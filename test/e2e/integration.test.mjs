@@ -595,7 +595,10 @@ test('GATE: a worktree reached through a symlinked path is still protected', asy
   // the worktree must live INSIDE the directory that is reached through a second path. A junction
   // is used on Windows, where a plain symlink needs elevation.
   const base = process.env.HOLT_TMPDIR || os.tmpdir();
-  const real = await fs.mkdtemp(path.join(base, 'holt-symlink-'));
+  // realpath, because the product does the same and for the same reasons: on Windows os.tmpdir()
+  // hands back an 8.3 short name (C:\Users\RUNNER~1\...) that git reports in its long form, and
+  // on macOS /var is a symlink to /private/var. Comparing the raw value fails on both.
+  const real = await fs.realpath(await fs.mkdtemp(path.join(base, 'holt-symlink-')));
   const link = path.join(base, `holt-symlink-link-${path.basename(real)}`);
   t.after(async () => {
     await fs.rm(link, { force: true, recursive: false }).catch(() => {});

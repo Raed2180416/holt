@@ -1,0 +1,23 @@
+#
+# holt — Dart for a ctags that does not have it.
+#
+# Loaded ONLY after holt has MEASURED that this toolchain cannot extract Dart symbols, and
+# defined under a PRIVATE name. Both matter, and the reason is not hypothetical: this definition
+# used to live in the always-loaded pack under the real name `Dart`, and the moment upstream
+# ctags gained its own Dart parser the load became FATAL — "Language \"Dart\" already
+# defined", ctags exits, and holt gets ZERO symbols from EVERY file in the repository. Silence,
+# which reads as "these agents share nothing".
+#
+# A private name cannot collide with a builtin. The measurement gate means a real builtin parser
+# is never replaced by these regexes when one exists.
+#
+### Dart #######################################################################
+--langdef=HoltDart
+--map-HoltDart=+.dart
+--kinddef-HoltDart=f,function,functions
+--kinddef-HoltDart=c,class,classes and mixins
+--kinddef-HoltDart=v,variable,variables
+--regex-HoltDart=/^[ \t]*(abstract|base|final|interface|sealed|[ \t])*(class|mixin|extension|enum)[ \t]+([a-zA-Z_$][a-zA-Z0-9_$]*)/\3/c/
+--regex-HoltDart=/^[ \t]*(static|final|const|late|[ \t])*[A-Za-z_$][A-Za-z0-9_$<>,? ]*[ \t]+([a-zA-Z_$][a-zA-Z0-9_$]*)[ \t]*\(/\2/f/
+--regex-HoltDart=/^[ \t]*(static[ \t]+)?(final|const|var|late)[ \t]+([a-zA-Z_$][a-zA-Z0-9_$]*)/\3/v/
+--regex-HoltDart=/^[ \t]*typedef[ \t]+([a-zA-Z_$][a-zA-Z0-9_$]*)/\1/c/

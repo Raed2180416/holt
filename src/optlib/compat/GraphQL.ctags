@@ -1,0 +1,21 @@
+#
+# holt — GraphQL for a ctags that does not have it.
+#
+# Loaded ONLY after holt has MEASURED that this toolchain cannot extract GraphQL symbols, and
+# defined under a PRIVATE name. Both matter, and the reason is not hypothetical: this definition
+# used to live in the always-loaded pack under the real name `GraphQL`, and the moment upstream
+# ctags gained its own GraphQL parser the load became FATAL — "Language \"GraphQL\" already
+# defined", ctags exits, and holt gets ZERO symbols from EVERY file in the repository. Silence,
+# which reads as "these agents share nothing".
+#
+# A private name cannot collide with a builtin. The measurement gate means a real builtin parser
+# is never replaced by these regexes when one exists.
+#
+### GraphQL ####################################################################
+--langdef=HoltGraphQL
+--map-HoltGraphQL=+.graphql
+--map-HoltGraphQL=+.gql
+--kinddef-HoltGraphQL=t,type,types
+--kinddef-HoltGraphQL=f,field,operations
+--regex-HoltGraphQL=/^[ \t]*(type|input|interface|enum|union|scalar|schema)[ \t]+([A-Za-z_][A-Za-z0-9_]*)/\2/t/
+--regex-HoltGraphQL=/^[ \t]*(query|mutation|subscription|fragment)[ \t]+([A-Za-z_][A-Za-z0-9_]*)/\2/f/

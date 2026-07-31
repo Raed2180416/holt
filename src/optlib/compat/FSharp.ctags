@@ -1,0 +1,23 @@
+#
+# holt — FSharp for a ctags that does not have it.
+#
+# Loaded ONLY after holt has MEASURED that this toolchain cannot extract FSharp symbols, and
+# defined under a PRIVATE name. Both matter, and the reason is not hypothetical: this definition
+# used to live in the always-loaded pack under the real name `FSharp`, and the moment upstream
+# ctags gained its own FSharp parser the load became FATAL — "Language \"FSharp\" already
+# defined", ctags exits, and holt gets ZERO symbols from EVERY file in the repository. Silence,
+# which reads as "these agents share nothing".
+#
+# A private name cannot collide with a builtin. The measurement gate means a real builtin parser
+# is never replaced by these regexes when one exists.
+#
+### F# #########################################################################
+--langdef=HoltFSharp
+--map-HoltFSharp=+.fs
+--map-HoltFSharp=+.fsi
+--map-HoltFSharp=+.fsx
+--kinddef-HoltFSharp=f,function,functions
+--kinddef-HoltFSharp=c,class,types and modules
+--regex-HoltFSharp=/^[ \t]*let[ \t]+(rec[ \t]+)?(inline[ \t]+)?([a-zA-Z_][a-zA-Z0-9_']*)/\3/f/
+--regex-HoltFSharp=/^[ \t]*(type|module|namespace)[ \t]+([a-zA-Z_][a-zA-Z0-9_'.]*)/\2/c/
+--regex-HoltFSharp=/^[ \t]*member[ \t]+(this\.|_\.)?([a-zA-Z_][a-zA-Z0-9_']*)/\2/f/

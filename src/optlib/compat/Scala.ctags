@@ -1,0 +1,24 @@
+#
+# holt — Scala for a ctags that does not have it.
+#
+# Loaded ONLY after holt has MEASURED that this toolchain cannot extract Scala symbols, and
+# defined under a PRIVATE name. Both matter, and the reason is not hypothetical: this definition
+# used to live in the always-loaded pack under the real name `Scala`, and the moment upstream
+# ctags gained its own Scala parser the load became FATAL — "Language \"Scala\" already
+# defined", ctags exits, and holt gets ZERO symbols from EVERY file in the repository. Silence,
+# which reads as "these agents share nothing".
+#
+# A private name cannot collide with a builtin. The measurement gate means a real builtin parser
+# is never replaced by these regexes when one exists.
+#
+### Scala ######################################################################
+--langdef=HoltScala
+--map-HoltScala=+.scala
+--map-HoltScala=+.sc
+--kinddef-HoltScala=f,function,methods
+--kinddef-HoltScala=c,class,classes objects and traits
+--kinddef-HoltScala=v,variable,values
+--regex-HoltScala=/^[ \t]*(private|protected|final|override|implicit|inline|[ \t])*def[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)/\2/f/
+--regex-HoltScala=/^[ \t]*(private|protected|final|sealed|abstract|implicit|case|[ \t])*(class|object|trait|enum)[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)/\3/c/
+--regex-HoltScala=/^[ \t]*(private|protected|final|implicit|lazy|[ \t])*(val|var)[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)/\3/v/
+--regex-HoltScala=/^[ \t]*type[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)/\1/c/

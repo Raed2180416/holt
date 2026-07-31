@@ -1,0 +1,23 @@
+#
+# holt — Nim for a ctags that does not have it.
+#
+# Loaded ONLY after holt has MEASURED that this toolchain cannot extract Nim symbols, and
+# defined under a PRIVATE name. Both matter, and the reason is not hypothetical: this definition
+# used to live in the always-loaded pack under the real name `Nim`, and the moment upstream
+# ctags gained its own Nim parser the load became FATAL — "Language \"Nim\" already
+# defined", ctags exits, and holt gets ZERO symbols from EVERY file in the repository. Silence,
+# which reads as "these agents share nothing".
+#
+# A private name cannot collide with a builtin. The measurement gate means a real builtin parser
+# is never replaced by these regexes when one exists.
+#
+### Nim ########################################################################
+--langdef=HoltNim
+--map-HoltNim=+.nim
+--map-HoltNim=+.nims
+--kinddef-HoltNim=f,function,procs
+--kinddef-HoltNim=c,class,types
+--kinddef-HoltNim=v,variable,variables
+--regex-HoltNim=/^[ \t]*(proc|func|method|iterator|template|macro|converter)[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)/\2/f/
+--regex-HoltNim=/^[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)\*?[ \t]*=[ \t]*(ref[ \t]+)?(object|enum|tuple|distinct)/\1/c/
+--regex-HoltNim=/^[ \t]*(var|let|const)[ \t]+([a-zA-Z_][a-zA-Z0-9_]*)/\2/v/

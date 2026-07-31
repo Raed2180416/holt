@@ -468,7 +468,8 @@ async function cmdBrief(opts) {
  */
 async function cmdSetup(opts) {
   const { detectCtags, detectEnry, resetToolchainProbes } = await import('../src/symbols.mjs');
-  const { installPortableCtags, portableTarget, holtBinDir } = await import('../src/toolchain.mjs');
+  const { portableTarget, holtBinDir } = await import('../src/toolchain.mjs');
+  const { installPortableCtags } = await import('./install-ctags.mjs');
 
   out('');
   out(paint('bold', 'holt setup') + paint('grey', '  — backends, agent wiring, and what is at risk right now'));

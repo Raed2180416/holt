@@ -150,6 +150,11 @@ const PROBE_SOURCES = {
   // needs from Elm, a top-level function, extracted nothing. The probe was easier than the
   // question it was asked. Each sample is now the plainest form of the construct holt depends
   // on, and the named symbol must come back or the language does not count.
+  Groovy: ['holt-probe.groovy', 'class HoltProbeCls {\n  def holtProbe() { }\n}\n', 'holtProbe'],
+  FSharp: ['holt-probe.fsx', 'module HoltProbeMod\nlet holtProbe x = x\n', 'holtProbe'],
+  Prolog: ['holt-probe.pro', 'holtProbe(X) :- X > 1.\n', 'holtProbe'],
+  Dockerfile: ['Dockerfile', 'FROM alpine AS holtProbe\nARG HOLT_PROBE_ARG=1\n', 'holtProbe'],
+  GraphQL: ['holt-probe.graphql', 'type holtProbe {\n  id: ID!\n}\n', 'holtProbe'],
   Terraform: ['holt-probe.tf', 'resource "aws_s3_bucket" "holtProbe" {}\n', 'holtProbe'],
   Elm: ['holt-probe.elm', 'holtProbe : Int -> Int\nholtProbe x = x\n', 'holtProbe'],
   Julia: ['holt-probe.jl', 'function holtProbe(x)\n    x + 1\nend\n', 'holtProbe'],
@@ -552,6 +557,23 @@ export async function detectEnry() {
  * Resolve ambiguous-extension files to a concrete language by CONTENT.
  * @returns {Promise<Map<string, string|null>>} rel path -> ctags language name (or null)
  */
+
+/**
+ * Translate a language name to the one THIS process can actually force.
+ *
+ * Ambiguous extensions (.fs is F# or Forth, .pl is Perl or Prolog) are classified by content and
+ * then passed to ctags as `--language-force=<name>`. When holt supplies the parser itself, that
+ * parser is defined under a private name — `HoltFSharp`, not `FSharp` — precisely so it can never
+ * collide with a builtin. Forcing the public name would then name a parser that does not exist
+ * here, ctags would extract nothing, and the file would be reported as having no symbols: the
+ * silence that reads as "these agents share nothing".
+ */
+function forcedName(lang) {
+  if (!lang) return lang;
+  const priv = `Holt${lang}`;
+  return _extraFlags.some((f) => f.endsWith(`${lang}.ctags`)) ? priv : lang;
+}
+
 export async function resolveAmbiguous(cwd, relPaths) {
   const out = new Map();
   if (relPaths.length === 0) return out;
@@ -699,6 +721,11 @@ export function symbolKey(sym) {
 export async function symbolsOnDisk(dir, relPaths, backend) {
   const result = new Map();
   if (relPaths.length === 0) return result;
+  // Resolve the toolchain's gaps BEFORE anything reads _extraFlags. forcedName() below decides
+  // whether an ambiguous file is forced to `FSharp` or to holt's private `HoltFSharp`, and that
+  // answer depends on which compat packs are loaded — so computing it first would ask the
+  // question before the answer existed, force a parser that is not there, and get silence.
+  if (backend.kind === 'ctags' && !_inProbe) await ensureCompat();
 
   const ctagsFiles = [];
   const keyFiles = [];
@@ -722,7 +749,7 @@ export async function symbolsOnDisk(dir, relPaths, backend) {
       byLang.get(lang).push(p);
     }
     for (const [lang, files] of byLang) {
-      const m = await ctagsBatch(dir, files, { languageForce: lang });
+      const m = await ctagsBatch(dir, files, { languageForce: forcedName(lang) });
       for (const [f, syms] of m) result.set(f, syms);
     }
   } else {
