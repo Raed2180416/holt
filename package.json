@@ -36,7 +36,7 @@
     "mcp",
     "code-review"
   ],
-  "license": "MIT",
+  "license": "FSL-1.1-MIT",
   "optionalDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "jscpd": "^5.0.14"

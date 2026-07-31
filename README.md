@@ -9,7 +9,7 @@
 [![tests](https://img.shields.io/badge/tests-179%20passing-brightgreen)](#the-test-suite-attacks-itself)
 [![mutation score](https://img.shields.io/badge/mutation%20score-12%2F12%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
-[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
 
 `npm install -g grovekit`
 
@@ -151,4 +151,15 @@ $ grove integrate     # wire your agents
 $ grove clean --apply # reclaim everything that provably holds nothing
 ```
 
-MIT © grove contributors
+## License — free for every developer, forever
+
+grove is **[FSL-1.1-MIT](LICENSE.md)** (the Functional Source License, as used by Sentry):
+
+- **Free for everyone** — individuals and companies alike, including **production use** inside
+  any codebase, commercial or not.
+- **The one thing you cannot do:** ship a commercial product or service whose selling point *is*
+  grove — a substitute for grove, or something offering substantially the same functionality.
+  Use it; don't *be* it.
+- **Every release automatically becomes plain MIT two years after it ships.** No rug to pull.
+
+© 2026 grove contributors
