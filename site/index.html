@@ -742,7 +742,7 @@ footer { padding: 44px 0 60px; }
       </p>
       <div class="btn-row">
         <button class="btn btn-primary" id="copy-install" type="button">
-          <span class="btn-icon">$</span> git clone github.com/Raed2180416/holt
+          <span class="btn-icon">$</span> npm install -g holt (release tarball)
         </button>
         <a class="btn btn-ghost" href="#proof">See what a naked agent deleted →</a>
       </div>
@@ -1449,8 +1449,7 @@ footer { padding: 44px 0 60px; }
       <div>
         <div class="code-block">
           <button class="copy-btn" id="copy-quickstart" type="button">copy</button>
-          <div class="cl"><span class="prompt">$</span> git clone https://github.com/Raed2180416/holt.git</div>
-          <div class="cl"><span class="prompt">$</span> cd holt &amp;&amp; npm install &amp;&amp; npm link</div>
+          <div class="cl"><span class="prompt">$</span> npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz</div>
           <div class="cl"><span class="prompt">$</span> cd your-repo</div>
           <div class="cl"><span class="prompt">$</span> holt status<span class="cmt">        # the decision surface — 1–2 s</span></div>
           <div class="cl"><span class="prompt">$</span> holt protect<span class="cmt">       # lock what would be lost</span></div>
@@ -1497,11 +1496,11 @@ footer { padding: 44px 0 60px; }
     }
   }
   var installBtn = document.getElementById('copy-install');
-  if (installBtn) installBtn.addEventListener('click', function () { copy('git clone https://github.com/Raed2180416/holt.git\ncd holt && npm install && npm link', installBtn); });
+  if (installBtn) installBtn.addEventListener('click', function () { copy('npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz', installBtn); });
 
   var qsBtn = document.getElementById('copy-quickstart');
   if (qsBtn) qsBtn.addEventListener('click', function () {
-    copy('git clone https://github.com/Raed2180416/holt.git\ncd holt && npm install && npm link\ncd your-repo\nholt status\nholt protect\nholt integrate\nholt clean --apply', qsBtn);
+    copy('npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz\ncd your-repo\nholt status\nholt protect\nholt integrate\nholt clean --apply', qsBtn);
   });
 })();
 </script>

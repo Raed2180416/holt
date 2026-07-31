@@ -13,11 +13,11 @@
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
 
 ```bash
-git clone https://github.com/Raed2180416/holt.git
-cd holt && npm install && npm link
+npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz
 ```
 
-<sub>Not on npm yet — `npm install -g holt` lands with v1. The commands above are the ones that work today.</sub>
+<sub>One command, no clone, no build — verified on a clean Ubuntu container. Not on the npm registry
+yet, so `npm install -g holt` lands with v1; the release tarball above is the path that works today.</sub>
 
 <!-- HOLT:SOCIAL-PROOF:BEGIN
 Social proof stays commented out until the numbers can carry it: 500 stars or 1,000 weekly
@@ -287,8 +287,7 @@ therefore to holt.
 ## Quick start
 
 ```console
-$ git clone https://github.com/Raed2180416/holt.git
-$ cd holt && npm install && npm link
+$ npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz
 $ cd your-repo
 $ holt status        # the decision surface — 1–2 s
 $ holt protect       # lock what would be lost
