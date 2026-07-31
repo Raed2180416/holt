@@ -39,7 +39,9 @@ HOLT:SOCIAL-PROOF:END -->
 
 ## The 30-second story
 
-Agents fan out into git worktrees. Worktrees pile up. Someone — a human or an agent — eventually cleans up. And git cannot help them, because **git has no primitive that relates *uncommitted* work across worktrees.** `merge-tree` sees only commits.
+Any coding agent — Claude Code, Codex, Cursor, Copilot, Aider, Gemini CLI, or a shell script — fans out into git worktrees. Worktrees pile up. Someone eventually cleans up. And git cannot help them, because **git has no primitive that relates *uncommitted* work across worktrees.** `merge-tree` sees only commits.
+
+holt is **agent-agnostic by construction**: its safety mechanism is git's *own* worktree lock, applied by content. It works identically whoever — or whatever — tries to delete work, because git itself does the refusing.
 
 In one measured case, a 39-worktree repository's committed layer flagged **4** interesting worktrees — its uncommitted layer held content that existed nowhere else. A tool that only reads commits would have been confidently, quietly wrong there. The A/B trials below reproduce the same failure mode:
 
@@ -55,17 +57,24 @@ Holt prevented that loss in **every** protected trial.
 
 Real coding agents (Claude Haiku 4.5), identical prompts that never mention holt, manufactured-messy repos built from real upstream projects, graded from **filesystem state** — never from what the agent claimed. The hardest scenario, *the gauntlet*, has 16 worktrees where every surface signal lies: rich commit history on disposable trees, no commits on irreplaceable ones, names anti-correlated with content, a duplicated pair where either may go but not both.
 
-| Arm | Irreplaceable work survived | Cleanup performed |
+| Arm | Irreplaceable work survived | Cleanup (mean) |
 |---|---|---|
-| **naked agent** | 4/6 trials — one destroyed **all 5** | 3/6 acted |
-| **holt, warnings only** | 6/6 | 0/6 acted — agents froze ⚠ |
-| **holt, shipped product**¹ | **5/5, 5/5, 5/5** | **8/9, 8/9, 1/9 disposable removed** |
+| **naked agent** | 4/6 trials — one destroyed **all 5** | 43% |
+| **holt, warnings only** | 6/6 | 0% — agents froze ⚠ |
+| **holt, shipped product**¹ | **6/6 — never lost work** | **73%** |
 
 ¹ installed binary + acting MCP tools + routed AGENTS.md. In two trials agents autonomously ran the full loop: **diagnose → rescue to a verified ref → release → clean** — the rescue refs are in the trial repos.
 
-The middle row is why holt is designed the way it is: safety that freezes the agent is worthless. The fix wasn't more warnings — it was giving agents a *permitted action* (`holt clean`) and tools that act (`holt_clean`, `holt_rescue` over MCP) instead of only rules that forbid.
+**Read the two columns separately, because they answer different questions.**
 
-Small N, stated plainly: these are 3–6 trials per arm. Directional, honestly produced, adversarially graded — not a benchmark paper.
+- **Safety (left) is holt's actual promise, and it was 100% — every trial, no exceptions.** The naked agent lost the only copy of a file in 2 of 6 trials; the holt-armed agent never did. That is the whole product.
+- **Cleanup (right) measures what a small, cheap model (Haiku 4.5) *chose* to do.** holt agents cleaned *more* than naked ones on average (73% vs 43%) — but a small model is variable, and in one trial each arm cleaned almost nothing. That variance is the *model's*, not holt's: the naked arm hit 0/5 twice too.
+
+The middle row is the design lesson: safety that just *warns* freezes the agent (0% cleanup). Mechanisms don't — holt gives the agent a *permitted action* and tools that act (`holt_clean`, `holt_rescue` over MCP), not only rules that forbid.
+
+**And cleanup doesn't have to depend on the model at all.** `holt clean --apply` deterministically removes every provably-disposable worktree and keeps everything that holds work — no agent, no judgment, no variance. The A/B measures the *agent deciding*; the deterministic path removes the decision. Use the agent loop for autonomy, `clean --apply` (or a scheduled job) when you want a guaranteed sweep.
+
+Small N, stated plainly: 3–6 trials per arm. Directional, honestly produced, adversarially graded — not a benchmark paper.
 
 ---
 
@@ -125,6 +134,21 @@ $ holt clean --apply                      # remove what provably holds nothing, 
 `rescue` **exits non-zero if the capture cannot be verified** — so `holt rescue X && git worktree remove X` stops before destroying anything. `clean` re-checks every worktree immediately before removal; a verdict computed seconds ago cannot authorise a deletion now.
 
 **Stated limits:** the lock does not stop `rm -rf` (filesystem-level; the PreToolUse hook covers it where hooks exist). `git worktree unlock` and `remove -f -f` defeat it — both are classified destructive and denied by the hook layer, with the same evidence-bearing message.
+
+---
+
+## How holt is different from what you already have
+
+The honest comparison, because "why not the tool I already use" is the first question worth asking:
+
+| | What it does | Where holt differs |
+|---|---|---|
+| **Claude Code worktree locking** | Locks worktrees *by session* — a session can't clobber its own trees | holt locks *by content* — the thing that actually determines whether deletion loses work — and works across **every** agent, not just one vendor's sessions |
+| **GitButler** | Virtual branches avoid worktrees, so its agents don't hit this failure mode; a full git client | holt is not a git client — it's a read-only safety + relationship layer you add to the worktree workflow you already run, across any agent; it never asks you to change how you branch |
+| **Worktree managers** (wktr, worktrunk, wt-cli, JetBrains) | Nicer *listing and switching* of worktrees | none model the **content relationship** — what's redundant, what collides, what holds the only copy — which is the part that loses work |
+| **Merge queues** (Mergify, Graphite) | Gate the *shared branch* at PR time in the cloud | holt gates the *local worktree* before anything is committed or pushed, offline, for work git can't even see yet |
+
+The one-sentence version: **everyone else manages worktrees or gates the shared branch; holt is the only layer that reads the *content relationship* between in-flight agent work and refuses, via git itself, to lose the only copy of something — across every agent, entirely local.** No single agent vendor has any reason to protect a *rival's* sessions; the cross-agent plane is the part that stays holt's.
 
 ---
 
@@ -190,22 +214,32 @@ under [FSL-1.1-MIT](LICENSE.md), including commercial production use, and become
 years after each release. The one thing you cannot do is sell a product whose selling point *is*
 holt. Use it; don't be it.
 
-What a team pays for is running that across many repositories, with rules and a paper trail:
+What a team pays for is running that **across many repositories, with rules and a paper trail** —
+priced by the thing that actually carries the risk (repositories under parallel agents), not by
+headcount:
 
-| | Free | Team — $10/developer/month | Enterprise |
+| | Free | Team — **per active repo / month, unlimited developers** | Enterprise |
 |---|---|---|---|
 | Every command, every language, MCP, hooks, TUI | ✓ | ✓ | ✓ |
 | CI gate for a repository | ✓ | ✓ | ✓ |
 | Policy as code (`.holt/policy.json`) | | ✓ | ✓ |
 | Fleet view across every repository | | ✓ | ✓ |
-| Audit export (JSON/CSV) | | ✓ | ✓ |
-| SSO, self-hosted and air-gapped licensing, SLA | | | ✓ |
+| Audit export (JSON/CSV + webhook sink) | | ✓ | ✓ |
+| SSO / SAML / SCIM, self-hosted & air-gapped licensing, SLA | | | ✓ |
 
-**Licenses verify offline.** holt makes no network calls on any tier — a Team key is an
-Ed25519-signed token you activate once (`holt license activate <key>`) or set as `HOLT_LICENSE`
-in CI. If a subscription lapses, paid features keep working for a 14-day grace period rather
-than breaking your pipeline, and the free features never stop. There is no kill switch, because
-a kill switch would require the tool to phone home.
+**Why per-repo, not per-seat:** your risk scales with how many repositories have agents fanning
+into worktrees, not with how many people you employ. A 3-dev team running 40 agent-repos carries
+far more collision risk than a 50-dev team on 5 quiet ones — per-seat would charge them backwards.
+Unlimited developers, no seat minimum, annual prepay discounted.
+
+**Your data never leaves your machine — on *any* tier, including paid.** Fleet view scans *your*
+repositories on *your* machine; audit export writes a file *you* control (or POSTs to a webhook
+*you* configure). There is no hosted holt dashboard your code is sent to, no telemetry, and no
+license check-in — a Team key is an Ed25519-signed token you activate once
+(`holt license activate <key>`) or set as `HOLT_LICENSE` in CI, verified entirely offline. If a
+subscription lapses, paid features keep working for a 14-day grace period rather than breaking
+your pipeline, and the free features never stop. There is no kill switch, because a kill switch
+would require the tool to phone home.
 
 [Pricing and details →](https://raed2180416.github.io/holt/#pricing)
 

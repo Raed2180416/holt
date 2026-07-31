@@ -249,7 +249,9 @@ export function sanitizeClaim(v, max = 120) {
   return clean || null;
 }
 
-const MIN_SEATS = { team: 3, enterprise: 1 };
+// Per-repo model (unlimited developers), so there is NO per-seat minimum — the quantity in the
+// event is the number of licensed repositories, floored at 1 (a license must cover at least one).
+const MIN_UNITS = { team: 1, enterprise: 1 };
 
 export function licenseForEvent(event, signingKeyB64, { priceMap = TIER_BY_PRICE(), days = null } = {}) {
   const handled = ['checkout.session.completed', 'invoice.paid', 'customer.subscription.updated',
@@ -274,9 +276,9 @@ export function licenseForEvent(event, signingKeyB64, { priceMap = TIER_BY_PRICE
   const email = sanitizeClaim(obj.customer_details?.email ?? obj.customer_email ?? obj.metadata?.email, 320);
   const org = sanitizeClaim(obj.customer_details?.name ?? obj.metadata?.org);
   // Seats: honour what was bought, but never below the tier minimum a license is allowed to carry.
-  // The tier's seat minimum is a floor, applied even when the quantity is absent or malformed —
-  // a Team license must never carry fewer than its minimum, on a first purchase OR a renewal.
-  const floor = MIN_SEATS[tier] ?? 1;
+  // Licensed-unit count (repositories under the per-repo model), floored at 1 even when the
+  // quantity is absent or malformed — a license must always cover at least one repository.
+  const floor = MIN_UNITS[tier] ?? 1;
   const rawSeats = seatsForEvent(event);
   const seats = Math.max(Number.isFinite(rawSeats) ? rawSeats : floor, floor);
   const lifetime = days ?? daysForEvent(event);

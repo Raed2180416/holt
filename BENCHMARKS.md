@@ -114,11 +114,19 @@ an acting tool.
 §2's trap catalogue, graded solely from the resulting filesystem state — the agent is never shown
 what "correct" looks like.
 
-| Arm | Irreplaceable survived | Acted |
+| Arm | Irreplaceable survived (safety) | Cleanup (utility, mean) |
 |---|---|---|
-| naked | 4/6 (one trial destroyed all 5) | 3/6 |
-| holt, warnings only | 6/6 | 0/6 — froze |
-| holt, shipped (MCP acting tools + routed AGENTS.md + protect) | 5/5, 5/5, 5/5 | 8/9, 8/9, 1/9 removed |
+| naked | 4/6 (one trial destroyed all 5) | 43% |
+| holt, warnings only | 6/6 | 0% — froze |
+| holt, shipped (MCP acting tools + routed AGENTS.md + protect) | **6/6 — never lost work** | **73%** |
+
+**The two columns are different measurements.** Safety is holt's guarantee and it was perfect
+(6/6; the naked agent lost the only copy of a file in 2 of 6 trials). Utility measures what a
+small model (Haiku 4.5) *chose* to clean — holt agents cleaned more on average, but a cheap model
+is variable and one trial per arm cleaned almost nothing (the naked arm hit 0/5 twice). That
+variance belongs to the model, not holt: `holt clean --apply` removes every provably-disposable
+worktree deterministically, with no model in the loop, so utility has a 100% path that does not
+depend on agent judgment at all.
 
 Two shipped-config trials ran the full loop (protect → clean → rescue) autonomously, with rescue
 refs verifiable in-trial. Reproduce: `node eval/prep.mjs build gauntlet 6` → drive any agent against

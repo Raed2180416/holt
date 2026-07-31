@@ -386,14 +386,14 @@ test('MONETIZATION: a monthly checkout does not mint a year-long license', () =>
   assert.ok(days <= 40, `a monthly plan must not mint a ~365-day license, got ${days}`);
 });
 
-test('MONETIZATION: the Team seat minimum is enforced at issuance', () => {
-  const ev = {
-    id: 'evt_s', type: 'checkout.session.completed',
+test('MONETIZATION: per-repo model — the purchased quantity is preserved, floored at 1', () => {
+  const ev = (qty) => ({
+    id: 'evt_s' + qty, type: 'checkout.session.completed',
     data: { object: { customer_details: { email: 's@x.test' }, metadata: { tier: 'team' },
-      line_items: { data: [{ quantity: 1, price: { id: 'price_team' } }] } } },
-  };
-  const r = licenseForEvent(ev, SIGNING);
-  assert.ok(r.claims.seats >= 3, `a Team license must carry at least the 3-seat minimum, got ${r.claims.seats}`);
+      line_items: { data: [{ quantity: qty, price: { id: 'price_team' } }] } } },
+  });
+  assert.equal(licenseForEvent(ev(5), SIGNING).claims.seats, 5, 'quantity (repos) preserved, no artificial minimum');
+  assert.equal(licenseForEvent(ev(1), SIGNING).claims.seats, 1, 'one repo is allowed — no 3-seat floor anymore');
 });
 
 test('SECURITY: a billing name carrying a terminal escape is stripped before it is signed', () => {
@@ -445,21 +445,21 @@ test('MONETIZATION: a merchant-set metadata.interval cannot buy a year (only a r
 });
 
 test('MONETIZATION: the seat floor holds on a renewal shape and when quantity is absent', () => {
-  // invoice.paid renewal carries seats under .lines.data, which seatsForEvent must read.
+  // invoice.paid renewal carries the quantity under .lines.data, which seatsForEvent must read.
   const renewal = {
     id: 'evt_renew', type: 'invoice.paid',
     data: { object: { customer: 'c1', metadata: { tier: 'team' },
-      lines: { data: [{ quantity: 1, price: { id: 'price_team' } }] } } },
+      lines: { data: [{ quantity: 4, price: { id: 'price_team' } }] } } },
   };
-  assert.equal(seatsForEvent(renewal), 1, 'seatsForEvent must read the invoice line shape');
-  assert.ok(licenseForEvent(renewal, SIGNING).claims.seats >= 3, 'a renewal must keep the Team floor');
+  assert.equal(seatsForEvent(renewal), 4, 'seatsForEvent must read the invoice line shape');
+  assert.equal(licenseForEvent(renewal, SIGNING).claims.seats, 4, 'a renewal preserves the repo count');
 
-  // Quantity entirely absent -> still floored, never null.
+  // Quantity entirely absent -> floored at 1, never null.
   const noQty = {
     id: 'evt_noqty', type: 'checkout.session.completed',
     data: { object: { customer_details: { email: 'n@x.test' }, metadata: { tier: 'team' }, line_items: { data: [{ price: { id: 'price_team' } }] } } },
   };
-  assert.ok(licenseForEvent(noQty, SIGNING).claims.seats >= 3, 'a missing quantity must fall to the floor, not null');
+  assert.equal(licenseForEvent(noQty, SIGNING).claims.seats, 1, 'a missing quantity floors at 1, never null');
 });
 
 test('SECURITY: sanitizeClaim strips the C1 control range (8-bit CSI/OSC), not just C0/DEL', () => {
