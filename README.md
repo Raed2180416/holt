@@ -62,6 +62,15 @@ Five of the seven documented parallel-agent problems reduce to one query — *wh
 | P5 | Review load | `holt plan` — measured **58% of symbol-reviews redundant** on a real 39-worktree repo |
 | P6 | What's provably safe to delete | `holt gate <id>` — exit `0/1/2`, fail-closed |
 
+And the v0.2 stack that turns the analysis into motion:
+
+| | What it answers | Command |
+|---|---|---|
+| order | which workstreams land in parallel, and the sequence for the entangled rest | `holt order` — exact lanes, heuristic peel, every watched merge named |
+| partition | how N agents should split the repo *before* they collide | `holt partition --agents 3` — disjoint buckets, each observed hotspot gets one owner |
+| branches | the other graveyard: branches nobody dares delete | `holt branches [--apply]` — content-landed squash merges detected; `--apply` uses `-d`, never `-D` |
+| journal | who deleted what, months later, with the evidence | `holt journal` — append-only audit of every protect / rescue / clean / branch-delete |
+
 Plus the two layers nobody else has:
 
 **`holt impact`** — *A defines symbol X; B references X; they share no file.* Invisible to collision detection by construction. On a real repo: 694 producer/consumer pairs, **307 not reported by any collision check**.
@@ -106,7 +115,7 @@ $ holt integrate
 ```
 
 - **AGENTS.md** — the cross-tool standard read by 30+ agents. Routes to the *permitted* action first, because we measured what warnings-only does (row two of the table).
-- **MCP** — 11 tools in the schema each host actually reads (three hosts, three different config shapes, all verified live). Diagnostic tools annotated read-only; `holt_clean` honestly `destructiveHint: true`, because a host that auto-approves read-only tools must never auto-approve a deletion.
+- **MCP** — 14 tools in the schema each host actually reads (three hosts, three different config shapes, all verified live). Diagnostic tools annotated read-only; `holt_clean` honestly `destructiveHint: true`, because a host that auto-approves read-only tools must never auto-approve a deletion.
 - **Hooks** — Claude Code PreToolUse deny + OpenCode plugin (throws to block, fails open *loudly* if holt is broken) + a git pre-commit warning as the floor.
 - Project-scoped by default. Your `~/.config` is never touched, never created.
 

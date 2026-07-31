@@ -1,6 +1,6 @@
 {
   "name": "holt",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The landing layer for parallel agent work. Answers what your N agents produced, what's redundant, what collides, what's safe to delete, and what you're about to lose.",
   "type": "module",
   "bin": {
