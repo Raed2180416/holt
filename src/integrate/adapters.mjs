@@ -29,6 +29,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { execFile } from 'node:child_process';
 
 const GROVE_BEGIN = '<!-- BEGIN grove -->';
 const GROVE_END = '<!-- END grove -->';
@@ -461,12 +462,46 @@ export async function detectHosts(repoRoot, home = os.homedir()) {
  * where that host is present. User-global config is touched ONLY with scope:'user'|'all', and
  * even then never created from nothing.
  */
+/**
+ * Resolve the command every integration should reference.
+ *
+ * MEASURED: with integrations written as `node /home/raed/grove/bin/grove.mjs`, agents read
+ * AGENTS.md, chose the correct action, and were then STOPPED by the host's permission classifier
+ * — "the permission classifier is blocking the execution". An absolute path to a script under a
+ * developer's home directory is exactly the shape a Bash allowlist refuses, and the agent froze
+ * holding the right answer.
+ *
+ * A plain `grove` on PATH is both what a real installation looks like and what a classifier will
+ * accept. So: prefer the installed binary, and only fall back to an explicit path when there
+ * genuinely is no installation — saying so, because the fallback is the shape that gets blocked.
+ */
+export async function resolveBin(preferred = null) {
+  if (preferred && preferred !== 'grove') return { bin: preferred, how: 'explicit' };
+
+  const found = await new Promise((resolve) => {
+    execFile('grove', ['--help'], { timeout: 8000 }, (err) => resolve(!err));
+  });
+
+  return found
+    ? { bin: 'grove', how: 'installed on PATH' }
+    : {
+        bin: 'grove',
+        how: 'NOT FOUND on PATH — integrations reference `grove`; install it with '
+          + '`npm install -g grovekit` or agents will be unable to run it',
+        missing: true,
+      };
+}
+
 export async function integrate(repoRoot, {
   bin = 'grove', home = os.homedir(), hosts = null, scope = 'project',
 } = {}) {
   const detected = hosts ?? await detectHosts(repoRoot, home);
   const present = detected.all ?? detected;
   const results = [];
+
+  // Every integration references the SAME command, and it must be one a host will actually run.
+  const resolved = await resolveBin(bin);
+  bin = resolved.bin;
 
   results.push(await installAgentsMd(repoRoot, { bin }));
   results.push(...await installMcp(repoRoot, { bin, home, scope, hosts: present }));
@@ -475,7 +510,7 @@ export async function integrate(repoRoot, {
   if (present.includes('opencode')) results.push(await installOpenCode(repoRoot, { bin }));
   results.push(await installGitHooks(repoRoot, { bin }));
 
-  return { detected, scope, results };
+  return { detected, scope, results, bin: { ...resolved } };
 }
 
 /* --------------------------------------------------------- response formatting ---- */

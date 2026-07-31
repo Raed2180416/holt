@@ -121,12 +121,34 @@ test('MCP PROTOCOL: tools/list returns the full, well-formed tool set', async (t
     assert.ok(names.includes(expected), `missing tool ${expected}`);
   }
 
+  // The ACTING tools must be present too. An agent that can only diagnose freezes holding the
+  // right answer — measured: two trials chose `grove clean` correctly and were then blocked by
+  // the host's Bash permission classifier, because MCP had no way to act.
+  for (const expected of ['grove_clean', 'grove_rescue', 'grove_protect']) {
+    assert.ok(names.includes(expected), `missing acting tool ${expected}`);
+  }
+
+  const MUTATING = new Set(['grove_clean', 'grove_rescue', 'grove_protect']);
+  const DESTRUCTIVE = new Set(['grove_clean']);
+
   for (const tool of tools) {
     assert.ok(tool.description?.length > 40, `${tool.name}: description too thin`);
     assert.equal(tool.inputSchema.type, 'object', `${tool.name}: schema must be an object`);
-    // Read-only annotation is the contract a host uses to decide whether to auto-approve.
-    assert.equal(tool.annotations?.readOnlyHint, true, `${tool.name} must be annotated read-only`);
-    assert.equal(tool.annotations?.destructiveHint, false, `${tool.name} must be non-destructive`);
+
+    // The annotation is a SAFETY CONTRACT: a host may auto-approve anything marked read-only.
+    // Claiming readOnlyHint on a tool that deletes worktrees would turn that convenience into a
+    // silent destruction, so each tool's annotation must match what it actually does.
+    const ro = tool.annotations?.readOnlyHint;
+    const destructive = tool.annotations?.destructiveHint;
+
+    if (MUTATING.has(tool.name)) {
+      assert.equal(ro, false, `${tool.name} MUTATES and must not claim readOnlyHint`);
+      assert.equal(destructive, DESTRUCTIVE.has(tool.name),
+        `${tool.name}: destructiveHint must reflect whether it can remove work`);
+    } else {
+      assert.equal(ro, true, `${tool.name} is diagnostic and must be annotated read-only`);
+      assert.equal(destructive, false, `${tool.name} must be non-destructive`);
+    }
   }
 });
 
@@ -200,6 +222,46 @@ test('MCP PROTOCOL: a bad repo path returns isError, and the server survives', a
     name: 'grove_status', arguments: { repo: fx.root },
   });
   assert.ok(after.result && !after.result.isError, 'server must recover');
+});
+
+test('MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over the wire', async (t) => {
+  const { fx } = await standardFixture();
+  const { client } = await startServer(fx.root);
+  t.after(() => { client.close(); return fx.cleanup(); });
+
+  // 1. protect: locks the workstreams holding unique work.
+  const prot = await client.send('tools/call', { name: 'grove_protect', arguments: { repo: fx.root } });
+  const protPayload = JSON.parse(prot.result.content[0].text);
+  assert.ok(protPayload.protected >= 1, `protect should lock something: ${prot.result.content[0].text.slice(0, 200)}`);
+
+  // 2. clean without apply: a DRY RUN, nothing removed.
+  const dry = await client.send('tools/call', { name: 'grove_clean', arguments: { repo: fx.root } });
+  const dryPayload = JSON.parse(dry.result.content[0].text);
+  assert.equal(dryPayload.dryRun, true, 'clean must be dry-run unless apply:true — over MCP too');
+  assert.ok(dryPayload.wouldRemove.length >= 1, 'the fixture has disposable worktrees');
+
+  // 3. clean with apply: actually removes the disposable ones, and ONLY those.
+  const applied = await client.send('tools/call', {
+    name: 'grove_clean', arguments: { repo: fx.root, apply: true },
+  });
+  const appliedPayload = JSON.parse(applied.result.content[0].text);
+  assert.ok(appliedPayload.removed >= 1, `apply:true must actually remove: ${applied.result.content[0].text.slice(0, 300)}`);
+
+  // The valuable workstream must have survived the applied clean.
+  const check = await client.send('tools/call', {
+    name: 'grove_check_workstream', arguments: { repo: fx.root, id: 'uniqueUncommitted' },
+  });
+  const checkPayload = JSON.parse(check.result.content[0].text);
+  assert.equal(checkPayload.safeToDelete, false, 'the work-holding worktree must survive grove_clean');
+
+  // 4. rescue --release: capture the survivor's work, verified, then unlock it.
+  const resc = await client.send('tools/call', {
+    name: 'grove_rescue', arguments: { repo: fx.root, id: 'uniqueUncommitted', release: true },
+  });
+  const rescPayload = JSON.parse(resc.result.content[0].text);
+  assert.equal(rescPayload.ok, true, `rescue failed over MCP: ${resc.result.content[0].text.slice(0, 300)}`);
+  assert.equal(rescPayload.verified, true, 'an unverified rescue must never report ok');
+  assert.match(rescPayload.ref, /^refs\/grove\/rescue\//);
 });
 
 test('MCP PROTOCOL: responses stay small enough to be worth calling', async (t) => {
