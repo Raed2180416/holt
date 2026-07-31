@@ -268,7 +268,7 @@ test('INSTALL: MCP targets cover the major hosts, split by scope', async (t) => 
   ]));
 
   const all = mcpTargets(dir, home, { scope: 'all' }).map((x) => x.host).join(' ');
-  for (const expected of ['claude-code', 'cursor', 'vscode', 'windsurf', 'gemini-cli', 'zed', 'continue']) {
+  for (const expected of ['claude-code', 'cursor', 'vscode', 'devin-desktop', 'gemini-cli', 'zed', 'continue']) {
     assert.match(all, new RegExp(expected), `MCP target list should include ${expected}`);
   }
 
