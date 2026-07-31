@@ -182,7 +182,36 @@ $ holt integrate     # wire your agents
 $ holt clean --apply # reclaim everything that provably holds nothing
 ```
 
-## License — free for every developer, forever
+
+## Free for every developer. Forever.
+
+Everything above — the scanner, the safety net, the MCP server, the TUI, the CI gate — is free
+under [FSL-1.1-MIT](LICENSE.md), including commercial production use, and becomes plain MIT two
+years after each release. The one thing you cannot do is sell a product whose selling point *is*
+holt. Use it; don't be it.
+
+What a team pays for is running that across many repositories, with rules and a paper trail:
+
+| | Free | Team — $10/developer/month | Enterprise |
+|---|---|---|---|
+| Every command, every language, MCP, hooks, TUI | ✓ | ✓ | ✓ |
+| CI gate for a repository | ✓ | ✓ | ✓ |
+| Policy as code (`.holt/policy.json`) | | ✓ | ✓ |
+| Fleet view across every repository | | ✓ | ✓ |
+| Audit export (JSON/CSV) | | ✓ | ✓ |
+| SSO, self-hosted and air-gapped licensing, SLA | | | ✓ |
+
+**Licenses verify offline.** holt makes no network calls on any tier — a Team key is an
+Ed25519-signed token you activate once (`holt license activate <key>`) or set as `HOLT_LICENSE`
+in CI. If a subscription lapses, paid features keep working for a 14-day grace period rather
+than breaking your pipeline, and the free features never stop. There is no kill switch, because
+a kill switch would require the tool to phone home.
+
+[Pricing and details →](https://raed2180416.github.io/holt/#pricing)
+
+---
+
+## License
 
 holt is **[FSL-1.1-MIT](LICENSE.md)** (the Functional Source License, as used by Sentry):
 
