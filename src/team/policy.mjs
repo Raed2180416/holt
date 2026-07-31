@@ -28,6 +28,57 @@
  *  - An unknown rule TYPE is an error, not a skip — same reason.
  *  - Every violation names the rule id, the subject, and the evidence, so a red build is
  *    actionable without re-running anything locally.
+ *  - THE SUBJECT OF A GATE NEVER SUPPLIES ITS OWN RULES. See loadGatePolicy below.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * ADJUDICATED 2026-08-01 — WHY THIS IS HAND-ROLLED AND NOT OPA/REGO OR CEDAR
+ *
+ * The right instinct is to take an existing policy engine rather than grow a bespoke one, and it
+ * was evaluated properly. Measured live against the npm registry on 2026-08-01 (re-derive with
+ * `npm view <pkg> dist.unpackedSize dependencies time.modified`; these numbers rot, the
+ * reasoning does not):
+ *
+ *   @open-policy-agent/opa-wasm  1.10.0, last published 2024-11-08, 950 KB, 2 runtime deps.
+ *     DISQUALIFYING: it only EVALUATES pre-compiled WASM. Its own README says to produce that
+ *     with `opa build -t wasm example.rego` — the Go binary. A policy file is written by the
+ *     USER, so adopting Rego would require every holt user to install the OPA toolchain merely
+ *     to author one. That is not a local-first CLI.
+ *
+ *   @cedar-policy/cedar-wasm     4.12.0, last published 2026-07-28, 0 runtime deps, Apache-2.0.
+ *     Genuinely strong: actively developed, no dependencies, parses and evaluates policy text
+ *     in-process with no external compiler, and formally verified. It is 12,745 KB unpacked
+ *     against holt's entire shipped surface of 487 KB (bin + src + README) — 26x the whole
+ *     product to express four rules.
+ *
+ * THE DECIDING ARGUMENT IS NOT SIZE, IT IS FIT, AND IT IS THIS: not one of the defects this
+ * module has ever had was an EXPRESSIVENESS defect. The gate read its rules from the candidate;
+ * a rule matched globs against symbol identities and could never fire; an empty path list
+ * validated and passed; unknown keys were silently ignored. Every one of those would have existed
+ * identically under Rego or Cedar, because they are defects of PROVENANCE (who wrote the rules)
+ * and REACHABILITY (can this rule fire at all) — questions no policy language answers for you.
+ * Adopting either engine would have fixed exactly zero of them while adding a language users must
+ * learn and a dependency the free tier cannot carry.
+ *
+ * There is also a semantic mismatch worth naming: Cedar answers "may this principal take this
+ * action on this resource", one decision per request. holt's rules are aggregate assertions over
+ * a scan result ("no branch may hold unlanded work"). Encoding those means synthesising one
+ * authorization request per rule per subject and reassembling the answers here — which is this
+ * file, with a 12 MB dependency underneath it.
+ *
+ * WHAT WOULD HAVE TO BE TRUE TO CHANGE THE ANSWER — adopt Cedar (not Rego, for the compiler
+ * reason above), as an OPTIONAL dependency so the free tier stays dependency-free, when ANY of:
+ *   1. Users need rules these four types cannot express: conditionals, arithmetic, cross-rule
+ *      logic, per-branch-pattern overrides, or their own predicates. One request is an anecdote;
+ *      the trigger is the third distinct one that cannot be expressed by adding a rule type.
+ *   2. The rule-type count passes ~10, where a hand-rolled validator stops being reviewable in
+ *      one sitting and an off-the-shelf grammar starts being cheaper than the one here.
+ *   3. A buyer requires a formally verified engine, or wants to reuse an existing Cedar/Rego
+ *      corpus they already maintain. This is a real procurement ask and it outranks every
+ *      argument above on its own.
+ *   4. Policy needs to be authored or analysed OUTSIDE holt — a central service, a policy
+ *      linter, "which repositories would this rule change break" — where a standard language
+ *      and its tooling are the product rather than an implementation detail.
+ * ---------------------------------------------------------------------------------------------
  */
 
 import fs from 'node:fs/promises';
