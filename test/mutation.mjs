@@ -90,6 +90,26 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "file-granularity-unwatched",
+    "defect": "the file layer is switched off — holt blocks worktree destruction but allows `rm <file>`, `git rm -f`, `truncate`, `shred`, `mv` and `> <file>` against the only copy of a file",
+    "file": "src/agent.mjs",
+    "find": "  const fileVerdict = fileTargets.length ? await assessFileTargets(fileTargets, cwd, ctx) : null;",
+    "replace": "  const fileVerdict = null; void fileTargets; // mutated: file granularity unwatched",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
+    "id": "file-gate-trigger-happy",
+    "defect": "the file layer stops excluding regenerable output, so `rm -rf node_modules` and `> app.log` are refused — the shape that gets a guard uninstalled",
+    "file": "src/scan.mjs",
+    "find": "    if (looksGenerated(p)) continue;",
+    "replace": "    // mutated: generated output is defended like source",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
     "id": "primary-tree-unwatched",
     "defect": "the hook stops scanning the primary worktree — the one tree git REFUSES to lock, so the hook is its only protection",
     "file": "src/agent.mjs",

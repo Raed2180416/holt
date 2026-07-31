@@ -18,7 +18,10 @@ import { fileURLToPath } from 'node:url';
 const HOLT_BIN = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
 import path from 'node:path';
 import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
-import { assessCommand, buildBrief, classifyCommand } from '../../src/agent.mjs';
+import {
+  assessCommand, buildBrief, classifyCommand, resolveFileTargets, cachedReport,
+} from '../../src/agent.mjs';
+import { atRiskFiles } from '../../src/scan.mjs';
 import {
   formatVerdict, formatContext, agentsMdBlock, installAgentsMd,
   detectHosts, integrate, mcpTargets, claudeCodeHooks, opencodePlugin,
@@ -529,6 +532,227 @@ test('COVERAGE: git -C redirects which worktree a path-less verb acts on', async
   t.after(() => fx.cleanup());
   const v = await assessCommand(`git -C ${fx.wt('uniqueUncommitted')} reset --hard`, fx.root);
   assert.equal(v.decision, 'deny', `-C must be followed to the real target: ${JSON.stringify(v)}`);
+});
+
+/* ------------------------------------------- FILE-GRANULAR DESTRUCTION ---- */
+
+/**
+ * MEASURED, before this suite existed: holt denied `git reset --hard` on a dirty tree and ALLOWED
+ * every one of `rm <file>`, `git rm -f <file>`, `truncate -s0 <file>`, `shred <file>`,
+ * `mv <file> /tmp/x` and `> <file>` against the exact file it itself reported as existing nowhere
+ * else — 9 spellings, 9 allows. The rules reasoned about WORKTREES; the loss happens one file at
+ * a time.
+ *
+ * Every deny below has its allow twin, because a guard that denies ordinary file deletion is
+ * uninstalled the same day. That is the harder half and it is asserted first.
+ */
+async function fileRiskFixture() {
+  const fx = await newRepo('file-risk');
+  await fx.write('.gitignore', 'node_modules/\ndist/\ncoverage/\n*.log\n.env\nsecrets/\n');
+  await fx.write('src/committed.js', 'export function COMMITTED_HERE() {}\n');
+  await fx.write('docs/guide.md', '# guide\n');
+  await fx.commit('ignore rules, a committed source file and a committed doc');
+
+  // --- content whose ONLY copy is on disk -----------------------------------------
+  await fx.write('src/only_here.js', 'export function ONLY_HERE() {}\n');            // untracked
+  await fx.write('notes.md', 'an hour of design notes\n');                           // untracked
+  await fx.write('src/base.js', 'export function baseline() { return 99; }\n');       // MODIFIED
+  await fx.write('.env', 'API_KEY=live\n');                                          // gitignored
+  await fx.write('secrets/prod.env', 'TOKEN=live\n');                        // ignored DIRECTORY
+
+  // --- regenerable noise, which must never be defended ----------------------------
+  await fx.write('node_modules/dep/index.js', 'module.exports = 1;\n');
+  await fx.write('dist/bundle.js', 'x\n');
+  await fx.write('build/out.js', 'x\n');
+  await fx.write('coverage/lcov.info', 'TN:\n');
+  await fx.write('app.log', 'line\n');
+  return fx;
+}
+
+test('FILE GATE: ordinary file operations stay allowed — the never-worse half', async (t) => {
+  const fx = await fileRiskFixture();
+  t.after(() => fx.cleanup());
+
+  const mustAllow = [
+    // regenerable output, by holt's own generated-file rule — never by a name allowlist
+    'rm -rf node_modules', 'rm -rf ./node_modules', 'rm -rf dist', 'rm build/out.js',
+    'rm -rf coverage', 'rm app.log', 'truncate -s0 app.log', '> app.log',
+    'rm -rf dist/* build/*', 'shred -u coverage/lcov.info',
+    // committed content: a commit still holds it, so removing the file is recoverable
+    'rm src/committed.js', 'git rm -f src/committed.js', 'rm -rf docs', '> src/committed.js',
+    'mv src/committed.js /tmp/elsewhere.js',
+    // nothing there to lose
+    'rm -f does-not-exist.txt', '> fresh-report.json', 'node build.js > report.html',
+    // outside every worktree
+    'rm -rf /tmp/scratch', 'echo hi > /dev/null', 'cargo test > /tmp/test.log 2>&1',
+    'cd /tmp && rm -f notes.md', 'cd && rm notes.md',
+    // not destructive at all
+    'git status', 'cat notes.md', 'echo more >> notes.md', 'npm test 2>&1 | tee -a app.log',
+    'git rm --cached .env', 'git rm -n notes.md', 'git clean -n',
+    // quoting: a '>' inside quotes is not a redirect
+    "awk '{if ($1 > 2) print $0}' notes.md", 'git log --pretty=format:"%h -> %s"',
+    'echo "notes.md > gone"',
+    // a rename inside the worktree moves the content, it does not destroy it
+    'mv src/only_here.js src/renamed.js', 'mv notes.md docs/notes.md', 'mv notes.md docs',
+    // copying READS the source, and writing INTO a directory does not replace the directory
+    'cp src/only_here.js src/only_here.bak.js', 'cp -r src src-backup', 'cp notes.md docs/',
+    'cp docs/guide.md dist/guide.md', 'dd if=/dev/zero of=dist/pad.bin bs=1M count=1',
+  ];
+  for (const cmd of mustAllow) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow', `ordinary operation must stay allowed: ${cmd}\n${v.reason ?? ''}`);
+  }
+});
+
+test('FILE GATE: the verbs that destroy one file at a time are denied', async (t) => {
+  const fx = await fileRiskFixture();
+  t.after(() => fx.cleanup());
+
+  // PROVE THE INSTRUMENT SEES PRESENCE before trusting any refusal it produces: holt must
+  // already be reporting these exact files as content nothing else holds.
+  const { scanned } = await cachedReport(fx.root, { includePrimary: true });
+  const ws = scanned.workstreams.find((w) => path.resolve(w.path) === path.resolve(fx.root));
+  const atRisk = new Set(atRiskFiles(ws));
+  for (const f of ['src/only_here.js', 'notes.md', 'src/base.js']) {
+    assert.ok(atRisk.has(f), `PRECONDITION: holt must already report ${f} as at risk — got ${[...atRisk]}`);
+  }
+  assert.ok(!atRisk.has('src/committed.js'), 'a committed file is not at risk');
+  assert.ok(![...atRisk].some((f) => f.startsWith('node_modules/') || f.startsWith('dist/')),
+    'regenerable output must never be in the at-risk set');
+
+  const mustDeny = [
+    'rm src/only_here.js',
+    'rm -f notes.md',
+    'rm -- notes.md',
+    'rm "notes.md"',
+    'git rm -f src/base.js',
+    'git rm -rf src/only_here.js',
+    'truncate -s0 src/base.js',
+    'truncate --size=0 notes.md',
+    'shred -u src/only_here.js',
+    'shred -n 3 notes.md',
+    'mv src/only_here.js /tmp/stash.js',
+    'mv -t /tmp notes.md',
+    '> src/only_here.js',
+    'echo "" > notes.md',
+    'cat /dev/null > src/base.js',
+    'node gen.js &> notes.md',
+    'unlink notes.md',
+    'rm src/*.js',                       // a glob still resolves to the files it would take
+    'rm -rf src',                        // a directory takes everything under it
+    'rm -rf secrets',                    // a collapsed ignored directory is still evidence
+    'rm .env',
+    'cd src && rm only_here.js',         // cd is followed, in both directions
+    'sudo rm -f notes.md',
+    'npm run build && rm notes.md',
+    // SAME ACT, OTHER SPELLINGS. A guard that stops `rm` and `>` while leaving these open just
+    // teaches an agent which verb to reach for next.
+    'cp /dev/null notes.md',
+    'cp docs/guide.md src/only_here.js',
+    'dd if=/dev/null of=src/only_here.js',
+    'tee notes.md < /dev/null',
+    'install -m 644 docs/guide.md notes.md',
+  ];
+  for (const cmd of mustDeny) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'deny', `destroys the only copy and must be denied: ${cmd}`);
+    assert.match(v.reason, /only copy is on disk/i, `${cmd} must say what is at stake`);
+  }
+});
+
+test('FILE GATE: the refusal names the file, its layer and what is inside it', async (t) => {
+  const fx = await fileRiskFixture();
+  t.after(() => fx.cleanup());
+
+  const v = await assessCommand('rm src/only_here.js', fx.root);
+  assert.equal(v.decision, 'deny');
+  assert.ok(v.files.includes('src/only_here.js'), `the verdict must carry the file: ${JSON.stringify(v.files)}`);
+  assert.match(v.reason, /src\/only_here\.js/, 'the refusal names the path');
+  assert.match(v.reason, /untracked/, 'the refusal names the layer the content lives in');
+  assert.match(v.reason, /ONLY_HERE/, 'the refusal names a symbol that would be lost');
+  assert.match(v.reason, /holt rescue/, 'the refusal says how to proceed');
+});
+
+test('FILE GATE: mv is a rename inside a worktree and a loss out of it', async (t) => {
+  const fx = await fileRiskFixture();
+  t.after(() => fx.cleanup());
+
+  // Same worktree: the content still exists, under a new name. Denying this would break the
+  // single most ordinary refactoring move there is.
+  for (const cmd of ['mv src/only_here.js src/moved.js', 'mv notes.md docs/notes.md',
+    'mv src/only_here.js ./deep/nested/moved.js']) {
+    assert.equal((await assessCommand(cmd, fx.root)).decision, 'allow', `a rename must stay allowed: ${cmd}`);
+  }
+  // Out of the worktree, or onto another at-risk file, and the content is gone.
+  for (const cmd of ['mv src/only_here.js /tmp/x.js', 'mv src/only_here.js notes.md']) {
+    assert.equal((await assessCommand(cmd, fx.root)).decision, 'deny', `must be denied: ${cmd}`);
+  }
+});
+
+test('FILE GATE: `>` truncates and `>>` does not — the guard tells them apart', async (t) => {
+  const fx = await fileRiskFixture();
+  t.after(() => fx.cleanup());
+
+  assert.equal((await assessCommand('> notes.md', fx.root)).decision, 'deny');
+  assert.equal((await assessCommand('echo x >> notes.md', fx.root)).decision, 'allow',
+    'appending adds to a file, it never destroys it');
+  assert.equal((await assessCommand('cmd 2>&1 | tee -a app.log', fx.root)).decision, 'allow',
+    'a descriptor duplication names no file at all');
+  // Redirecting a command's own diagnostics must not be read as destroying its argument.
+  assert.equal((await assessCommand('grep -r ONLY_HERE src 2>/dev/null', fx.root)).decision, 'allow');
+});
+
+test('FILE GATE: the fast probe and scan.mjs agree on what is at risk', async (t) => {
+  // The guard answers the common case from one `git status` instead of a full scan, so the two
+  // definitions of "at risk" must not be able to drift apart. If the probe ever sees LESS than
+  // the scan, a file holt reports as unique becomes deletable again — silently.
+  const fx = await fileRiskFixture();
+  t.after(() => fx.cleanup());
+
+  const { scanned } = await cachedReport(fx.root, { includePrimary: true });
+  const ws = scanned.workstreams.find((w) => path.resolve(w.path) === path.resolve(fx.root));
+  const computed = atRiskFiles(ws);
+  assert.ok(computed.length >= 5, `the fixture must plant several at-risk files, got ${computed.length}`);
+
+  for (const f of computed) {
+    const v = await assessCommand(`rm ${JSON.stringify(f)}`, fx.root);
+    assert.equal(v.decision, 'deny',
+      `scan.mjs calls ${f} at risk, so the guard must too — otherwise the probe is blind to it`);
+  }
+});
+
+test('FILE GATE: target resolution is a pure function of the command string', () => {
+  // Kept parse-only so a regression here is diagnosable without a repository.
+  const paths = (c) => resolveFileTargets(c).map((t) => `${t.role}:${t.raw}`);
+
+  assert.deepEqual(paths('rm -rf a b'), ['delete:a', 'delete:b'], 'every operand is a target');
+  assert.deepEqual(paths('rm -- -weird'), ['delete:-weird'], '`--` ends the flags');
+  assert.deepEqual(paths('truncate -s 0 f'), ['truncate:f'], 'an option value is not a target');
+  assert.deepEqual(paths('shred -n 3 f'), ['delete:f'], 'shred takes a value-bearing option too');
+  assert.deepEqual(paths('git rm --cached f'), [], '--cached leaves the file on disk');
+  assert.deepEqual(paths('git rm -n f'), [], 'a dry run destroys nothing');
+  assert.deepEqual(paths('echo hi >> f'), [], 'append is not truncation');
+  assert.deepEqual(paths('echo hi > f'), ['truncate:f'], 'truncating redirection is');
+  assert.deepEqual(paths('cmd 2>&1'), [], 'a descriptor duplication names no file');
+  assert.deepEqual(paths("echo 'a > b'"), [], 'a quoted > is not a redirect');
+  assert.deepEqual(paths('echo "a > b"'), [], 'in either quote style');
+  assert.deepEqual(paths('ls -la'), [], 'a read has no targets');
+  assert.deepEqual(paths('docker rm container'), [], 'only the shell verbs, not every word "rm"');
+  assert.deepEqual(paths('cp a b'), ['overwrite:b'], 'a copy reads the source and replaces the destination');
+  assert.deepEqual(paths('mv a b'), ['move-src:a', 'overwrite:b'], 'a move does both');
+  assert.deepEqual(paths('tee -a f'), [], 'tee -a appends');
+  assert.deepEqual(paths('tee f'), ['truncate:f'], 'tee without -a truncates');
+  assert.deepEqual(paths('dd if=/dev/null of=f'), ['truncate:f'], 'dd destroys of=, never if=');
+  assert.deepEqual(
+    resolveFileTargets('cd sub && rm f').map((t) => t.baseDir),
+    ['sub'],
+    'cd moves the base directory the paths resolve against',
+  );
+  assert.deepEqual(
+    resolveFileTargets('git -C other rm f').map((t) => t.baseDir),
+    ['other'],
+    'git -C does the same for git',
+  );
 });
 
 test('IDENTITY: rescue works in a repository with no git identity configured', async (t) => {
