@@ -235,7 +235,7 @@ export function claudeCodeHooks(bin = 'holt') {
       { matcher: 'Bash', hooks: [{ type: 'command', command: `${bin} hook pre-tool-use --host claude-code`, timeout: 120 }] },
     ],
     SessionStart: [
-      { hooks: [{ type: 'command', command: `${bin} hook session-start --host claude-code`, timeout: 120 }] },
+      { hooks: [{ type: 'command', command: `${bin} hook session-start --autoprotect --host claude-code`, timeout: 120 }] },
     ],
     UserPromptSubmit: [
       { hooks: [{ type: 'command', command: `${bin} hook user-prompt-submit --host claude-code`, timeout: 60 }] },

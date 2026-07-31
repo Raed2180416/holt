@@ -73,6 +73,8 @@ AGENT INTEGRATION
   hook <event>        hook entry point; reads the host event as JSON on stdin
                       events: pre-tool-use · session-start · user-prompt-submit
                       --host claude-code|generic   --command <cmd>  (bypass stdin)
+                      --autoprotect: session-start also locks at-risk workstreams first
+                      (holt integrate wires this — zero-touch protection at every session)
 
 OPTIONS
   --json              machine-readable output
@@ -111,6 +113,7 @@ function parseArgs(argv) {
       case '--release': opts.release = true; break;
       case '--run': opts.run = argv[++i]; break;
       case '--agents': opts.agents = Number(argv[++i]) || 2; break;
+      case '--autoprotect': opts.autoprotect = true; break;
       case '--snapshot': opts.snapshot = true; break;
       case '--columns': opts.columns = Number(argv[++i]) || 120; break;
       case '--rows': opts.rowsOpt = Number(argv[++i]) || 34; break;
@@ -279,7 +282,21 @@ async function cmdHook(opts) {
   }
 
   if (event === 'session-start' || event === 'user-prompt-submit') {
-    const text = await buildBrief(cwd);
+    // Zero-touch protection: with --autoprotect (what `holt integrate` wires), every session
+    // start locks the workstreams that hold work found nowhere else BEFORE the agent's first
+    // tool call. Best-effort by design — a protection failure must not break session startup,
+    // but it is stated in the brief, never swallowed.
+    let protectLine = '';
+    if (event === 'session-start' && opts.autoprotect) {
+      try {
+        const p = await protect(cwd, {});
+        if (p.protected > 0) protectLine = `holt auto-protect: locked ${p.protected} workstream(s) holding unique work.\n`;
+        else if (p.failed > 0) protectLine = `holt auto-protect: ${p.failed} lock attempt(s) FAILED — run 'holt protect' to see why.\n`;
+      } catch (e) {
+        protectLine = `holt auto-protect FAILED (${e.message}) — protection is NOT in place; run 'holt protect'.\n`;
+      }
+    }
+    const text = protectLine + await buildBrief(cwd);
     const eventName = event === 'session-start' ? 'SessionStart' : 'UserPromptSubmit';
     out(JSON.stringify(formatContext(text, { host: opts.host, eventName })));
     return;
