@@ -200,7 +200,9 @@ export function tierForEvent(event, priceMap = TIER_BY_PRICE()) {
 
 export function seatsForEvent(event) {
   const qty = event?.data?.object?.line_items?.data?.[0]?.quantity
-    ?? event?.data?.object?.items?.data?.[0]?.quantity ?? null;
+    ?? event?.data?.object?.items?.data?.[0]?.quantity
+    ?? event?.data?.object?.lines?.data?.[0]?.quantity   // invoice.paid renewal shape
+    ?? null;
   return Number.isFinite(qty) ? qty : null;
 }
 
@@ -218,12 +220,13 @@ export function daysForEvent(event) {
   const price = event?.data?.object?.line_items?.data?.[0]?.price
     ?? event?.data?.object?.items?.data?.[0]?.price
     ?? event?.data?.object?.lines?.data?.[0]?.price;
-  const interval = price?.recurring?.interval
-    ?? event?.data?.object?.metadata?.interval
-    ?? null;
+  // Only a REAL Stripe price's recurring.interval is authoritative. We deliberately do NOT read
+  // an interval out of metadata: metadata is merchant-set free-form, and trusting it here would
+  // let a future integration silently reintroduce year-long licenses. No interval -> short.
+  const interval = price?.recurring?.interval ?? null;
   if (interval === 'year') return 379;
   if (interval === 'month') return 38;
-  return 38; // unknown interval -> the short, safe default
+  return 38; // unknown / missing interval -> the short, safe default (never a giveaway)
 }
 
 /**
@@ -240,7 +243,8 @@ export function sanitizeClaim(v, max = 120) {
   if (typeof v !== 'string') return null;
   const clean = Array.from(v).filter((ch) => {
     const c = ch.codePointAt(0);
-    return c > 0x1f && c !== 0x7f;
+    // C0 (0x00-0x1F), DEL (0x7F), and C1 (0x80-0x9F, the 8-bit CSI/OSC/DCS range) all out.
+    return c > 0x1f && c !== 0x7f && !(c >= 0x80 && c <= 0x9f);
   }).join('').trim().slice(0, max);
   return clean || null;
 }
@@ -270,8 +274,11 @@ export function licenseForEvent(event, signingKeyB64, { priceMap = TIER_BY_PRICE
   const email = sanitizeClaim(obj.customer_details?.email ?? obj.customer_email ?? obj.metadata?.email, 320);
   const org = sanitizeClaim(obj.customer_details?.name ?? obj.metadata?.org);
   // Seats: honour what was bought, but never below the tier minimum a license is allowed to carry.
+  // The tier's seat minimum is a floor, applied even when the quantity is absent or malformed —
+  // a Team license must never carry fewer than its minimum, on a first purchase OR a renewal.
+  const floor = MIN_SEATS[tier] ?? 1;
   const rawSeats = seatsForEvent(event);
-  const seats = rawSeats == null ? null : Math.max(rawSeats, MIN_SEATS[tier] ?? 1);
+  const seats = Math.max(Number.isFinite(rawSeats) ? rawSeats : floor, floor);
   const lifetime = days ?? daysForEvent(event);
   const { token, claims } = mintLicense({ tier, org, email, seats, days: lifetime }, signingKeyB64);
   return { action: 'issue', token, claims, email, tier, customer: obj.customer ?? null };
@@ -544,7 +551,8 @@ export function createServer({ env = process.env, dataFile = DATA } = {}) {
         // does nothing) would otherwise take measurably different times to respond, leaking
         // existence. Now the response time is constant and the work happens after.
         if (typeof email === 'string' && email.length <= 320 && email.includes('@')) {
-          const hash = createHmac('sha256', webhookSecret).update(email.toLowerCase()).digest('hex').slice(0, 16);
+          const normEmail = email.trim().toLowerCase();
+          const hash = createHmac('sha256', webhookSecret).update(normEmail).digest('hex').slice(0, 16);
           // Per-TARGET cap: even across rotating source IPs, one mailbox cannot be flooded.
           if (perEmailLimiter.take(hash).allowed) {
             queueMicrotask(async () => {

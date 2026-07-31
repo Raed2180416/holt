@@ -429,3 +429,43 @@ test('webhook: rotation — multiple secrets and multiple v1 signatures both ver
   assert.equal(verifyStripeSignature(body, `t=${ts},v1=${'0'.repeat(64)},v1=${sigWith('new')}`, 'new', { now: NOW }).ok, true);
   assert.equal(verifyStripeSignature(body, `t=${ts},v1=${sigWith('wrong')}`, 'new,old', { now: NOW }).ok, false);
 });
+
+
+/* ------------------------------------------- residual edge cases (2nd audit pass) ---- */
+
+test('MONETIZATION: a merchant-set metadata.interval cannot buy a year (only a real price interval)', () => {
+  const ev = {
+    id: 'evt_meta', type: 'checkout.session.completed',
+    data: { object: { customer_details: { email: 'z@x.test' }, metadata: { tier: 'team', interval: 'year' },
+      line_items: { data: [{ quantity: 3, price: { id: 'price_team' } }] } } },  // no recurring.interval on the price
+  };
+  const r = licenseForEvent(ev, SIGNING);
+  const days = Math.round((r.claims.exp - r.claims.iat) / 86_400_000);
+  assert.ok(days <= 40, `metadata.interval must NOT be trusted for duration, got ${days} days`);
+});
+
+test('MONETIZATION: the seat floor holds on a renewal shape and when quantity is absent', () => {
+  // invoice.paid renewal carries seats under .lines.data, which seatsForEvent must read.
+  const renewal = {
+    id: 'evt_renew', type: 'invoice.paid',
+    data: { object: { customer: 'c1', metadata: { tier: 'team' },
+      lines: { data: [{ quantity: 1, price: { id: 'price_team' } }] } } },
+  };
+  assert.equal(seatsForEvent(renewal), 1, 'seatsForEvent must read the invoice line shape');
+  assert.ok(licenseForEvent(renewal, SIGNING).claims.seats >= 3, 'a renewal must keep the Team floor');
+
+  // Quantity entirely absent -> still floored, never null.
+  const noQty = {
+    id: 'evt_noqty', type: 'checkout.session.completed',
+    data: { object: { customer_details: { email: 'n@x.test' }, metadata: { tier: 'team' }, line_items: { data: [{ price: { id: 'price_team' } }] } } },
+  };
+  assert.ok(licenseForEvent(noQty, SIGNING).claims.seats >= 3, 'a missing quantity must fall to the floor, not null');
+});
+
+test('SECURITY: sanitizeClaim strips the C1 control range (8-bit CSI/OSC), not just C0/DEL', () => {
+  const c1 = String.fromCharCode(0x9b) + '31m' + String.fromCharCode(0x9d) + '0;title';
+  const cleaned = sanitizeClaim('Acme' + c1 + 'Inc');
+  const hasC1 = Array.from(cleaned).some((ch) => { const c = ch.charCodeAt(0); return c >= 0x80 && c <= 0x9f; });
+  assert.equal(hasC1, false, 'no C1 control byte may survive');
+  assert.match(cleaned, /Acme/);
+});
