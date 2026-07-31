@@ -1,0 +1,42 @@
+{
+  "name": "grovekit",
+  "version": "0.1.0",
+  "description": "The landing layer for parallel agent work. Answers what your N agents produced, what's redundant, what collides, what's safe to delete, and what you're about to lose.",
+  "type": "module",
+  "bin": {
+    "grove": "./bin/grove.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs",
+    "./mcp": "./src/mcp/server.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "test:unit": "node --test \"test/unit/*.test.mjs\"",
+    "test:e2e": "node --test \"test/e2e/*.test.mjs\"",
+    "selfcheck": "node bin/grove.mjs doctor"
+  },
+  "keywords": [
+    "git",
+    "worktree",
+    "jujutsu",
+    "ai-agents",
+    "parallel-agents",
+    "merge",
+    "mcp",
+    "code-review"
+  ],
+  "license": "MIT",
+  "optionalDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "jscpd": "^5.0.14"
+  }
+}
