@@ -119,9 +119,38 @@ const MUTATIONS = [
     id: 'ignore-uncommitted',
     defect: 'safeToDelete() ignores the uncommitted layer — the layer git cannot see',
     file: 'src/analyze.mjs',
-    find: "    if (w.uncommitted.count > 0) reasons.push(`${w.uncommitted.count} uncommitted file(s)`);",
+    find: "    if (uncommittedCount > 0) reasons.push(`${uncommittedCount} uncommitted file(s)`);",
     replace: '    // mutated: uncommitted layer ignored',
     tests: ['test/e2e/break-it.test.mjs'],
+  },
+  {
+    // THE DEFECT THIS ANCHOR WAS WRITTEN FOR: `gate` counted the gitignored layer and `rescue`
+    // did not, so one product gave two opposite answers to "would deleting this lose work?" —
+    // and the one that exited 0 was the one a `rescue && worktree remove` chain trusts. Dropping
+    // the layer HERE now breaks BOTH commands at once, which is exactly the property the fix
+    // bought: they can no longer be wrong independently.
+    id: 'atrisk-drops-ignored',
+    defect: 'contentAtRisk() forgets the gitignored layer — gate and rescue silently disagree again',
+    file: 'src/analyze.mjs',
+    find: '  const ignored = (w?.ignored?.files ?? []).filter(Boolean);',
+    replace: '  const ignored = [];',
+    tests: ['test/e2e/actions.test.mjs', 'test/e2e/break-it.test.mjs'],
+  },
+  {
+    id: 'atrisk-blind-reads-empty',
+    defect: 'a probe that FAILED reports as an empty worktree — absence of evidence becomes a green light',
+    file: 'src/analyze.mjs',
+    find: "  if (w?.ignored?.how === 'ignored-probe-failed') {",
+    replace: '  if (false) {',
+    tests: ['test/e2e/actions.test.mjs'],
+  },
+  {
+    id: 'rescue-builds-own-fileset',
+    defect: 'rescue re-derives its own content set instead of sharing the gate — the drift that caused the defect',
+    file: 'src/actions.mjs',
+    find: '  const files = risk.files;',
+    replace: '  const files = [...new Set([...ws.uncommitted.files, ...ws.uncommitted.untracked])].filter(Boolean);',
+    tests: ['test/e2e/actions.test.mjs', 'test/e2e/cli.test.mjs'],
   },
   {
     id: 'fail-open-unknown',

@@ -106,6 +106,49 @@ test('CLI: `gate` exit codes are the documented contract', async (t) => {
   assert.equal(missing.code, 2, 'unknown must exit 2, never 0');
 });
 
+test('CLI: `gate` and `rescue` must not give a script two different answers', async (t) => {
+  const fx = await newRepo('cli-parity');
+  t.after(() => fx.cleanup());
+
+  await fx.write('.gitignore', 'notes.local\nsecrets/\n');
+  await fx.commit('ignore rules');
+  const wt = await fx.worktree('w1');
+  await fx.write('notes.local', 'an hour of hand-written notes\n', wt);
+  await fx.write('secrets/prod.env', 'API_KEY=live-do-not-lose\n', wt);
+
+  // MEASURED, AND THIS IS THE WHOLE DEFECT: `gate` exited 1 saying HOLDS UNIQUE WORK while
+  // `rescue` exited 0 saying "this worktree holds nothing base lacks". A script chaining
+  //     holt rescue w1 && git worktree remove w1
+  // trusts the 0 and deletes the only copy of the credentials.
+  const gate = await holt(['gate', 'w1', '--cwd', fx.root], fx.root);
+  assert.equal(gate.code, 1, `gate must refuse: ${gate.stdout}${gate.stderr}`);
+
+  const resc = await holt(['rescue', 'w1', '--cwd', fx.root], fx.root);
+  const payload = JSON.parse(resc.stdout);
+  assert.notEqual(payload.nothingToRescue, true,
+    `rescue must not report nothing-to-rescue for work gate refuses on: ${resc.stdout}`);
+
+  // Either it captured the work (exit 0 with a verified ref) or it refused and NAMED what it
+  // could not capture (non-zero). Silence with exit 0 is the one outcome that is never allowed.
+  if (payload.ok === true) {
+    assert.equal(resc.code, 0);
+    assert.equal(payload.verified, true, `a success must be verified: ${resc.stdout}`);
+    assert.ok(payload.commit, 'and must name the commit that now holds the work');
+  } else {
+    assert.equal(resc.code, 1, 'a refusal must exit non-zero so the chain stops');
+    assert.ok((payload.missing?.length ?? 0) + (payload.blind?.length ?? 0) > 0,
+      `a refusal must NAME what could not be captured: ${resc.stdout}`);
+  }
+
+  // NEVER-WORSE, at the same layer: an empty worktree still exits 0 with nothing-to-rescue.
+  await fx.worktree('spent');
+  const empty = await holt(['rescue', 'spent', '--cwd', fx.root], fx.root);
+  assert.equal(empty.code, 0, `an empty worktree must still exit 0: ${empty.stdout}${empty.stderr}`);
+  assert.equal(JSON.parse(empty.stdout).nothingToRescue, true);
+  const emptyGate = await holt(['gate', 'spent', '--cwd', fx.root], fx.root);
+  assert.equal(emptyGate.code, 0, 'and gate must agree it is disposable');
+});
+
 test('CLI: a FAILED rescue must exit non-zero', async (t) => {
   const fx = await newRepo('cli-rescue-exit');
   t.after(() => fx.cleanup());

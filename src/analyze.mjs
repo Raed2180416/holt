@@ -180,6 +180,59 @@ export function uniqueWork(scanResult) {
     .sort((a, b) => b.uncommittedOnlyCount - a.uncommittedOnlyCount || b.uniqueSymbolCount - a.uniqueSymbolCount);
 }
 
+/* --------------------------------------- shared: what a deletion destroys ---- */
+
+/**
+ * EVERY PATH DESTROYING THIS WORKSTREAM WOULD DESTROY — ONE computation, for every command.
+ *
+ * WHY THIS FUNCTION EXISTS. `gate` (via safeToDelete) and `rescue` each built their own idea of
+ * "what is in here", from overlapping but DIFFERENT fields of the same scan. gate counted the
+ * committed delta, the uncommitted layer AND the gitignored layer; rescue counted the committed
+ * delta and the uncommitted layer only. So a worktree whose sole unique content was gitignored
+ * produced two opposite answers from one product:
+ *
+ *     holt gate w1     ->  "✗ w1: HOLDS UNIQUE WORK ... 2 gitignored file(s)"      exit 1
+ *     holt rescue w1   ->  "this worktree holds nothing base lacks"                exit 0
+ *
+ * and the one that exits 0 is the one a script trusts before `git worktree remove`. Two commands
+ * disagreeing about whether work exists is worse than either being wrong alone, because it
+ * teaches the user that one of them can be ignored.
+ *
+ * The class fix is not "teach rescue about ignored files" — that is this week's layer. It is that
+ * NO COMMAND MAY DERIVE THE CONTENT SET ITSELF. Every layer the scanner can see is enumerated
+ * here exactly once; a future layer is added here and every command inherits it, which is the
+ * only arrangement in which they cannot drift apart again.
+ *
+ * BLINDNESS IS NOT EMPTINESS. An instrument that failed to run reports zero paths, which is
+ * byte-identical to a genuinely clean worktree. That is reported separately as `blind` so a
+ * caller must REFUSE rather than read a probe failure as good news.
+ */
+export function contentAtRisk(w) {
+  const uncommitted = (w?.uncommitted?.files ?? []).filter(Boolean);
+  const untracked = (w?.uncommitted?.untracked ?? []).filter(Boolean);
+  const ignored = (w?.ignored?.files ?? []).filter(Boolean);
+  const committedCount = w?.committed?.count ?? 0;
+
+  // Name the instrument, not the symptom: whoever refuses has to be able to say WHY it refused.
+  const blind = [];
+  if (w?.uncommitted?.how === 'status-failed') {
+    blind.push(`working-tree status probe failed (${w.uncommitted.error ?? 'unknown'})`);
+  }
+  if (w?.ignored?.how === 'ignored-probe-failed') {
+    blind.push(`gitignored-content probe failed (${w.ignored.error ?? 'unknown'})`);
+  }
+
+  const files = [...new Set([...uncommitted, ...untracked, ...ignored])].sort();
+  return {
+    files,
+    layers: { uncommitted, untracked, ignored },
+    committedCount,
+    blind,
+    // TRUE only when every instrument ran AND every layer came back empty.
+    empty: blind.length === 0 && files.length === 0 && committedCount === 0,
+  };
+}
+
 /* ------------------------------------------------- P6: safe to delete ---- */
 
 /**
@@ -198,9 +251,13 @@ export function safeToDelete(scanResult, unique = null) {
       return { id: w.id, path: w.path, safe: false, confidence: 'unknown', reasons: [w.reason ?? 'not scanned'] };
     }
     const u = uniqById.get(w.id);
+    // ONE content computation, shared with rescue — see contentAtRisk(). Reading these fields
+    // directly here is what let the two commands drift into opposite answers.
+    const risk = contentAtRisk(w);
     const reasons = [];
-    if (w.committed.count > 0) reasons.push(`${w.committed.count} file(s) base lacks`);
-    if (w.uncommitted.count > 0) reasons.push(`${w.uncommitted.count} uncommitted file(s)`);
+    if (risk.committedCount > 0) reasons.push(`${risk.committedCount} file(s) base lacks`);
+    const uncommittedCount = risk.layers.uncommitted.length + risk.layers.untracked.length;
+    if (uncommittedCount > 0) reasons.push(`${uncommittedCount} uncommitted file(s)`);
     if (u && u.uniqueSymbolCount > 0) reasons.push(`${u.uniqueSymbolCount} symbol(s) found nowhere else`);
     if (w.locked) reasons.push(`locked${w.lockReason ? `: ${w.lockReason}` : ''}`);
 
@@ -209,11 +266,17 @@ export function safeToDelete(scanResult, unique = null) {
     // the worktree destroys them all the same. A `.env` of live credentials or a hand-patched
     // dependency was being called "provably nothing to lose". Recognisable build output is
     // already filtered out upstream, so what reaches here is content a human plausibly wants.
-    const ignoredCount = w.ignored?.count ?? 0;
+    const ignoredCount = risk.layers.ignored.length;
     if (ignoredCount > 0) {
-      const sample = (w.ignored.files ?? []).slice(0, 3).join(', ');
+      const sample = risk.layers.ignored.slice(0, 3).join(', ');
       reasons.push(`${ignoredCount} gitignored file(s) holt cannot verify${sample ? ` (e.g. ${sample})` : ''}`);
     }
+
+    // A PROBE THAT FAILED REPORTS ZERO PATHS, exactly like a clean worktree. Same rule the
+    // scanner already applies to merge-tree and status: an empty answer from a broken instrument
+    // is not an answer. Without this, `gate` would green-light a worktree it never managed to
+    // look inside — and `rescue` (which refuses on the same signal) would contradict it again.
+    for (const b of risk.blind) reasons.push(`${b} — refusing to call it disposable`);
 
     return {
       id: w.id,
@@ -225,7 +288,7 @@ export function safeToDelete(scanResult, unique = null) {
       confidence: ignoredCount > 0 && reasons.length === 1
         ? 'unverifiable'
         : scanResult.strictReadOnly ? 'approximate' : 'measured',
-      ignoredFiles: ignoredCount ? (w.ignored.files ?? []).slice(0, 10) : undefined,
+      ignoredFiles: ignoredCount ? risk.layers.ignored.slice(0, 10) : undefined,
       reasons: reasons.length ? reasons : ['no committed delta, no uncommitted changes, no unique symbols'],
     };
   }).sort((a, b) => Number(b.safe) - Number(a.safe));
