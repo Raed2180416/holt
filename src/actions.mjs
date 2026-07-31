@@ -234,7 +234,15 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     return { ok: true, nothingToRescue: true, id, note: 'this worktree holds nothing base lacks' };
   }
 
-  const ref = `refs/holt/rescue/${refSafeId(id)}`;
+  // A workstream id is only a DIRECTORY BASENAME, so it is reused constantly: delete `wt/feat`,
+  // create a new `wt/feat` later, and both map to refs/holt/rescue/feat. Writing that ref
+  // unconditionally silently destroyed the earlier capture — a rescue overwriting a rescue,
+  // which is the exact opposite of this command's promise ("discoverable months later"). Live-
+  // reproduced against the real binary, so the ref is now allocated NEVER-DESTRUCTIVELY: if the
+  // name is taken by a DIFFERENT commit, suffix it. Re-rescuing identical content reuses the
+  // same ref (idempotent, no ref sprawl); genuinely new content always gets its own.
+  const baseRef = `refs/holt/rescue/${refSafeId(id)}`;
+  let ref = baseRef;
   if (dryRun) {
     return { ok: true, dryRun: true, id, ref, wouldCapture: { files, committedDelta } };
   }
@@ -262,12 +270,24 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
 
     const msg = `holt rescue: ${id}\n\n`
       + `Captured ${files.length} uncommitted/untracked file(s) and the worktree's committed state.\n`
-      + `Restore with:  git checkout ${ref} -- .\n`;
+      + `Restore with:  git checkout <this-ref> -- .   (see 'holt rescued')\n`;
     const commitR = await gitOk(
       ['commit-tree', tree, '-p', ws.head, '-m', msg],
       { cwd: ws.path, env, allowMutation: true },
     );
     const commit = commitR.stdout.trim();
+
+    // Allocate the ref non-destructively, now that the commit exists:
+    //   - name free            -> use it
+    //   - name holds THIS commit -> reuse it (re-rescuing identical content is idempotent)
+    //   - name holds ANOTHER commit -> suffix, never overwrite
+    // Without this, a reused directory basename silently destroyed the earlier capture.
+    for (let n = 2; n < 1000; n++) {
+      const cur = await git(['rev-parse', '--verify', '--quiet', ref], { cwd: ws.path });
+      const oid = cur.code === 0 ? cur.stdout.trim() : '';
+      if (!oid || oid === commit) break;
+      ref = `${baseRef}-${n}`;
+    }
 
     await gitOk(['update-ref', ref, commit], { cwd: ws.path, allowMutation: true });
 
@@ -306,7 +326,14 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       released = un.unlocked > 0;
     }
 
-    await appendEvent(cwd, { action: 'rescue', id, ref, commit, capturedFiles: files.length, released: release });
+    // Record WHICH worktree this was, not just its (reusable) basename: path, branch and head
+    // make two rescues under a recycled id distinguishable in the audit trail. Without them the
+    // journal printed two identical lines for two different captures — live-reproduced.
+    await appendEvent(cwd, {
+      action: 'rescue', id, ref, commit,
+      path: ws.path, branch: ws.branch ?? null, head: ws.head ?? null,
+      capturedFiles: files.length, released: release,
+    });
     return {
       ok: true, id, ref, commit,
       capturedFiles: files.length,

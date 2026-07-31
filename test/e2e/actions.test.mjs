@@ -461,3 +461,55 @@ test('GUARANTEE: a plain scan still modifies nothing, even now that holt can mut
   assert.deepEqual([...changed, ...created], [],
     'the read-only guarantee must survive the addition of mutating commands');
 });
+
+test('RESURRECTION: reusing a worktree id must NEVER overwrite an earlier rescue', async (t) => {
+  // The owner's exact concern, live-reproduced before this fix: a workstream id is only a
+  // directory basename, so deleting wt/feat and later creating a NEW wt/feat mapped both to
+  // refs/holt/rescue/feat — and the second rescue silently destroyed the first capture.
+  const fx = await newRepo('id-reuse');
+  t.after(() => fx.cleanup());
+
+  const wtPath = path.join(fx.root, 'wt', 'recycled');
+  await sh('git', ['worktree', 'add', '-q', '-b', 'first', wtPath], fx.root);
+  await fs.writeFile(path.join(wtPath, 'first.js'), 'export function FIRST_ONLY() {}\n');
+  const r1 = await rescue(fx.root, 'recycled', {});
+  assert.equal(r1.ok, true, JSON.stringify(r1));
+  const firstRef = r1.ref;
+  const firstCommit = (await sh('git', ['rev-parse', firstRef], fx.root)).stdout.trim();
+  assert.ok(firstCommit, 'the first rescue must exist');
+
+  // Tear the worktree down and recreate a DIFFERENT one under the SAME id.
+  await sh('git', ['worktree', 'remove', '--force', wtPath], fx.root);
+  await sh('git', ['worktree', 'add', '-q', '-b', 'second', wtPath], fx.root);
+  await fs.writeFile(path.join(wtPath, 'second.js'), 'export function SECOND_ONLY() {}\n');
+  const r2 = await rescue(fx.root, 'recycled', {});
+  assert.equal(r2.ok, true, JSON.stringify(r2));
+
+  // THE INVARIANT: the first capture still exists, unchanged.
+  const firstStill = (await sh('git', ['rev-parse', '--verify', '--quiet', firstRef], fx.root)).stdout.trim();
+  assert.equal(firstStill, firstCommit, 'the FIRST rescue must survive a same-id second rescue');
+  assert.notEqual(r2.ref, firstRef, 'the second rescue must get its own ref, not clobber the first');
+
+  // And both captures are actually retrievable.
+  const firstFiles = (await sh('git', ['ls-tree', '-r', '--name-only', firstRef], fx.root)).stdout;
+  const secondFiles = (await sh('git', ['ls-tree', '-r', '--name-only', r2.ref], fx.root)).stdout;
+  assert.match(firstFiles, /first\.js/, 'the first capture still holds its file');
+  assert.match(secondFiles, /second\.js/, 'the second capture holds its own file');
+});
+
+test('AUDIT: a rescue records path/branch/head so a recycled id stays distinguishable', async (t) => {
+  const fx = await newRepo('audit-identity');
+  t.after(() => fx.cleanup());
+
+  const wtPath = path.join(fx.root, 'wt', 'audited');
+  await sh('git', ['worktree', 'add', '-q', '-b', 'audited-br', wtPath], fx.root);
+  await fs.writeFile(path.join(wtPath, 'u.js'), 'export function AUDIT_ME() {}\n');
+  await rescue(fx.root, 'audited', {});
+
+  const { readJournal } = await import('../../src/journal.mjs');
+  const ev = (await readJournal(fx.root)).find((e) => e.action === 'rescue');
+  assert.ok(ev, 'the rescue must be journalled');
+  assert.ok(ev.path && ev.path.includes('audited'), `the journal must record WHICH worktree: ${JSON.stringify(ev)}`);
+  assert.equal(ev.branch, 'audited-br', 'and its branch');
+  assert.ok(ev.head, 'and its head, so two rescues under one id are never identical lines');
+});

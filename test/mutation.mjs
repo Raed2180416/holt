@@ -238,6 +238,14 @@ const MUTATIONS = [
     tests: ['test/unit/roi.test.mjs'],
   },
   {
+    id: 'rescue-ref-clobber',
+    defect: 'a reused worktree id silently overwrites an earlier rescue ref — destroying a capture',
+    file: 'src/actions.mjs',
+    find: '      if (!oid || oid === commit) break;',
+    replace: '      break;',
+    tests: ['test/e2e/actions.test.mjs'],
+  },
+  {
     id: 'idempotency-race',
     defect: 'the event lock is bypassed, so concurrent deliveries of one payment can mint two licenses',
     file: 'server/index.mjs',
