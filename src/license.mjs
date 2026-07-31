@@ -185,7 +185,7 @@ export function tierEntitles(tier, feature) {
  * The single question every paid code path asks. Never throws; the caller decides how to refuse,
  * and the refusal always states exactly what is missing and how to fix it.
  */
-export function checkEntitlement(feature, { env = process.env, now = Date.now(), publicKeyB64 = LICENSE_PUBLIC_KEY_B64 } = {}) {
+export function checkEntitlement(feature, { env = process.env, now = Date.now(), publicKeyB64 = null } = {}) {
   const need = FEATURE_TIER[feature];
   if (!need) return { entitled: true, tier: 'free', feature, reason: 'this feature is free' };
 
@@ -220,7 +220,7 @@ export function checkEntitlement(feature, { env = process.env, now = Date.now(),
 }
 
 /** Full status for `holt license status` — never throws, always explains. */
-export function licenseStatus({ env = process.env, now = Date.now(), publicKeyB64 = LICENSE_PUBLIC_KEY_B64 } = {}) {
+export function licenseStatus({ env = process.env, now = Date.now(), publicKeyB64 = null } = {}) {
   const { token, source } = readLicenseToken({ env });
   const v = verifyToken(token, { now, publicKeyB64 });
   const features = Object.entries(FEATURE_TIER).map(([f, need]) => ({

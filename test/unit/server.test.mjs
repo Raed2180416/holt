@@ -361,3 +361,71 @@ test('E2E: the webhook endpoint is rate limited against an unsigned flood', asyn
   assert.ok(codes.includes(429), 'a 260-request unsigned flood must hit the limiter');
   assert.ok(codes.includes(400), 'and legitimate-shaped-but-unsigned ones still get 400 until the limiter trips');
 });
+
+
+/* -------------------------------------------------- billing-interval duration ---- */
+
+import { daysForEvent, sanitizeClaim } from '../../server/index.mjs';
+
+test('MONETIZATION: license lifetime tracks the billing interval, not a flat year', () => {
+  const ev = (interval) => ({ data: { object: { line_items: { data: [{ price: { recurring: { interval } } }] } } } });
+  assert.equal(daysForEvent(ev('month')), 38, 'a monthly plan gets ~1 month + buffer, not a year');
+  assert.equal(daysForEvent(ev('year')), 379);
+  assert.equal(daysForEvent(ev('week')), 38, 'an unrecognised interval falls back SHORT, never long');
+  assert.equal(daysForEvent({ data: { object: {} } }), 38, 'no interval -> short default (never a giveaway)');
+});
+
+test('MONETIZATION: a monthly checkout does not mint a year-long license', () => {
+  const ev = {
+    id: 'evt_m', type: 'checkout.session.completed',
+    data: { object: { customer_details: { email: 'm@x.test' }, metadata: { tier: 'team' },
+      line_items: { data: [{ quantity: 3, price: { id: 'price_team', recurring: { interval: 'month' } } }] } } },
+  };
+  const r = licenseForEvent(ev, SIGNING);
+  const days = Math.round((r.claims.exp - r.claims.iat) / 86_400_000);
+  assert.ok(days <= 40, `a monthly plan must not mint a ~365-day license, got ${days}`);
+});
+
+test('MONETIZATION: the Team seat minimum is enforced at issuance', () => {
+  const ev = {
+    id: 'evt_s', type: 'checkout.session.completed',
+    data: { object: { customer_details: { email: 's@x.test' }, metadata: { tier: 'team' },
+      line_items: { data: [{ quantity: 1, price: { id: 'price_team' } }] } } },
+  };
+  const r = licenseForEvent(ev, SIGNING);
+  assert.ok(r.claims.seats >= 3, `a Team license must carry at least the 3-seat minimum, got ${r.claims.seats}`);
+});
+
+test('SECURITY: a billing name carrying a terminal escape is stripped before it is signed', () => {
+  const esc = String.fromCharCode(27) + '[31m';
+  const nl = String.fromCharCode(10);
+  assert.equal(sanitizeClaim('Acme' + esc + nl + 'Inc'), 'Acme[31mInc');
+  assert.equal(sanitizeClaim(' bad'), 'bad');
+  assert.equal(sanitizeClaim(''), null);
+  assert.equal(sanitizeClaim(42), null);
+  const ev = {
+    id: 'evt_esc', type: 'checkout.session.completed',
+    data: { object: { customer_details: { email: 'e@x.test', name: 'Ev' + esc + '[2Jil' }, metadata: { tier: 'team' },
+      line_items: { data: [{ quantity: 3, price: { id: 'price_team' } }] } } },
+  };
+  const r = licenseForEvent(ev, SIGNING);
+  const hasControl = Array.from(r.claims.org).some((c) => c.charCodeAt(0) < 0x20);
+  assert.equal(hasControl, false, 'no control byte may survive into the signed org claim');
+});
+
+test('event: refunds and chargebacks are recorded (flagged), never silently dropped', () => {
+  for (const type of ['charge.refunded', 'charge.dispute.created']) {
+    const r = licenseForEvent({ id: `evt_${type}`, type, data: { object: { customer: 'cus_9' } } }, SIGNING);
+    assert.equal(r.action, 'flag');
+    assert.match(r.reason, /manual review/);
+  }
+});
+
+test('webhook: rotation — multiple secrets and multiple v1 signatures both verify', () => {
+  const body = JSON.stringify(checkoutEvent());
+  const ts = Math.floor(NOW / 1000);
+  const sigWith = (sec) => createHmac('sha256', sec).update(`${ts}.${body}`, 'utf8').digest('hex');
+  assert.equal(verifyStripeSignature(body, `t=${ts},v1=${sigWith('old')}`, 'new,old', { now: NOW }).ok, true);
+  assert.equal(verifyStripeSignature(body, `t=${ts},v1=${'0'.repeat(64)},v1=${sigWith('new')}`, 'new', { now: NOW }).ok, true);
+  assert.equal(verifyStripeSignature(body, `t=${ts},v1=${sigWith('wrong')}`, 'new,old', { now: NOW }).ok, false);
+});

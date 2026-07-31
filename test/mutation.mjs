@@ -201,8 +201,8 @@ const MUTATIONS = [
     id: 'webhook-signature-blind',
     defect: 'Stripe webhook signatures are not checked — anyone can POST an event and mint a license',
     file: 'server/index.mjs',
-    find: "  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, reason: 'signature mismatch' };",
-    replace: '  // mutated: signature ignored',
+    find: "      if (a.length === b.length && timingSafeEqual(a, b)) return { ok: true, timestamp: t };",
+    replace: "      return { ok: true, timestamp: t };",
     tests: ['test/unit/server.test.mjs'],
   },
   {

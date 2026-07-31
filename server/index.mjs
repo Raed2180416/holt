@@ -82,22 +82,35 @@ export function mintLicense({ tier = 'team', org = null, email = null, seats = n
  */
 export function verifyStripeSignature(rawBody, header, secret, { now = Date.now(), toleranceSec = 300 } = {}) {
   if (typeof header !== 'string' || !header) return { ok: false, reason: 'missing Stripe-Signature header' };
-  const parts = Object.fromEntries(header.split(',').map((kv) => {
+  // A header can legitimately carry MULTIPLE v1 signatures (Stripe sends one per active secret
+  // during a secret rotation). Collect them all and accept if ANY matches, so rotating the
+  // webhook secret does not drop events. Likewise, `secret` may be a comma-separated list, so
+  // the operator can add a new secret before removing the old one.
+  const v1s = [];
+  let t = NaN;
+  for (const kv of header.split(',')) {
     const i = kv.indexOf('=');
-    return i < 0 ? ['', ''] : [kv.slice(0, i).trim(), kv.slice(i + 1).trim()];
-  }));
-  const t = Number(parts.t);
-  const v1 = parts.v1;
-  if (!Number.isFinite(t) || !v1) return { ok: false, reason: 'malformed Stripe-Signature header' };
+    if (i < 0) continue;
+    const k = kv.slice(0, i).trim();
+    const val = kv.slice(i + 1).trim();
+    if (k === 't') t = Number(val);
+    else if (k === 'v1') v1s.push(val);
+  }
+  if (!Number.isFinite(t) || v1s.length === 0) return { ok: false, reason: 'malformed Stripe-Signature header' };
 
   const age = Math.abs(now / 1000 - t);
   if (age > toleranceSec) return { ok: false, reason: `event timestamp is ${Math.round(age)}s old — outside the ${toleranceSec}s replay window` };
 
-  const expected = createHmac('sha256', secret).update(`${t}.${rawBody}`, 'utf8').digest('hex');
-  const a = Buffer.from(expected, 'utf8');
-  const b = Buffer.from(v1, 'utf8');
-  if (a.length !== b.length || !timingSafeEqual(a, b)) return { ok: false, reason: 'signature mismatch' };
-  return { ok: true, timestamp: t };
+  const secrets = String(secret).split(',').map((s) => s.trim()).filter(Boolean);
+  for (const sec of secrets) {
+    const expected = createHmac('sha256', sec).update(`${t}.${rawBody}`, 'utf8').digest('hex');
+    const a = Buffer.from(expected, 'utf8');
+    for (const v1 of v1s) {
+      const b = Buffer.from(v1, 'utf8');
+      if (a.length === b.length && timingSafeEqual(a, b)) return { ok: true, timestamp: t };
+    }
+  }
+  return { ok: false, reason: 'signature mismatch' };
 }
 
 /* ------------------------------------------------------------------- storage ---- */
@@ -192,11 +205,51 @@ export function seatsForEvent(event) {
 }
 
 /**
+ * License lifetime must match what was actually BILLED, or a monthly subscriber who pays once
+ * gets a year. We read the recurring interval from the event and issue slightly PAST the next
+ * renewal, so `invoice.paid` renews the license before it lapses; if renewal never comes (a
+ * failed card), the license expires on its own and the CLI's 14-day grace is the only softener.
+ *   month  -> 38 days  (renews at ~30; 38 + 14 grace covers a late invoice)
+ *   year   -> 379 days (renews at ~365)
+ * An interval we do not recognise falls back to the safe SHORT option (monthly), never the long
+ * one — mispricing in the customer's favour is a bug, mispricing in ours is a giveaway.
+ */
+export function daysForEvent(event) {
+  const price = event?.data?.object?.line_items?.data?.[0]?.price
+    ?? event?.data?.object?.items?.data?.[0]?.price
+    ?? event?.data?.object?.lines?.data?.[0]?.price;
+  const interval = price?.recurring?.interval
+    ?? event?.data?.object?.metadata?.interval
+    ?? null;
+  if (interval === 'year') return 379;
+  if (interval === 'month') return 38;
+  return 38; // unknown interval -> the short, safe default
+}
+
+/**
  * Turn a verified Stripe event into a license, or into an explicit refusal. Pure: no I/O, so
  * every branch is testable without a network or a filesystem.
  */
-export function licenseForEvent(event, signingKeyB64, { priceMap = TIER_BY_PRICE(), days = 365 } = {}) {
-  const handled = ['checkout.session.completed', 'invoice.paid', 'customer.subscription.updated'];
+/**
+ * Strip control bytes out of a free-text claim (org/email) that originates from Stripe
+ * checkout fields a buyer types. The claim is signed and later printed to a terminal by
+ * `holt license status`; an ANSI escape or newline smuggled through the billing name must
+ * never reach that output. Removes C0 controls (0x00-0x1F) and DEL (0x7F), then caps length.
+ */
+export function sanitizeClaim(v, max = 120) {
+  if (typeof v !== 'string') return null;
+  const clean = Array.from(v).filter((ch) => {
+    const c = ch.codePointAt(0);
+    return c > 0x1f && c !== 0x7f;
+  }).join('').trim().slice(0, max);
+  return clean || null;
+}
+
+const MIN_SEATS = { team: 3, enterprise: 1 };
+
+export function licenseForEvent(event, signingKeyB64, { priceMap = TIER_BY_PRICE(), days = null } = {}) {
+  const handled = ['checkout.session.completed', 'invoice.paid', 'customer.subscription.updated',
+    'charge.refunded', 'charge.dispute.created'];
   if (!handled.includes(event?.type)) {
     return { action: 'ignore', reason: `event type '${event?.type}' is not a license trigger` };
   }
@@ -206,12 +259,21 @@ export function licenseForEvent(event, signingKeyB64, { priceMap = TIER_BY_PRICE
     // stops being renewed, and the existing token expires on its own schedule.
     return { action: 'lapse', reason: `subscription ${obj.status} — no renewal will be issued`, customer: obj.customer ?? null };
   }
+  if (event.type === 'charge.refunded' || event.type === 'charge.dispute.created') {
+    // We cannot revoke a live token (no phone-home), but a refund/chargeback must leave a
+    // trace so a human can decline renewal and follow up. Recorded, never silently dropped.
+    return { action: 'flag', reason: `${event.type} — recorded for manual review; the current license will not be renewed`, customer: obj.customer ?? null };
+  }
   const { tier, reason } = tierForEvent(event, priceMap);
   if (!tier) return { action: 'refuse', reason: `cannot determine tier: ${reason}` };
 
-  const email = obj.customer_details?.email ?? obj.customer_email ?? obj.metadata?.email ?? null;
-  const org = obj.customer_details?.name ?? obj.metadata?.org ?? null;
-  const { token, claims } = mintLicense({ tier, org, email, seats: seatsForEvent(event), days }, signingKeyB64);
+  const email = sanitizeClaim(obj.customer_details?.email ?? obj.customer_email ?? obj.metadata?.email, 320);
+  const org = sanitizeClaim(obj.customer_details?.name ?? obj.metadata?.org);
+  // Seats: honour what was bought, but never below the tier minimum a license is allowed to carry.
+  const rawSeats = seatsForEvent(event);
+  const seats = rawSeats == null ? null : Math.max(rawSeats, MIN_SEATS[tier] ?? 1);
+  const lifetime = days ?? daysForEvent(event);
+  const { token, claims } = mintLicense({ tier, org, email, seats, days: lifetime }, signingKeyB64);
   return { action: 'issue', token, claims, email, tier, customer: obj.customer ?? null };
 }
 
@@ -405,11 +467,13 @@ export function createServer({ env = process.env, dataFile = DATA } = {}) {
 
   // Tight buckets on anything that sends mail; a loose one on checkout redirects.
   const checkoutLimiter = new RateLimiter({ capacity: 30, refillPerSec: 0.5 });
-  const resendLimiter = new RateLimiter({ capacity: 3, refillPerSec: 1 / 200 }); // ~3 then 1 per 3.3min
+  const resendLimiter = new RateLimiter({ capacity: 3, refillPerSec: 1 / 200 }); // ~3 then 1 per 3.3min per IP
+  const perEmailLimiter = new RateLimiter({ capacity: 3, refillPerSec: 1 / 600 }); // ~3/hour per target mailbox
   // The webhook is signature-gated, so this is not the primary defence — it is a cheap ceiling
   // so a flood of INVALID (unsigned) posts cannot exhaust CPU on HMAC checks. Generous, because
   // a legitimate Stripe retry storm is exactly what we must not throttle.
   const webhookLimiter = new RateLimiter({ capacity: 200, refillPerSec: 20 });
+  let healthCache = null; // {at, torn, issued} — bounds the unauthenticated /health read
   const siteOrigin = new URL(env.HOLT_SITE_URL || 'https://raed2180416.github.io').origin;
 
   return http.createServer(async (req, res) => {
@@ -436,8 +500,16 @@ export function createServer({ env = process.env, dataFile = DATA } = {}) {
 
     try {
       if (req.method === 'GET' && req.url === '/health') {
-        const { records, torn } = readRecords(dataFile);
-        return send(torn ? 500 : 200, { ok: torn === 0, issued: records.filter((r) => r.action === 'issue').length, tornRecords: torn });
+        // /health is unauthenticated (a platform health check must reach it), so it must not do
+        // unbounded work per hit — a flood would otherwise re-read and re-parse the whole ledger
+        // and burn CPU. Cache the computed summary for a few seconds; a health check polling
+        // every 30s never notices, and a flood is served from memory.
+        const nowMs = Date.now();
+        if (!healthCache || nowMs - healthCache.at > 3000) {
+          const { records, torn } = readRecords(dataFile);
+          healthCache = { at: nowMs, torn, issued: records.filter((r) => r.action === 'issue').length };
+        }
+        return send(healthCache.torn ? 500 : 200, { ok: healthCache.torn === 0, issued: healthCache.issued, tornRecords: healthCache.torn });
       }
 
       if (req.method === 'GET' && pathname === '/checkout') {
@@ -467,12 +539,22 @@ export function createServer({ env = process.env, dataFile = DATA } = {}) {
         const raw = await readBody(req, 10_000);
         let email = null;
         try { email = JSON.parse(raw)?.email; } catch { /* fall through to the constant reply */ }
+        // Respond FIRST, then do the lookup-and-deliver in the background. This closes the timing
+        // side-channel: a known address (which triggers a mail send) and an unknown one (which
+        // does nothing) would otherwise take measurably different times to respond, leaking
+        // existence. Now the response time is constant and the work happens after.
         if (typeof email === 'string' && email.length <= 320 && email.includes('@')) {
-          const r = await resendLicense(email, { env, file: dataFile }).catch((e) => ({ sent: false, reason: e.message }));
-          appendRecord({ action: 'resend', emailHash: createHmac('sha256', webhookSecret).update(email.toLowerCase()).digest('hex').slice(0, 16), sent: r.sent, reason: r.reason }, dataFile);
+          const hash = createHmac('sha256', webhookSecret).update(email.toLowerCase()).digest('hex').slice(0, 16);
+          // Per-TARGET cap: even across rotating source IPs, one mailbox cannot be flooded.
+          if (perEmailLimiter.take(hash).allowed) {
+            queueMicrotask(async () => {
+              const r = await resendLicense(email, { env, file: dataFile }).catch((e) => ({ sent: false, reason: e.message }));
+              appendRecord({ action: 'resend', emailHash: hash, sent: r.sent, reason: r.reason }, dataFile);
+            });
+          } else {
+            appendRecord({ action: 'resend-throttled', emailHash: hash }, dataFile);
+          }
         }
-        // Constant response: whether the address exists, whether mail went out — same answer.
-        // The ledger, not the caller, learns what actually happened.
         return send(200, { ok: true, note: 'if that address has a license, it will arrive shortly' }, cors);
       }
 
