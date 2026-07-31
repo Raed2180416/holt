@@ -169,3 +169,15 @@ quietly corrected for:
 - **The grove arm has a hard gate.** Part of the effect is the plugin blocking the command
   outright, not the agent reasoning better. That is the intended mechanism, but it means the
   result measures *the integration*, not *the agent's judgement*.
+
+## Observed: availability is not adoption
+
+In one grove-arm trial the agent removed only 2 of 5 disposable worktrees and kept the three
+decoys, reasoning that they "have meaningful work from commit …" — exactly the `git log` heuristic
+the scenario is built to defeat. It had `AGENTS.md` and `.opencode/plugins/grove.js` sitting in
+the repository and did not consult either.
+
+That is a product finding, not a harness bug: **making a tool discoverable does not make an agent
+use it.** It is the strongest argument for the hard gate — a `PreToolUse` deny fires whether or
+not the model thought to look — and a reason to report the AGENTS.md-only arm separately from the
+gated one rather than blending them.
