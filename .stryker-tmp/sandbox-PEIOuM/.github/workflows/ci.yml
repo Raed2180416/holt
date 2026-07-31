@@ -73,12 +73,6 @@ jobs:
       - name: the tool must be able to inspect its own repository
         run: node bin/grove.mjs status
 
-      - name: mutation testing — prove the tests would FAIL on a real defect
-        # A green suite proves the tests RAN. This proves they would have caught the specific
-        # defects that matter: a tool that authorises deleting work, or runs a command it
-        # promised never to run. A survivor fails the build.
-        run: npm run test:mutation
-
   package:
     name: packaging
     runs-on: ubuntu-latest

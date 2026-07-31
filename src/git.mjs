@@ -58,6 +58,40 @@ const POSITIONAL_LIMITS = {
 const OBJECT_WRITE = new Set(['merge-tree']);
 
 /**
+ * Tier MUTATE — commands that genuinely change the repository.
+ *
+ * These are UNREACHABLE unless a caller passes `allowMutation: true`, which only the explicitly
+ * destructive/protective commands do (`grove protect`, `grove rescue`, `grove clean`). Scanning
+ * and analysis can never reach them, and test/unit/safety.test.mjs proves a full scan still
+ * changes nothing byte-for-byte.
+ *
+ * The read-only guarantee is a core reason to trust grove, so adding write features must not
+ * quietly widen the default. It does not: the default for every code path in the scanner remains
+ * allowMutation:false, and a mutating command that forgets to opt in fails loudly rather than
+ * silently succeeding.
+ *
+ * Each entry is here because a specific feature needs it, and nothing else is:
+ *   worktree lock/unlock  -> `grove protect`  (git's own protection; defeats a single --force)
+ *   worktree remove       -> `grove clean`    (removing provably-disposable worktrees)
+ *   branch -d/-D          -> `grove clean`    (the second command nobody runs)
+ *   commit-tree/hash-object/update-ref/write-tree/read-tree -> `grove rescue` (capture work)
+ */
+const MUTATE_SUBVERBS = {
+  worktree: new Set(['lock', 'unlock', 'remove', 'prune']),
+  branch: new Set(['-d', '-D', '--delete']),
+};
+const MUTATE_COMMANDS = new Set([
+  'commit-tree', 'update-ref', 'write-tree', 'read-tree', 'update-index', 'mktree',
+  // `add` is here for `grove rescue` ONLY, and it is safe there because rescue runs it with
+  // GIT_INDEX_FILE pointed at a scratch index — the user's real index is never touched, which
+  // test/e2e/actions.test.mjs asserts by comparing `git status` before and after.
+  // The hand-rolled update-index fallback that preceded this silently failed to capture files,
+  // and rescue's own verification caught it: an incomplete capture is worse than none, because
+  // it licenses a deletion.
+  'add',
+]);
+
+/**
  * Flags that turn an otherwise-safe subcommand into a mutating one.
  * `git worktree list` is a read; `git worktree add/remove/prune` is not.
  * `git config --get` is a read; `git config key value` is not.
@@ -96,7 +130,7 @@ export class GitFailed extends Error {
  *
  * @returns {{allowed: boolean, tier?: 'SAFE'|'OBJECT_WRITE', reason?: string}}
  */
-export function classify(argv) {
+export function classify(argv, { allowMutation = false } = {}) {
   if (!Array.isArray(argv) || argv.length === 0) {
     return { allowed: false, reason: 'empty argv' };
   }
@@ -117,12 +151,26 @@ export function classify(argv) {
   if (!sub) return { allowed: false, reason: 'no subcommand' };
 
   const rest = argv.slice(i + 1);
+
+  // MUTATE tier — only reachable with an explicit opt-in from a mutating grove command.
+  if (allowMutation) {
+    if (MUTATE_COMMANDS.has(sub)) return { allowed: true, tier: 'MUTATE' };
+    const mutable = MUTATE_SUBVERBS[sub];
+    if (mutable && rest.some((t) => mutable.has(t.split('=')[0]))) {
+      return { allowed: true, tier: 'MUTATE' };
+    }
+  }
+
   const forbidden = FORBIDDEN_SUBVERBS[sub];
   if (forbidden) {
     for (const token of rest) {
       const bare = token.split('=')[0];
       if (forbidden.has(bare)) {
-        return { allowed: false, reason: `'git ${sub} ${bare}' mutates the repository` };
+        return {
+          allowed: false,
+          reason: `'git ${sub} ${bare}' mutates the repository`
+            + (MUTATE_SUBVERBS[sub]?.has(bare) ? ' (needs an explicit mutating grove command)' : ''),
+        };
       }
     }
   }
@@ -158,8 +206,10 @@ const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
  * Non-zero exit is NOT automatically an error — many git reads use exit codes as answers
  * (merge-tree returns 1 on conflict, diff --quiet returns 1 on difference). Callers decide.
  */
-export function git(argv, { cwd, timeout = DEFAULT_TIMEOUT_MS, allowObjectWrite = true, env } = {}) {
-  const verdict = classify(argv);
+export function git(argv, {
+  cwd, timeout = DEFAULT_TIMEOUT_MS, allowObjectWrite = true, allowMutation = false, env,
+} = {}) {
+  const verdict = classify(argv, { allowMutation });
   if (!verdict.allowed) {
     return Promise.reject(new GitRefused(`grove refused to run \`git ${argv.join(' ')}\`: ${verdict.reason}`));
   }

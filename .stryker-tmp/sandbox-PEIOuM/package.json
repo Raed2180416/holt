@@ -22,9 +22,7 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "test:unit": "node --test \"test/unit/*.test.mjs\"",
     "test:e2e": "node --test \"test/e2e/*.test.mjs\"",
-    "selfcheck": "node bin/grove.mjs doctor",
-    "test:mutation": "node test/mutation.mjs",
-    "test:all": "npm test && npm run test:mutation"
+    "selfcheck": "node bin/grove.mjs doctor"
   },
   "keywords": [
     "git",
@@ -40,5 +38,8 @@
   "optionalDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "jscpd": "^5.0.14"
+  },
+  "devDependencies": {
+    "@stryker-mutator/core": "^9.6.1"
   }
 }
