@@ -1,0 +1,17 @@
+# The npm package is bin/ src/ README LICENSE only (enforced by package.json "files" and by CI).
+# This file is belt-and-suspenders for anything not covered by "files".
+server/
+legal/
+site/
+eval/
+test/
+scripts/
+docs/
+.github/
+LAUNCH-RUNBOOK.md
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+BENCHMARKS.md
+*.tgz
+.holt-work/

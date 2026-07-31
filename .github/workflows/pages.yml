@@ -27,11 +27,14 @@ jobs:
         # A landing page that silently reaches out to a CDN contradicts the product's central
         # promise. This fails the deploy rather than shipping a page that does.
         run: |
-          if grep -oE 'src="https?://|href="https?://[^"]*\.(css|js)' site/index.html; then
-            echo "site/index.html references an external asset — the page must be self-contained"
-            exit 1
-          fi
-          echo "self-contained: no external assets"
+          fail=0
+          for f in site/*.html; do
+            if grep -oE 'src="https?://|href="https?://[^"]*\.(css|js)|@import|url\(https?://' "$f"; then
+              echo "$f references an external asset — pages must be self-contained"; fail=1
+            fi
+          done
+          [ "$fail" = 0 ] && echo "self-contained: no external assets in any site/*.html"
+          exit $fail
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

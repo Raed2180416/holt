@@ -121,7 +121,38 @@ jobs:
           git init -q && git commit -q --allow-empty -m base
           holt doctor
           holt status
-      - name: the published tarball must not ship tests or fixtures
+      - name: the published tarball must not ship anything operator-only
         run: |
           tar -tzf holt-*.tgz | tee /tmp/files.txt
-          ! grep -q 'package/test/' /tmp/files.txt || (echo "tests leaked into the package" && exit 1)
+          # Tests, fixtures, the license SERVER, operator scripts, legal docs, the site, and
+          # above all anything key-shaped must never reach a public install. Each of these is a
+          # real leak class: server/ holds the mint logic, and a signing key must never ship.
+          for bad in 'package/test/' 'package/eval/' 'package/server/' 'package/legal/' 'package/site/' 'package/scripts/' '.key' 'signing' '.env'; do
+            if grep -qi "$bad" /tmp/files.txt; then echo "FORBIDDEN in tarball: $bad"; exit 1; fi
+          done
+          echo "tarball is clean: bin/ src/ README LICENSE only"
+
+  business:
+    name: commerce and entitlement
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+      # The paid path is money and reputation, so it is tested on every OS the buyer might run
+      # CI on: offline license crypto (forgery, rotation, expiry, the free-tool-never-breaks
+      # invariant), the policy engine's refuse-don't-silently-pass behaviour, and the full
+      # Stripe purchase path over a real socket.
+      - run: node --test test/unit/license.test.mjs test/unit/policy.test.mjs test/unit/server.test.mjs test/unit/milestone.test.mjs test/e2e/purchase-path.test.mjs test/e2e/branches.test.mjs test/e2e/autoprotect.test.mjs
+      - name: no src/ file may make a network call (the no-telemetry promise)
+        if: runner.os != 'Windows'
+        run: |
+          if grep -rnE "https?://[^\"' )]+|fetch\(|http\.request|net\.connect|dgram" src/ | grep -vE "^\s*//|\* |example\.|localhost|127\.0\.0\.1|holt\.dev/pricing|github\.com" ; then
+            echo "a network call appeared in src/ — the free tool must make none"; exit 1
+          fi
+          echo "src/ makes no network calls"
