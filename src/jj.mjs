@@ -33,12 +33,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import os from 'node:os';
 
 function jj(args, cwd, timeout = 20_000) {
   return new Promise((resolve) => {
     execFile('jj', args, {
       cwd, timeout, maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env, JJ_CONFIG: process.env.JJ_CONFIG ?? '/dev/null', LC_ALL: 'C' },
+      // os.devNull, not '/dev/null': jj is Rust, so unlike git-for-windows there is no MSYS
+      // path translation — a literal /dev/null on Windows is just a missing file.
+      env: { ...process.env, JJ_CONFIG: process.env.JJ_CONFIG ?? os.devNull, LC_ALL: 'C' },
     }, (err, stdout, stderr) => {
       resolve({ code: err ? (err.code ?? -1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
     });

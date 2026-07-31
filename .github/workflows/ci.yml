@@ -10,6 +10,30 @@ on:
   pull_request:
 
 jobs:
+
+  matrix:
+    name: core on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+      # The portable core: safety classifier, detection against ground truth, the CLI as a
+      # binary, actions (protect/rescue/clean), and the invariant fuzzer. No optional backends —
+      # the point of this job is that grove's CORE is correct on every OS, degraded loudly.
+      # Known portability hazards already fixed by this matrix existing: URL.pathname vs
+      # fileURLToPath (file:///C:/x -> /C:/x), and jj's JJ_CONFIG=/dev/null (jj is Rust; no
+      # MSYS translation on Windows — os.devNull).
+      - run: node --test test/unit/safety.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs
+      - run: node bin/grove.mjs doctor --json
+      - name: the tool must run against its own repository on this OS
+        run: node bin/grove.mjs status --json
+
   bare:
     name: no optional backends (degradation path)
     runs-on: ubuntu-latest
