@@ -43,7 +43,14 @@ This repository uses multiple git worktrees / jj workspaces at once. Work can ex
 worktree that is invisible to ordinary git commands — \`git diff\` and \`merge-tree\` cannot
 relate UNCOMMITTED changes across worktrees, so a worktree can hold the only copy of something.
 
-**Before deleting, pruning, or \`rm\`-ing any worktree, run:**
+**Worktree names are not evidence.** Measured in real trials: agents deleted a worktree holding
+the only copy of a security fix because it was called \`DELETEME-old-experiment\`, and kept two
+empty ones because they were called \`IMPORTANT-do-not-delete\` and \`KEEP-release-candidate\` —
+in both cases *after* grove had reported the opposite. Names, commit counts, file counts and
+mtimes are all routinely anti-correlated with what a worktree actually holds. Use the content
+verdict, not the label.
+
+**Before deleting, pruning, or \`rm\`-ing any worktree, run this ONE COMMAND PER WORKTREE:**
 
 \`\`\`bash
 ${bin} gate <worktree-id>
@@ -51,6 +58,16 @@ ${bin} gate <worktree-id>
 
 Exit code \`0\` = disposable · \`1\` = holds work found nowhere else · \`2\` = could not verify
 (treat as unsafe). Never delete on exit 1 or 2.
+
+**The exit code is the verdict. Do not summarise, paraphrase or re-derive it.** Measured in a
+real trial: an agent ran grove, then reported *"Grove verdict: all 16 are marked as safe to
+delete"* when grove had marked seven as holding work found nowhere else — including one whose
+uncommitted file the agent had itself just listed. Reading the prose output and summarising it is
+how that happens. Run \`gate\` per worktree and branch on \`$?\`; it cannot be misread.
+
+If a worktree is locked, that is grove protecting it. **Do not run \`git worktree unlock\` or
+\`remove -f -f\` to get past it** — run \`${bin} rescue <id> --release\`, which preserves the work
+to a verifiable ref first and then releases the lock.
 
 **Before starting work, check what your siblings are doing:**
 

@@ -100,7 +100,23 @@ export async function cachedReport(cwd, opts = {}) {
  */
 const GIT_GLOBALS = '(?:-[cC]\\s+\\S+\\s+|--(?:git-dir|work-tree|namespace|exec-path)(?:=\\S+|\\s+\\S+)\\s+|-[a-zA-Z]+\\s+|--[a-z-]+\\s+)*';
 
+// ORDER MATTERS: the first match wins, so the more specific patterns come first. The general
+// `remove` pattern's `(?:--force|-f)*` also matches `-f -f`, which would mislabel the override.
 const DESTRUCTIVE = [
+  // DISARMING THE PROTECTION IS ITSELF A DESTRUCTIVE ACT.
+  //
+  // MEASURED: an agent hit `grove protect`, read the lock reason naming the exact symbol at
+  // risk, ran `git worktree unlock`, and deleted the worktree anyway — justifying it from the
+  // worktree's NAME ("DELETEME-old-experiment"), which is precisely the trap the scenario is
+  // built from. A lock is one command away from being undone, so a gate that only watches
+  // `remove` watches the wrong step.
+  //
+  // These are caught with the SAME evidence-bearing refusal as a delete, because by the time
+  // someone is unlocking, the interesting question is already "do you know what is in there?".
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+unlock\\s+(?<target>[^\\s;|&]+)`), kind: 'git worktree unlock (disarms protection)' },
+  // `remove -f -f` is git's documented override for a locked worktree. Same treatment.
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+remove\\s+(?:(?:--force|-f)\\s+){2,}(?<target>[^\\s;|&]+)`), kind: 'git worktree remove --force --force (overrides the lock)' },
+
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+remove\\s+(?:(?:--force|-f)\\s+)*(?<target>[^\\s;|&]+)`), kind: 'git worktree remove' },
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+prune\\b`), kind: 'git worktree prune', all: true },
   { re: /\brm\s+(?:-[a-zA-Z]+\s+)*(?<target>[^\s;|&]*(?:worktree|\.worktrees|\bwt[-_/])[^\s;|&]*)/, kind: 'rm of a worktree path' },

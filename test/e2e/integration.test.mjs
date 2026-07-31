@@ -52,6 +52,30 @@ test('command classifier: catches the ways worktrees actually get destroyed', ()
   }
 });
 
+test('command classifier: DISARMING the protection counts as destructive', () => {
+  // MEASURED: an agent hit `grove protect`, read the lock reason naming the exact symbol at
+  // risk, ran `git worktree unlock`, and deleted anyway — justifying it from the worktree's NAME
+  // ("DELETEME-old-experiment"), which is the exact trap the scenario is built from.
+  //
+  // A gate that only watches `remove` watches the wrong step: a lock is one command from being
+  // undone, and `-f -f` is git's documented override for it.
+  const mustCatch = [
+    ['git worktree unlock /path/to/wt', /unlock/],
+    ['git -C /repo worktree unlock wt/thing', /unlock/],
+    ['git worktree remove -f -f /path/to/wt', /--force --force|override/],
+    ['git worktree remove --force --force /path/to/wt', /--force --force|override/],
+  ];
+  for (const [cmd, kindPattern] of mustCatch) {
+    const hit = classifyCommand(cmd);
+    assert.ok(hit, `must be classified as destructive: ${cmd}`);
+    assert.match(hit.kind, kindPattern, `wrong kind for: ${cmd}`);
+  }
+
+  // …while LOCKING is not destructive — that is grove's own protective action.
+  assert.equal(classifyCommand('git worktree lock --reason x /path/to/wt'), null,
+    'locking must not be treated as destructive');
+});
+
 /* --------------------------------------------------------- the deny gate ---- */
 
 test('GATE DENY: destroying a worktree with uncommitted-only work is blocked, with evidence', async (t) => {
