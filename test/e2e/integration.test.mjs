@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { standardFixture, emptyFixture } from '../fixtures.mjs';
+import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
 import { assessCommand, buildBrief, classifyCommand } from '../../src/agent.mjs';
 import {
   formatVerdict, formatContext, agentsMdBlock, installAgentsMd,
@@ -473,4 +473,57 @@ test('GATE: broadening rm did NOT make it trigger-happy — ordinary deletes sta
     const v = await assessCommand(cmd, fx.root);
     assert.equal(v.decision, 'allow', `${cmd} must stay allowed: ${JSON.stringify(v)}`);
   }
+});
+
+test('COVERAGE: mutation verbs are blocked, not only the deletion verb', async (t) => {
+  // A lock stops `git worktree remove`. It does NOT stop the commands that destroy the SAME
+  // uncommitted work in place — and those are the ones that actually cost this project work
+  // during its own development. Deleting a worktree and hard-resetting it are the same loss.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const wt = fx.wt('uniqueUncommitted');
+
+  for (const cmd of [
+    'git reset --hard HEAD', 'git reset --hard origin/main',
+    'git clean -fd', 'git clean -fdx',
+    'git checkout -- .', 'git restore --worktree .',
+  ]) {
+    const v = await assessCommand(cmd, wt);
+    assert.equal(v.decision, 'deny', `${cmd} destroys uncommitted work and must be denied: ${JSON.stringify(v)}`);
+    assert.match(v.reason, /exists nowhere else/i, `${cmd} must say what is at stake`);
+  }
+});
+
+test('COVERAGE: the same verbs are ALLOWED where there is nothing to lose (never-worse)', async (t) => {
+  // The rule must be invisible in normal use. A clean worktree has nothing to protect, so
+  // resetting it is ordinary work — blocking it would make holt the thing people uninstall.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  for (const cmd of ['git reset --hard HEAD', 'git clean -fd', 'git checkout -- .']) {
+    const v = await assessCommand(cmd, fx.wt('empty'));
+    assert.equal(v.decision, 'allow', `${cmd} in a clean worktree must stay allowed: ${JSON.stringify(v)}`);
+  }
+  for (const cmd of ['git reset --soft HEAD~1', 'git checkout -b feature', 'git status', 'git clean -n']) {
+    const v = await assessCommand(cmd, fx.wt('uniqueUncommitted'));
+    assert.equal(v.decision, 'allow', `${cmd} is not destructive and must be allowed: ${JSON.stringify(v)}`);
+  }
+});
+
+test('COVERAGE: the PRIMARY worktree is protected, though git refuses to lock it', async (t) => {
+  // Structural gap: `git worktree lock` cannot lock the main worktree, so there the hook is the
+  // ONLY protection — and it was excluded from the scan entirely.
+  const fx = await newRepo('primary-guard');
+  t.after(() => fx.cleanup());
+  await fs.writeFile(path.join(fx.root, 'main-only.js'), 'export function MAIN_ONLY() {}\n');
+
+  const v = await assessCommand('git reset --hard HEAD', fx.root);
+  assert.equal(v.decision, 'deny', `uncommitted work in the MAIN tree must be defended: ${JSON.stringify(v)}`);
+});
+
+test('COVERAGE: git -C redirects which worktree a path-less verb acts on', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const v = await assessCommand(`git -C ${fx.wt('uniqueUncommitted')} reset --hard`, fx.root);
+  assert.equal(v.decision, 'deny', `-C must be followed to the real target: ${JSON.stringify(v)}`);
 });
