@@ -1,3 +1,4 @@
+import path from 'node:path';
 // SPDX-License-Identifier: FSL-1.1-MIT
 /**
  * holt — self-contained HTML graph.
@@ -13,6 +14,16 @@
 function esc(s) {
   return String(s).replace(/[&<>"']/g, (ch) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+/**
+ * Last path segment, tolerant of EITHER separator. path.basename() only understands the host
+ * platform's separator, so a Windows path rendered on any other platform (or vice versa) would
+ * otherwise print in full as the page title.
+ */
+function repoName(p) {
+  const segs = String(p ?? '').split(/[\\/]+/).filter(Boolean);
+  return segs.length ? segs[segs.length - 1] : 'repository';
 }
 
 export function renderHtml(report) {
@@ -31,7 +42,7 @@ export function renderHtml(report) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>holt — ${esc(report.root.split('/').pop() || 'repository')}</title>
+<title>holt — ${esc(repoName(report.root))}</title>
 <style>
   :root {
     --bg:#0f1115; --panel:#171a21; --line:#252a35; --fg:#e6e9ef; --muted:#8b93a7;
