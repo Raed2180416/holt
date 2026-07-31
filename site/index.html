@@ -1251,7 +1251,7 @@ footer { padding: 44px 0 60px; }
           <li><strong>Audit export</strong> — JSON/CSV of every protect, rescue, clean and branch deletion</li>
           <li>Priority support</li>
         </ul>
-        <a class="btn btn-primary" href="mailto:sales@holt.dev?subject=holt%20Team">Start a Team plan</a>
+        <a class="btn btn-primary" data-checkout="team" href="mailto:sales@holt.dev?subject=holt%20Team">Start a Team plan</a>
       </div>
 
       <div class="tier reveal">
@@ -1355,6 +1355,22 @@ footer { padding: 44px 0 60px; }
     entries.forEach(function (en) { if (en.isIntersecting) { en.target.classList.add('in'); io.unobserve(en.target); } });
   }, { rootMargin: '0px 0px -10% 0px', threshold: 0.08 });
   els.forEach(function (e) { io.observe(e); });
+})();
+</script>
+
+<script>
+(function () {
+  // The checkout host is injected at deploy time by replacing __HOLT_API__. Until then the
+  // buttons keep their mailto: fallback, so the page is never broken between deploys.
+  var API = "__HOLT_API__";
+  if (API.indexOf("__") === 0) return;
+  document.querySelectorAll("[data-checkout]").forEach(function (a) {
+    a.addEventListener("click", function (e) {
+      e.preventDefault();
+      var plan = a.getAttribute("data-checkout");
+      window.location.href = API.replace(/\/$/, "") + "/checkout?plan=" + encodeURIComponent(plan);
+    });
+  });
 })();
 </script>
 </body>

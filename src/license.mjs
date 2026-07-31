@@ -39,6 +39,15 @@ import { createPublicKey, verify as edVerify } from 'node:crypto';
  */
 const LICENSE_PUBLIC_KEY_B64 = 'MCowBQYDK2VwAyEAEg0pQuXYxzS1ftB+WAclS0QsFAd1eEXZBR6GtJOFDco=';
 
+/**
+ * KEY ROTATION. Every key in this list is trusted; the first is the one new licenses are
+ * signed with. If the signing key is ever compromised: generate a new pair, prepend the new
+ * public key here, ship a release, re-issue active customers' licenses under the new key, and
+ * after the longest outstanding license under the old key has expired, remove it. Old licenses
+ * keep verifying throughout — rotation must never brick a paying customer mid-term.
+ */
+const LICENSE_PUBLIC_KEYS_B64 = [LICENSE_PUBLIC_KEY_B64];
+
 /** Days a license keeps working after `exp`. A failed card must not break a customer's CI at 3am. */
 export const GRACE_DAYS = 14;
 
@@ -98,7 +107,7 @@ export function readLicenseToken({ env = process.env } = {}) {
  * @returns {{valid: boolean, reason?: string, code?: string, claims?: object, expired?: boolean,
  *            inGrace?: boolean, daysLeft?: number|null}}
  */
-export function verifyToken(token, { now = Date.now(), publicKeyB64 = LICENSE_PUBLIC_KEY_B64 } = {}) {
+export function verifyToken(token, { now = Date.now(), publicKeyB64 = null, publicKeysB64 = LICENSE_PUBLIC_KEYS_B64 } = {}) {
   if (typeof token !== 'string' || !token) {
     return { valid: false, code: 'absent', reason: 'no license present' };
   }
@@ -107,13 +116,18 @@ export function verifyToken(token, { now = Date.now(), publicKeyB64 = LICENSE_PU
   if (!m) return { valid: false, code: 'malformed', reason: 'not a holt license token' };
   const [, tierHint, payloadB64, sigB64] = m;
 
+  // Any pinned key may verify (rotation), but the list is compiled in — a token can never
+  // nominate its own key, which is the JWK/x5c mistake this format refuses to inherit.
+  const keys = publicKeyB64 ? [publicKeyB64] : publicKeysB64;
   let ok = false;
   try {
-    const key = createPublicKey({
-      key: Buffer.from(publicKeyB64, 'base64'), format: 'der', type: 'spki',
-    });
-    // Signed over the transmitted payload STRING — never over a re-serialised object.
-    ok = edVerify(null, Buffer.from(payloadB64, 'utf8'), key, b64urlToBuf(sigB64));
+    for (const kb64 of keys) {
+      const key = createPublicKey({
+        key: Buffer.from(kb64, 'base64'), format: 'der', type: 'spki',
+      });
+      // Signed over the transmitted payload STRING — never over a re-serialised object.
+      if (edVerify(null, Buffer.from(payloadB64, 'utf8'), key, b64urlToBuf(sigB64))) { ok = true; break; }
+    }
   } catch {
     return { valid: false, code: 'bad-signature', reason: 'signature could not be verified' };
   }

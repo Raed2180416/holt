@@ -220,6 +220,130 @@ export async function deliverLicense({ email, token, tier, claims }, { fetchImpl
 
 /* ------------------------------------------------------------------- server ---- */
 
+/* ---------------------------------------------------------------- rate limit ---- */
+
+/**
+ * In-process token bucket per key. Deliberately simple: this service runs as one instance and
+ * its abuse surface is small, so a distributed limiter would be complexity spent on the wrong
+ * risk. The endpoints that SEND MAIL get the tight buckets — an unthrottled resend endpoint is
+ * a spam cannon pointed at our own customers, which is a reputation wound no feature justifies.
+ */
+export class RateLimiter {
+  constructor({ capacity = 30, refillPerSec = 0.5 } = {}) {
+    this.capacity = capacity;
+    this.refillPerSec = refillPerSec;
+    this.buckets = new Map();
+  }
+
+  /** @returns {{allowed: boolean, retryAfterSec?: number}} */
+  take(key, { now = Date.now() } = {}) {
+    let b = this.buckets.get(key);
+    if (!b) { b = { tokens: this.capacity, at: now }; this.buckets.set(key, b); }
+    b.tokens = Math.min(this.capacity, b.tokens + ((now - b.at) / 1000) * this.refillPerSec);
+    b.at = now;
+    if (b.tokens < 1) {
+      return { allowed: false, retryAfterSec: Math.ceil((1 - b.tokens) / this.refillPerSec) };
+    }
+    b.tokens -= 1;
+    // Unbounded growth is its own denial of service: cap the table and evict the oldest.
+    if (this.buckets.size > 10_000) {
+      const oldest = [...this.buckets.entries()].sort((x, y) => x[1].at - y[1].at)[0];
+      if (oldest) this.buckets.delete(oldest[0]);
+    }
+    return { allowed: true };
+  }
+}
+
+/** Client IP for rate limiting: the platform-set header first (Fly sets fly-client-ip). */
+export function clientIp(req) {
+  return req.headers['fly-client-ip']
+    ?? req.headers['x-forwarded-for']?.split(',')[0]?.trim()
+    ?? req.socket?.remoteAddress ?? 'unknown';
+}
+
+/* ------------------------------------------------------------------ checkout ---- */
+
+/**
+ * Validate a checkout request. Pure, so every hostile input shape is testable.
+ *
+ * The price id comes ONLY from HOLT_PRICE_MAP by tier name — a raw price id in the query is
+ * refused by construction, so a caller can never check out against an arbitrary price object
+ * in the Stripe account. Success/cancel URLs are server configuration, never caller input:
+ * accepting them from the query would make this endpoint an open redirect.
+ */
+export function parseCheckoutRequest(url, priceMap) {
+  let u;
+  try { u = new URL(url, 'http://localhost'); } catch { return { ok: false, reason: 'bad url' }; }
+  const plan = u.searchParams.get('plan') ?? 'team';
+  if (!/^[a-z]+$/.test(plan)) return { ok: false, reason: 'malformed plan' };
+
+  const price = [...priceMap.entries()].find(([, tier]) => tier === plan)?.[0];
+  if (!price) return { ok: false, reason: `no price configured for plan '${plan}'` };
+
+  const rawSeats = u.searchParams.get('seats') ?? '5';
+  const seats = Number(rawSeats);
+  if (!Number.isInteger(seats) || seats < 1 || seats > 500) {
+    return { ok: false, reason: 'seats must be an integer between 1 and 500' };
+  }
+  return { ok: true, plan, price, seats };
+}
+
+export async function createCheckoutSession({ plan, price, seats }, { env = process.env, fetchImpl = fetch } = {}) {
+  const site = env.HOLT_SITE_URL || 'https://raed2180416.github.io/holt';
+  const body = new URLSearchParams({
+    mode: 'subscription',
+    'line_items[0][price]': price,
+    'line_items[0][quantity]': String(seats),
+    'line_items[0][adjustable_quantity][enabled]': 'true',
+    'line_items[0][adjustable_quantity][minimum]': '1',
+    'line_items[0][adjustable_quantity][maximum]': '500',
+    'metadata[tier]': plan,
+    allow_promotion_codes: 'true',
+    success_url: `${site}/thanks.html`,
+    cancel_url: `${site}/#pricing`,
+  });
+  if (env.HOLT_STRIPE_TAX === '1') body.set('automatic_tax[enabled]', 'true');
+
+  const res = await fetchImpl('https://api.stripe.com/v1/checkout/sessions', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: body.toString(),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.url) {
+    return { ok: false, status: res.status, reason: data.error?.message ?? `stripe returned ${res.status}` };
+  }
+  return { ok: true, url: data.url, id: data.id };
+}
+
+/* ------------------------------------------------- self-service (resend/portal) ---- */
+
+/**
+ * Both self-service endpoints follow one rule: the response NEVER varies with whether the
+ * email exists in the ledger, and nothing sensitive is ever returned to the requester — the
+ * portal link and the license go to the address ON FILE, or nowhere. Anything else is an
+ * account-enumeration oracle plus, for /portal, a subscription-takeover primitive.
+ */
+export function latestLicenseForEmail(email, file = DATA) {
+  const norm = String(email ?? '').trim().toLowerCase();
+  if (!norm) return null;
+  const { records } = readRecords(file);
+  return [...records].reverse()
+    .find((r) => r.action === 'issue' && r.email?.toLowerCase() === norm && r.token) ?? null;
+}
+
+export async function resendLicense(email, { env = process.env, file = DATA, fetchImpl = fetch } = {}) {
+  const rec = latestLicenseForEmail(email, file);
+  if (!rec) return { sent: false, reason: 'no record' };
+  const delivery = await deliverLicense(
+    { email: rec.email, token: rec.token, tier: rec.tier, claims: { exp: rec.exp } },
+    { env, fetchImpl });
+  return { sent: delivery.delivered === true, reason: delivery.reason ?? null, licenseId: rec.licenseId };
+}
+
 function readBody(req, limitBytes = 1_000_000) {
   return new Promise((resolve, reject) => {
     let size = 0;
@@ -237,17 +361,73 @@ function readBody(req, limitBytes = 1_000_000) {
 export function createServer({ env = process.env, dataFile = DATA } = {}) {
   const { signingKey, webhookSecret } = requireConfig(env);
 
+  // Tight buckets on anything that sends mail; a loose one on checkout redirects.
+  const checkoutLimiter = new RateLimiter({ capacity: 30, refillPerSec: 0.5 });
+  const resendLimiter = new RateLimiter({ capacity: 3, refillPerSec: 1 / 200 }); // ~3 then 1 per 3.3min
+  const siteOrigin = new URL(env.HOLT_SITE_URL || 'https://raed2180416.github.io').origin;
+
   return http.createServer(async (req, res) => {
-    const send = (code, body) => {
+    const send = (code, body, extra = {}) => {
       const text = typeof body === 'string' ? body : JSON.stringify(body);
-      res.writeHead(code, { 'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json' });
+      res.writeHead(code, {
+        'Content-Type': typeof body === 'string' ? 'text/plain' : 'application/json',
+        // This service serves no HTML and embeds nowhere; say so on every response.
+        'X-Content-Type-Options': 'nosniff',
+        'X-Frame-Options': 'DENY',
+        'Referrer-Policy': 'no-referrer',
+        'Cache-Control': 'no-store',
+        'Strict-Transport-Security': 'max-age=63072000; includeSubDomains',
+        ...extra,
+      });
       res.end(text);
     };
+    const cors = {
+      'Access-Control-Allow-Origin': siteOrigin,
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+    const pathname = (req.url ?? '/').split('?')[0];
 
     try {
       if (req.method === 'GET' && req.url === '/health') {
         const { records, torn } = readRecords(dataFile);
         return send(torn ? 500 : 200, { ok: torn === 0, issued: records.filter((r) => r.action === 'issue').length, tornRecords: torn });
+      }
+
+      if (req.method === 'GET' && pathname === '/checkout') {
+        const rl = checkoutLimiter.take(clientIp(req));
+        if (!rl.allowed) return send(429, { ok: false, reason: 'slow down' }, { 'Retry-After': String(rl.retryAfterSec) });
+        if (!env.STRIPE_SECRET_KEY) {
+          return send(503, { ok: false, reason: 'checkout is not configured yet — email sales@holt.dev and a human will sort you out' });
+        }
+        const parsed = parseCheckoutRequest(req.url, TIER_BY_PRICE());
+        if (!parsed.ok) return send(400, { ok: false, reason: parsed.reason });
+        const session = await createCheckoutSession(parsed, { env });
+        if (!session.ok) {
+          appendRecord({ action: 'checkout-error', reason: session.reason }, dataFile);
+          return send(502, { ok: false, reason: 'could not start checkout — try again or email sales@holt.dev' });
+        }
+        appendRecord({ action: 'checkout-start', plan: parsed.plan, seats: parsed.seats, sessionId: session.id }, dataFile);
+        // 303: a bookmarked/replayed URL just creates a fresh session; nothing is mutated by GET.
+        return send(303, 'redirecting to checkout', { Location: session.url });
+      }
+
+      if (req.method === 'OPTIONS' && pathname === '/license/resend') {
+        return send(204, '', cors);
+      }
+      if (req.method === 'POST' && pathname === '/license/resend') {
+        const rl = resendLimiter.take(clientIp(req));
+        if (!rl.allowed) return send(429, { ok: false, reason: 'slow down' }, { ...cors, 'Retry-After': String(rl.retryAfterSec) });
+        const raw = await readBody(req, 10_000);
+        let email = null;
+        try { email = JSON.parse(raw)?.email; } catch { /* fall through to the constant reply */ }
+        if (typeof email === 'string' && email.length <= 320 && email.includes('@')) {
+          const r = await resendLicense(email, { env, file: dataFile }).catch((e) => ({ sent: false, reason: e.message }));
+          appendRecord({ action: 'resend', emailHash: createHmac('sha256', webhookSecret).update(email.toLowerCase()).digest('hex').slice(0, 16), sent: r.sent, reason: r.reason }, dataFile);
+        }
+        // Constant response: whether the address exists, whether mail went out — same answer.
+        // The ledger, not the caller, learns what actually happened.
+        return send(200, { ok: true, note: 'if that address has a license, it will arrive shortly' }, cors);
       }
 
       if (req.method === 'POST' && req.url === '/webhooks/stripe') {

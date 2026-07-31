@@ -222,6 +222,22 @@ const MUTATIONS = [
     tests: ['test/unit/server.test.mjs'],
   },
   {
+    id: 'checkout-price-injection',
+    defect: 'a raw price id in the checkout query is honoured instead of resolving by plan name',
+    file: 'server/index.mjs',
+    find: "  const price = [...priceMap.entries()].find(([, tier]) => tier === plan)?.[0];\n  if (!price) return { ok: false, reason: `no price configured for plan '${plan}'` };",
+    replace: "  const price = plan;\n  if (!price) return { ok: false, reason: 'x' };",
+    tests: ['test/unit/server.test.mjs'],
+  },
+  {
+    id: 'resend-rate-limit-open',
+    defect: 'the resend endpoint loses its rate limit — a mail-sending endpoint becomes a spam cannon at our own customers',
+    file: 'server/index.mjs',
+    find: "        const rl = resendLimiter.take(clientIp(req));\n        if (!rl.allowed) return send(429, { ok: false, reason: 'slow down' }, { ...cors, 'Retry-After': String(rl.retryAfterSec) });",
+    replace: "        const rl = { allowed: true };",
+    tests: ['test/e2e/purchase-path.test.mjs'],
+  },
+  {
     id: 'forbidden-open',
     defect: 'the destructive first gate is dead — reset/stash/checkout rely on the allowlist fallthrough alone',
     file: 'src/git.mjs',

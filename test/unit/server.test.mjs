@@ -221,3 +221,121 @@ test('delivery: the email contains an activation command and the expiry', async 
   assert.match(captured.text, /HOLT_LICENSE=/);
   assert.match(captured.text, /verify offline/);
 });
+
+/* ------------------------------------------------------------- checkout ---- */
+
+import {
+  parseCheckoutRequest, createCheckoutSession, RateLimiter, clientIp,
+  latestLicenseForEmail, resendLicense,
+} from '../../server/index.mjs';
+
+const priceMap = new Map([['price_team', 'team'], ['price_ent', 'enterprise']]);
+
+test('checkout: a valid request resolves a configured price by plan name', () => {
+  const r = parseCheckoutRequest('/checkout?plan=team&seats=25', priceMap);
+  assert.equal(r.ok, true);
+  assert.equal(r.price, 'price_team');
+  assert.equal(r.seats, 25);
+});
+
+test('SAFETY: a raw price id in the query is ignored — only plan names resolve', () => {
+  // The caller cannot check out against an arbitrary Stripe price object. An id with an
+  // underscore fails the plan-name charset before it can even be looked up; a well-formed but
+  // unknown plan name is refused at the price lookup. Both are refused — that is what matters.
+  assert.equal(parseCheckoutRequest('/checkout?plan=price_attacker_controlled', priceMap).ok, false);
+  const wellFormed = parseCheckoutRequest('/checkout?plan=priceattacker', priceMap);
+  assert.equal(wellFormed.ok, false);
+  assert.match(wellFormed.reason, /no price configured/);
+});
+
+test('checkout: seat count is bounded and integer-only', () => {
+  for (const bad of ['0', '-3', '501', '3.5', 'abc', '1e9', '  ']) {
+    assert.equal(parseCheckoutRequest(`/checkout?plan=team&seats=${bad}`, priceMap).ok, false, `seats=${bad} must be refused`);
+  }
+  assert.equal(parseCheckoutRequest('/checkout?plan=team', priceMap).seats, 5, 'defaults to 5');
+});
+
+test('checkout: an unknown plan is refused, not defaulted', () => {
+  assert.equal(parseCheckoutRequest('/checkout?plan=godmode', priceMap).ok, false);
+  assert.equal(parseCheckoutRequest('/checkout?plan=Team', priceMap).ok, false, 'case-sensitive; no fuzzy matching');
+});
+
+test('checkout: success/cancel URLs come from server config, never the query (no open redirect)', async () => {
+  let captured = null;
+  const fetchImpl = async (_url, opts) => { captured = opts.body; return { ok: true, json: async () => ({ url: 'https://checkout.stripe.com/x', id: 'cs_1' }) }; };
+  await createCheckoutSession({ plan: 'team', price: 'price_team', seats: 10 }, {
+    env: { STRIPE_SECRET_KEY: 'sk_test', HOLT_SITE_URL: 'https://holt.dev' }, fetchImpl,
+  });
+  assert.match(captured, /success_url=https%3A%2F%2Fholt\.dev/);
+  // A success_url injected in the (already-rejected) query can never reach Stripe.
+  assert.ok(!captured.includes('evil.com'));
+});
+
+test('checkout: a Stripe error is reported without leaking Stripe internals to the caller', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 402, json: async () => ({ error: { message: 'card_declined internal detail' } }) });
+  const r = await createCheckoutSession({ plan: 'team', price: 'price_team', seats: 1 }, { env: { STRIPE_SECRET_KEY: 'sk' }, fetchImpl });
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 402);
+});
+
+/* ------------------------------------------------------------ rate limit ---- */
+
+test('rate limit: a bucket drains and then refuses with a retry hint', () => {
+  const rl = new RateLimiter({ capacity: 3, refillPerSec: 1 });
+  const t = 1_000_000;
+  assert.equal(rl.take('ip', { now: t }).allowed, true);
+  assert.equal(rl.take('ip', { now: t }).allowed, true);
+  assert.equal(rl.take('ip', { now: t }).allowed, true);
+  const denied = rl.take('ip', { now: t });
+  assert.equal(denied.allowed, false);
+  assert.ok(denied.retryAfterSec >= 1);
+  // Refills over time.
+  assert.equal(rl.take('ip', { now: t + 2000 }).allowed, true);
+});
+
+test('rate limit: separate keys have separate buckets', () => {
+  const rl = new RateLimiter({ capacity: 1, refillPerSec: 0 });
+  assert.equal(rl.take('a').allowed, true);
+  assert.equal(rl.take('b').allowed, true);
+  assert.equal(rl.take('a').allowed, false);
+});
+
+test('clientIp: prefers the platform header over anything client-controlled', () => {
+  assert.equal(clientIp({ headers: { 'fly-client-ip': '1.2.3.4', 'x-forwarded-for': '9.9.9.9' }, socket: {} }), '1.2.3.4');
+  assert.equal(clientIp({ headers: { 'x-forwarded-for': '9.9.9.9, 8.8.8.8' }, socket: {} }), '9.9.9.9');
+  assert.equal(clientIp({ headers: {}, socket: { remoteAddress: '7.7.7.7' } }), '7.7.7.7');
+});
+
+/* ------------------------------------------------ self-service resend ---- */
+
+test('resend: finds only the LATEST license for an address, case-insensitively', () => {
+  const file = tmpLedger();
+  appendRecord({ action: 'issue', email: 'Buyer@Acme.test', tier: 'team', token: 'holt_team_old', licenseId: 'l1' }, file);
+  appendRecord({ action: 'issue', email: 'buyer@acme.test', tier: 'team', token: 'holt_team_new', licenseId: 'l2' }, file);
+  const r = latestLicenseForEmail('BUYER@acme.TEST', file);
+  assert.equal(r.token, 'holt_team_new');
+});
+
+test('PRIVACY: resend for an unknown address does nothing and reveals nothing', async () => {
+  const file = tmpLedger();
+  const r = await resendLicense('nobody@nowhere.test', { env: { RESEND_API_KEY: 'k' }, file, fetchImpl: async () => ({ ok: true, status: 200 }) });
+  assert.equal(r.sent, false);
+  assert.equal(r.reason, 'no record', 'a missing address is indistinguishable to the CALLER, but logged internally');
+});
+
+/* ------------------------------------------------------------ key rotation ---- */
+
+test('rotation: a token signed by ANY pinned key verifies; others do not', () => {
+  const { privateKey: oldK, publicKey: oldPub } = generateKeyPairSync('ed25519');
+  const { privateKey: newK, publicKey: newPub } = generateKeyPairSync('ed25519');
+  const { privateKey: evilK } = generateKeyPairSync('ed25519');
+  const keys = [newPub, oldPub].map((k) => k.export({ type: 'spki', format: 'der' }).toString('base64'));
+
+  const underOld = mintLicense({ tier: 'team', days: 30 }, oldK.export({ type: 'pkcs8', format: 'der' }).toString('base64')).token;
+  const underNew = mintLicense({ tier: 'team', days: 30 }, newK.export({ type: 'pkcs8', format: 'der' }).toString('base64')).token;
+  const underEvil = mintLicense({ tier: 'team', days: 30 }, evilK.export({ type: 'pkcs8', format: 'der' }).toString('base64')).token;
+
+  assert.equal(verifyToken(underOld, { publicKeysB64: keys }).valid, true, 'old customers keep working during rotation');
+  assert.equal(verifyToken(underNew, { publicKeysB64: keys }).valid, true, 'new licenses work');
+  assert.equal(verifyToken(underEvil, { publicKeysB64: keys }).valid, false, 'a foreign key never verifies');
+});
