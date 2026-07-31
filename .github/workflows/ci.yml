@@ -186,6 +186,10 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm ci
+      - name: every checked-in release body must carry an install command
+        # The gate lives here as well as on the release event so a body is caught in the PR that
+        # writes it, not at publish time when someone is already watching the Releases tab.
+        run: node scripts/check-release-body.mjs --all
       - name: pack and install globally from the tarball
         run: |
           npm pack
@@ -231,8 +235,16 @@ jobs:
       - run: node --test test/unit/license.test.mjs test/unit/policy.test.mjs test/unit/server.test.mjs test/unit/milestone.test.mjs test/e2e/purchase-path.test.mjs test/e2e/branches.test.mjs test/e2e/autoprotect.test.mjs
       - name: no src/ file may make a network call (the no-telemetry promise)
         if: runner.os != 'Windows'
+        # The exclusion list is where "this URL-shaped string is not a network call" is recorded,
+        # and it had gone stale in both directions. It still excluded `holt.dev/pricing` after the
+        # pricing page moved to raed2180416.github.io, so the two upgrade MESSAGES in license.mjs —
+        # text printed for a human, never fetched — were failing this job on main. And an XML
+        # namespace (`http://www.w3.org/2000/svg`, required by createElementNS) is an identifier
+        # compared as a string, not an endpoint; grep cannot tell a URI from a URL, so the
+        # distinction has to live here. Neither addition weakens the check: `fetch(`,
+        # `http.request`, `net.connect` and `dgram` are still caught anywhere in src/.
         run: |
-          if grep -rnE "https?://[^\"' )]+|fetch\(|http\.request|net\.connect|dgram" src/ | grep -vE "^\s*//|\* |example\.|localhost|127\.0\.0\.1|holt\.dev/pricing|github\.com" ; then
+          if grep -rnE "https?://[^\"' )]+|fetch\(|http\.request|net\.connect|dgram" src/ | grep -vE "^\s*//|\* |example\.|localhost|127\.0\.0\.1|holt\.dev/pricing|raed2180416\.github\.io|w3\.org/2000/svg|github\.com" ; then
             echo "a network call appeared in src/ — the free tool must make none"; exit 1
           fi
           echo "src/ makes no network calls"
