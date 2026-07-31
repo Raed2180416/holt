@@ -26,6 +26,7 @@ import { execFile } from 'node:child_process';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze } from '../../src/analyze.mjs';
+import { impact } from '../../src/impact.mjs';
 
 const REAL_ROOT = process.env.GROVE_REAL_REPOS
   ?? path.join(process.env.HOME ?? '/tmp', '.agentic-os-tmp', 'grove-real');
@@ -38,24 +39,28 @@ const REPOS = [
   {
     dir: 'py-click', lang: 'Python', ext: 'py', hot: 'setup.cfg',
     dup: (n) => `def ${n}(items):\n    out = []\n    for it in items:\n        out.append(it * 2)\n    return out\n`,
+    consumes: (n) => `def grove_consumer(xs):\n    return ${n}(xs)\n`,
     uniq: (n) => `def ${n}():\n    return "only here"\n`,
     hotAdd: (owner) => `\n[grove_hotspot]\nSHARED_HOT_KEY = ${owner}\n`,
   },
   {
     dir: 'go-gin', lang: 'Go', ext: 'go', hot: 'go.mod',
     dup: (n) => `package grovetest\n\nfunc ${n}(items []int) []int {\n\tout := []int{}\n\tfor _, it := range items {\n\t\tout = append(out, it*2)\n\t}\n\treturn out\n}\n`,
+    consumes: (n) => `package grovetest\n\nfunc groveConsumer(xs []int) []int {\n\treturn ${n}(xs)\n}\n`,
     uniq: (n) => `package grovetest\n\nfunc ${n}() string {\n\treturn "only here"\n}\n`,
     hotAdd: (owner) => `\n// grove_hotspot SHARED_HOT_KEY ${owner}\n`,
   },
   {
     dir: 'rs-ripgrep', lang: 'Rust', ext: 'rs', hot: 'Cargo.toml',
     dup: (n) => `pub fn ${n}(items: &[i32]) -> Vec<i32> {\n    let mut out = Vec::new();\n    for it in items {\n        out.push(it * 2);\n    }\n    out\n}\n`,
+    consumes: (n) => `pub fn grove_consumer(xs: &[i32]) -> Vec<i32> {\n    ${n}(xs)\n}\n`,
     uniq: (n) => `pub fn ${n}() -> &'static str {\n    "only here"\n}\n`,
     hotAdd: (owner) => `\n[grove_hotspot]\nSHARED_HOT_KEY = "${owner}"\n`,
   },
   {
     dir: 'js-express', lang: 'JavaScript', ext: 'js', hot: 'package.json',
     dup: (n) => `export function ${n}(items) {\n  const out = [];\n  for (const it of items) {\n    out.push(it * 2);\n  }\n  return out;\n}\n`,
+    consumes: (n) => `export function groveConsumer(xs) {\n  return ${n}(xs);\n}\n`,
     uniq: (n) => `export function ${n}() {\n  return 'only here';\n}\n`,
     hotAdd: null, // package.json is JSON; handled specially below
   },
@@ -131,6 +136,18 @@ async function plantScenario(repo, root) {
     await commit(hotB, 'B claims the hotspot key differently');
   }
 
+  // --- impact: a producer/consumer pair sharing NO file ----------------------------
+  // producer defines groveProducedHelper in producer.<ext>; consumer CALLS it from a different
+  // file and never touches producer.<ext>. Collision detection works by file overlap, so this
+  // pair must be invisible to it — and visible to `grove impact`.
+  const producer = await mk('producer-1');
+  await write(producer, `grove_probe/producer.${repo.ext}`, repo.dup('groveProducedHelper'));
+  await commit(producer, 'producer defines the helper');
+
+  const consumer = await mk('consumer-1');
+  await write(consumer, `grove_probe/consumer.${repo.ext}`, repo.consumes('groveProducedHelper'));
+  await commit(consumer, 'consumer calls the helper it does not define');
+
   // --- at risk: unique work, NEVER committed --------------------------------------
   const risky = await mk('risky');
   await write(risky, `grove_probe/only_here.${repo.ext}`, repo.uniq('groveUncommittedOnly'));
@@ -146,6 +163,8 @@ async function plantScenario(repo, root) {
       collisionPair: hotUsed ? ['hotA', 'hotB'] : null,
       collisionKey: 'groveSharedHotKey',
       atRisk: 'risky',
+      impactPair: ['producer-1', 'consumer-1'],
+      impactSymbol: 'groveProducedHelper',
       atRiskSymbol: 'groveUncommittedOnly',
       disposable: 'spent',
       hotFile: hotUsed,
@@ -174,7 +193,8 @@ for (const repo of REPOS) {
     });
 
     const disc = await discover(root);
-    const report = await analyze(await scan(disc, {}), {});
+    const scanned = await scan(disc, {});
+    const report = await analyze(scanned, {});
 
     const ids = report.unique.map((u) => u.id);
     for (const expected of ['alpha-1', 'beta-1', 'risky', 'spent']) {
@@ -212,6 +232,27 @@ for (const repo of REPOS) {
     assert.equal(spent.safe, true, `${repo.dir}: untouched worktree should be disposable (${spent.reasons.join('; ')})`);
     const riskyVerdict = report.safe.find((s) => s.id === 'risky');
     assert.equal(riskyVerdict.safe, false, `${repo.dir}: 'risky' must NEVER be reported disposable`);
+
+    // ---- P4-adjacent: cross-workstream impact, invisible to collision detection -----
+    const [prod, cons] = truth.impactPair;
+
+    // Establish the premise first: these two share no file, so P1 CANNOT see them.
+    const asCollision = report.collisions.find((c) =>
+      (c.a === prod && c.b === cons) || (c.a === cons && c.b === prod));
+    assert.equal(asCollision, undefined,
+      `${repo.dir}: premise broken — P1 now catches the producer/consumer pair, so impact adds nothing`);
+
+    const imp = await impact(scanned, {});
+    const pair = imp.pairs.find((p) => p.producer === prod && p.consumer === cons);
+    assert.ok(pair,
+      `${repo.dir}: impact missed the planted producer/consumer pair. ` +
+      `Found: ${JSON.stringify(imp.pairs.map((p) => [p.producer, p.consumer]))}`);
+    assert.ok(pair.symbols.includes(truth.impactSymbol),
+      `${repo.dir}: expected ${truth.impactSymbol} as evidence, got ${pair.symbols.join(', ')}`);
+
+    // And it must not invent a dependency on the workstream that touched nothing.
+    assert.equal(imp.pairs.find((p) => p.consumer === 'spent' || p.producer === 'spent'), undefined,
+      `${repo.dir}: an untouched worktree cannot participate in a dependency`);
 
     // ---- no invented findings ------------------------------------------------------
     const bogus = report.collisions.find((c) =>
