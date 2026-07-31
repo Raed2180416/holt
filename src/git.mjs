@@ -77,7 +77,10 @@ const OBJECT_WRITE = new Set(['merge-tree']);
  *   commit-tree/hash-object/update-ref/write-tree/read-tree -> `grove rescue` (capture work)
  */
 const MUTATE_SUBVERBS = {
-  worktree: new Set(['lock', 'unlock', 'remove', 'prune']),
+  // `add` is here for `grove verify`, which materialises a SPECULATIVE MERGE into a scratch
+  // worktree (outside the repo, removed afterwards) to run the user's tests against it. It is
+  // still refused without the explicit opt-in, so the scanner can never create worktrees.
+  worktree: new Set(['lock', 'unlock', 'remove', 'prune', 'add']),
   branch: new Set(['-d', '-D', '--delete']),
 };
 const MUTATE_COMMANDS = new Set([

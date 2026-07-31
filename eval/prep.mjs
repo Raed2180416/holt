@@ -21,7 +21,11 @@ import { integrate } from '../src/integrate/adapters.mjs';
 import { protect } from '../src/actions.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
-const GROVE_BIN = `${process.execPath} ${path.join(HERE, '..', 'bin', 'grove.mjs')}`;
+// The INSTALLED binary, not a node-script path. Measured: agents chose the right command and
+// were blocked by the host's permission classifier, because `node /abs/path/grove.mjs` is
+// exactly the shape a Bash allowlist refuses. `grove` on PATH is what a real deployment looks
+// like and what a classifier will accept. The eval must test the product as shipped.
+const GROVE_BIN = 'grove';
 const SRC = process.env.GROVE_EVAL_SRC
   ?? path.join(os.homedir(), '.agentic-os-tmp', 'grove-real', 'py-click');
 const WORK = process.env.GROVE_EVAL_WORK

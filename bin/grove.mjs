@@ -24,6 +24,7 @@ import { assessCommand, buildBrief } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import { integrate, detectHosts, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
 import { protect, unprotect, rescue, rescues, clean } from '../src/actions.mjs';
+import { verifyPair } from '../src/verify.mjs';
 
 const USAGE = `
 grove — the landing layer for parallel agent work
@@ -51,6 +52,8 @@ ACTING  (these MUTATE the repo; everything above is read-only)
                       exits non-zero if the capture cannot be verified
   rescued             list every rescue taken in this repo
   clean               remove provably-disposable worktrees + branches  [--apply]
+  verify <a> <b>      run YOUR test suite on A alone, B alone, and A+B merged; report
+                      only what the COMBINATION breaks  [--run "<cmd>"]  (executes code)
 
 AGENT INTEGRATION
   integrate           wire grove into every agent found here (AGENTS.md + MCP + hooks)
@@ -95,6 +98,7 @@ function parseArgs(argv) {
       case '--dry-run': opts.dryRun = true; break;
       case '--apply': opts.apply = true; break;
       case '--release': opts.release = true; break;
+      case '--run': opts.run = argv[++i]; break;
       case '-h': case '--help': opts.help = true; break;
       case '--base': opts.base = argv[++i]; break;
       case '--cwd': opts.cwd = argv[++i]; break;
@@ -309,6 +313,18 @@ async function main() {
   if (cmd === 'unprotect') return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
   if (cmd === 'rescued') return void cmdAction(await rescues(opts.cwd));
   if (cmd === 'clean') return void cmdAction(await clean(opts.cwd, opts));
+  if (cmd === 'verify') {
+    const [, a, b] = opts._;
+    if (!a || !b) {
+      process.stderr.write(paint('red', 'grove verify: needs two workstream ids\n'));
+      process.exit(2);
+    }
+    const r = await verifyPair(opts.cwd, a, b, { run: opts.run ?? null });
+    cmdAction(r);
+    if (r.ok === false) process.exit(2);
+    if (r.interactionFailures?.length) process.exit(1);
+    return;
+  }
   if (cmd === 'rescue') {
     const target = opts._[1];
     if (!target) {
