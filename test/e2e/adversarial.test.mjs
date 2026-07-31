@@ -338,3 +338,55 @@ test('ADVERSARIAL: --strict-read-only never writes objects and still answers', a
     if (s.confidence !== 'unknown') assert.equal(s.confidence, 'approximate');
   }
 });
+
+test('ADVERSARIAL: instrument failure (missing object) must be UNKNOWN, never safe', async (t) => {
+  // Deterministic core of the partial-clone / pruned-odb workflow: merge-tree needs a blob that
+  // is not in the object store. Before the fail-closed guard in scan.mjs, its empty answer read
+  // as "no committed delta", and a worktree with committed-ahead work but a clean working tree
+  // was SAFE — clean --apply would have deleted it. The blob is deleted surgically here, so the
+  // failure is guaranteed, offline, on every machine.
+  const fx = await newRepo('missing-object');
+  t.after(() => fx.cleanup());
+
+  await fx.write('shared.txt', 'base\n');
+  await fx.commit('base state');
+
+  const wt = await fx.worktree('diverged');
+  await fx.write('shared.txt', 'worktree version\n', wt);
+  await fx.commit('worktree edit', wt);
+
+  await fx.write('shared.txt', 'main version\n');
+  await fx.commit('main edit');
+
+  const oid = (await sh('git', ['rev-parse', 'wt/diverged:shared.txt'], fx.root)).stdout.trim();
+  await fs.rm(path.join(fx.root, '.git', 'objects', oid.slice(0, 2), oid.slice(2)));
+
+  const { report } = await inspect(fx.root);
+  const v = verdictFor(report, 'diverged');
+  assert.ok(v, 'the workstream must still be reported');
+  assert.equal(v.safe, false, 'instrument failure must NEVER produce safe');
+  assert.equal(v.confidence, 'unknown',
+    `merge-tree could not run, so the only honest verdict is UNKNOWN: ${JSON.stringify(v)}`);
+  assert.match(v.reasons.join(' '), /instrument failed|refusing to classify/i);
+});
+
+test('ADVERSARIAL: rebase in progress in the PRIMARY does not break sibling scans', async (t) => {
+  const fx = await newRepo('midrebase');
+  t.after(() => fx.cleanup());
+
+  const wt = await fx.worktree('bystander2');
+  await fx.write('src/b.js', 'export function REBASE_BYSTANDER() {}\n', wt);
+
+  await fx.write('f.txt', 'a\n'); await fx.commit('a');
+  await sh('git', ['checkout', '-q', '-b', 'side'], fx.root);
+  await fx.write('f.txt', 'side\n'); await fx.commit('side');
+  await sh('git', ['checkout', '-q', 'main'], fx.root);
+  await fx.write('f.txt', 'main2\n'); await fx.commit('main2');
+  const reb = await sh('git', ['rebase', 'side'], fx.root);
+  assert.notEqual(reb.code, 0, 'fixture must genuinely be mid-rebase-conflict');
+
+  const { report } = await inspect(fx.root);
+  const v = verdictFor(report, 'bystander2');
+  assert.ok(v, 'sibling must be reported while the primary is mid-rebase');
+  assert.equal(v.safe, false, 'its uncommitted work must be seen');
+});
