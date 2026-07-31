@@ -270,8 +270,12 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
 
     // VERIFY before claiming success. A rescue that silently captured nothing is worse than no
     // rescue at all, because it licenses a deletion.
-    const captured = await git(['ls-tree', '-r', '--name-only', commit], { cwd: ws.path });
-    const capturedFiles = captured.code === 0 ? captured.stdout.split('\n').filter(Boolean) : [];
+    // -z is LOAD-BEARING: without it ls-tree C-quotes non-ASCII paths ("src/\303\274ni.js"),
+    // while the `files` list (from status --porcelain -z) carries them raw. The comparison then
+    // mismatches and rescue refuses a capture that actually succeeded — found by the monster
+    // round on a worktree named ünïcode-3. NUL-separated output is never quoted.
+    const captured = await git(['ls-tree', '-r', '--name-only', '-z', commit], { cwd: ws.path });
+    const capturedFiles = captured.code === 0 ? captured.stdout.split('\0').filter(Boolean) : [];
     const capturedSet = new Set(capturedFiles);
 
     // `git status` reports an unaddable directory as `nested/`; the tree lists files. Count a
