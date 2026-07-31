@@ -702,7 +702,7 @@ footer { padding: 44px 0 60px; }
       </p>
       <div class="btn-row">
         <button class="btn btn-primary" id="copy-install" type="button">
-          <span class="btn-icon">$</span> npm install -g holt
+          <span class="btn-icon">$</span> git clone github.com/Raed2180416/holt
         </button>
         <a class="btn btn-ghost" href="#proof">See what a naked agent deleted →</a>
       </div>
@@ -1060,7 +1060,7 @@ footer { padding: 44px 0 60px; }
       reproduce, that's a bug.
     </p>
     <div class="bench-meta">
-      machine: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics · Linux · Node v24.18.0 · holt @ e5cfa43
+      machine: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics · Linux · Node v24.18.0 · holt @ 4a198b0
     </div>
 
     <!-- 1: correctness at scale -->
@@ -1133,7 +1133,7 @@ footer { padding: 44px 0 60px; }
             <dt>what</dt>
             <dd>One repository containing every hazard at once: junk heaps, buried gold, lying names in both directions, unicode names, nested git repos, foreign locks, and valuable work buried in each of 50 supported languages — graded on symbol detection, verdict correctness, and byte survival through <code class="inline">protect → clean --apply → rescue</code>.</dd>
             <dt>how</dt>
-            <dd>One synthesized worst-case repo, scanned and then run through the full destructive loop.</dd>
+            <dd>One synthesised worst-case repo, scanned and then run through the full destructive loop.</dd>
             <dt>means</dt>
             <dd>Correctness holds under adversarial composition, not just the easy average case. This round has a track record: it caught a unicode-quoting bug that made rescue refuse correct captures, and a Dockerfile-variant parser gap, before either shipped.</dd>
           </dl>
@@ -1236,19 +1236,19 @@ footer { padding: 44px 0 60px; }
       <div class="bench-cols">
         <div>
           <div class="tile-row tri">
-            <div class="tile"><div class="tile-num">199</div><div class="tile-label">tests passing (<code class="inline">npm test</code>)</div></div>
-            <div class="tile"><div class="tile-num">13/13</div><div class="tile-label">deliberate defects killed (<code class="inline">npm run test:mutation</code>)</div></div>
+            <div class="tile"><div class="tile-num">356</div><div class="tile-label">tests passing (<code class="inline">npm test</code>)</div></div>
+            <div class="tile"><div class="tile-num">28/28</div><div class="tile-label">deliberate defects killed (<code class="inline">npm run test:mutation</code>)</div></div>
             <div class="tile"><div class="tile-num">50</div><div class="tile-label">languages asserted by symbol name</div></div>
           </div>
         </div>
         <div class="bench-explain">
           <dl>
             <dt>what</dt>
-            <dd>Whether the safety net has holes the ordinary test suite wouldn't find. <code class="inline">test/mutation.mjs</code> breaks high-stakes behaviors on purpose — <code class="inline">safeToDelete</code> returning true for everything, the git allowlist permitting everything, rescue skipping verification — and requires the suite to go red.</dd>
+            <dd>Whether the safety net has holes the ordinary test suite wouldn't find. <code class="inline">test/mutation.mjs</code> breaks high-stakes behaviours on purpose — <code class="inline">safeToDelete</code> returning true for everything, the git allowlist permitting everything, rescue skipping verification — and requires the suite to go red.</dd>
             <dt>how</dt>
             <dd>Mutations run in a disposable repo copy, never the live tree; a tripwire fingerprints the live repo after every mutation and exits 2 on any drift — proven able to fire by deliberate sabotage.</dd>
             <dt>means</dt>
-            <dd>The first mutation run scored 10/12, not 13/13 — both survivors were real holes, now fixed and killed by tests built on real mechanisms. That falsification history is why the suite looks the way it does.</dd>
+            <dd>The first mutation run scored 10/12, not 28/28 — both survivors were real holes, now fixed and killed by tests built on real mechanisms. That falsification history is why the suite looks the way it does.</dd>
           </dl>
         </div>
       </div>
@@ -1265,9 +1265,9 @@ footer { padding: 44px 0 60px; }
     <ul class="boundaries-list">
       <li><strong>Gitignored content is invisible</strong> — to git, therefore to holt. Pinned by a test as a documented limit.</li>
       <li><strong>P4 in general remains unsolved.</strong> <code class="inline">verify</code> decides a specific suspected pair empirically; it does not certify compatibility.</li>
-      <li><strong>jj workstreams are analyzed as of their last snapshot</strong> — holt passes <code class="inline">--ignore-working-copy</code> because letting jj snapshot would itself be a write.</li>
+      <li><strong>jj workstreams are analysed as of their last snapshot</strong> — holt passes <code class="inline">--ignore-working-copy</code> because letting jj snapshot would itself be a write.</li>
       <li><strong>A/B results are small-N pilots</strong> with confidence intervals, not benchmarks.</li>
-      <li><strong>Linux-tested</strong>; macOS/Windows CI pending. 1000+-worktree scale unmeasured.</li>
+      <li><strong>1000+-worktree scale is unmeasured on a real repository</strong> — the published figure comes from a generated fixture.</li>
       <li><strong>The lock doesn't stop <code class="inline">rm -rf</code></strong> — that's filesystem-level; the PreToolUse hook covers it where hooks exist. <code class="inline">git worktree unlock</code> and <code class="inline">remove -f -f</code> are classified destructive and denied by the hook layer.</li>
     </ul>
   </div>
@@ -1356,7 +1356,8 @@ footer { padding: 44px 0 60px; }
       <div>
         <div class="code-block">
           <button class="copy-btn" id="copy-quickstart" type="button">copy</button>
-          <div class="cl"><span class="prompt">$</span> npm install -g holt</div>
+          <div class="cl"><span class="prompt">$</span> git clone https://github.com/Raed2180416/holt.git</div>
+          <div class="cl"><span class="prompt">$</span> cd holt &amp;&amp; npm install &amp;&amp; npm link</div>
           <div class="cl"><span class="prompt">$</span> cd your-repo</div>
           <div class="cl"><span class="prompt">$</span> holt status<span class="cmt">        # the decision surface — 1–2 s</span></div>
           <div class="cl"><span class="prompt">$</span> holt protect<span class="cmt">       # lock what would be lost</span></div>
@@ -1403,11 +1404,11 @@ footer { padding: 44px 0 60px; }
     }
   }
   var installBtn = document.getElementById('copy-install');
-  if (installBtn) installBtn.addEventListener('click', function () { copy('npm install -g holt', installBtn); });
+  if (installBtn) installBtn.addEventListener('click', function () { copy('git clone https://github.com/Raed2180416/holt.git\ncd holt && npm install && npm link', installBtn); });
 
   var qsBtn = document.getElementById('copy-quickstart');
   if (qsBtn) qsBtn.addEventListener('click', function () {
-    copy('npm install -g holt\ncd your-repo\nholt status\nholt protect\nholt integrate\nholt clean --apply', qsBtn);
+    copy('git clone https://github.com/Raed2180416/holt.git\ncd holt && npm install && npm link\ncd your-repo\nholt status\nholt protect\nholt integrate\nholt clean --apply', qsBtn);
   });
 })();
 </script>

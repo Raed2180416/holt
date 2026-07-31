@@ -277,3 +277,15 @@ test('INSTALLER: --install never runs anything without explicit consent', async 
   assert.match(r.stdout, /no supported package manager|re-run with --yes|holt will run/,
     'and must explain what it would do or why it cannot');
 });
+
+test('CLI: --version answers, in every spelling people actually try', async () => {
+  // holt answered none of these. A bug report that cannot name the version that produced it is
+  // not actionable, and `--version` is the first thing anyone runs against an unfamiliar binary.
+  const { version } = JSON.parse(await fs.readFile(new URL('../../package.json', import.meta.url), 'utf8'));
+  for (const flag of ['--version', '-v', '-V', 'version']) {
+    const r = await holt([flag], process.cwd());
+    assert.equal(r.code, 0, `holt ${flag} must exit 0, got ${r.code}: ${r.stderr}`);
+    assert.match(r.stdout, new RegExp(`holt ${version.replace(/\./g, '\\.')}`),
+      `holt ${flag} must print the package version, got: ${r.stdout || r.stderr}`);
+  }
+});

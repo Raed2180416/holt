@@ -6,13 +6,18 @@
 
 **You ran a dozen agents overnight. holt tells you what each one actually made, which ones<br>collide, and which are safe to delete — and it stops an agent deleting work that exists nowhere else.**
 
-[![tests](https://img.shields.io/badge/tests-348%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
-[![mutation score](https://img.shields.io/badge/mutation%20score-26%2F26%20killed-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-356%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+[![mutation score](https://img.shields.io/badge/mutation%20score-28%2F28%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
 
-`npm install -g holt`
+```bash
+git clone https://github.com/Raed2180416/holt.git
+cd holt && npm install && npm link
+```
+
+<sub>Not on npm yet — `npm install -g holt` lands with v1. The commands above are the ones that work today.</sub>
 
 <!-- HOLT:SOCIAL-PROOF:BEGIN
 Social proof stays commented out until the numbers can carry it: 500 stars or 1,000 weekly
@@ -43,7 +48,7 @@ Any coding agent — Claude Code, Codex, Cursor, Copilot, Aider, Gemini CLI, or 
 
 holt is **agent-agnostic by construction**: its safety mechanism is git's *own* worktree lock, applied by content. It works identically whoever — or whatever — tries to delete work, because git itself does the refusing.
 
-In one measured case, a 39-worktree repository's committed layer flagged **4** interesting worktrees — its uncommitted layer held content that existed nowhere else. A tool that only reads commits would have been confidently, quietly wrong there. The A/B trials below reproduce the same failure mode:
+In one measured case, a 39-worktree repository's committed layer flagged **4** worktrees as interesting. The uncommitted layer — the one git cannot relate across worktrees at all — held content in trees the committed view had already dismissed. A tool that only reads commits would have been confidently, quietly wrong there. The A/B trials below reproduce the same failure mode:
 
 > An unaided agent deleted **13 of 16 worktrees including all five irreplaceable ones** — *"wip-1, wip-2: only contained untracked files"* — and kept two empty decoys because they were named `IMPORTANT-do-not-delete` and `KEEP-release-candidate`. Names in both directions, content in neither.
 
@@ -96,7 +101,7 @@ The middle row is the design lesson: safety that just *warns* freezes the agent 
 
 **And cleanup doesn't have to depend on the model at all.** `holt clean --apply` deterministically removes every provably-disposable worktree and keeps everything that holds work — no agent, no judgment, no variance. The A/B measures the *agent deciding*; the deterministic path removes the decision. Use the agent loop for autonomy, `clean --apply` (or a scheduled job) when you want a guaranteed sweep.
 
-Small N, stated plainly: 3–6 trials per arm. Directional, honestly produced, adversarially graded — not a benchmark paper.
+Small N: 3–6 trials per arm. Directional, honestly produced, adversarially graded — not a benchmark paper.
 
 ---
 
@@ -192,9 +197,9 @@ Every optional dependency degrades **loudly**: `holt doctor` shows exactly what'
 
 ## The test suite attacks itself
 
-348 tests, and the interesting ones are the hostile ones:
+356 tests, and the interesting ones are the hostile ones:
 
-- **26/26 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
+- **28/28 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
 - **The CLI is tested as a binary**, because at one point 169 tests passed while `holt protect` printed *"unknown command"* — every test called functions directly and the dispatcher was dead. Exit codes are asserted per command; they're the contract scripts chain on.
 - **The eval polices itself.** It refuses to score trials the agent never ran (a credits-exhausted run once fabricated "+17 pts" from agents that did nothing — that scenario is now a permanent regression test), and its answer key is proven unreachable from trial repos after an agent found it and scored by reading it.
@@ -213,7 +218,7 @@ because a claim you cannot back is worse than a gap you name.
 
 | Surface | How it was verified |
 |---|---|
-| Core scan, safety, actions, CLI | 348 tests + 26/26 deliberate-defect mutation kills, run on every commit |
+| Core scan, safety, actions, CLI | 356 tests + 28/28 deliberate-defect mutation kills, run on every commit |
 | Linux / macOS / Windows core | CI matrix runs the safety classifier, detection, CLI-as-binary, actions and the invariant fuzzer on all three |
 | Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
 | OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |
@@ -238,24 +243,22 @@ flagship value — *what you are about to lose* — is therefore mostly a **git*
 what remains is duplicates, collisions, landing order and review-load reduction: still a real
 product, but a different pitch, and we would rather say so than let you discover it.
 
-**Known not to apply** — stated plainly rather than glossed: cloud/ephemeral agents (Google Jules,
-Replit Agent, Devin cloud) have no local worktree, so the lock cannot protect them; holt reaches
-them only through advisory AGENTS.md. Gitignored files are invisible to git, therefore to holt.
+**Known not to apply:** cloud/ephemeral agents have no local worktree, so the lock cannot reach
+them — the per-host detail is in [HOSTS.md](HOSTS.md). Gitignored files are invisible to git, and
+therefore to holt.
 
 ---
 
 ## Honest boundaries
 
-- **Gitignored content is invisible** — to git, therefore to holt. Pinned by a test as a documented limit.
 - **P4 in general remains unsolved.** `verify` decides a *specific suspected pair* empirically; it does not certify compatibility, and the wording is asserted by test.
-- **jj workstreams are analysed as of their last snapshot** — holt passes `--ignore-working-copy` because letting jj snapshot would be a write.
-- **A/B results are small-N pilots** with confidence intervals, not benchmarks.
-- Linux-tested; macOS/Windows CI pending. 1000+-worktree scale unmeasured.
+- **1000+-worktree scale is unmeasured on a real repository** — the figure published is from a generated fixture.
 
 ## Quick start
 
 ```console
-$ npm install -g holt
+$ git clone https://github.com/Raed2180416/holt.git
+$ cd holt && npm install && npm link
 $ cd your-repo
 $ holt status        # the decision surface — 1–2 s
 $ holt protect       # lock what would be lost

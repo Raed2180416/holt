@@ -110,12 +110,15 @@ jobs:
         # already shipped README/BENCHMARKS disagreeing with each other AND with the suite. The
         # fix is not vigilance, it is a gate: the claimed test count and mutation score are
         # compared against what the suite actually reports, and a mismatch fails the build.
+        # site/index.html is included because it was the ONE surface this gate never checked,
+        # and it is the surface the public actually reads — it drifted to 199/13-13 unnoticed.
+        # test/unit/published-numbers.test.mjs covers the other half: all surfaces must AGREE.
         run: |
           ACTUAL_TESTS=$(npm test 2>&1 | grep -oE '^# pass [0-9]+|^ℹ pass [0-9]+' | grep -oE '[0-9]+' | head -1)
           ACTUAL_MUT=$(npm run test:mutation 2>&1 | grep -oE '[0-9]+/[0-9]+ mutations killed' | grep -oE '^[0-9]+/[0-9]+')
           echo "suite reports: $ACTUAL_TESTS tests, $ACTUAL_MUT mutations"
           fail=0
-          for f in README.md BENCHMARKS.md; do
+          for f in README.md BENCHMARKS.md site/index.html; do
             if ! grep -q "$ACTUAL_TESTS" "$f"; then
               echo "::error::$f does not mention the real test count ($ACTUAL_TESTS)"; fail=1
             fi

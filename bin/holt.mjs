@@ -107,6 +107,7 @@ OPTIONS
   --global            integrate: ALSO add holt to user-level editor configs.
                       Default is project scope — nothing outside the repo is touched.
   -h, --help          this
+  -v, --version       print the version and exit
 `;
 
 function parseArgs(argv) {
@@ -145,6 +146,7 @@ function parseArgs(argv) {
       case '--columns': opts.columns = Number(argv[++i]) || 120; break;
       case '--rows': opts.rowsOpt = Number(argv[++i]) || 34; break;
       case '-h': case '--help': opts.help = true; break;
+      case '-v': case '-V': case '--version': opts.version = true; break;
       case '--base': opts.base = argv[++i]; break;
       case '--cwd': opts.cwd = argv[++i]; break;
       case '--html': opts.html = argv[++i]; break;
@@ -486,6 +488,15 @@ async function main() {
 
   const cmd = opts._[0] ?? 'status';
   if (opts.help || cmd === 'help') { out(USAGE); return; }
+  // Every packaged CLI is expected to answer this, and holt answered none of the four spellings
+  // people try. A bug report that cannot say which version produced it is not actionable.
+  if (opts.version || cmd === 'version') {
+    const { version } = JSON.parse(
+      await (await import('node:fs/promises')).readFile(new URL('../package.json', import.meta.url), 'utf8'),
+    );
+    out(`holt ${version}`);
+    return;
+  }
 
   if (cmd === 'mcp') {
     const { runStdioServer } = await import('../src/mcp/server.mjs');

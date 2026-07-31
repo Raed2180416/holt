@@ -156,13 +156,13 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 348 passing (`npm test`) |
-| deliberate-defect mutations | 26/26 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
+| tests | 356 passing (`npm test`) |
+| deliberate-defect mutations | 28/28 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
-broken, not merely observed to be green. **Does not mean:** 13 hand-picked mutations amount to full
+broken, not merely observed to be green. **Does not mean:** 28 hand-picked mutations amount to full
 mutation coverage of the codebase — they target the highest-stakes behaviors by design (see
 `test/mutation.mjs` for why hand-picked mutations were chosen over exhaustive Stryker mutation).
 
