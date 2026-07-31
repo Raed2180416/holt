@@ -159,6 +159,8 @@
 ### Dockerfile #################################################################
 --langdef=Dockerfile
 --map-Dockerfile=+(Dockerfile)
+--map-Dockerfile=+(Dockerfile.*)
+--map-Dockerfile=+(*.Dockerfile)
 --map-Dockerfile=+.dockerfile
 --kinddef-Dockerfile=s,stage,build stages
 --kinddef-Dockerfile=a,arg,build arguments

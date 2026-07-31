@@ -60,6 +60,73 @@ async function write(dir, rel, content) {
   await fs.writeFile(abs, content);
 }
 
+
+/**
+ * GOLD50 — the full 50-language corpus, embedded from test/unit/languages.test.mjs so the
+ * monster buries valuable work in EVERY language grove claims. Each entry's first symbol name
+ * doubles as the byte marker; grading asserts (a) the verdict is not-safe, (b) the bytes
+ * survive the destructive loop, and (c) the SYMBOL layer itself flagged the tree — so a
+ * language whose extractor silently regressed fails the monster, not just the unit corpus.
+ */
+const GOLD50 = [
+  // --- ctags native ---------------------------------------------------------
+  ['a.py', 'class PyThing:\n    def py_method(self):\n        return 1\n\ndef py_free(): pass\n', ['PyThing', 'py_method', 'py_free']],
+  ['a.js', 'export function jsFn() {}\nexport class JsClass {}\nconst jsConst = 3;\n', ['jsFn', 'JsClass', 'jsConst']],
+  ['a.ts', 'export interface TsIface { x: number }\nexport function tsFn(): void {}\n', ['TsIface', 'tsFn']],
+  ['a.go', 'package m\n\nfunc GoFunc() int { return 1 }\n\ntype GoType struct{}\n', ['GoFunc', 'GoType']],
+  ['a.rs', 'pub fn rust_fn() {}\npub struct RustStruct;\npub trait RustTrait {}\n', ['rust_fn', 'RustStruct', 'RustTrait']],
+  ['a.java', 'public class JavaClass {\n  public int javaMethod() { return 1; }\n}\n', ['JavaClass', 'javaMethod']],
+  ['a.rb', 'class RubyClass\n  def ruby_method\n  end\nend\n', ['RubyClass', 'ruby_method']],
+  ['a.php', '<?php\nclass PhpClass {\n  public function phpMethod() {}\n}\n', ['PhpClass', 'phpMethod']],
+  ['a.c', 'struct CStruct { int x; };\nint c_func(int a) {\n  return a;\n}\n', ['CStruct', 'c_func']],
+  ['a.cpp', 'class CppClass {\npublic:\n  void cppMethod();\n};\n', ['CppClass', 'cppMethod']],
+  ['a.cs', 'public class CsClass {\n  public void CsMethod() {}\n}\n', ['CsClass', 'CsMethod']],
+  ['a.kt', 'class KtClass {\n  fun ktFun(): Int = 1\n}\n', ['KtClass', 'ktFun']],
+  ['a.lua', 'function luaFunc()\nend\n', ['luaFunc']],
+  ['a.pl6', 'sub perlSub { }\n', ['perlSub']],
+  ['a.ex', 'defmodule ElixirMod do\n  def elixir_fun do\n  end\nend\n', ['ElixirMod', 'elixir_fun']],
+  ['a.erl', '-module(erl_mod).\nerl_fun() -> ok.\n', ['erl_fun']],
+  ['a.hs', 'haskellFn :: Int -> Int\nhaskellFn x = x\n', ['haskellFn']],
+  ['a.jl', 'function juliaFn(x)\n    x\nend\n', ['juliaFn']],
+  ['a.r', 'rFunc <- function(x) { x }\n', ['rFunc']],
+  ['a.sh', 'shell_func() {\n  echo hi\n}\n', ['shell_func']],
+  ['a.sql', 'CREATE TABLE sql_table (id INT);\n', ['sql_table']],
+  ['a.tf', 'resource "aws_s3_bucket" "tf_bucket" {}\n', ['tf_bucket']],
+
+  // --- ctags native, wave 2: toward the 50-language corpus -------------------
+  ['a.ml', 'let ocaml_fn x = x + 1\n', ['ocaml_fn']],
+  ['a.clj', '(defn clj_fn [x] x)\n', ['clj_fn']],
+  ['a.scm', '(define (scheme_fn x) x)\n', ['scheme_fn']],
+  ['a.pas', 'program hello;\nprocedure PascalProc;\nbegin\nend;\nbegin\nend.\n', ['PascalProc']],
+  ['a.f90', 'subroutine fort_sub(x)\nend subroutine\n', ['fort_sub']],
+  ['a.adb', 'procedure Ada_Proc is\nbegin\n  null;\nend Ada_Proc;\n', ['Ada_Proc']],
+  ['a.vim', 'function! VimFunc()\nendfunction\n', ['VimFunc']],
+  ['a.tcl', 'proc tcl_proc {x} { return $x }\n', ['tcl_proc']],
+  ['a.sv', 'module sv_mod;\nendmodule\n', ['sv_mod']],
+  ['a.vhd', 'entity vhdl_ent is\nend entity;\n', ['vhdl_ent']],
+  ['a.proto', 'syntax = "proto3";\nmessage ProtoMsg { int32 xf = 1; }\n', ['ProtoMsg']],
+  ['a.elm', 'elmFn : Int -> Int\nelmFn x = x\n', ['elmFn']],
+  ['a.ps1', 'function PsFunc { return 1 }\n', ['PsFunc']],
+  ['a.awk', 'function awk_fn(y) { return y }\n', ['awk_fn']],
+  // Ambiguous extensions resolved by CONTENT (enry): .d and .m route through the classifier.
+  ['a.d', 'int dlang_fn(int x) { return x; }\n', ['dlang_fn']],
+  ['objc.m', '#import <Foundation/Foundation.h>\n@interface ObjcClass : NSObject\n@end\n', ['ObjcClass']],
+  ['matlab.m', 'function y = matlab_fn(x)\n  y = x;\nend\n', ['matlab_fn']],
+
+  // --- grove optlib gap pack ------------------------------------------------
+  ['a.swift', 'public class SwiftClass {\n    func swiftMethod() -> Int { return 1 }\n}\n', ['SwiftClass', 'swiftMethod']],
+  ['a.scala', 'class ScalaClass {\n  def scalaMethod(): Int = 1\n}\nobject ScalaObj\n', ['ScalaClass', 'scalaMethod', 'ScalaObj']],
+  ['a.dart', 'class DartClass {\n  int dartMethod() => 1;\n}\n', ['DartClass', 'dartMethod']],
+  ['a.groovy', 'class GroovyClass {\n  def groovyMethod() { }\n}\n', ['GroovyClass', 'groovyMethod']],
+  ['a.sol', 'contract SolContract {\n  function solFunction() public {}\n  event SolEvent();\n}\n', ['SolContract', 'solFunction', 'SolEvent']],
+  ['a.zig', 'pub fn zigFn() void {}\nconst ZigStruct = struct {};\n', ['zigFn', 'ZigStruct']],
+  ['a.nim', 'proc nimProc(): int =\n  1\n', ['nimProc']],
+  ['a.cr', 'class CrystalClass\n  def crystal_method\n  end\nend\n', ['CrystalClass', 'crystal_method']],
+  ['a.fs', 'module FsModule\nlet fsFunction x = x\n', ['FsModule', 'fsFunction']],
+  ['Dockerfile', 'FROM node:20 AS dockerStage\nARG DOCKER_ARG=1\n', ['dockerStage', 'DOCKER_ARG']],
+  ['a.graphql', 'type GqlType {\n  id: ID!\n}\nquery GqlQuery { id }\n', ['GqlType', 'GqlQuery']],
+];
+
 const LANGS = [
   { ext: 'js', fn: (n, i) => `export function ${n}() { return ${i}; }\n` },
   { ext: 'py', fn: (n, i) => `def ${n}():\n    return ${i}\n` },
@@ -104,6 +171,7 @@ async function main() {
     unknownExpected: new Set(),
     foreignLocked: new Set(),
     gitignoredOnly: new Set(), // documented limit: expected DISPOSABLE
+    gold50: new Map(),         // id -> symbol that the SYMBOL layer must itself flag
   };
 
   const mk = async (name, { branch = false } = {}) => {
@@ -120,7 +188,7 @@ async function main() {
   const nextLang = () => LANGS[n % LANGS.length];
 
   while (n < COUNT) {
-    const kind = n % 16;
+    const kind = (n % 3 === 2) ? 14 : (n % 16);
     const L = nextLang();
     const id = (() => {
       // Names that lie, names that hurt.
@@ -239,6 +307,22 @@ async function main() {
         truth.mustSurvive.set(id, [null, null]); // nothing to find; must simply not be "safe"
         break;
       }
+      case 14: { // GOLD50: buried valuable work in one of the 50 languages, round-robin
+        const [fname, body, symbols] = GOLD50[n % GOLD50.length];
+        await heapJunk(wt, n);
+        // Instantiate the snippet with a per-tree suffix: round-robin repeats a language once
+        // n exceeds 50, and two trees planting the SAME symbol makes it correctly non-unique —
+        // the first run of this grader asserted uniqueness anyway and manufactured 4 false
+        // failures. The suffix keeps every planted symbol genuinely unique. (The fifth failure
+        // was real: Dockerfile name variants had no parser mapping.)
+        const uniqSym = `${symbols[0]}_${n}`;
+        const instantiated = body.split(symbols[0]).join(uniqSym);
+        const rel = `gold50/g${n}/${fname}`; // per-tree DIR keeps realistic basenames — g98_Dockerfile is nobody's real filename; Dockerfile under a subdir is everyone's
+        await write(wt, rel, instantiated);
+        truth.mustSurvive.set(id, [rel, uniqSym]);
+        truth.gold50.set(id, uniqSym);
+        break;
+      }
       default: { // genuinely spent: junk only or empty
         if (n % 2) await heapJunk(wt, n);
         truth.disposable.add(id);
@@ -290,6 +374,18 @@ async function main() {
     if (va?.safe && vb?.safe) errors.push(`${a}+${b}: duplicated pair BOTH called safe — deleting both loses the work`);
   }
 
+  // GOLD50: the SYMBOL layer itself must have flagged these — byte survival alone would let a
+  // silently-regressed language extractor hide behind the file layer.
+  let goldSeen = 0;
+  for (const [id, sym] of truth.gold50) {
+    const u = report.unique.find((x) => x.id === id || x.id.endsWith(`/${id}`));
+    if (!u) { errors.push(`${id}: gold50 tree missing from unique report`); continue; }
+    const names = [...u.byLayer.uncommitted, ...u.byLayer.untracked, ...u.byLayer.committed].map((x) => x.key);
+    if (!names.some((k) => k.endsWith(`:${sym}`))) {
+      errors.push(`${id}: SYMBOL LAYER MISSED ${sym} — language extractor regressed for this tree`);
+    } else goldSeen++;
+  }
+  console.log(`  gold50 symbol-layer detections: ${goldSeen}/${truth.gold50.size}`);
   console.log(`  diagnostic verdicts: ${errors.length === 0 ? 'ALL CORRECT' : errors.length + ' WRONG'}`);
 
   /* ------------------------------------------------- the destructive loop ---- */
