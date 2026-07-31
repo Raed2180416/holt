@@ -283,6 +283,38 @@ export function git(argv, {
 }
 
 /** Run git and throw if it exits non-zero. For calls where non-zero genuinely is a failure. */
+
+/**
+ * Identity for git objects HOLT creates (rescue captures, verify probes).
+ *
+ * MEASURED BUG: `holt rescue` died with "Author identity unknown" in any repository that has no
+ * user.name/user.email configured — a fresh container, a CI runner, a new machine, a locked-down
+ * corporate image. The command whose entire purpose is preserving work that exists nowhere else
+ * failed precisely when asked to preserve it. It failed CLOSED (exit 1, no ref, no false claim of
+ * success), so nothing was lost — but nothing was saved either, and the user is then one
+ * `git worktree remove` away from losing it for real.
+ *
+ * The repository's own identity WINS whenever it is configured, so nothing changes for a normal
+ * developer and rescue commits stay attributable. The fallback exists only so that holt can still
+ * do its job where git would otherwise refuse to author anything at all.
+ *
+ * @returns {Promise<Record<string,string>>} env additions — empty when the repo has an identity
+ */
+export async function authorEnv(cwd) {
+  const read = async (key) => {
+    const r = await git(['config', key], { cwd }).catch(() => null);
+    return r && r.code === 0 ? r.stdout.trim() : '';
+  };
+  const [name, email] = await Promise.all([read('user.name'), read('user.email')]);
+  if (name && email) return {}; // configured — never override the user's own identity
+  return {
+    GIT_AUTHOR_NAME: name || 'holt',
+    GIT_AUTHOR_EMAIL: email || 'holt@localhost',
+    GIT_COMMITTER_NAME: name || 'holt',
+    GIT_COMMITTER_EMAIL: email || 'holt@localhost',
+  };
+}
+
 export async function gitOk(argv, opts) {
   const r = await git(argv, opts);
   if (r.code !== 0) {

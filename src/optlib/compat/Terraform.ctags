@@ -7,20 +7,25 @@
 # because silence reads as "nothing there", quietly claim two agents editing the same
 # infrastructure had nothing in common.
 #
-# Never loaded on a ctags that already has the parser — --langdef would collide with it.
+# The language is defined under a PRIVATE NAME. `--langdef=Terraform` on a ctags that already has
+# a Terraform parser is not a warning — it is FATAL, exit 1, and the entire ctags run dies, so a
+# single misjudged probe would take symbol extraction down for every modern user. A private name
+# cannot collide with a builtin, which makes this pack safe to load even when it is not needed.
+# holt still only loads it after MEASURING the gap, so a working builtin parser is never replaced
+# by these regexes; the private name is the second line of defence, not the first.
 #
---langdef=Terraform
---map-Terraform=+.tf
---map-Terraform=+.tfvars
---kinddef-Terraform=r,resource,resources
---kinddef-Terraform=d,data,data sources
---kinddef-Terraform=v,variable,variables
---kinddef-Terraform=o,output,outputs
---kinddef-Terraform=m,module,modules
---kinddef-Terraform=p,provider,providers
---regex-Terraform=/^[ \t]*resource[ \t]+"[^"]+"[ \t]+"([^"]+)"/\1/r/
---regex-Terraform=/^[ \t]*data[ \t]+"[^"]+"[ \t]+"([^"]+)"/\1/d/
---regex-Terraform=/^[ \t]*variable[ \t]+"([^"]+)"/\1/v/
---regex-Terraform=/^[ \t]*output[ \t]+"([^"]+)"/\1/o/
---regex-Terraform=/^[ \t]*module[ \t]+"([^"]+)"/\1/m/
---regex-Terraform=/^[ \t]*provider[ \t]+"([^"]+)"/\1/p/
+--langdef=HoltTerraform
+--map-HoltTerraform=+.tf
+--map-HoltTerraform=+.tfvars
+--kinddef-HoltTerraform=r,resource,resources
+--kinddef-HoltTerraform=d,data,data sources
+--kinddef-HoltTerraform=v,variable,variables
+--kinddef-HoltTerraform=o,output,outputs
+--kinddef-HoltTerraform=m,module,modules
+--kinddef-HoltTerraform=p,provider,providers
+--regex-HoltTerraform=/^[ \t]*resource[ \t]+"[^"]+"[ \t]+"([^"]+)"/\1/r/
+--regex-HoltTerraform=/^[ \t]*data[ \t]+"[^"]+"[ \t]+"([^"]+)"/\1/d/
+--regex-HoltTerraform=/^[ \t]*variable[ \t]+"([^"]+)"/\1/v/
+--regex-HoltTerraform=/^[ \t]*output[ \t]+"([^"]+)"/\1/o/
+--regex-HoltTerraform=/^[ \t]*module[ \t]+"([^"]+)"/\1/m/
+--regex-HoltTerraform=/^[ \t]*provider[ \t]+"([^"]+)"/\1/p/

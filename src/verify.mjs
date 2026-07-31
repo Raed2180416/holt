@@ -57,7 +57,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { git, gitOk } from './git.mjs';
+import { git, gitOk, authorEnv } from './git.mjs';
 import { scratchDir } from './symbols.mjs';
 import { discover } from './discover.mjs';
 import { scan } from './scan.mjs';
@@ -93,7 +93,7 @@ async function runAgainstTree(root, tree, command, { timeoutMs, label }) {
   let commit = null;
   try {
     const c = await gitOk(['commit-tree', tree, '-m', `holt verify: ${label}`],
-      { cwd: root, allowMutation: true });
+      { cwd: root, allowMutation: true, env: await authorEnv(root) });
     commit = c.stdout.trim();
 
     const add = await git(['worktree', 'add', '--detach', '--no-checkout', wt, commit],

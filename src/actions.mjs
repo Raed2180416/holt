@@ -20,7 +20,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { git, gitOk, pmap } from './git.mjs';
+import { git, gitOk, pmap, authorEnv } from './git.mjs';
 import { discover } from './discover.mjs';
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
@@ -249,7 +249,8 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
 
   // Build a tree from the worktree's CURRENT state in a scratch index.
   const tmpIndex = path.join(ws.path, '.git-holt-rescue-index');
-  const env = { GIT_INDEX_FILE: tmpIndex };
+  // holt authors this capture; a repo with no configured identity must still be rescuable.
+  const env = { GIT_INDEX_FILE: tmpIndex, ...(await authorEnv(ws.path)) };
   try {
     // Seed from HEAD so committed content is included, then overlay everything on disk.
     await gitOk(['read-tree', 'HEAD'], { cwd: ws.path, env, allowMutation: true });

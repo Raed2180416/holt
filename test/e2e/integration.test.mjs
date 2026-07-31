@@ -9,10 +9,13 @@
  * "blocks destruction" while being useless, so each deny test has an allow twin.
  */
 
+import { execFile } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
+const HOLT_BIN = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
 import path from 'node:path';
 import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
 import { assessCommand, buildBrief, classifyCommand } from '../../src/agent.mjs';
@@ -526,4 +529,57 @@ test('COVERAGE: git -C redirects which worktree a path-less verb acts on', async
   t.after(() => fx.cleanup());
   const v = await assessCommand(`git -C ${fx.wt('uniqueUncommitted')} reset --hard`, fx.root);
   assert.equal(v.decision, 'deny', `-C must be followed to the real target: ${JSON.stringify(v)}`);
+});
+
+test('IDENTITY: rescue works in a repository with no git identity configured', async (t) => {
+  // MEASURED BUG: `holt rescue` died with "Author identity unknown" wherever user.name/user.email
+  // were unset — a fresh container, a CI runner, a new machine, a locked-down corporate image.
+  // The command whose entire purpose is preserving work that exists nowhere else failed exactly
+  // when asked to preserve it. It failed CLOSED, so nothing was destroyed; but nothing was saved
+  // either, and the user is then one `git worktree remove` from losing it for real.
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-noident-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  // /dev/null for both config files is the only reliable way to make git see NO identity at all.
+  const blind = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+  const g = (args, cwd) => new Promise((res) => {
+    execFile('git', args, { cwd, env: blind }, (e, so, se) => res({ code: e?.code ?? 0, so, se }));
+  });
+
+  await g(['init', '-q', '-b', 'main', '.'], dir);
+  await fs.writeFile(path.join(dir, 'base.txt'), 'base\n');
+  await g(['-c', 'user.name=x', '-c', 'user.email=x@x', 'add', '-A'], dir);
+  await g(['-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-qm', 'base'], dir);
+  await g(['worktree', 'add', '-q', '--detach', 'wt1'], dir);
+  await fs.writeFile(path.join(dir, 'wt1', 'only-copy.js'), 'export function ONLY_COPY() {}\n');
+
+  // Confirm the premise: this repo really has no identity. Without this the test could pass
+  // because git found one, proving nothing.
+  const probe = await g(['config', 'user.email'], dir);
+  assert.equal(probe.so.trim(), '',
+    `PRECONDITION FAILED: the fixture must have NO identity, but git reports "${probe.so.trim()}" — ` +
+    'this test would otherwise pass without ever exercising the fallback');
+
+  const r = await new Promise((res) => {
+    execFile(process.execPath, [HOLT_BIN, 'rescue', 'wt1'], { cwd: dir, env: blind },
+      (e, so, se) => res({ code: e?.code ?? 0, so, se }));
+  });
+  assert.equal(r.code, 0, `rescue must succeed without a configured identity: ${r.se}`);
+
+  const refs = await g(['for-each-ref', 'refs/holt', '--format=%(refname)'], dir);
+  assert.match(refs.so, /refs\/holt\/rescue\/wt1/, 'the rescue ref must exist — not just a claim');
+  const show = await g(['show', 'refs/holt/rescue/wt1:only-copy.js'], dir);
+  assert.match(show.so, /ONLY_COPY/, 'the captured ref must actually contain the irreplaceable work');
+});
+
+test('IDENTITY: a configured repository keeps its OWN identity (never-worse)', async () => {
+  // The fallback must never override a developer's own authorship on their own commits.
+  const { authorEnv } = await import('../../src/git.mjs');
+  const fx = await newRepo('identity-configured');
+  try {
+    const env = await authorEnv(fx.root);
+    assert.deepEqual(env, {},
+      `a repo with a configured identity must get NO override, got ${JSON.stringify(env)}`);
+  } finally {
+    await fx.cleanup();
+  }
 });
