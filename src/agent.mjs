@@ -167,45 +167,81 @@ function gitCFlag(command) {
 }
 
 /** The worktree CONTAINING this directory — for verbs that act on wherever they are run. */
-function containingWorkstream(report, cwd) {
-  const abs = path.resolve(cwd || process.cwd());
+async function containingWorkstream(report, cwd) {
+  const abs = await canonicalPath(cwd || process.cwd());
   let best = null;
+  let bestLen = -1;
   for (const s of report.safe) {
     if (!s.path) continue;
-    const p = path.resolve(s.path);
-    if (abs === p || abs.startsWith(p + path.sep)) {
-      if (!best || p.length > path.resolve(best.path).length) best = s; // deepest match wins
-    }
+    const p = await canonicalPath(s.path);
+    if (underOrEqual(abs, p) && p.length > bestLen) { best = s; bestLen = p.length; } // deepest wins
   }
   return best;
 }
 
-function findWorkstream(report, target, cwd) {
+async function findWorkstream(report, target, cwd) {
   if (!target) return null;
-  const abs = path.resolve(cwd || process.cwd(), target);
-  const byPath = report.safe.find((s) => s.path && path.resolve(s.path) === abs);
+  const abs = await canonicalPath(path.resolve(cwd || process.cwd(), target));
+  let byPath = null;
+  for (const s of report.safe) {
+    if (s.path && samePath(await canonicalPath(s.path), abs)) { byPath = s; break; }
+  }
   if (byPath) return byPath;
   const base = path.basename(abs);
   return report.safe.find((s) => s.id === base || s.id.endsWith(`/${base}`)) ?? null;
 }
 
 
+
+/**
+ * Path comparison that survives macOS and Windows.
+ *
+ * MEASURED FAILURE, on two of three platforms: `rm -rf <a worktree holding the only copy of
+ * something>` was ALLOWED on macOS and Windows while correctly denied on Linux. The guard
+ * compared `path.resolve()` output, and path.resolve does NOT resolve symlinks — on macOS
+ * os.tmpdir() is /var/folders/... while git reports the real /private/var/folders/..., so the
+ * target never matched any worktree and the destructive command sailed through. Windows adds
+ * case-insensitivity and 8.3 short names to the same problem.
+ *
+ * So comparison is canonical (symlinks resolved) and case-folded where the filesystem is
+ * case-insensitive. realpath fails on a path that does not exist yet — that is fine and
+ * deliberate: fall back to resolve, because a target that does not exist cannot be a worktree.
+ */
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+async function canonicalPath(p) {
+  const abs = path.resolve(p);
+  try { return await fs.realpath(abs); } catch { return abs; }
+}
+
+const foldCase = (p) => (CASE_INSENSITIVE_FS ? p.toLowerCase() : p);
+
+/** a and b are the same directory. */
+const samePath = (a, b) => foldCase(a) === foldCase(b);
+
+/** `child` is `parent` or lives underneath it. */
+const underOrEqual = (child, parent) => {
+  const c = foldCase(child);
+  const q = foldCase(parent);
+  return c === q || c.startsWith(q.endsWith(path.sep) ? q : q + path.sep);
+};
+
 /**
  * Is this rm target actually a registered worktree? One `git worktree list` call, so the broad
  * rm rule costs nothing on the overwhelmingly common case of deleting build output.
  */
 async function targetIsWorktree(target, cwd) {
-  const abs = path.resolve(cwd || process.cwd(), target);
+  const abs = await canonicalPath(path.resolve(cwd || process.cwd(), target));
   const r = await git(['worktree', 'list', '--porcelain'], { cwd }).catch(() => null);
   if (!r || r.code !== 0) return true; // cannot tell -> fall through to the full check, never skip silently
   for (const line of r.stdout.split('\n')) {
     if (!line.startsWith('worktree ')) continue;
-    const wt = path.resolve(line.slice('worktree '.length).trim());
+    const wt = await canonicalPath(line.slice('worktree '.length).trim());
     // Dangerous iff the target IS a worktree root, or CONTAINS one (deleting a parent directory
     // takes the worktrees under it with it). Deleting something INSIDE a worktree — the common
     // `rm -rf node_modules` — is ordinary file work and must stay allowed; treating it as
     // destruction would flag every delete in the repo, since the repo root is itself a worktree.
-    if (wt === abs || wt.startsWith(abs + path.sep)) return true;
+    if (samePath(wt, abs) || underOrEqual(wt, abs)) return true;
   }
   return false;
 }
@@ -254,8 +290,8 @@ export async function assessCommand(command, cwd = process.cwd()) {
   const targets = hit.all
     ? report.safe.filter((s) => !s.safe)
     : hit.cwdTarget
-      ? [findWorkstream(report, gitCFlag(command) ?? cwd, cwd) ?? containingWorkstream(report, cwd)].filter(Boolean)
-      : [findWorkstream(report, hit.target, cwd)].filter(Boolean);
+      ? [(await findWorkstream(report, gitCFlag(command) ?? cwd, cwd)) ?? (await containingWorkstream(report, cwd))].filter(Boolean)
+      : [await findWorkstream(report, hit.target, cwd)].filter(Boolean);
 
   const holding = targets.filter((s) => !s.safe);
   if (holding.length === 0) {

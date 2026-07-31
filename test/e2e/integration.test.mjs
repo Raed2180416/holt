@@ -583,3 +583,56 @@ test('IDENTITY: a configured repository keeps its OWN identity (never-worse)', a
     await fx.cleanup();
   }
 });
+
+test('GATE: a worktree reached through a symlinked path is still protected', async (t) => {
+  // MEASURED ON macOS AND WINDOWS, both of which ALLOWED `rm -rf <worktree holding the only copy
+  // of something>` while Linux correctly denied it. The guard compared path.resolve() output, and
+  // path.resolve does NOT resolve symlinks: on macOS os.tmpdir() is /var/folders/... while git
+  // reports the real /private/var/folders/..., so the target matched no worktree and the command
+  // sailed through. Two of three supported platforms had no rm protection at all.
+  //
+  // Built by hand rather than from the shared fixture, because the geometry is the whole point:
+  // the worktree must live INSIDE the directory that is reached through a second path. A junction
+  // is used on Windows, where a plain symlink needs elevation.
+  const base = process.env.HOLT_TMPDIR || os.tmpdir();
+  const real = await fs.mkdtemp(path.join(base, 'holt-symlink-'));
+  const link = path.join(base, `holt-symlink-link-${path.basename(real)}`);
+  t.after(async () => {
+    await fs.rm(link, { force: true, recursive: false }).catch(() => {});
+    await fs.rm(real, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const g = (args, cwd) => new Promise((res) => {
+    execFile('git', args, { cwd, env: { ...process.env } }, (e, so) => res({ code: e?.code ?? 0, so }));
+  });
+  await g(['init', '-q', '-b', 'main', '.'], real);
+  await g(['config', 'user.email', 'x@x'], real);
+  await g(['config', 'user.name', 'x'], real);
+  await fs.writeFile(path.join(real, 'base.txt'), 'base\n');
+  await g(['add', '-A'], real);
+  await g(['commit', '-qm', 'base'], real);
+  await g(['worktree', 'add', '-q', '--detach', 'gold-scratch'], real);
+  await fs.writeFile(path.join(real, 'gold-scratch', 'only.js'), 'export function ONLY_COPY() {}\n');
+
+  try {
+    await fs.symlink(real, link, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch (e) {
+    const direct = await assessCommand(`rm -rf ${path.join(real, 'gold-scratch')}`, real);
+    assert.equal(direct.decision, 'deny',
+      `this platform refuses symlinks (${e.message}), so at minimum the direct path must be denied`);
+    return;
+  }
+
+  // The premise: git reports the REAL path, the command names the LINKED one. If those ever
+  // coincide this test proves nothing, so assert they differ.
+  const listed = (await g(['worktree', 'list', '--porcelain'], real)).so;
+  assert.ok(listed.includes(path.join(real, 'gold-scratch')),
+    'PRECONDITION: git must report the real path');
+  const viaLink = path.join(link, 'gold-scratch');
+  assert.notEqual(viaLink, path.join(real, 'gold-scratch'),
+    'PRECONDITION: the two routes must actually differ');
+
+  const v = await assessCommand(`rm -rf ${viaLink}`, link);
+  assert.equal(v.decision, 'deny',
+    `a worktree is no less protected for being named through a symlink: ${JSON.stringify(v)}`);
+});
