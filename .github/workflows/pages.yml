@@ -1,0 +1,40 @@
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify the site is self-contained
+        # A landing page that silently reaches out to a CDN contradicts the product's central
+        # promise. This fails the deploy rather than shipping a page that does.
+        run: |
+          if grep -oE 'src="https?://|href="https?://[^"]*\.(css|js)' site/index.html; then
+            echo "site/index.html references an external asset — the page must be self-contained"
+            exit 1
+          fi
+          echo "self-contained: no external assets"
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4
