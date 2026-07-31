@@ -87,7 +87,7 @@ test('SEQUENCING: co-located pairs entangle the ORDER even though triage hides t
   // two agents append different keys to the same registry file. They share no SYMBOL, so the
   // human triage view correctly stays quiet (admitting bare file overlap produced 616 findings
   // with 6 real ones on a real repo). But sequencing them in PARALLEL means the second one fails
-  // to apply — the flagship "landing layer" claim breaking on the exact case it exists for.
+  // to apply — the flagship sequencing claim breaking on the exact case it exists for.
   const report = {
     safe: [{ id: 'a' }, { id: 'b' }],
     unique: [{ id: 'a' }, { id: 'b' }],

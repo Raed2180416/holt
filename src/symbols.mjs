@@ -107,12 +107,79 @@ export async function ctagsLanguages() {
  * Honest coverage report: of the languages holt names in its own corpus, which can the installed
  * ctags actually parse? Used by `holt doctor` so the gap is visible rather than silent.
  */
+
+/**
+ * Minimal real source per language that distro ctags builds have historically shipped without.
+ *
+ * WHY THESE EXIST. `ctags --list-languages` is a DECLARATION, and holt trusted it. holt's optlib
+ * gap pack loads without error on an older ctags, so that ctags then *lists* Terraform and Elm
+ * while extracting nothing from either — and holt reported coverage it could not deliver. CI
+ * caught it as two silent languages; a user would have caught it as a worktree whose unique
+ * symbols were invisible, which is the failure mode holt exists to prevent.
+ *
+ * So capability is now DEMONSTRATED: parse a real fragment and require a symbol back. Presence,
+ * not a claim about presence.
+ */
+const PROBE_SOURCES = {
+  Terraform: ['holt-probe.tf', 'resource "aws_s3_bucket" "holt_probe" {\n  bucket = "b"\n}\n'],
+  Elm: ['holt-probe.elm', 'module HoltProbe exposing (add)\n\nadd : Int -> Int\nadd x =\n    x + 1\n'],
+  Julia: ['holt-probe.jl', 'function holt_probe(x)\n    x + 1\nend\n'],
+  Zig: ['holt-probe.zig', 'pub fn holtProbe() void {}\n'],
+  Nim: ['holt-probe.nim', 'proc holtProbe(): int =\n  1\n'],
+  Crystal: ['holt-probe.cr', 'def holt_probe\n  1\nend\n'],
+  Solidity: ['holt-probe.sol', 'contract HoltProbe {\n  function f() public {}\n}\n'],
+  Dart: ['holt-probe.dart', 'void holtProbe() {}\n'],
+  Swift: ['holt-probe.swift', 'func holtProbe() {}\n'],
+  Scala: ['holt-probe.scala', 'object HoltProbe {\n  def f = 1\n}\n'],
+};
+
+let _demoProbe = null;
+
+/**
+ * Which of PROBE_SOURCES this toolchain can actually extract symbols from.
+ * Memoized: one temp dir and one ctags invocation for the whole process.
+ */
+async function demonstratedLanguages() {
+  if (_demoProbe) return _demoProbe;
+  _demoProbe = (async () => {
+    const backend = await resolveBackend();
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-langprobe-'));
+    try {
+      const files = [];
+      const byFile = new Map();
+      for (const [lang, [file, src]] of Object.entries(PROBE_SOURCES)) {
+        await fs.writeFile(path.join(dir, file), src, 'utf8');
+        files.push(file);
+        byFile.set(file, lang);
+      }
+      const found = await symbolsOnDisk(dir, files, backend);
+      const ok = new Set();
+      for (const [file, lang] of byFile) {
+        if ((found.get(file) ?? []).length > 0) ok.add(lang);
+      }
+      return ok;
+    } catch {
+      return null; // probe itself broke — callers fall back to the declaration, never to silence
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  })();
+  return _demoProbe;
+}
+
 export async function languageCoverage(expected = []) {
   const probe = await ctagsLanguages();
   if (!probe.available) {
     return { available: false, total: probe.count, missing: [], note: 'ctags unavailable — the regex fallback applies to every language' };
   }
-  const missing = expected.filter((l) => !probe.languages.has(l));
+  // A language counts as supported only if this toolchain DEMONSTRABLY extracts a symbol from it.
+  // Falling back to the declaration when the demonstration itself fails keeps a broken probe from
+  // silently reporting zero coverage, which would read as "upgrade ctags" to someone whose ctags
+  // is fine.
+  const demonstrated = await demonstratedLanguages();
+  const missing = expected.filter((l) => (demonstrated && PROBE_SOURCES[l]
+    ? !demonstrated.has(l)
+    : !probe.languages.has(l)));
   return {
     available: true,
     total: probe.count,
@@ -120,7 +187,7 @@ export async function languageCoverage(expected = []) {
     supported: expected.length - missing.length,
     missing,
     note: missing.length
-      ? `this ctags cannot parse ${missing.join(', ')} — upgrade universal-ctags (distro packages lag; 6.x adds these)`
+      ? `this ctags lists but cannot actually parse ${missing.join(', ')} — upgrade universal-ctags (distro packages lag; 6.x adds these)`
       : 'every language holt names is supported by this ctags',
   };
 }

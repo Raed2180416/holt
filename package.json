@@ -1,7 +1,7 @@
 {
   "name": "holt",
   "version": "0.2.0",
-  "description": "holt\u2122 \u2014 the landing layer for parallel agent work: know what your agents produced, what collides, and what you are about to lose, before anything gets deleted.",
+  "description": "holt™ — know what your agents made, and don't lose any of it: what each worktree produced, which ones collide, which are safe to delete, and a guard that stops an agent deleting work that exists nowhere else.",
   "type": "module",
   "bin": {
     "holt": "./bin/holt.mjs"

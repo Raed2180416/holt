@@ -2,7 +2,7 @@
 /**
  * holt — public API.
  *
- * The landing layer for parallel agent work. One scan answers: what did N agents produce,
+ * Know what your agents made, and don't lose any of it. One scan answers: what did they produce,
  * what's redundant, what collides, what's safe to delete, and what you're about to lose.
  */
 

@@ -332,7 +332,7 @@ export async function collisions(scanResult, opts = {}) {
   // A MACHINE sequencing a landing order has the inverse cost. A false positive costs a human
   // three seconds of "not really"; a false NEGATIVE tells `order` that two workstreams editing
   // the same file are independent, they get sequenced in parallel, and the second one fails to
-  // apply. That is the flagship "landing layer" claim breaking on the exact case it exists for.
+  // apply. That is the flagship sequencing claim breaking on the exact case it exists for.
   //
   // So: `visible` is what humans read, `all` is what order/plan/gate consume, and `hotspots`
   // aggregates the hidden bucket BY FILE — "5 workstreams edit config/registry.mjs" is one

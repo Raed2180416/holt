@@ -40,7 +40,7 @@ import { loadPolicy, evaluatePolicy } from '../src/team/policy.mjs';
 import { fleetScan } from '../src/team/fleet.mjs';
 
 const USAGE = `
-holt — the landing layer for parallel agent work
+holt — know what your agents made, and don't lose any of it
 
 USAGE
   holt [command] [options]

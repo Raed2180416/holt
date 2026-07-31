@@ -120,12 +120,17 @@ test('language coverage: every case yields its named symbols', async (t) => {
   // so failing here would make the suite red on a correct build. Those cases are reported as
   // UNSUPPORTED-BY-THIS-CTAGS and asserted separately by the coverage-honesty test below —
   // everything the installed ctags CAN parse must still yield its symbols, or the suite goes red.
+  // "Has no parser" must be DEMONSTRATED, not read off `--list-languages`. holt's optlib pack
+  // loads cleanly on an older ctags, which then lists Terraform and Elm and extracts nothing from
+  // either — so the declaration says supported while the parse says silent.
   const probe = await ctagsLanguages();
+  const cov = await languageCoverage([...new Set(Object.values(CASE_LANGUAGE))]);
+  const demonstrablyMissing = new Set(cov.available ? cov.missing : []);
   const unsupported = [];
   const failures = [];
   for (const [name, , expected] of CASES) {
     const lang = CASE_LANGUAGE[name];
-    if (lang && probe.available && !probe.languages.has(lang)) { unsupported.push(`${name} (${lang})`); continue; }
+    if (lang && probe.available && demonstrablyMissing.has(lang)) { unsupported.push(`${name} (${lang})`); continue; }
     const names = new Set((found.get(name) ?? []).map((s) => s.name));
     const missing = expected.filter((e) => !names.has(e));
     if (missing.length) {
@@ -170,16 +175,31 @@ test('language coverage: the count is what we claim', async (t) => {
   const found = await symbolsOnDisk(dir, files, backend);
   // Same capability rule as above: count only the languages this ctags can actually parse, so
   // an older toolchain reports an honest smaller number instead of failing a correct build.
+  // Skip only what this toolchain DEMONSTRABLY cannot parse. `--list-languages` is a claim:
+  // holt's optlib pack loads cleanly on an older ctags, which then lists Terraform and Elm and
+  // extracts nothing from either. Asking the declaration made this test fail on a correct build
+  // and, worse, made `holt doctor` promise coverage it could not deliver.
   const probe = await ctagsLanguages();
+  const cov = await languageCoverage([...new Set(Object.values(CASE_LANGUAGE))]);
+  const unsupported = new Set(cov.available ? cov.missing : []);
   const parseable = files.filter((f) => {
     const lang = CASE_LANGUAGE[f];
-    return !(lang && probe.available && !probe.languages.has(lang));
+    return !(lang && probe.available && unsupported.has(lang));
   });
   const withSymbols = parseable.filter((f) => (found.get(f) ?? []).length > 0);
 
   assert.equal(withSymbols.length, parseable.length,
     `expected all ${parseable.length} parseable languages to yield symbols, got ${withSymbols.length}. ` +
     `Silent: ${files.filter((f) => !withSymbols.includes(f)).join(', ')}`);
+
+  // ANTI-VACUITY. A capability-aware skip is one broken probe away from proving nothing: if the
+  // demonstration returned "nothing is parseable", every case would skip and this test would pass
+  // while measuring zero languages. The floor makes that failure loud instead of green.
+  assert.ok(parseable.length >= CASES.length - 6,
+    `only ${parseable.length}/${CASES.length} languages were exercised — the probe is broken, ` +
+    `not your toolchain. Skipped: ${[...unsupported].join(', ')}`);
+  assert.ok(withSymbols.length >= 40,
+    `only ${withSymbols.length} languages yielded symbols — far below the shipped corpus`);
 });
 
 test('an unknown extension yields no symbols WITHOUT throwing', async (t) => {

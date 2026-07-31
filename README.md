@@ -2,9 +2,9 @@
 
 # 🌳 holt
 
-### The landing layer for parallel agent work
+### Know what your agents made, and don't lose any of it
 
-**You ran N agents. Holt answers: what did they produce, what's redundant, what collides,<br>what's safe to delete — and what you're about to lose.**
+**You ran a dozen agents overnight. holt tells you what each one actually made, which ones<br>collide, and which are safe to delete — and it stops an agent deleting work that exists nowhere else.**
 
 [![tests](https://img.shields.io/badge/tests-348%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
 [![mutation score](https://img.shields.io/badge/mutation%20score-26%2F26%20killed-brightgreen)](#the-test-suite-attacks-itself)
