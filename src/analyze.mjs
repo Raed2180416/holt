@@ -159,6 +159,21 @@ export function uniqueWork(scanResult) {
       const atRiskSymbols = byLayer.uncommitted.length + byLayer.untracked.length;
       const atRisk = Math.max(atRiskSymbols, uncommittedFileCount);
 
+      // THE PATH LAYER, CARRIED BESIDE THE SYMBOL LAYER — for the same reason the count above
+      // takes the max of the two. `byLayer` holds SYMBOLS, and a symbol is a lossy view of risk
+      // twice over: a file whose language has no parser (notes.md, a .env, a CSV, a design asset)
+      // contributes none, and a symbol two workstreams share is not unique so it is filtered out
+      // of `byLayer` entirely. Any consumer asking a question about PATHS — "is anything under
+      // infra/** at risk here" — must read paths, not symbol identities. Without this, the only
+      // path-shaped consumer in the product silently matched its globs against `kind:name`
+      // strings and could never fire. Same three layers, same names, so the two views cannot
+      // drift apart.
+      const pathsByLayer = {
+        committed: [...(w.committed?.files ?? [])],
+        uncommitted: [...(w.uncommitted?.files ?? [])],
+        untracked: [...(w.uncommitted?.untracked ?? [])],
+      };
+
       return {
         id: w.id,
         path: w.path,
@@ -166,6 +181,7 @@ export function uniqueWork(scanResult) {
         uniqueSymbolCount: uniqueSymbols.length,
         uniqueSymbols,
         byLayer,
+        pathsByLayer,
         uncommittedOnlyCount: atRisk,
         uncommittedFileCount,
         atRiskSymbolCount: atRiskSymbols,

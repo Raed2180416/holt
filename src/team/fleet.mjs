@@ -16,6 +16,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { git } from '../git.mjs';
 import { discover } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze } from '../analyze.mjs';
@@ -30,10 +31,47 @@ export class EntitlementError extends Error {
   }
 }
 
-/** Find git repositories under `roots`, bounded in depth so a home directory cannot be walked. */
+/**
+ * A directory's REPOSITORY IDENTITY — the thing that makes two directories the same repo.
+ *
+ * A linked worktree has a `.git` too (a file, not a directory), so "contains .git" answers
+ * "is this a working tree", never "is this a distinct repository". `--git-common-dir` is git's
+ * own answer to the second question: every worktree of one repository — main and linked alike —
+ * reports the SAME common dir, and two unrelated repositories can never share one.
+ *
+ * Returns null when git cannot answer (a stray file literally named `.git`, an unreadable dir, no
+ * git on PATH). Null is never treated as "same as something else": the caller falls back to the
+ * path so the directory is still REPORTED and fails loudly downstream. Silently dropping a
+ * directory holt could not identify would be the fail-open shape this project refuses everywhere.
+ */
+async function repoIdentity(dir) {
+  try {
+    const r = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: dir });
+    if (r.code !== 0) return null;
+    const out = r.stdout.trim();
+    return out ? path.resolve(out) : null;
+  } catch {
+    return null; // GitRefused/GitFailed — unidentifiable, not "already seen"
+  }
+}
+
+/**
+ * Find git repositories under `roots`, bounded in depth so a home directory cannot be walked.
+ *
+ * ONE REPOSITORY IS ONE ROW, however many worktrees it has. Keying the seen-set on the directory
+ * path counted every linked worktree as its own repository, so a team running holt on the very
+ * layout holt exists for — one repo, N agent worktrees parked beside it — saw `repositories: 4`
+ * where git reports 3, and every total derived from those rows (workstreams, atRisk, disposable,
+ * collisions) double-counted the same work. An inflated exposure number is not a harmless
+ * cosmetic: it is the first number an enterprise buyer checks against `git worktree list`.
+ *
+ * When several working trees of one repository are found, the MAIN one is kept — it is the tree
+ * whose own `.git` is the common dir — falling back to the shortest path (then lexicographic) so
+ * the answer never depends on readdir order.
+ */
 export async function findRepos(roots, { maxDepth = 3 } = {}) {
-  const found = [];
-  const seen = new Set();
+  const byRepo = new Map(); // repository identity -> chosen working-tree path
+  const candidates = [];
 
   async function walk(dir, depth) {
     if (depth > maxDepth) return;
@@ -41,8 +79,7 @@ export async function findRepos(roots, { maxDepth = 3 } = {}) {
     try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
     const isRepo = entries.some((e) => e.name === '.git');
     if (isRepo) {
-      const real = path.resolve(dir);
-      if (!seen.has(real)) { seen.add(real); found.push(real); }
+      candidates.push(path.resolve(dir));
       return; // never descend into a repository: its worktrees are holt's business, not the walker's
     }
     for (const e of entries) {
@@ -53,7 +90,24 @@ export async function findRepos(roots, { maxDepth = 3 } = {}) {
   }
 
   for (const r of roots) await walk(path.resolve(r), 0);
-  return found.sort();
+
+  // Rank: the main working tree first, then the shortest path, then lexicographic. Every term is
+  // a property of the candidate itself, so the winner is the same whatever order the walk found
+  // them in — a fleet total that changed with filesystem ordering would be unauditable.
+  const rank = (p, id) => [id && path.dirname(id) === p ? 0 : 1, p.length, p];
+  const better = (a, b) => {
+    for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return a[i] < b[i]; }
+    return false;
+  };
+
+  for (const p of candidates) {
+    const id = await repoIdentity(p);
+    const key = id ?? `unidentified:${p}`;
+    const prev = byRepo.get(key);
+    if (!prev || better(rank(p, id), rank(prev, id))) byRepo.set(key, p);
+  }
+
+  return [...byRepo.values()].sort();
 }
 
 /**

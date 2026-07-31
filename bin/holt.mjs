@@ -56,7 +56,8 @@ COMMANDS
   order               landing order: parallel lanes + min-entanglement sequence
   partition           pre-flight split for N agents  [--agents <n>]   (collision-free start map)
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
-  journal             audit trail of every protect / rescue / clean / branch-delete
+  journal             audit trail of every protect / unprotect / rescue / clean / branch-delete,
+                      each stamped with WHO (user, host, agent session when one is declared)
                       --summary: the ROI view — losses prevented, hours saved
   fleet <dir>...      every repository under <dir>: where work sits unlanded   [team]
   license             activate | status | deactivate  (team/enterprise features)
@@ -850,6 +851,7 @@ async function main() {
       out(`    ${paint('bold', String(b.workstreamsProtected).padStart(4))}  workstream(s) protected (holding work found nowhere else)`);
       out(`    ${paint('bold', String(b.worktreesReclaimed).padStart(4))}  disposable worktree(s) reclaimed`);
       out(`    ${paint('bold', String(b.branchesDeleted).padStart(4))}  landed branch(es) cleaned up`);
+      out(`    ${paint('bold', String(b.protectionsReleased).padStart(4))}  protection(s) released (recorded with who released them)`);
       out(`\n  ${paint('grey', `~${s.estimatedHoursSaved}h saved (conservative planning estimate) · ${s.events} events since ${s.since ? s.since.slice(0,10) : '—'}`)}`);
       out(`  ${paint('grey', s.note)}\n`);
       return;
@@ -863,14 +865,22 @@ async function main() {
       const fmt = String(opts.exportFmt).toLowerCase();
       if (fmt === 'json') return emitJson({ exportedAt: new Date().toISOString(), repo: opts.cwd, count: events.length, events });
       if (fmt === 'csv') {
-        const cols = ['at', 'action', 'id', 'name', 'path', 'branch', 'ref', 'commit', 'reason', 'evidence'];
+        // WHO gets its own columns. A compliance reviewer filters and pivots on the actor; a
+        // nested JSON blob in one cell is not something a spreadsheet can group by.
+        const cols = ['at', 'action', 'actorUser', 'actorHost', 'actorAgent', 'actorSession',
+          'id', 'name', 'path', 'branch', 'ref', 'commit', 'reason', 'evidence'];
         const esc = (v) => {
           if (v == null) return '';
           const s2 = Array.isArray(v) ? v.join('; ') : String(typeof v === 'object' ? JSON.stringify(v) : v);
           return /[",\n]/.test(s2) ? `"${s2.replace(/"/g, '""')}"` : s2;
         };
+        // An event written before actor attribution existed has no actor, and 'unknown' is the
+        // honest value for it — never a guess at who it must have been.
+        const cell = (e, c) => (c.startsWith('actor')
+          ? (e.actor?.[c.slice(5).toLowerCase()] ?? 'unknown')
+          : e[c]);
         out(cols.join(','));
-        for (const e of events) out(cols.map((c) => esc(e[c])).join(','));
+        for (const e of events) out(cols.map((c) => esc(cell(e, c))).join(','));
         return;
       }
       process.stderr.write(paint('red', `holt journal: unknown export format '${opts.exportFmt}' (json | csv)\n`));
@@ -882,7 +892,12 @@ async function main() {
     for (const e of events) {
       if (e.corrupt) { out(`  ${paint('red', 'corrupt line:')} ${e.corrupt.slice(0, 80)}`); continue; }
       const what = [e.id ?? e.name, e.ref, e.evidence ?? e.reason].filter(Boolean).join('  ');
-      out(`  ${paint('grey', e.at)}  ${paint('bold', e.action)}  ${what}`);
+      // WHO, printed inline. An entry from before attribution existed prints 'unknown', which is
+      // the honest reading of it — never a back-filled guess.
+      const a = e.actor ?? {};
+      const who = `${a.user ?? 'unknown'}@${a.host ?? 'unknown'}`
+        + (a.agent && a.agent !== 'unknown' ? ` via ${a.agent}` : '');
+      out(`  ${paint('grey', e.at)}  ${paint('bold', e.action)}  ${paint('grey', who)}  ${what}`);
     }
     return;
   }

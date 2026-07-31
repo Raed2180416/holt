@@ -111,7 +111,17 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
   };
 }
 
-/** Release protection. Only ever unlocks locks holt placed. */
+/**
+ * Release protection. Only ever unlocks locks holt placed.
+ *
+ * JOURNALLED LIKE EVERY OTHER MUTATION, and this is the one that most needs it. protect, rescue,
+ * clean-remove and branch-delete all wrote an audit line; unprotect — the single action that
+ * REMOVES the guard standing between irreplaceable work and a `--force` — wrote none. An audit
+ * trail whose only gap is the risky action is not a partial audit trail, it is a misleading one:
+ * a reviewer reading it sees protections applied and never released, so the record positively
+ * asserts a safer state than the repository is in. Same shape as the others (action, id, path,
+ * reason, actor), so one reader parses all of them.
+ */
 export async function unprotect(cwd, { id = null, force = false, ...opts } = {}) {
   const { report } = await assess(cwd, opts);
   const targets = report.graph.nodes.filter((n) => (id ? n.id === id : true));
@@ -123,12 +133,22 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
     if (!st.locked) continue;
     // Locks placed by something else are left alone: holt must not quietly disarm a protection
     // a human or another tool put there deliberately.
-    if (!st.reason.startsWith(LOCK_PREFIX) && !force) {
+    const foreign = !st.reason.startsWith(LOCK_PREFIX);
+    if (foreign && !force) {
       actions.push({ id: ws.id, action: 'skipped-foreign-lock', reason: st.reason });
       continue;
     }
     const r = await git(['worktree', 'unlock', ws.path], { cwd, allowMutation: true });
     actions.push({ id: ws.id, action: r.code === 0 ? 'unlocked' : 'failed', reason: r.stderr.trim() || st.reason });
+    if (r.code === 0) {
+      // `forced` and `foreignLock` are recorded because overriding a protection somebody else
+      // placed is a materially different act from releasing holt's own, and a compliance review
+      // that cannot tell them apart is not a review.
+      await appendEvent(cwd, {
+        action: 'unprotect', id: ws.id, path: ws.path,
+        reason: st.reason, forced: !!force, foreignLock: foreign,
+      });
+    }
   }
   return { actions, unlocked: actions.filter((a) => a.action === 'unlocked').length };
 }

@@ -155,7 +155,7 @@ And the v0.2 stack that turns the analysis into motion:
 | order | which workstreams land in parallel, and the sequence for the entangled rest | `holt order` — exact lanes, heuristic peel, every watched merge named |
 | partition | how N agents should split the repo *before* they collide | `holt partition --agents 3` — disjoint buckets, each observed hotspot gets one owner |
 | branches | the other graveyard: branches nobody dares delete | `holt branches [--apply]` — content-landed squash merges detected; `--apply` uses `-d`, never `-D` |
-| journal | who deleted what, months later, with the evidence | `holt journal` — append-only audit of every protect / rescue / clean / branch-delete |
+| journal | who deleted what, months later, with the evidence | `holt journal` — append-only audit of every protect / unprotect / rescue / clean / branch-delete, each stamped with who |
 
 Plus the two layers nobody else has:
 

@@ -24,9 +24,14 @@ test('roi: prevented losses count blocks and verified rescues, and only those', 
     { at: '2026-07-04T00:00:00Z', action: 'clean-remove', id: 'junk1' },
     { at: '2026-07-04T00:01:00Z', action: 'removed', id: 'junk2' },
     { at: '2026-07-05T00:00:00Z', action: 'branch-delete', name: 'landed' },
+    { at: '2026-07-05T00:01:00Z', action: 'unprotect', id: 'wt1' },
     { at: '2026-07-05T00:02:00Z', action: 'skipped' }, // must not count toward anything
   ];
   const s = summarizeJournal(events);
+  // Protections RELEASED are reported beside protections applied. A tally showing only the guards
+  // holt put up, never the ones taken down, overstates the protection actually standing.
+  assert.equal(s.breakdown.protectionsReleased, 1);
+  assert.equal(s.preventedLosses, 3, 'releasing a protection is not a prevented loss');
   assert.equal(s.breakdown.destructiveCommandsBlocked, 2);
   assert.equal(s.breakdown.workstreamsRescued, 1);
   assert.equal(s.breakdown.workstreamsProtected, 1);
