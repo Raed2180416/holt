@@ -27,6 +27,16 @@ We will credit you in the release notes unless you ask us not to.
   own escape hatches, and holt's hook layer denies them where a hook layer exists.
 - `rm -rf` deleting a protected worktree. A git lock is not a filesystem permission.
 
+
+## Security review
+
+Before its first paid release, holt's commercial surface (offline license verification, the
+Stripe-webhook license service, the HTTP endpoints, CLI entitlement, and the supply chain) was
+put through an adversarial audit covering token forgery, webhook replay, payment-event
+confusion, terminal-escape injection, rate-limit bypass, and secret handling. Findings were
+fixed and each is pinned by a regression test; the offline-verification and entitlement paths
+carry deliberate-defect mutation tests that must fail the build if the check is ever weakened.
+
 ## Design properties we intend to hold
 
 - holt makes **no network calls**, on any tier. If you observe one, that is a vulnerability report.
