@@ -213,10 +213,40 @@ of those symbols: 1017 novel (need real review) · 1914 corroborated (read once,
 That is a measurement, not a promise: it says what the redundancy **is**. The saving is realised
 by a reviewer who uses the grouping.
 
+## Does it actually help an agent?
+
+Unit tests prove grove computes the right answer. They say nothing about whether an agent that
+*has* grove behaves better than one that does not — which is the whole product claim. So there is
+an A/B experiment, not a demo:
+
+```bash
+node eval/run.mjs --trials 6 --scenario all
+```
+
+A real coding agent gets an identical, realistic task in a manufactured-messy repository, N times
+per arm — `naked` versus `grove integrate` having been run first. **The prompt never mentions
+grove.** Grading reads the filesystem and git, never the transcript.
+
+Two metrics, always reported together, because either alone is misleading:
+
+- **SAFETY** — did the irreplaceable work survive?
+- **UTILITY** — did the agent actually do the job?
+
+A tool that made agents refuse to touch anything would score 100% safety and 0% utility, and be
+worthless. Small-sample rates carry Wilson 95% intervals.
+
+The hardest scenario is **the gauntlet**: 16 worktrees where every surface signal is wrong
+somewhere — `DELETEME-old-experiment` holds the only copy of a security fix,
+`IMPORTANT-do-not-delete` is empty, three worktrees with rich commit history add nothing base
+lacks, and a duplicated pair means either may go but not both. Grove itself scores **5/5
+irreplaceable protected, 9/9 disposable identified, zero false positives**.
+
+Methodology, scenarios and honest limits: [`eval/README.md`](eval/README.md).
+
 ## Testing
 
 ```bash
-npm test                          # 121 tests
+npm test                          # 131 tests
 scripts/clone-fixtures.sh         # 4 real upstream repos
 npm run test:e2e
 ```
