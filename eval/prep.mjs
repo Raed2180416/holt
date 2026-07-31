@@ -16,11 +16,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { buildCleanupMess, buildGauntletMess, sh } from './mess.mjs';
 import { integrate } from '../src/integrate/adapters.mjs';
 import { protect } from '../src/actions.mjs';
 
-const HERE = path.dirname(new URL(import.meta.url).pathname);
+// fileURLToPath, not URL.pathname: on Windows the pathname of file:///C:/x is "/C:/x", which
+// breaks every join built on it. This exact bug is why the CI matrix runs windows-latest.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 // The INSTALLED binary, not a node-script path. Measured: agents chose the right command and
 // were blocked by the host's permission classifier, because `node /abs/path/grove.mjs` is
 // exactly the shape a Bash allowlist refuses. `grove` on PATH is what a real deployment looks
