@@ -213,6 +213,43 @@ test('INSTALL: MCP targets cover the major hosts, split by scope', async (t) => 
   }
 });
 
+test('INSTALL: each host gets the entry SHAPE it actually reads', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-shapes-'));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-shapeshome-'));
+  t.after(() => Promise.all([
+    fs.rm(dir, { recursive: true, force: true }),
+    fs.rm(home, { recursive: true, force: true }),
+  ]));
+
+  const { installMcp, mcpServerEntry } = await import('../../src/integrate/adapters.mjs');
+
+  // Verified against a live `opencode debug config`: opencode reads
+  //   mcp: { name: { type: "local", command: [...] } }
+  // NOT the mcpServers/{command,args} shape everyone else uses. Writing the wrong shape
+  // produces a config the host silently ignores — installed, and inert.
+  const oc = mcpServerEntry('grove', 'opencode');
+  assert.equal(oc.type, 'local');
+  assert.deepEqual(oc.command, ['grove', 'mcp']);
+
+  const std = mcpServerEntry('grove');
+  assert.equal(std.command, 'grove');
+  assert.deepEqual(std.args, ['mcp']);
+
+  // A bin carrying arguments must be split, not passed whole — same defect class that made the
+  // OpenCode plugin gate fail open.
+  const withArgs = mcpServerEntry('node /path/to/grove.mjs', 'opencode');
+  assert.deepEqual(withArgs.command, ['node', '/path/to/grove.mjs', 'mcp']);
+  const stdWithArgs = mcpServerEntry('npx grovekit');
+  assert.equal(stdWithArgs.command, 'npx');
+  assert.deepEqual(stdWithArgs.args, ['grovekit', 'mcp']);
+
+  // And end-to-end: the file opencode reads must contain the opencode shape.
+  await installMcp(dir, { home, scope: 'project' });
+  const written = JSON.parse(await fs.readFile(path.join(dir, 'opencode.json'), 'utf8'));
+  assert.equal(written.mcp.grove.type, 'local');
+  assert.ok(Array.isArray(written.mcp.grove.command));
+});
+
 test('INSTALL: user-global config is NEVER created from nothing', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-mcp2-'));
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-home2-'));

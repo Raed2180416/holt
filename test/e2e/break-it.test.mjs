@@ -278,6 +278,34 @@ test('ATTACK: a huge fan-out where the needle is a single deleted line', async (
   mustNotBeSafe(report, 'the-quiet-one', 'a one-line change buried under 12 noisy workstreams');
 });
 
+test('ATTACK: the SAME work in TWO worktrees and nowhere else', async (t) => {
+  const fx = await newRepo('twins');
+  t.after(() => fx.cleanup());
+
+  // The subtle one. `uniqueWork` counts a symbol as unique only when exactly ONE workstream has
+  // it — so a symbol present in two worktrees is unique to neither. If safety rested on symbol
+  // uniqueness alone, BOTH would be marked disposable, and deleting both would destroy work that
+  // no amount of per-worktree reasoning would have flagged.
+  const body = 'export function ONLY_IN_THE_TWINS() { return 42; }\n';
+
+  const a = await fx.worktree('twin-uncommitted-a');
+  const b = await fx.worktree('twin-uncommitted-b');
+  await fx.write('src/twin.js', body, a);
+  await fx.write('src/twin.js', body, b);
+
+  const c = await fx.worktree('twin-committed-a');
+  const d = await fx.worktree('twin-committed-b');
+  await fx.write('src/twin2.js', body.replace('ONLY_IN_THE_TWINS', 'ONLY_IN_COMMITTED_TWINS'), c);
+  await fx.commit('committed twin a', c);
+  await fx.write('src/twin2.js', body.replace('ONLY_IN_THE_TWINS', 'ONLY_IN_COMMITTED_TWINS'), d);
+  await fx.commit('committed twin b', d);
+
+  const report = await inspect(fx.root);
+  for (const id of ['twin-uncommitted-a', 'twin-uncommitted-b', 'twin-committed-a', 'twin-committed-b']) {
+    mustNotBeSafe(report, id, 'work duplicated across exactly two worktrees, absent from base');
+  }
+});
+
 /* =================================================== the gate under attack ==== */
 
 test('ATTACK: destructive commands disguised to slip past the classifier', async (t) => {

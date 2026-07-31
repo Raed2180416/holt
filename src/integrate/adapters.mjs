@@ -113,6 +113,10 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     { host: 'cursor', scope: 'project', file: path.join(repoRoot, '.cursor', 'mcp.json'), key: 'mcpServers' },
     { host: 'vscode / copilot', scope: 'project', file: path.join(repoRoot, '.vscode', 'mcp.json'), key: 'servers' },
     { host: 'gemini-cli', scope: 'project', file: path.join(repoRoot, '.gemini', 'settings.json'), key: 'mcpServers' },
+    // OpenCode uses a DIFFERENT key AND a different entry shape. Verified against a live
+    // `opencode debug config`: mcp: { name: { type: "local", command: [bin, ...args] } }.
+    // Writing the mcpServers shape here would produce a config opencode silently ignores.
+    { host: 'opencode', scope: 'project', file: path.join(repoRoot, 'opencode.json'), key: 'mcp', shape: 'opencode' },
   ];
   const user = [
     { host: 'cursor', scope: 'user', file: path.join(home, '.cursor', 'mcp.json'), key: 'mcpServers' },
@@ -120,12 +124,23 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     { host: 'gemini-cli', scope: 'user', file: path.join(home, '.gemini', 'settings.json'), key: 'mcpServers' },
     { host: 'zed', scope: 'user', file: path.join(home, '.config', 'zed', 'settings.json'), key: 'context_servers' },
     { host: 'continue', scope: 'user', file: path.join(home, '.continue', 'config.json'), key: 'mcpServers' },
+    { host: 'opencode', scope: 'user', file: path.join(home, '.config', 'opencode', 'opencode.json'), key: 'mcp', shape: 'opencode' },
   ];
   return scope === 'user' ? user : scope === 'all' ? [...project, ...user] : project;
 }
 
-export function mcpServerEntry(bin = 'grove') {
-  return { command: bin, args: ['mcp'], env: {} };
+/**
+ * The server entry, in whichever shape the host expects.
+ *
+ * `bin` may carry arguments ("node /path/grove.mjs", "npx grovekit"), so it is split rather than
+ * passed whole — the same defect that made the OpenCode plugin gate fail open.
+ */
+export function mcpServerEntry(bin = 'grove', shape = 'standard') {
+  const [cmd, ...prefix] = String(bin).trim().split(/\s+/);
+  if (shape === 'opencode') {
+    return { type: 'local', command: [cmd, ...prefix, 'mcp'], enabled: true };
+  }
+  return { command: cmd, args: [...prefix, 'mcp'], env: {} };
 }
 
 /**
@@ -161,7 +176,7 @@ export async function installMcp(repoRoot, {
 
     cfg[t.key] ??= {};
     const already = !!cfg[t.key].grove;
-    cfg[t.key].grove = mcpServerEntry(bin);
+    cfg[t.key].grove = mcpServerEntry(bin, t.shape);
 
     await fs.mkdir(path.dirname(t.file), { recursive: true });
     await fs.writeFile(t.file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
