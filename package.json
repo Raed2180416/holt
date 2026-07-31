@@ -29,16 +29,29 @@
   "keywords": [
     "git",
     "worktree",
-    "jujutsu",
     "ai-agents",
-    "parallel-agents",
-    "merge",
     "mcp",
-    "code-review"
+    "agentic",
+    "developer-tools",
+    "cli",
+    "git-worktree",
+    "parallel-development",
+    "claude-code",
+    "codex",
+    "cursor"
   ],
   "license": "FSL-1.1-MIT",
   "optionalDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "jscpd": "^5.0.14"
+  },
+  "author": "Contrare",
+  "homepage": "https://raed2180416.github.io/holt/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Raed2180416/holt.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Raed2180416/holt/issues"
   }
 }

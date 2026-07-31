@@ -289,7 +289,11 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       ref = `${baseRef}-${n}`;
     }
 
-    await gitOk(['update-ref', ref, commit], { cwd: ws.path, allowMutation: true });
+    // `--create-reflog` forces a reflog for this ref even though refs/holt/* is outside git's
+    // default logged namespaces. Belt-and-braces on top of the never-overwrite rule above: if a
+    // future change ever did move one of these refs, the previous value would still be
+    // recoverable from `git reflog show <ref>` instead of becoming unreachable silently.
+    await gitOk(['update-ref', '--create-reflog', ref, commit], { cwd: ws.path, allowMutation: true });
 
     // VERIFY before claiming success. A rescue that silently captured nothing is worse than no
     // rescue at all, because it licenses a deletion.

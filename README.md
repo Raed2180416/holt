@@ -6,8 +6,8 @@
 
 **You ran N agents. Holt answers: what did they produce, what's redundant, what collides,<br>what's safe to delete — and what you're about to lose.**
 
-[![tests](https://img.shields.io/badge/tests-199%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
-[![mutation score](https://img.shields.io/badge/mutation%20score-13%2F13%20killed-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-330%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+[![mutation score](https://img.shields.io/badge/mutation%20score-25%2F25%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
@@ -48,6 +48,28 @@ In one measured case, a 39-worktree repository's committed layer flagged **4** i
 > An unaided agent deleted **13 of 16 worktrees including all five irreplaceable ones** — *"wip-1, wip-2: only contained untracked files"* — and kept two empty decoys because they were named `IMPORTANT-do-not-delete` and `KEEP-release-candidate`. Names in both directions, content in neither.
 
 Holt prevented that loss in **every** protected trial.
+
+---
+
+## The gap holt fills
+
+**Git has no primitive that relates *uncommitted* work across worktrees** — `merge-tree` only ever
+sees commits. So the moment several agents are mid-flight, every existing tool is reasoning about
+names, dates and commit counts, none of which tell you whether deleting something loses the only
+copy of it.
+
+| Tool | What it gives you | What it can't see |
+|---|---|---|
+| **Claude Code** worktree locking | Locks worktrees *by session* — a session can't clobber its own trees | Another vendor's agent, or content: it locks by *who*, not by *what's at stake* |
+| **GitButler** | Virtual branches — a genuinely different, very good model that avoids worktrees | Requires adopting its git client; holt adds to the worktree flow you already run |
+| **Worktree managers** (wktr, worktrunk, JetBrains) | Nicer listing, switching, creation | Relationships: what's redundant, what collides, what holds the only copy |
+| **Merge queues** (Mergify, Graphite) | Gate the *shared branch* at PR time, in the cloud | Work not yet committed or pushed — where the loss actually happens |
+| **holt** | The **content relationship** between in-flight workstreams — and git itself refuses the delete | Stated plainly: gitignored files, and cloud agents with no local worktree |
+
+**In one sentence:** everyone else manages worktrees or gates the shared branch; holt is the only
+layer that reads what's *inside* them and refuses, through git itself, to lose the only copy of
+something — across every agent, entirely on your machine. No agent vendor has a reason to protect
+a *rival's* sessions, which is why the cross-agent plane stays holt's.
 
 ---
 
@@ -137,20 +159,6 @@ $ holt clean --apply                      # remove what provably holds nothing, 
 
 ---
 
-## How holt is different from what you already have
-
-The honest comparison, because "why not the tool I already use" is the first question worth asking:
-
-| | What it does | Where holt differs |
-|---|---|---|
-| **Claude Code worktree locking** | Locks worktrees *by session* — a session can't clobber its own trees | holt locks *by content* — the thing that actually determines whether deletion loses work — and works across **every** agent, not just one vendor's sessions |
-| **GitButler** | Virtual branches avoid worktrees, so its agents don't hit this failure mode; a full git client | holt is not a git client — it's a read-only safety + relationship layer you add to the worktree workflow you already run, across any agent; it never asks you to change how you branch |
-| **Worktree managers** (wktr, worktrunk, wt-cli, JetBrains) | Nicer *listing and switching* of worktrees | none model the **content relationship** — what's redundant, what collides, what holds the only copy — which is the part that loses work |
-| **Merge queues** (Mergify, Graphite) | Gate the *shared branch* at PR time in the cloud | holt gates the *local worktree* before anything is committed or pushed, offline, for work git can't even see yet |
-
-The one-sentence version: **everyone else manages worktrees or gates the shared branch; holt is the only layer that reads the *content relationship* between in-flight agent work and refuses, via git itself, to lose the only copy of something — across every agent, entirely local.** No single agent vendor has any reason to protect a *rival's* sessions; the cross-agent plane is the part that stays holt's.
-
----
 
 ## One command to integrate everything
 
@@ -184,15 +192,49 @@ Every optional dependency degrades **loudly**: `holt doctor` shows exactly what'
 
 ## The test suite attacks itself
 
-199 tests, and the interesting ones are the hostile ones:
+330 tests, and the interesting ones are the hostile ones:
 
-- **13/13 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
+- **25/25 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
 - **The CLI is tested as a binary**, because at one point 169 tests passed while `holt protect` printed *"unknown command"* — every test called functions directly and the dispatcher was dead. Exit codes are asserted per command; they're the contract scripts chain on.
 - **The eval polices itself.** It refuses to score trials the agent never ran (a credits-exhausted run once fabricated "+17 pts" from agents that did nothing — that scenario is now a permanent regression test), and its answer key is proven unreachable from trial repos after an agent found it and scored by reading it.
 - Byte-for-byte proof that scanning changes nothing; jj op-log proven unchanged; read-only vs MUTATE tiers with mutation unreachable without explicit opt-in — `reset --hard`, `push`, `stash` refused even *with* it.
 
 Five times in this project, the thing meant to detect a problem wasn't itself under test — a ctags flag silently dropping symbols, the fabricated eval result, a grader checking the wrong path, the leaked answer key, and the mutation harness itself executing the very defect it simulated against the live repo. Each one is now a named regression test or a permanent tripwire. That history is why the suite looks the way it does.
+
+---
+
+## Verified, and not yet verified
+
+Nothing here is aspirational. This table says exactly what has been exercised and what has not,
+because a claim you cannot back is worse than a gap you name.
+
+**Verified end to end, on a real machine**
+
+| Surface | How it was verified |
+|---|---|
+| Core scan, safety, actions, CLI | 330 tests + 25/25 deliberate-defect mutation kills, run on every commit |
+| Linux / macOS / Windows core | CI matrix runs the safety classifier, detection, CLI-as-binary, actions and the invariant fuzzer on all three |
+| Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
+| OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |
+| MCP protocol | Live over real stdio: initialize → 14 tools → `tools/call` returning correct data |
+| Crush, Cursor, Gemini CLI, VS Code/Copilot MCP config | Written by `holt integrate` and validated as correct JSON in the shape each host reads |
+| Language extraction | 50 languages asserted by symbol name; the count is now derived from the *installed* ctags, never claimed blind |
+| Purchase path | 12 tests over a real socket: signed webhook → license → the CLI accepts it; forged webhook mints nothing |
+
+**Should work, but not yet verified by us** — treat as unproven until it is:
+
+| Surface | Why it should work | What is unproven |
+|---|---|---|
+| Codex, Copilot CLI, Cline, Amp, Goose, Factory, Junie | They read AGENTS.md and/or speak MCP, both of which holt writes correctly | We have not driven each host live; their *deny hooks* are not wired (see [HOSTS.md](HOSTS.md)) |
+| jj (Jujutsu) backend | Implemented and unit-tested against a real jj repo | Not exercised across a long multi-workspace session |
+| Windows *end-to-end* agent flows | The core suite passes on Windows in CI | Hooks + MCP under Windows agent hosts are untested by us |
+| Very large repos (10k+ files, 200+ worktrees) | Scans are linear and bounded; measured to 1000 worktrees synthetically | Not measured on a real repository of that size |
+| git-LFS, submodules, sparse-checkout | holt reads git's own output, which handles these | No dedicated test fixture yet |
+
+**Known not to apply** — stated plainly rather than glossed: cloud/ephemeral agents (Google Jules,
+Replit Agent, Devin cloud) have no local worktree, so the lock cannot protect them; holt reaches
+them only through advisory AGENTS.md. Gitignored files are invisible to git, therefore to holt.
 
 ---
 
@@ -265,4 +307,6 @@ holt is **[FSL-1.1-MIT](LICENSE.md)** (the Functional Source License, as used by
   Use it; don't *be* it.
 - **Every release automatically becomes plain MIT two years after it ships.** No rug to pull.
 
-© 2026 holt contributors
+**holt™** is a product of **Contrare**.
+
+© 2026 Contrare

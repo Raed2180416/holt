@@ -114,6 +114,18 @@ body {
 .tier li::before { content: "✓"; color: var(--good); font-weight: 700; flex: none; }
 .tier li.muted::before { content: "·"; color: var(--text-faint); }
 .tier .btn { margin-top: auto; width: 100%; justify-content: center; text-align: center; }
+.tier-fine { margin: 10px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--text-faint); }
+
+.cmp { margin-top: 30px; border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
+.cmp-row { display: grid; grid-template-columns: 1.1fr 1.6fr 1.6fr; gap: 18px; padding: 16px 20px; border-bottom: 1px solid var(--border-soft); font-size: 14.5px; align-items: start; }
+.cmp-row:last-child { border-bottom: none; }
+.cmp-head { background: var(--bg-raised-2); font-family: var(--mono); font-size: 12px; letter-spacing: .07em; text-transform: uppercase; color: var(--text-faint); }
+.cmp-row span:nth-child(2) { color: var(--text-dim); }
+.cmp-row span:nth-child(3) { color: var(--text-faint); }
+.cmp-us { background: linear-gradient(90deg, rgba(226,161,84,.08), transparent 70%); }
+.cmp-us span:nth-child(2) { color: var(--text); }
+.dim { color: var(--text-faint); font-weight: 400; }
+@media (max-width: 820px) { .cmp-row { grid-template-columns: 1fr; gap: 6px; } .cmp-head { display: none; } }
 .pricing-foot { margin-top: 26px; font-size: 13.5px; color: var(--text-faint); }
 
 /* faint ambient backdrop */
@@ -646,19 +658,6 @@ footer { padding: 44px 0 60px; }
 </style>
 </head>
 <body>
-<nav class="nav">
-  <div class="wrap nav-inner">
-    <span class="nav-brand">holt<span class="dot">.</span></span>
-    <div class="nav-links">
-      <a href="#proof">Proof</a>
-      <a href="#commands">Commands</a>
-      <a href="#benchmarks">Benchmarks</a>
-      <a href="#pricing">Pricing</a>
-      <a class="nav-cta" href="https://github.com/raed2180416/holt">GitHub ★</a>
-    </div>
-  </div>
-</nav>
-
 
 <header class="nav">
   <div class="nav-inner">
@@ -668,9 +667,11 @@ footer { padding: 44px 0 60px; }
     </a>
     <nav class="nav-links">
       <a class="hide-sm" href="#proof">Proof</a>
+      <a class="hide-sm" href="#different">Why holt</a>
       <a class="hide-sm" href="#commands">Commands</a>
-      <a class="hide-sm" href="#architecture">How it works</a>
-      <a href="#benchmarks">Benchmarks</a>
+      <a class="hide-sm" href="#benchmarks">Benchmarks</a>
+      <a href="#pricing">Pricing</a>
+      <a class="hide-sm" href="https://github.com/Raed2180416/holt">GitHub</a>
       <a class="nav-cta" href="#install">npm i -g holt</a>
     </nav>
   </div>
@@ -734,6 +735,57 @@ footer { padding: 44px 0 60px; }
 </section>
 
 <!-- ============ PROOF / A-B ============ -->
+
+<section id="different">
+  <div class="wrap">
+    <span class="kicker">the gap</span>
+    <h2>Every tool manages worktrees. None of them read what's <em>inside</em> them.</h2>
+    <p class="prose" style="color:var(--text-dim);margin-top:12px">
+      Git has no primitive that relates <strong>uncommitted</strong> work across worktrees —
+      <code>merge-tree</code> only ever sees commits. So the moment several agents are mid-flight,
+      every existing tool is reasoning about names, dates and commit counts, none of which tell you
+      whether deleting something loses the only copy of it. That is the gap holt fills.
+    </p>
+
+    <div class="cmp">
+      <div class="cmp-row cmp-head"><span>Tool</span><span>What it gives you</span><span>What it can't see</span></div>
+      <div class="cmp-row">
+        <span><strong>Claude Code</strong> worktree locking</span>
+        <span>Locks worktrees <em>by session</em> — a session can't clobber its own trees</span>
+        <span>Another vendor's agent, or content: it locks by <em>who</em>, not by <em>what's at stake</em></span>
+      </div>
+      <div class="cmp-row">
+        <span><strong>GitButler</strong></span>
+        <span>Virtual branches — a genuinely different, very good model that avoids worktrees</span>
+        <span>Requires adopting its git client; holt adds to the worktree flow you already run</span>
+      </div>
+      <div class="cmp-row">
+        <span><strong>Worktree managers</strong><br><span class="dim">wktr, worktrunk, JetBrains</span></span>
+        <span>Nicer listing, switching and creation</span>
+        <span>Relationships: what's redundant, what collides, what holds the only copy</span>
+      </div>
+      <div class="cmp-row">
+        <span><strong>Merge queues</strong><br><span class="dim">Mergify, Graphite</span></span>
+        <span>Gate the <em>shared branch</em> at PR time, in the cloud</span>
+        <span>Work that hasn't been committed or pushed yet — where the loss actually happens</span>
+      </div>
+      <div class="cmp-row cmp-us">
+        <span><strong>holt</strong></span>
+        <span>The <strong>content relationship</strong> between in-flight workstreams — and git itself refuses the delete</span>
+        <span>Stated plainly: gitignored files, and cloud agents with no local worktree</span>
+      </div>
+    </div>
+
+    <p class="prose" style="color:var(--text-dim);margin-top:22px">
+      One sentence: <strong>everyone else manages worktrees or gates the shared branch; holt is the
+      only layer that reads what's inside them and refuses, through git itself, to lose the only
+      copy of something — across every agent, entirely on your machine.</strong>
+      No agent vendor has a reason to protect a rival's sessions, which is why the cross-agent
+      plane stays holt's.
+    </p>
+  </div>
+</section>
+
 <section id="proof">
   <div class="wrap prose">
     <span class="kicker">measured, not hypothetical</span>
@@ -1252,7 +1304,10 @@ footer { padding: 44px 0 60px; }
           <li>Runs entirely on your machines — no data leaves, on any tier</li>
           <li>Priority support</li>
         </ul>
-        <a class="btn btn-primary" data-checkout="team" href="mailto:sales@holt.dev?subject=holt%20Team">Start a Team plan</a>
+        <a class="btn btn-primary" data-checkout="team"
+           href="mailto:team@holt.dev?subject=holt%20Team%20early%20access&body=Repos%20under%20parallel%20agents%3A%20%0ATeam%20size%3A%20%0AAgents%20in%20use%3A%20">Get Team early access</a>
+        <p class="tier-fine">Self-serve checkout opens with v1. Until then this reaches a human, and early-access
+          teams get their first year at half price — and shape what ships.</p>
       </div>
 
       <div class="tier reveal">
@@ -1266,7 +1321,9 @@ footer { padding: 44px 0 60px; }
           <li>Security review, DPA, invoicing</li>
           <li>Support SLA</li>
         </ul>
-        <a class="btn btn-ghost" href="mailto:sales@holt.dev?subject=holt%20Enterprise">Talk to us</a>
+        <a class="btn btn-ghost"
+           href="mailto:enterprise@holt.dev?subject=holt%20Enterprise&body=Organisation%3A%20%0ARepos%3A%20%0ARequirements%20(SSO%2C%20self-host%2C%20air-gap%2C%20DPA)%3A%20">Talk to us</a>
+        <p class="tier-fine">Enterprise is always a conversation — security review, DPA and deployment shape the terms.</p>
       </div>
     </div>
 
@@ -1319,6 +1376,7 @@ footer { padding: 44px 0 60px; }
     <span class="footer-oss">universal-ctags · enry · jscpd · git merge-tree · jj</span>
     <span>© 2026 holt contributors</span>
   </div>
+  <p style="margin-top:14px;color:var(--text-faint);font-size:13.5px">holt™ is a product of <strong style="color:var(--text-dim)">Contrare</strong>.</p>
 </footer>
 
 <script>
@@ -1366,6 +1424,11 @@ footer { padding: 44px 0 60px; }
   var API = "__HOLT_API__";
   if (API.indexOf("__") === 0) return;
   document.querySelectorAll("[data-checkout]").forEach(function (a) {
+    // A live service turns the early-access mailto into real self-serve checkout, and the
+    // surrounding fine print stops being true — so remove it at the same time.
+    a.textContent = "Start a Team plan";
+    var fine = a.parentNode.querySelector(".tier-fine");
+    if (fine) fine.remove();
     a.addEventListener("click", function (e) {
       e.preventDefault();
       var plan = a.getAttribute("data-checkout");

@@ -21,6 +21,7 @@ import {
   renderPlan, renderContext, renderImpact, paint,
 } from '../src/render.mjs';
 import { renderHtml } from '../src/graph-html.mjs';
+import { renderClusters } from '../src/ascii-graph.mjs';
 import { assessCommand, buildBrief } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import { integrate, detectHosts, hostsReport, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
@@ -745,7 +746,14 @@ async function main() {
         out(paint('green', `wrote ${path.resolve(opts.html)}`) + paint('grey', `  (${report.graph.nodes.length} nodes, ${report.graph.edges.length} edges)`));
         return;
       }
-      return emitJson(report.graph);
+      if (opts.json) return emitJson(report.graph);
+      // In a terminal, the useful shape of the graph is its CLUSTERING — who is entangled with
+      // whom — not a node drawing. --html renders the full interactive graph when you want it.
+      out(paint('bold', 'holt graph') + paint('grey', `  ${report.graph.nodes.length} workstreams · ${report.graph.edges.length} relationships`));
+      out('');
+      out(renderClusters(report, paint));
+      out(paint('grey', '\n  holt graph --html <file>  writes the full interactive graph\n'));
+      return;
     }
 
     case 'context': {
