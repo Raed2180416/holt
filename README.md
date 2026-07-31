@@ -168,32 +168,73 @@ examples.
 
 ---
 
+## Review load: the honest number
+
+Counting workstreams was measuring the wrong thing. A reviewer does not read workstreams, they
+read *changes* — and the same change appears in many workstreams. `grove plan` reports both:
+
+```
+39 workstreams  ->  -2 disposable  -0 duplicate  ->  37 to land
+
+reviewing PR-by-PR:  351 file-reviews, 6999 symbol-reviews
+actually distinct:   151 files (-57%), 2931 symbols (-58%)
+of those symbols: 1017 novel (need real review) · 1914 corroborated (read once, then compare)
+```
+
+That is a measurement, not a promise: it says what the redundancy **is**. The saving is realised
+by a reviewer who uses the grouping.
+
 ## Testing
 
 ```bash
-npm test                          # 74 tests
+npm test                          # 121 tests
 scripts/clone-fixtures.sh         # 4 real upstream repos
 npm run test:e2e
 ```
 
-The suite is built on one rule: **prove the instrument can detect presence before trusting its
-silence.** Every detector is asserted first on a case that must be found, then on a negative
-control. A suite that only checked "no false positives" would pass with every detector returning
-`[]`.
+Two rules govern the suite:
 
-Included:
+**1. Prove the instrument can detect presence before trusting its silence.** Every detector is
+asserted first on a case that must be found, then on a negative control. A suite that only
+checked "no false positives" would pass with every detector returning `[]`.
+
+**2. Attack it.** `test/e2e/break-it.test.mjs` is not written to confirm grove works — it is
+written to force the one catastrophic failure: *grove says safe to delete, and it is not.*
+14 attacks, each from a real thing agents do: commit-only-deletions, uncommitted deletions,
+symbol renames, file moves, reverts, mutation *during* a scan, stale-cache authorisation,
+coincidental name collisions, a one-line change buried under 12 noisy workstreams, and seven
+disguised forms of the destroy command. Plus the inverse — a gate that blocks harmless commands
+gets switched off and protects nothing.
+
+Also covered:
 
 - **33 languages**, each asserted by name, including the 12 universal-ctags 6.2.1 does not ship
   (Swift, Scala, Dart, Groovy, Solidity, Zig, Nim, Crystal, F#, Prolog, Dockerfile, GraphQL) —
   covered by `src/optlib/grove.ctags`.
-- **Adversarial states**: filenames with spaces/quotes/unicode, a file literally named `--force`,
-  vanished worktrees, detached HEAD, merge-in-progress, empty repos, symlink loops, submodules,
-  binary/huge/generated files, 24-workstream load.
-- **Real repositories** in Python, Go, Rust and JavaScript, with planted multi-agent damage and
-  exact ground truth.
+- **Ambiguous extensions by content**: `.fs` resolves to F# *or* Forth, `.m` to Objective-C *or*
+  MATLAB, by what the file actually contains.
+- **Adversarial git states**: filenames with spaces/quotes/unicode, a file literally named
+  `--force`, vanished worktrees, detached HEAD, merge-in-progress, empty repos, symlink loops,
+  submodules, binary/huge/generated files, 24-workstream load.
+- **Real repositories** in Python, Go, Rust and JavaScript, with planted multi-agent damage.
+- **MCP over the real wire protocol** — a spawned server, hand-rolled JSON-RPC client,
+  initialize → tools/list → tools/call, including recovery from bad input.
+- **The OpenCode plugin driven as OpenCode drives it**, and `opencode debug config` asserted to
+  actually discover it.
+- **jj**: workspaces discovered with resolved paths, and the operation log asserted unchanged —
+  grove must not snapshot a jj repo just by reading it.
 - **The instrument check**: a worktree whose content base *already has* must be reported
   disposable. `--strict-read-only` is asserted to get that case *wrong*, proving the two
   instruments genuinely differ and the documented caveat is real.
+
+### Known limits, stated rather than hidden
+
+- **Gitignored content is invisible.** git cannot see it, so neither can grove. Pinned by a test
+  so it is a documented boundary, not a surprise.
+- **jj workstreams are analysed as of their last snapshot.** grove passes
+  `--ignore-working-copy` everywhere, because letting jj snapshot would be a *write*.
+- **Semantic conflicts (P4) are not attempted.** Two changes that merge cleanly and break at
+  runtime are unresolved research; a confident wrong answer there is worse than none.
 
 ---
 

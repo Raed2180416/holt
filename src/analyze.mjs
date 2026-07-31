@@ -461,6 +461,7 @@ export function landingPlan(scanResult, { collisions: cols = [], duplicates: dup
   const uniq = uniqueWork(scanResult);
   const safe = safeToDelete(scanResult, uniq);
   const safeIds = setOf(safe.filter((s) => s.safe).map((s) => s.id));
+  const live = scanResult.workstreams.filter((w) => w.ok);
 
   const entanglement = new Map();
   for (const c of cols) {
@@ -508,12 +509,77 @@ export function landingPlan(scanResult, { collisions: cols = [], duplicates: dup
     collapse: candidates.filter((c) => c.supersededBy).map((c) => ({ id: c.id, into: c.supersededBy, why: 'duplicate of another dispatch' })),
     order: toLand.map((c, i) => ({ step: i + 1, ...c })),
     reviewReduction: {
-      total: scanResult.workstreams.filter((w) => w.ok).length,
+      total: live.length,
       dropped: safe.filter((s) => s.safe).length,
       collapsed: candidates.filter((c) => c.supersededBy).length,
       toReview: toLand.length,
     },
+    reviewSurface: reviewSurface(live, safeIds),
     note: 'grove produces the ORDER. Executing rebases is git-machete / stack-pr / Graphite territory.',
+  };
+}
+
+/**
+ * REVIEW SURFACE — the honest measure of P5, and the one that makes it a product.
+ *
+ * Counting workstreams was measuring the wrong thing. On a real 39-workstream repo the plan
+ * "reduced" review from 39 to 36 — an 8% saving that nobody would pay for. But a reviewer does
+ * not read workstreams, they read CHANGES, and the same change appears in many workstreams: when
+ * five agents each add `ARC_MEMORY_PROMOTION_K`, a human needs to understand it ONCE and then
+ * only confirm the other four match.
+ *
+ * So the real quantity is: how many DISTINCT things need human eyes, versus how many a
+ * PR-by-PR review would put in front of them.
+ *
+ *   naive       sum over workstreams of files touched   (what reviewing each PR costs today)
+ *   distinct    the union of those files                (what actually needs reading)
+ *   novel       symbols that appear in exactly ONE workstream — genuine review
+ *   corroborated symbols in 2+ workstreams — read once, then compare
+ *
+ * This is a measurement, not a promise: it says what the redundancy IS, and the reduction is
+ * only realised by a reviewer who uses the grouping. Reported as such.
+ */
+export function reviewSurface(live, safeIds = new Set()) {
+  const inPlay = live.filter((w) => !safeIds.has(w.id));
+
+  let naiveFiles = 0;
+  let naiveSymbols = 0;
+  const distinctFiles = new Set();
+  const symbolOwners = new Map();
+
+  for (const w of inPlay) {
+    naiveFiles += w.touched.length;
+    for (const f of w.touched) distinctFiles.add(f);
+    const keys = w.addedKeys ?? [];
+    naiveSymbols += keys.length;
+    for (const k of keys) {
+      if (!symbolOwners.has(k)) symbolOwners.set(k, 0);
+      symbolOwners.set(k, symbolOwners.get(k) + 1);
+    }
+  }
+
+  let novel = 0;
+  let corroborated = 0;
+  for (const count of symbolOwners.values()) {
+    if (count === 1) novel++; else corroborated++;
+  }
+
+  const pct = (from, to) => (from > 0 ? Math.round((1 - to / from) * 100) : 0);
+
+  return {
+    workstreamsInPlay: inPlay.length,
+    files: { naive: naiveFiles, distinct: distinctFiles.size, reductionPct: pct(naiveFiles, distinctFiles.size) },
+    symbols: {
+      naive: naiveSymbols,
+      distinct: symbolOwners.size,
+      novel,
+      corroborated,
+      reductionPct: pct(naiveSymbols, symbolOwners.size),
+    },
+    explanation:
+      'naive = what PR-by-PR review puts in front of a human; distinct = what actually needs reading. ' +
+      'novel symbols appear in exactly one workstream and need real review; corroborated symbols appear ' +
+      'in several and need reading once, then comparing.',
   };
 }
 

@@ -206,9 +206,13 @@ async function scanFiles(ws, ctx) {
     return result;
   }
 
-  const headOid = ws.head ?? (await resolveRef(ws.path, 'HEAD'));
+  // A jj workspace has no .git of its own, so `rev-parse HEAD` there fails. Its head arrives
+  // pre-resolved from src/jj.mjs as the git commit id of `<name>@`.
+  const headOid = ws.head ?? (ws.vcs === 'jj' ? null : await resolveRef(ws.path, 'HEAD'));
   if (!headOid) {
-    result.reason = 'HEAD does not resolve (unborn branch?)';
+    result.reason = ws.vcs === 'jj'
+      ? 'jj workspace commit could not be resolved (is this a colocated repo?)'
+      : 'HEAD does not resolve (unborn branch?)';
     return result;
   }
   result.head = headOid;
@@ -216,7 +220,13 @@ async function scanFiles(ws, ctx) {
   try {
     const [committed, uncommitted] = await Promise.all([
       committedDelta(root, base.oid, headOid, { strictReadOnly, timeout }),
-      uncommittedDelta(ws.path, { timeout }),
+      // jj snapshots the working copy into `@` automatically, so under jj there IS no separate
+      // uncommitted layer — the thing git cannot relate across worktrees simply does not exist.
+      // Asking git for status inside a jj workspace would fail (no .git) and, worse, a failure
+      // there would read as "clean".
+      ws.vcs === 'jj'
+        ? Promise.resolve({ files: [], untracked: [], how: 'jj-snapshot (working copy is part of @)' })
+        : uncommittedDelta(ws.path, { timeout }),
     ]);
 
     const cFiles = committed.files.filter((f) => !looksGenerated(f));

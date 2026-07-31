@@ -58,6 +58,8 @@ OPTIONS
   --include-primary   also scan the primary worktree
   --deep              duplicates: additionally run jscpd token clone detection
   --html <file>       graph: write an interactive HTML graph
+  --global            integrate: ALSO add grove to user-level editor configs.
+                      Default is project scope — nothing outside the repo is touched.
   -h, --help          this
 `;
 
@@ -66,7 +68,7 @@ function parseArgs(argv) {
     _: [], json: false, base: null, cwd: process.cwd(), symbols: true,
     strictReadOnly: false, concurrency: 8, includePrimary: false,
     deep: false, html: null, help: false,
-    host: 'generic', command: null, bin: 'grove',
+    host: 'generic', command: null, bin: 'grove', global: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -75,6 +77,7 @@ function parseArgs(argv) {
       case '--no-symbols': opts.symbols = false; break;
       case '--strict-read-only': opts.strictReadOnly = true; break;
       case '--include-primary': opts.includePrimary = true; break;
+      case '--global': opts.global = true; break;
       case '--deep': opts.deep = true; break;
       case '-h': case '--help': opts.help = true; break;
       case '--base': opts.base = argv[++i]; break;
@@ -229,21 +232,28 @@ async function cmdIntegrate(opts) {
     process.exit(2);
   }
 
-  const { detected, results } = await integrate(disc.root, { bin: opts.bin });
-  if (opts.json) return emitJson({ detected, results });
+  const scope = opts.global ? 'all' : 'project';
+  const { detected, results } = await integrate(disc.root, { bin: opts.bin, scope });
+  if (opts.json) return emitJson({ detected, scope, results });
 
-  out(paint('bold', 'grove integrate'));
+  out(paint('bold', 'grove integrate') + paint('grey', `  (${scope} scope)`));
   out('');
-  out(`  detected hosts   ${detected.length ? detected.join(', ') : paint('grey', 'none')}`);
+  out(`  in this repo     ${detected.project.length ? detected.project.join(', ') : paint('grey', 'none')}`);
+  out(`  on this machine  ${detected.user.length ? detected.user.join(', ') : paint('grey', 'none')}`);
   out('');
   for (const r of results) {
     const skipped = /skipped/.test(r.action);
     const mark = skipped ? paint('grey', '·') : paint('green', '✓');
-    out(`  ${mark} ${(r.adapter + '            ').slice(0, 12)} ${(r.host ? `${r.host} ` : '')}${paint('grey', r.action)}`);
+    const label = `${r.host ? `${r.host}${r.scope ? ` [${r.scope}]` : ''} ` : ''}`;
+    out(`  ${mark} ${(r.adapter + '            ').slice(0, 12)} ${label}${paint('grey', r.action)}`);
     if (!skipped) out(paint('grey', `      ${r.path}`));
   }
   out('');
   out(paint('grey', '  AGENTS.md and MCP reach every agent that reads them; hooks add enforcement where supported.'));
+  if (!opts.global) {
+    out(paint('grey', '  Project scope only — nothing outside this repository was modified. Use --global to also'));
+    out(paint('grey', '  add grove to your user-level editor configs (existing files only, never created).'));
+  }
   out('');
 }
 

@@ -95,17 +95,33 @@ export async function installAgentsMd(repoRoot, { bin = 'grove', filename = 'AGE
  * MCP config locations, by host. Each entry says where the file lives and which key holds the
  * server map, because the ecosystem did not converge on one shape.
  */
-export function mcpTargets(repoRoot, home = os.homedir()) {
-  return [
-    { host: 'claude-code (project)', file: path.join(repoRoot, '.mcp.json'), key: 'mcpServers' },
-    { host: 'cursor (project)', file: path.join(repoRoot, '.cursor', 'mcp.json'), key: 'mcpServers' },
-    { host: 'cursor (user)', file: path.join(home, '.cursor', 'mcp.json'), key: 'mcpServers' },
-    { host: 'vscode / copilot', file: path.join(repoRoot, '.vscode', 'mcp.json'), key: 'servers' },
-    { host: 'windsurf', file: path.join(home, '.codeium', 'windsurf', 'mcp_config.json'), key: 'mcpServers' },
-    { host: 'gemini-cli', file: path.join(home, '.gemini', 'settings.json'), key: 'mcpServers' },
-    { host: 'zed', file: path.join(home, '.config', 'zed', 'settings.json'), key: 'context_servers' },
-    { host: 'continue', file: path.join(home, '.continue', 'config.json'), key: 'mcpServers' },
+/**
+ * MCP config locations, by host and SCOPE.
+ *
+ * Scope matters and the default is project-only. An earlier revision wrote to every user-global
+ * config it could find — ~/.cursor/mcp.json, ~/.codeium/…, ~/.config/zed/… — the first time it
+ * ran. Editing a developer's home configuration for every editor they have installed, because
+ * they asked to wire up ONE repository, is not acceptable behaviour for an install command. It
+ * is also usually wrong: the entry points at a `grove` binary that may only exist for this
+ * project.
+ *
+ * `--global` opts into user scope explicitly.
+ */
+export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } = {}) {
+  const project = [
+    { host: 'claude-code', scope: 'project', file: path.join(repoRoot, '.mcp.json'), key: 'mcpServers' },
+    { host: 'cursor', scope: 'project', file: path.join(repoRoot, '.cursor', 'mcp.json'), key: 'mcpServers' },
+    { host: 'vscode / copilot', scope: 'project', file: path.join(repoRoot, '.vscode', 'mcp.json'), key: 'servers' },
+    { host: 'gemini-cli', scope: 'project', file: path.join(repoRoot, '.gemini', 'settings.json'), key: 'mcpServers' },
   ];
+  const user = [
+    { host: 'cursor', scope: 'user', file: path.join(home, '.cursor', 'mcp.json'), key: 'mcpServers' },
+    { host: 'windsurf', scope: 'user', file: path.join(home, '.codeium', 'windsurf', 'mcp_config.json'), key: 'mcpServers' },
+    { host: 'gemini-cli', scope: 'user', file: path.join(home, '.gemini', 'settings.json'), key: 'mcpServers' },
+    { host: 'zed', scope: 'user', file: path.join(home, '.config', 'zed', 'settings.json'), key: 'context_servers' },
+    { host: 'continue', scope: 'user', file: path.join(home, '.continue', 'config.json'), key: 'mcpServers' },
+  ];
+  return scope === 'user' ? user : scope === 'all' ? [...project, ...user] : project;
 }
 
 export function mcpServerEntry(bin = 'grove') {
@@ -117,16 +133,30 @@ export function mcpServerEntry(bin = 'grove') {
  * `onlyExisting` (default) touches only files that already exist, so grove never fabricates
  * config for tools the user does not have installed.
  */
-export async function installMcp(repoRoot, { bin = 'grove', onlyExisting = true, home = os.homedir() } = {}) {
+export async function installMcp(repoRoot, {
+  bin = 'grove', home = os.homedir(), scope = 'project', hosts = null,
+} = {}) {
   const results = [];
-  for (const t of mcpTargets(repoRoot, home)) {
+  for (const t of mcpTargets(repoRoot, home, { scope })) {
+    // Only wire hosts the user actually has, when we know which those are.
+    if (hosts && !hosts.some((h) => t.host.startsWith(h.replace('-cli', '')) || h.startsWith(t.host))) {
+      results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'skipped (host not detected)' });
+      continue;
+    }
+
     let cfg = {};
     let exists = true;
     try {
       cfg = JSON.parse(await fs.readFile(t.file, 'utf8'));
     } catch {
       exists = false;
-      if (onlyExisting) { results.push({ adapter: 'mcp', host: t.host, path: t.file, action: 'skipped (not installed)' }); continue; }
+      // Project scope: creating the file is the point — it is how you wire a repo.
+      // User scope: never create. Adding grove to a config the user does not have is
+      // indistinguishable from installing software they did not ask for.
+      if (t.scope === 'user') {
+        results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'skipped (no user config)' });
+        continue;
+      }
     }
 
     cfg[t.key] ??= {};
@@ -136,7 +166,7 @@ export async function installMcp(repoRoot, { bin = 'grove', onlyExisting = true,
     await fs.mkdir(path.dirname(t.file), { recursive: true });
     await fs.writeFile(t.file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
     results.push({
-      adapter: 'mcp', host: t.host, path: t.file,
+      adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
       action: !exists ? 'created' : already ? 'updated' : 'added',
     });
   }
@@ -183,44 +213,104 @@ export async function installClaudeCode(repoRoot, { bin = 'grove' } = {}) {
 
 /* --------------------------------------------------------------------- OpenCode ---- */
 
-/** OpenCode plugins are JS modules that subscribe to events. */
+/**
+ * OpenCode plugin.
+ *
+ * Written against the real API (verified against opencode 1.18.x, not a summary):
+ *   - plugins live in `.opencode/plugins/` (PLURAL) or `~/.config/opencode/plugins/`
+ *   - a plugin exports an async fn receiving `{ project, client, $, directory, worktree }`
+ *     and returning a hooks object
+ *   - `"tool.execute.before": async (input, output)` — `input.tool` names the tool,
+ *     `output.args` holds its arguments
+ *   - a tool call is DENIED by THROWING. There is no permissionDecision object here, which is
+ *     exactly why the neutral core returns verdicts and adapters translate them.
+ */
 export function opencodePlugin(bin = 'grove') {
   return `// grove — OpenCode plugin (generated by \`grove integrate\`).
 //
 // Blocks worktree destruction that would lose work existing nowhere else, and injects
-// sibling-workstream context at session start. Delegates every decision to the grove CLI,
-// so the logic stays in one place.
-import { execFile } from 'node:child_process';
+// sibling-workstream context at session start. Every decision is delegated to the grove CLI,
+// so the logic lives in one place and this file never goes stale.
+import { execFile } from "node:child_process"
 
-const run = (args, cwd) => new Promise((resolve) => {
-  execFile(${JSON.stringify(bin)}, args, { cwd, timeout: 120000, maxBuffer: 16 * 1024 * 1024 },
-    (err, stdout) => resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? '') }));
-});
+// The configured binary may carry arguments (e.g. "node /path/to/grove.mjs" during development,
+// or "npx grovekit"). execFile takes the executable and an argv array separately, so passing the
+// whole string as the executable finds nothing — and the gate then FAILS OPEN, silently, on every
+// command. Caught by test/e2e/opencode-plugin.test.mjs, which is the only reason it is not still
+// shipping: the plugin loaded, the hooks fired, and it blocked nothing.
+const [GROVE_CMD, ...GROVE_PREFIX] = ${JSON.stringify(bin)}.trim().split(/\\s+/)
 
-export const grove = async ({ project, directory }) => ({
-  'tool.execute.before': async (input, output) => {
-    const command = output?.args?.command;
-    if (!command) return;
-    const res = await run(['hook', 'pre-tool-use', '--host', 'generic', '--command', command], directory);
-    try {
-      const verdict = JSON.parse(res.stdout);
-      if (verdict.decision === 'deny') throw new Error(verdict.reason);
-    } catch (e) {
-      if (e instanceof SyntaxError) return; // unparseable => do not block
-      throw e;
-    }
-  },
-  event: async ({ event }) => {
-    if (event.type !== 'session.created') return;
-    const res = await run(['brief'], directory);
-    if (res.stdout.trim()) console.log(res.stdout);
-  },
-});
+let warned = false
+
+const run = (args, cwd) =>
+  new Promise((resolve) => {
+    execFile(GROVE_CMD, [...GROVE_PREFIX, ...args], { cwd, timeout: 120000, maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? ""), err }),
+    )
+  })
+
+// OpenCode's shell tool has been named "bash" and "shell" across versions; accept either, and
+// fall back to sniffing the args rather than silently doing nothing on an unknown name.
+const commandOf = (input, output) => {
+  const a = output?.args ?? {}
+  if (typeof a.command === "string") return a.command
+  if (typeof a.cmd === "string") return a.cmd
+  if (Array.isArray(a.command)) return a.command.join(" ")
+  return null
+}
+
+export const grove = async ({ directory, worktree }) => {
+  const cwd = worktree || directory || process.cwd()
+  return {
+    "tool.execute.before": async (input, output) => {
+      const command = commandOf(input, output)
+      if (!command) return
+
+      const res = await run(["hook", "pre-tool-use", "--host", "generic", "--command", command, "--cwd", cwd], cwd)
+
+      let verdict
+      try {
+        verdict = JSON.parse(res.stdout)
+      } catch {
+        // grove could not run, or produced something unparseable. Do NOT block — a safety tool
+        // that bricks the agent when it breaks is worse than one that is absent. But SAY SO,
+        // once: a gate that fails open in silence is indistinguishable from no gate at all,
+        // and the user believes they are protected when they are not.
+        if (!warned) {
+          warned = true
+          console.warn(
+            "[grove] gate INACTIVE — could not run '" + GROVE_CMD + "'" +
+              (res.err ? " (" + res.err.message + ")" : "") +
+              ". Worktree deletions are NOT being checked. Fix with: grove doctor",
+          )
+        }
+        return
+      }
+
+      if (verdict.decision === "deny") {
+        throw new Error(verdict.reason || "grove: this command would destroy work found nowhere else")
+      }
+      if (verdict.decision === "ask") {
+        // OpenCode has no "ask" channel here; surface it without blocking legitimate work.
+        console.warn("[grove] " + (verdict.reason || "could not verify this command"))
+      }
+    },
+
+    event: async ({ event }) => {
+      if (event?.type !== "session.created") return
+      const res = await run(["brief"], cwd)
+      const text = res.stdout.trim()
+      if (text && !text.startsWith("[grove] no parallel")) console.log(text)
+    },
+  }
+}
 `;
 }
 
 export async function installOpenCode(repoRoot, { bin = 'grove' } = {}) {
-  const file = path.join(repoRoot, '.opencode', 'plugin', 'grove.js');
+  // `.opencode/plugins/` — plural. The singular form is silently ignored by opencode, which is
+  // the worst kind of wrong: the file exists, looks installed, and never runs.
+  const file = path.join(repoRoot, '.opencode', 'plugins', 'grove.js');
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, opencodePlugin(bin), 'utf8');
   return { adapter: 'opencode', path: file, action: 'installed' };
@@ -265,28 +355,43 @@ export async function installGitHooks(repoRoot, { bin = 'grove' } = {}) {
 
 /* ---------------------------------------------------------------- host detection ---- */
 
-/** Which hosts are actually in use here? Detection is by config presence, never by guessing. */
+/**
+ * Which hosts are in use, and WHERE.
+ *
+ * Scope is reported separately because it changes what grove is allowed to do. A host found only
+ * in the user's home directory means "this person uses Cursor", not "this repository is wired
+ * for Cursor" — and it is not a licence to edit their home config.
+ *
+ * @returns {Promise<{all: string[], project: string[], user: string[]}>}
+ */
 export async function detectHosts(repoRoot, home = os.homedir()) {
   const probes = [
-    { host: 'claude-code', paths: [path.join(repoRoot, '.claude'), path.join(home, '.claude')] },
-    { host: 'opencode', paths: [path.join(repoRoot, '.opencode'), path.join(home, '.config', 'opencode')] },
-    { host: 'cursor', paths: [path.join(repoRoot, '.cursor'), path.join(home, '.cursor')] },
-    { host: 'windsurf', paths: [path.join(home, '.codeium', 'windsurf')] },
-    { host: 'gemini-cli', paths: [path.join(home, '.gemini')] },
-    { host: 'codex', paths: [path.join(home, '.codex'), path.join(repoRoot, '.codex')] },
-    { host: 'zed', paths: [path.join(home, '.config', 'zed')] },
-    { host: 'continue', paths: [path.join(home, '.continue')] },
-    { host: 'aider', paths: [path.join(repoRoot, '.aider.conf.yml'), path.join(home, '.aider.conf.yml')] },
-    { host: 'vscode', paths: [path.join(repoRoot, '.vscode')] },
+    { host: 'claude-code', project: ['.claude'], user: ['.claude'] },
+    { host: 'opencode', project: ['.opencode'], user: ['.config/opencode'] },
+    { host: 'cursor', project: ['.cursor'], user: ['.cursor'] },
+    { host: 'windsurf', project: [], user: ['.codeium/windsurf'] },
+    { host: 'gemini-cli', project: ['.gemini'], user: ['.gemini'] },
+    { host: 'codex', project: ['.codex', 'AGENTS.md'], user: ['.codex'] },
+    { host: 'zed', project: ['.zed'], user: ['.config/zed'] },
+    { host: 'continue', project: [], user: ['.continue'] },
+    { host: 'aider', project: ['.aider.conf.yml'], user: ['.aider.conf.yml'] },
+    { host: 'vscode', project: ['.vscode'], user: [] },
   ];
 
-  const found = [];
-  for (const p of probes) {
-    for (const candidate of p.paths) {
-      try { await fs.stat(candidate); found.push(p.host); break; } catch { /* not present */ }
+  const hit = async (base, rels) => {
+    for (const rel of rels) {
+      try { await fs.stat(path.join(base, rel)); return true; } catch { /* absent */ }
     }
+    return false;
+  };
+
+  const project = [];
+  const user = [];
+  for (const p of probes) {
+    if (await hit(repoRoot, p.project)) project.push(p.host);
+    if (await hit(home, p.user)) user.push(p.host);
   }
-  return found;
+  return { all: [...new Set([...project, ...user])], project, user };
 }
 
 /**
@@ -295,18 +400,29 @@ export async function detectHosts(repoRoot, home = os.homedir()) {
  * AGENTS.md and MCP go in unconditionally (widest reach, zero risk). Host-specific hooks go in
  * only where that host is detected.
  */
-export async function integrate(repoRoot, { bin = 'grove', home = os.homedir(), hosts = null } = {}) {
+/**
+ * Install everything applicable, PROJECT-SCOPED by default.
+ *
+ * AGENTS.md and project MCP config go in unconditionally: they live in the repository, they are
+ * what the user asked to wire, and they are trivially reversible with git. Host hooks go in only
+ * where that host is present. User-global config is touched ONLY with scope:'user'|'all', and
+ * even then never created from nothing.
+ */
+export async function integrate(repoRoot, {
+  bin = 'grove', home = os.homedir(), hosts = null, scope = 'project',
+} = {}) {
   const detected = hosts ?? await detectHosts(repoRoot, home);
+  const present = detected.all ?? detected;
   const results = [];
 
   results.push(await installAgentsMd(repoRoot, { bin }));
-  results.push(...await installMcp(repoRoot, { bin, home }));
+  results.push(...await installMcp(repoRoot, { bin, home, scope, hosts: present }));
 
-  if (detected.includes('claude-code')) results.push(await installClaudeCode(repoRoot, { bin }));
-  if (detected.includes('opencode')) results.push(await installOpenCode(repoRoot, { bin }));
+  if (present.includes('claude-code')) results.push(await installClaudeCode(repoRoot, { bin }));
+  if (present.includes('opencode')) results.push(await installOpenCode(repoRoot, { bin }));
   results.push(await installGitHooks(repoRoot, { bin }));
 
-  return { detected, results };
+  return { detected, scope, results };
 }
 
 /* --------------------------------------------------------- response formatting ---- */

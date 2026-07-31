@@ -1,0 +1,97 @@
+name: ci
+
+# grove's optional backends are the interesting part of CI: the tool must work WITHOUT them
+# (degraded, and saying so) and correctly WITH them. Both are exercised, because "works on the
+# maintainer's machine where everything is installed" is how a degradation path rots unnoticed.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  bare:
+    name: no optional backends (degradation path)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: assert the optional tools really are absent
+        run: |
+          ! command -v ctags || (echo "ctags present; this job must test the degraded path" && exit 1)
+          ! command -v enry  || (echo "enry present; this job must test the degraded path" && exit 1)
+      - run: npm ci --omit=optional
+      - run: node bin/grove.mjs doctor --json
+      - name: unit + safety must pass with no backends at all
+        run: node --test "test/unit/safety.test.mjs"
+      - name: grove must still answer, degraded and labelled
+        run: |
+          node bin/grove.mjs status --json > /tmp/out.json
+          node -e "
+            const r = require('/tmp/out.json');
+            if (!r.backend.degraded) { console.error('expected degraded backend'); process.exit(1); }
+            console.log('degraded as expected:', r.backend.label);
+          "
+
+  full:
+    name: all backends
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: actions/setup-go@v5
+        with: { go-version: 'stable' }
+
+      - name: install universal-ctags
+        run: sudo apt-get update && sudo apt-get install -y universal-ctags
+
+      - name: install enry (content-based language detection)
+        run: |
+          go install github.com/go-enry/enry@latest
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: install jj (Jujutsu backend)
+        run: |
+          cargo install --locked jj-cli --root "$HOME/.local" || echo "jj unavailable; its suite will skip and say so"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - run: npm ci
+
+      - name: doctor
+        run: node bin/grove.mjs doctor
+
+      - name: clone real repositories for the end-to-end suite
+        run: bash scripts/clone-fixtures.sh
+
+      - name: full suite
+        run: npm test
+        env:
+          GROVE_REAL_REPOS: ${{ github.workspace }}/.grove-fixtures
+
+      - name: the tool must be able to inspect its own repository
+        run: node bin/grove.mjs status
+
+  package:
+    name: packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+      - name: pack and install globally from the tarball
+        run: |
+          npm pack
+          npm install -g ./grovekit-*.tgz
+      - name: the installed binary must run from a clean directory
+        run: |
+          mkdir -p /tmp/clean && cd /tmp/clean
+          git init -q && git commit -q --allow-empty -m base
+          grove doctor
+          grove status
+      - name: the published tarball must not ship tests or fixtures
+        run: |
+          tar -tzf grovekit-*.tgz | tee /tmp/files.txt
+          ! grep -q 'package/test/' /tmp/files.txt || (echo "tests leaked into the package" && exit 1)

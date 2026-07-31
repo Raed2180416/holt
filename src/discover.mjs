@@ -9,7 +9,8 @@
  * that git makes invisible.
  */
 
-import { git, splitLines, repoRoot } from './git.mjs';
+import { git, repoRoot } from './git.mjs';
+import { discoverJjWorkspaces as _discoverJj } from './jj.mjs';
 import path from 'node:path';
 
 /**
@@ -111,38 +112,13 @@ export async function discoverGitWorktrees(cwd) {
 }
 
 /**
- * Discover jj workspaces, if jj is present and this is a colocated/jj repo.
- * jj is treated as an ADDITIONAL backend, never a replacement: a jj repo with a git
- * backend has both, and the content model downstream is identical.
+ * jj workspace discovery lives in src/jj.mjs — it needs real work to resolve paths, because
+ * `jj workspace list` does not print them. Re-exported here so callers have one entry point.
  *
- * Absence of jj is not an error and must never be reported as "no workstreams" —
- * that would be exactly the fail-open-on-missing-evidence defect this tool exists to catch.
+ * Absence of jj is not an error and must never be reported as "no workstreams" — that would be
+ * exactly the fail-open-on-missing-evidence defect this tool exists to catch.
  */
-export async function discoverJjWorkspaces(cwd) {
-  const { execFile } = await import('node:child_process');
-  const run = (args) =>
-    new Promise((resolve) => {
-      execFile('jj', args, { cwd, timeout: 15_000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout, stderr) => {
-        resolve({ code: err ? (err.code ?? -1) : 0, stdout: stdout ?? '', stderr: stderr ?? '' });
-      });
-    });
-
-  const probe = await run(['--version']);
-  if (probe.code !== 0) return { available: false, workstreams: [], reason: 'jj-not-installed' };
-
-  const ws = await run(['workspace', 'list']);
-  if (ws.code !== 0) return { available: true, workstreams: [], reason: 'not-a-jj-repo' };
-
-  // Format: "name: /abs/path"
-  const workstreams = splitLines(ws.stdout).map((line) => {
-    const idx = line.indexOf(':');
-    const name = idx === -1 ? line.trim() : line.slice(0, idx).trim();
-    const p = idx === -1 ? null : line.slice(idx + 1).trim();
-    return { id: name, path: p, vcs: 'jj', head: null, branch: null, detached: false, locked: false, prunable: false, isPrimary: name === 'default' };
-  });
-
-  return { available: true, workstreams, reason: null };
-}
+export { discoverJjWorkspaces } from './jj.mjs';
 
 /**
  * Full discovery. Returns every workstream grove can see, tagged by backend,
@@ -157,9 +133,9 @@ export async function discover(cwd, { familyOverrides = [], includeJj = true } =
   let jj = null;
   if (includeJj) {
     try {
-      jj = await discoverJjWorkspaces(g.root);
-    } catch {
-      jj = { available: false, workstreams: [], reason: 'jj-probe-threw' };
+      jj = await _discoverJj(g.root);
+    } catch (err) {
+      jj = { available: false, workstreams: [], unresolved: [], reason: `jj-probe-threw: ${err.message}` };
     }
   }
 

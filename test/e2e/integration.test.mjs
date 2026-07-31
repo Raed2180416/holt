@@ -193,7 +193,7 @@ test('INSTALL: existing AGENTS.md content is preserved', async (t) => {
   assert.match(text, /BEGIN grove/);
 });
 
-test('INSTALL: MCP targets cover the major hosts and never invent config', async (t) => {
+test('INSTALL: MCP targets cover the major hosts, split by scope', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-mcp-'));
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-home-'));
   t.after(() => Promise.all([
@@ -201,16 +201,36 @@ test('INSTALL: MCP targets cover the major hosts and never invent config', async
     fs.rm(home, { recursive: true, force: true }),
   ]));
 
-  const targets = mcpTargets(dir, home);
-  const hosts = targets.map((x) => x.host).join(' ');
+  const all = mcpTargets(dir, home, { scope: 'all' }).map((x) => x.host).join(' ');
   for (const expected of ['claude-code', 'cursor', 'vscode', 'windsurf', 'gemini-cli', 'zed', 'continue']) {
-    assert.match(hosts, new RegExp(expected), `MCP target list should include ${expected}`);
+    assert.match(all, new RegExp(expected), `MCP target list should include ${expected}`);
   }
 
+  // Default scope must be PROJECT ONLY — no path may point outside the repo.
+  for (const t2 of mcpTargets(dir, home)) {
+    assert.equal(t2.scope, 'project');
+    assert.ok(t2.file.startsWith(dir), `default scope leaked outside the repo: ${t2.file}`);
+  }
+});
+
+test('INSTALL: user-global config is NEVER created from nothing', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-mcp2-'));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-home2-'));
+  t.after(() => Promise.all([
+    fs.rm(dir, { recursive: true, force: true }),
+    fs.rm(home, { recursive: true, force: true }),
+  ]));
+
   const { installMcp } = await import('../../src/integrate/adapters.mjs');
-  const results = await installMcp(dir, { home });
+  // Even asking explicitly for user scope must not fabricate configs for editors the user
+  // does not have. An earlier revision created ~/.cursor, ~/.codeium and ~/.config/zed on a
+  // machine that had none of them — installing software the user never asked for.
+  const results = await installMcp(dir, { home, scope: 'user' });
   assert.ok(results.every((r) => /skipped/.test(r.action)),
-    'with no host configs present, grove must not fabricate any');
+    `user-scope install must skip absent configs, got: ${JSON.stringify(results)}`);
+
+  const leftovers = await fs.readdir(home);
+  assert.deepEqual(leftovers, [], `nothing may be created in HOME, found: ${leftovers.join(', ')}`);
 });
 
 test('INSTALL: integrate() wires AGENTS.md + MCP + detected hosts only', async (t) => {
@@ -225,8 +245,12 @@ test('INSTALL: integrate() wires AGENTS.md + MCP + detected hosts only', async (
 
   const { detected, results } = await integrate(dir, { home });
 
-  assert.ok(detected.includes('claude-code'), 'should detect the host whose config dir exists');
-  assert.ok(!detected.includes('windsurf'), 'must not claim hosts that are absent');
+  assert.ok(detected.project.includes('claude-code'), 'should detect the host whose config dir exists');
+  assert.ok(!detected.all.includes('windsurf'), 'must not claim hosts that are absent');
+
+  // Default scope must not have touched HOME at all.
+  const homeLeftovers = await fs.readdir(home);
+  assert.deepEqual(homeLeftovers, [], `integrate touched HOME: ${homeLeftovers.join(', ')}`);
 
   const adapters = results.map((r) => r.adapter);
   assert.ok(adapters.includes('agents-md'), 'AGENTS.md is universal and always installed');
@@ -265,14 +289,17 @@ test('ADAPTER: host detection reports only what exists', async (t) => {
     fs.rm(home, { recursive: true, force: true }),
   ]));
 
-  assert.deepEqual(await detectHosts(dir, home), [], 'nothing installed => nothing detected');
+  const none = await detectHosts(dir, home);
+  assert.deepEqual(none.all, [], 'nothing installed => nothing detected');
 
   await fs.mkdir(path.join(dir, '.cursor'), { recursive: true });
   await fs.mkdir(path.join(home, '.gemini'), { recursive: true });
   const found = await detectHosts(dir, home);
-  assert.ok(found.includes('cursor'));
-  assert.ok(found.includes('gemini-cli'));
-  assert.ok(!found.includes('claude-code'));
+
+  assert.ok(found.project.includes('cursor'), 'repo-local host detected as project scope');
+  assert.ok(found.user.includes('gemini-cli'), 'home-only host detected as user scope');
+  assert.ok(!found.project.includes('gemini-cli'), 'a home-only host is NOT a project host');
+  assert.ok(!found.all.includes('claude-code'));
 });
 
 test('AGENTS.md text tells an agent the exit-code contract', () => {

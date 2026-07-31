@@ -124,17 +124,28 @@ export function renderSummary(report) {
   }
 
   const plan = report.plan.reviewReduction;
+  const surf = report.plan.reviewSurface;
   out.push('', c('bold', 'REVIEW LOAD'));
   out.push('');
   out.push(
     `  ${plan.total} workstreams  ${c('grey', '->')}  ` +
     `${c('green', `-${plan.dropped} disposable`)}  ` +
     `${c('magenta', `-${plan.collapsed} duplicate`)}  ` +
-    `${c('grey', '->')}  ${c('bold', `${plan.toReview} to review`)}`,
+    `${c('grey', '->')}  ${c('bold', `${plan.toReview} to land`)}`,
   );
-  if (plan.total > 0) {
-    const pct = Math.round((1 - plan.toReview / plan.total) * 100);
-    if (pct > 0) out.push(c('grey', `  ${pct}% less to review than the raw worktree count suggests`));
+  if (surf) {
+    out.push('');
+    out.push(
+      `  reviewing PR-by-PR:  ${c('bold', surf.files.naive)} file-reviews, ${c('bold', surf.symbols.naive)} symbol-reviews`,
+    );
+    out.push(
+      `  actually distinct:   ${c('green', surf.files.distinct)} files ${c('grey', `(-${surf.files.reductionPct}%)`)}, ` +
+      `${c('green', surf.symbols.distinct)} symbols ${c('grey', `(-${surf.symbols.reductionPct}%)`)}`,
+    );
+    out.push(
+      c('grey', `  of those symbols: ${surf.symbols.novel} novel (need real review) · ` +
+        `${surf.symbols.corroborated} corroborated (read once, then compare)`),
+    );
   }
 
   if (report.skipped.length) {
