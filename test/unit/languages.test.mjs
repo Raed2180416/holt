@@ -16,7 +16,25 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { symbolsOnDisk, resolveBackend, detectCtags } from '../../src/symbols.mjs';
+import { symbolsOnDisk, resolveBackend, detectCtags, ctagsLanguages, languageCoverage } from '../../src/symbols.mjs';
+
+/**
+ * Filename -> the ctags LANGUAGE NAME that parses it, for the cases where a stock/older ctags may
+ * lack the parser entirely. Only languages that have historically been absent from distro builds
+ * need an entry; anything unlisted is assumed universally present and is always asserted.
+ */
+const CASE_LANGUAGE = {
+  'a.tf': 'Terraform',
+  'a.elm': 'Elm',
+  'a.jl': 'Julia',
+  'a.zig': 'Zig',
+  'a.nim': 'Nim',
+  'a.cr': 'Crystal',
+  'a.sol': 'Solidity',
+  'a.dart': 'Dart',
+  'a.swift': 'Swift',
+  'a.scala': 'Scala',
+};
 
 /** [filename, source, symbols that must be found] */
 const CASES = [
@@ -97,8 +115,17 @@ test('language coverage: every case yields its named symbols', async (t) => {
 
   const found = await symbolsOnDisk(dir, files, backend);
 
+  // A language the INSTALLED ctags has no parser for is a toolchain gap, not a holt regression.
+  // Distro packages lag badly (Ubuntu 24.04 ships 5.9.0, which has no Terraform or Elm parser),
+  // so failing here would make the suite red on a correct build. Those cases are reported as
+  // UNSUPPORTED-BY-THIS-CTAGS and asserted separately by the coverage-honesty test below —
+  // everything the installed ctags CAN parse must still yield its symbols, or the suite goes red.
+  const probe = await ctagsLanguages();
+  const unsupported = [];
   const failures = [];
   for (const [name, , expected] of CASES) {
+    const lang = CASE_LANGUAGE[name];
+    if (lang && probe.available && !probe.languages.has(lang)) { unsupported.push(`${name} (${lang})`); continue; }
     const names = new Set((found.get(name) ?? []).map((s) => s.name));
     const missing = expected.filter((e) => !names.has(e));
     if (missing.length) {
@@ -106,7 +133,28 @@ test('language coverage: every case yields its named symbols', async (t) => {
     }
   }
 
+  if (unsupported.length) {
+    t.diagnostic(`this ctags (${(await detectCtags()).version}) has no parser for: ${unsupported.join(', ')} — upgrade universal-ctags to cover them`);
+  }
   assert.deepEqual(failures, [], `language coverage failures:\n${failures.join('\n')}`);
+  // Presence-detection guard: if the probe were broken and skipped everything, this test would
+  // pass vacuously. Require that the great majority actually ran.
+  assert.ok(CASES.length - unsupported.length >= CASES.length - 6,
+    `too many languages skipped (${unsupported.length}) — the suite would be proving nothing`);
+});
+
+test('language coverage: holt reports the gap between what it names and what this ctags supports', async () => {
+  // The honesty mechanism itself. holt must never claim coverage the installed toolchain cannot
+  // deliver: languageCoverage() names the missing parsers so `holt doctor` can surface them.
+  const named = [...new Set(Object.values(CASE_LANGUAGE))];
+  const cov = await languageCoverage(named);
+  if (!cov.available) return; // no ctags at all — the regex-fallback path, covered elsewhere
+  assert.equal(cov.checked, named.length);
+  assert.equal(cov.supported + cov.missing.length, cov.checked, 'the accounting must balance');
+  assert.ok(cov.note.length > 0, 'the report must always explain itself');
+  if (cov.missing.length) {
+    assert.match(cov.note, /upgrade universal-ctags/, 'a gap must tell the user how to close it');
+  }
 });
 
 test('language coverage: the count is what we claim', async (t) => {
@@ -120,10 +168,17 @@ test('language coverage: the count is what we claim', async (t) => {
     files.push(name);
   }
   const found = await symbolsOnDisk(dir, files, backend);
-  const withSymbols = files.filter((f) => (found.get(f) ?? []).length > 0);
+  // Same capability rule as above: count only the languages this ctags can actually parse, so
+  // an older toolchain reports an honest smaller number instead of failing a correct build.
+  const probe = await ctagsLanguages();
+  const parseable = files.filter((f) => {
+    const lang = CASE_LANGUAGE[f];
+    return !(lang && probe.available && !probe.languages.has(lang));
+  });
+  const withSymbols = parseable.filter((f) => (found.get(f) ?? []).length > 0);
 
-  assert.equal(withSymbols.length, CASES.length,
-    `expected all ${CASES.length} languages to yield symbols, got ${withSymbols.length}. ` +
+  assert.equal(withSymbols.length, parseable.length,
+    `expected all ${parseable.length} parseable languages to yield symbols, got ${withSymbols.length}. ` +
     `Silent: ${files.filter((f) => !withSymbols.includes(f)).join(', ')}`);
 });
 

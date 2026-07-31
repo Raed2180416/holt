@@ -33,6 +33,7 @@ import { discover } from '../src/discover.mjs';
 import { scan } from '../src/scan.mjs';
 import { analyze } from '../src/analyze.mjs';
 import { protect, clean, rescue } from '../src/actions.mjs';
+import { ctagsLanguages } from '../src/symbols.mjs';
 
 const COUNT = Math.max(20, Number(process.argv[2] ?? 80));
 const WORK = process.env.HOLT_MONSTER_WORK
@@ -172,6 +173,7 @@ async function main() {
     foreignLocked: new Set(),
     gitignoredOnly: new Set(), // documented limit: expected DISPOSABLE
     gold50: new Map(),         // id -> symbol that the SYMBOL layer must itself flag
+    gold50Lang: new Map(),     // id -> ctags language name, so an older ctags is reported not failed
   };
 
   const mk = async (name, { branch = false } = {}) => {
@@ -321,6 +323,8 @@ async function main() {
         await write(wt, rel, instantiated);
         truth.mustSurvive.set(id, [rel, uniqSym]);
         truth.gold50.set(id, uniqSym);
+        const langOf = { 'a.tf': 'Terraform', 'a.elm': 'Elm', 'a.jl': 'Julia', 'a.zig': 'Zig', 'a.nim': 'Nim', 'a.cr': 'Crystal', 'a.sol': 'Solidity', 'a.dart': 'Dart', 'a.swift': 'Swift', 'a.scala': 'Scala' };
+        if (langOf[fname]) truth.gold50Lang.set(id, langOf[fname]);
         break;
       }
       default: { // genuinely spent: junk only or empty
@@ -376,16 +380,25 @@ async function main() {
 
   // GOLD50: the SYMBOL layer itself must have flagged these — byte survival alone would let a
   // silently-regressed language extractor hide behind the file layer.
+  // Capability-aware: a language the INSTALLED ctags has no parser for is a toolchain gap, not a
+  // holt regression (Ubuntu 24.04 ships ctags 5.9.0 — no Terraform/Elm parser). Those trees are
+  // reported as unsupported rather than counted as misses, so a correct build is never red on an
+  // older toolchain — while every language this ctags CAN parse must still be detected.
+  const langProbe = await ctagsLanguages();
   let goldSeen = 0;
+  let goldUnsupported = 0;
   for (const [id, sym] of truth.gold50) {
     const u = report.unique.find((x) => x.id === id || x.id.endsWith(`/${id}`));
     if (!u) { errors.push(`${id}: gold50 tree missing from unique report`); continue; }
     const names = [...u.byLayer.uncommitted, ...u.byLayer.untracked, ...u.byLayer.committed].map((x) => x.key);
     if (!names.some((k) => k.endsWith(`:${sym}`))) {
+      const lang = truth.gold50Lang?.get(id);
+      if (lang && langProbe.available && !langProbe.languages.has(lang)) { goldUnsupported++; continue; }
       errors.push(`${id}: SYMBOL LAYER MISSED ${sym} — language extractor regressed for this tree`);
     } else goldSeen++;
   }
-  console.log(`  gold50 symbol-layer detections: ${goldSeen}/${truth.gold50.size}`);
+  console.log(`  gold50 symbol-layer detections: ${goldSeen}/${truth.gold50.size - goldUnsupported}`
+    + (goldUnsupported ? `  (${goldUnsupported} skipped: no parser in this ctags)` : ''));
   console.log(`  diagnostic verdicts: ${errors.length === 0 ? 'ALL CORRECT' : errors.length + ' WRONG'}`);
 
   /* ------------------------------------------------- the destructive loop ---- */

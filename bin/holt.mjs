@@ -13,7 +13,7 @@ import { discover } from '../src/discover.mjs';
 import { scan } from '../src/scan.mjs';
 import { analyze, contextDigest } from '../src/analyze.mjs';
 import { deepDuplicates, detectJscpd } from '../src/deep.mjs';
-import { detectCtags, detectEnry } from '../src/symbols.mjs';
+import { detectCtags, detectEnry, languageCoverage } from '../src/symbols.mjs';
 import { classify } from '../src/git.mjs';
 import {
   renderSummary, renderRisk, renderCollisions, renderDuplicates,
@@ -217,6 +217,16 @@ async function cmdDoctor(opts) {
   out(`  workstreams       ${info.workstreams}`);
   out(`  jj backend        ${info.jj}`);
   out(`  symbol backend    ${ctags.available ? paint('green', info.symbolBackend) : paint('yellow', info.symbolBackend)}`);
+  // Never claim language coverage the INSTALLED toolchain cannot deliver: distro ctags packages
+  // lag (Ubuntu 24.04 ships 5.9.0, no Terraform/Elm parser), so say so instead of overclaiming.
+  if (ctags.available) {
+    const cov = await languageCoverage(['Terraform', 'Elm', 'Julia', 'Zig', 'Nim', 'Crystal', 'Solidity', 'Dart', 'Swift', 'Scala']);
+    if (cov.available) {
+      const line = `${cov.total} languages parseable by this ctags`;
+      out(`  languages         ${cov.missing.length ? paint('yellow', `${line} — MISSING ${cov.missing.join(', ')}`) : paint('green', line)}`);
+      if (cov.missing.length) out(paint('grey', `                    upgrade universal-ctags to cover them (distro packages lag; 6.x adds these)`));
+    }
+  }
   out(`  language detect   ${enry.available ? paint('green', info.languageDetection) : paint('yellow', info.languageDetection)}`);
   out(`  deep duplicates   ${jscpd.available ? paint('green', info.deepDuplicates) : paint('yellow', info.deepDuplicates)}`);
   out('');

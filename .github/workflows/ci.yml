@@ -68,8 +68,13 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: 'stable' }
 
-      - name: install universal-ctags
-        run: sudo apt-get update && sudo apt-get install -y universal-ctags
+      - name: install universal-ctags (snap = current; apt ships 5.9.0 which lacks Terraform/Elm)
+        run: |
+          sudo snap install universal-ctags 2>/dev/null && sudo snap alias universal-ctags.ctags ctags || {
+            echo "snap unavailable — falling back to apt (older parser set; holt reports the gap honestly)"
+            sudo apt-get update && sudo apt-get install -y universal-ctags
+          }
+          ctags --version | head -1
 
       - name: install enry (content-based language detection)
         run: |
@@ -118,7 +123,12 @@ jobs:
       - name: the installed binary must run from a clean directory
         run: |
           mkdir -p /tmp/clean && cd /tmp/clean
-          git init -q && git commit -q --allow-empty -m base
+          # A bare CI runner has no git identity, and `git commit` exits 128 without one.
+          # Set it locally for this throwaway repo rather than globally.
+          git init -q
+          git config user.email ci@holt.invalid
+          git config user.name 'holt ci'
+          git commit -q --allow-empty -m base
           holt doctor
           holt status
       - name: the published tarball must not ship anything operator-only

@@ -63,6 +63,56 @@ export async function detectCtags() {
 }
 
 /**
+ * Which languages does the INSTALLED ctags actually parse?
+ *
+ * holt advertises a language count, but that count is a property of the ctags on THIS machine,
+ * not of holt. Stock distro packages lag: Ubuntu 24.04 ships universal-ctags 5.9.0, which has no
+ * Terraform or Elm parser, so a user there silently gets fewer languages than the README claims.
+ * Guessing from a version number would be fragile; asking the instrument what it supports is
+ * exact. That is the whole point — never claim coverage the installed toolchain cannot deliver.
+ *
+ * Returns the set of language names ctags reports, plus the ones holt's own optlib pack adds.
+ */
+let _langProbe = null;
+export async function ctagsLanguages() {
+  if (_langProbe) return _langProbe;
+  _langProbe = new Promise((resolve) => {
+    execFile('ctags', [...optionFlags(), '--list-languages'], { timeout: 8000 }, (err, stdout) => {
+      if (err) return resolve({ available: false, languages: new Set(), count: 0 });
+      const languages = new Set(
+        String(stdout).split('\n')
+          .map((l) => l.trim().replace(/\s*\[disabled\]$/, ''))
+          .filter(Boolean),
+      );
+      resolve({ available: true, languages, count: languages.size });
+    });
+  });
+  return _langProbe;
+}
+
+/**
+ * Honest coverage report: of the languages holt names in its own corpus, which can the installed
+ * ctags actually parse? Used by `holt doctor` so the gap is visible rather than silent.
+ */
+export async function languageCoverage(expected = []) {
+  const probe = await ctagsLanguages();
+  if (!probe.available) {
+    return { available: false, total: probe.count, missing: [], note: 'ctags unavailable — the regex fallback applies to every language' };
+  }
+  const missing = expected.filter((l) => !probe.languages.has(l));
+  return {
+    available: true,
+    total: probe.count,
+    checked: expected.length,
+    supported: expected.length - missing.length,
+    missing,
+    note: missing.length
+      ? `this ctags cannot parse ${missing.join(', ')} — upgrade universal-ctags (distro packages lag; 6.x adds these)`
+      : 'every language holt names is supported by this ctags',
+  };
+}
+
+/**
  * Noise filter for ctags output.
  *
  * ctags reports every nesting level of an object literal. For a registry like
