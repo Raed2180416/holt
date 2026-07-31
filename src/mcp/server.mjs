@@ -133,6 +133,17 @@ const TOOLS = [
     },
   },
   {
+    name: 'grove_impact',
+    title: 'Who depends on what another workstream changed',
+    description:
+      'Producer/consumer pairs across workstreams: A defines a symbol, B references it, and they share no file — so collision detection cannot see it. This is a DEPENDENCY relationship, NOT a conflict: it does not tell you the interaction breaks anything. Use before landing a workstream to see whose code will start running against your changes.',
+    inputSchema: {
+      type: 'object',
+      properties: { ...REPO_ARG, limit: { type: 'number', description: 'Max pairs (default 10).' } },
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'grove_landing_plan',
     title: 'What to land, in what order',
     description:
@@ -267,6 +278,26 @@ async function handle(name, args) {
           workstream: x.workstream, files: x.files.slice(0, 5),
           count: x.fileCount, theirsUncommitted: x.hasUncommitted,
         })),
+      };
+    }
+
+    case 'grove_impact': {
+      const { scanned } = await getReport(cwd);
+      const { impact } = await import('../impact.mjs');
+      const imp = await impact(scanned, {});
+      return {
+        total: imp.counts.pairs,
+        highConfidence: imp.counts.high,
+        pairs: imp.pairs.slice(0, limit).map((p) => ({
+          producer: p.producer,
+          consumer: p.consumer,
+          confidence: p.confidence,
+          symbols: (p.unambiguousSymbols.length ? p.unambiguousSymbols : p.symbols).slice(0, 6),
+          definedIn: p.definedIn.slice(0, 2),
+        })),
+        // Repeated on every response on purpose: a model that reads only the payload must not
+        // be able to conclude grove detected a conflict.
+        important: 'These are DEPENDENCIES, not conflicts. grove cannot tell you whether an interaction breaks anything. References are matched textually, so an occurrence in a comment or string counts.',
       };
     }
 

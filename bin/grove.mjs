@@ -17,10 +17,11 @@ import { detectCtags, detectEnry } from '../src/symbols.mjs';
 import { classify } from '../src/git.mjs';
 import {
   renderSummary, renderRisk, renderCollisions, renderDuplicates,
-  renderPlan, renderContext, paint,
+  renderPlan, renderContext, renderImpact, paint,
 } from '../src/render.mjs';
 import { renderHtml } from '../src/graph-html.mjs';
 import { assessCommand, buildBrief } from '../src/agent.mjs';
+import { impact, detectRipgrep } from '../src/impact.mjs';
 import { integrate, detectHosts, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
 
 const USAGE = `
@@ -36,6 +37,7 @@ COMMANDS
   duplicates          pairs that built the same thing  [--deep]                (P3)
   context <id>        what an agent in <id> needs to know about its siblings   (P2)
   plan                drop / collapse / land-in-this-order                     (P5)
+  impact              who DEPENDS on what another workstream changed  (not a conflict check)
   graph               the relationship graph  [--html <file>]
   gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
   doctor              environment and backend check
@@ -302,6 +304,11 @@ async function main() {
 
     case 'plan':
       return opts.json ? emitJson(report.plan) : out(renderPlan(report));
+
+    case 'impact': {
+      const imp = await impact(scanned, opts);
+      return opts.json ? emitJson(imp) : out(renderImpact(imp));
+    }
 
     case 'graph': {
       if (opts.html) {

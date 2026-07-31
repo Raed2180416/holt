@@ -40,9 +40,38 @@ from one graph.
 | **P3** | Redundant work — N agents building one thing | `grove duplicates` |
 | **P5** | Review bottleneck | `grove plan` |
 | **P6** | Nothing knows what's safe to delete | `grove gate <id>` |
+| **P4** | Semantic conflict | **not attempted** — see below |
 
-P4 (semantic conflict) is **deliberately not attempted**. It is unresolved research, and a
-confident wrong answer there is worse than no answer.
+## P4, and what grove does instead
+
+grove does **not** claim to detect semantic conflicts — two changes that merge cleanly and break
+at runtime. The 2026 literature is unambiguous about why:
+
+- static approaches carry high false-positive rates, largely from imprecise pointer analysis
+  ([arXiv 2310.04269](https://arxiv.org/pdf/2310.04269), [arXiv 2507.20081](https://arxiv.org/pdf/2507.20081));
+- dynamic/test-based approaches buy precision at a large cost in recall
+  ([JSS 2024](https://www.sciencedirect.com/science/article/pii/S0164121224001158));
+- [RefFilter](https://arxiv.org/abs/2510.01960) is the current best refactoring-aware filter and
+  cuts false positives by ~32% over baseline — an improvement, not a solution;
+- and RefactoringMiner, which RefFilter depends on, is **Java only**, which rules it out for a
+  tool that must work on 164 languages.
+
+What grove *can* state factually is the dependency structure P1 structurally cannot see:
+
+```bash
+grove impact
+```
+
+> **A defines symbol X. B references X and does not define it. B never touches A's file.**
+
+That is a producer/consumer relationship across workstreams. Collision detection works by file
+overlap, and here there is none — so this is invisible to it. When both land, B's code runs
+against A's definition for the first time. On a real 37-workstream repository: **694 interaction
+pairs, 307 of them not reported as collisions.**
+
+grove reports the relationship and its evidence. It does **not** tell you the interaction is a
+problem, because it cannot know that. Every finding carries that caveat, in the CLI and in the
+MCP payload.
 
 ### The finding that justifies the tool
 

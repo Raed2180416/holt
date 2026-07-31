@@ -116,7 +116,7 @@ test('MCP PROTOCOL: tools/list returns the full, well-formed tool set', async (t
   const names = tools.map((t2) => t2.name);
   for (const expected of [
     'grove_status', 'grove_at_risk', 'grove_check_workstream',
-    'grove_collisions', 'grove_duplicates', 'grove_context', 'grove_landing_plan',
+    'grove_collisions', 'grove_duplicates', 'grove_context', 'grove_landing_plan', 'grove_impact',
   ]) {
     assert.ok(names.includes(expected), `missing tool ${expected}`);
   }

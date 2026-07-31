@@ -277,6 +277,43 @@ export function renderPlan(report) {
   return out.join('\n');
 }
 
+export function renderImpact(imp) {
+  const out = [];
+  out.push(c('bold', 'CROSS-WORKSTREAM IMPACT') + c('grey', '  — dependency, NOT conflict'));
+  out.push('');
+  out.push(c('grey', `  ${imp.tool ?? 'no reference search available'}`));
+  out.push('');
+
+  if (!imp.pairs.length) {
+    out.push(c('green', '  No workstream references a symbol another workstream defines.'));
+    out.push('');
+    for (const cav of imp.caveats) out.push(c('grey', `  · ${cav}`));
+    out.push('');
+    return out.join('\n');
+  }
+
+  out.push(
+    `  ${c('bold', imp.counts.pairs)} producer/consumer pair(s)` +
+    `  ${c('grey', '·')}  ${c('yellow', imp.counts.high)} with unambiguous evidence`,
+  );
+  out.push('');
+
+  for (const p of imp.pairs.slice(0, 20)) {
+    const conf = p.confidence === 'high' ? c('yellow', 'HIGH') : p.confidence === 'medium' ? c('grey', 'MED ') : c('grey', 'LOW ');
+    out.push(`  ${conf}  ${c('bold', p.producer)} ${c('grey', 'defines →')} ${c('bold', p.consumer)} ${c('grey', 'uses')}`);
+    const shown = p.unambiguousSymbols.length ? p.unambiguousSymbols : p.symbols;
+    out.push(c('grey', `        ${shown.slice(0, 6).join(', ')}${p.symbolCount > 6 ? ` … +${p.symbolCount - 6}` : ''}`));
+    out.push(c('grey', `        defined in: ${p.definedIn.slice(0, 2).join(', ')}`));
+  }
+  if (imp.pairs.length > 20) out.push(c('grey', `  … and ${imp.pairs.length - 20} more`));
+
+  out.push('');
+  out.push(c('bold', '  WHAT THIS DOES AND DOES NOT TELL YOU'));
+  for (const cav of imp.caveats) out.push(c('grey', `  · ${cav}`));
+  out.push('');
+  return out.join('\n');
+}
+
 export function renderContext(digest) {
   if (!digest.ok) {
     return c('red', `grove: ${digest.error}`) + '\n' + c('grey', `known: ${digest.known.join(', ')}`);
