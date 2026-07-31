@@ -223,9 +223,40 @@ const MUTATIONS = [
     id: 'policy-silent-pass',
     defect: 'an unparseable policy file is ignored instead of refusing — the team believes rules ran',
     file: 'src/team/policy.mjs',
-    find: "      throw Object.assign(new Error(`${rel} is not valid JSON (${e.message}) — refusing to run with a policy nobody can read`), { code: 'POLICY_PARSE' });",
-    replace: '      continue;',
+    // Anchor re-pointed when parsing was extracted into parsePolicy() so the same document could
+    // be validated whether its bytes came from disk or from a git ref. `continue` is no longer in
+    // scope there, and returning null is the faithful expression of the same defect: the caller
+    // reads "no policy" and the build goes green with nothing enforced.
+    find: "    throw Object.assign(new Error(`${label} is not valid JSON (${e.message}) — refusing to run with a policy nobody can read`), { code: 'POLICY_PARSE' });",
+    replace: '    return null;',
     tests: ['test/unit/policy.test.mjs'],
+  },
+  {
+    id: 'gate-policy-from-worktree',
+    defect: 'the gate reads .holt/policy.json from the WORKING TREE, so a pull request that '
+      + 'deletes or weakens it is judged by its own edited copy',
+    file: 'src/team/policy.mjs',
+    find: '  if (baseRef) {\n    const fromBase = await loadPolicyFromRef(root, baseRef);',
+    replace: '  if (false) {\n    const fromBase = await loadPolicyFromRef(root, baseRef);',
+    tests: ['test/unit/policy.test.mjs', 'test/e2e/ci-gate.test.mjs'],
+  },
+  {
+    id: 'gate-untrusted-policy-suppresses-flags',
+    defect: 'a policy the base never carried can switch off --fail-on-unlanded — the same bypass '
+      + 'as editing the policy, through the door of ADDING one',
+    file: 'src/team/policy.mjs',
+    find: '  const carried = trusted ? [] : [...flagFailures];',
+    replace: '  const carried = [];',
+    tests: ['test/unit/policy.test.mjs'],
+  },
+  {
+    id: 'shallow-history-passes',
+    defect: 'a shallow or grafted checkout yields an empty audit and the gate reports GREEN — '
+      + 'the moment holt knows least is the moment it is most reassuring',
+    file: 'src/git.mjs',
+    find: "  if (shallow) {\n    return {\n      complete: false,\n      kind: 'shallow',",
+    replace: "  if (false) {\n    return {\n      complete: false,\n      kind: 'shallow',",
+    tests: ['test/e2e/ci-gate.test.mjs'],
   },
   {
     id: 'webhook-signature-blind',

@@ -370,6 +370,99 @@ export async function worktreeSnapshot(wsPath, head, { timeout = 60_000 } = {}) 
 
 let snapCounter = 0;
 
+/**
+ * Is this repository's HISTORY COMPLETE enough for holt to render a verdict?
+ *
+ * MEASURED FAILURE, and it is the worst shape a gate can have: `actions/checkout` defaults to
+ * `fetch-depth: 1`. In that checkout there are no other branches and no merge base, so the
+ * branch audit finds nothing unlanded and `holt ci` reports GREEN — with `--fail-on-unlanded`
+ * set, on a repository that provably held abandoned work. The moment holt knows LEAST is the
+ * moment it is most reassuring, which is precisely backwards.
+ *
+ * This is the general rule, not a CI special case: an EMPTY result has two explanations — the
+ * thing is absent, or the instrument cannot see it — and they are indistinguishable from the
+ * output alone. Wherever holt turns an empty result into a PASS, it must first prove the
+ * instrument could have seen a positive. Here that proof is the history itself.
+ *
+ * Detected, in the order git itself understands them:
+ *   shallow  — `rev-parse --is-shallow-repository` (git >= 2.15), else the `shallow` marker file,
+ *              which IS the shallow state and works on every git ever shipped.
+ *   grafted  — `info/grafts` (deprecated) or `refs/replace/*` (the modern form). Either one means
+ *              the commit graph git shows is not the commit graph that exists, so an ancestry or
+ *              merge-base answer derived from it is not trustworthy.
+ *
+ * FAIL-CLOSED: if the instrument itself cannot be run, the answer is "incomplete", never
+ * "complete". A gate that cannot check its own preconditions must refuse, not wave things through.
+ *
+ * @returns {Promise<{complete: boolean, kind: 'complete'|'shallow'|'grafted'|'unverifiable',
+ *                    reason?: string, fix?: string}>}
+ */
+export async function historyCompleteness(root) {
+  const gitPathExists = async (rel) => {
+    const r = await git(['rev-parse', '--git-path', rel], { cwd: root }).catch(() => null);
+    if (!r || r.code !== 0) return null; // unknown, not "absent"
+    const p = r.stdout.trim();
+    if (!p) return null;
+    const abs = path.isAbsolute(p) ? p : path.join(root, p);
+    try {
+      const st = await fs.stat(abs);
+      return st.size > 0;
+    } catch {
+      return false;
+    }
+  };
+
+  const q = await git(['rev-parse', '--is-shallow-repository'], { cwd: root }).catch(() => null);
+  let shallow = q && q.code === 0 && /^(true|false)$/.test(q.stdout.trim())
+    ? q.stdout.trim() === 'true'
+    : await gitPathExists('shallow');
+
+  if (shallow === null) {
+    return {
+      complete: false,
+      kind: 'unverifiable',
+      reason: 'holt could not determine whether this repository is a shallow clone, so it cannot '
+        + 'tell "nothing was abandoned" from "there is no history to look at"',
+      fix: 'Check out the full history — actions/checkout with `fetch-depth: 0` — or run `git fetch --unshallow`.',
+    };
+  }
+  if (shallow) {
+    return {
+      complete: false,
+      kind: 'shallow',
+      reason: 'this is a SHALLOW clone: git holds only part of the history, so no branch can be '
+        + 'compared against its base. An empty result here means "no history to look at", NOT '
+        + '"no work was abandoned"',
+      fix: 'actions/checkout@v4 with `fetch-depth: 0` (the default of 1 is a shallow clone), '
+        + 'or run `git fetch --unshallow` before holt.',
+    };
+  }
+
+  if (await gitPathExists('info/grafts')) {
+    return {
+      complete: false,
+      kind: 'grafted',
+      reason: 'this repository has GRAFTS (.git/info/grafts): the commit graph git reports is not '
+        + 'the commit graph that exists, so ancestry and merge-base answers are not trustworthy',
+      fix: 'Run holt against an ungrafted clone, or migrate the grafts to `git replace` and remove them.',
+    };
+  }
+  const replaced = await git(['for-each-ref', 'refs/replace', '--format=%(refname)'], { cwd: root })
+    .catch(() => null);
+  if (replaced && replaced.code === 0 && replaced.stdout.trim()) {
+    return {
+      complete: false,
+      kind: 'grafted',
+      reason: 'this repository has replacement refs (refs/replace/*), which git itself labels '
+        + '"grafted": the visible commit graph is not the real one, so a content verdict derived '
+        + 'from it cannot be trusted',
+      fix: 'Run holt with `GIT_NO_REPLACE_OBJECTS=1`, or against a clone without replacement refs.',
+    };
+  }
+
+  return { complete: true, kind: 'complete' };
+}
+
 export async function gitOk(argv, opts) {
   const r = await git(argv, opts);
   if (r.code !== 0) {
