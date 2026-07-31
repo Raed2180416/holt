@@ -72,21 +72,21 @@ const TOOLS = [
     name: 'holt_landing_order',
     title: 'What order to land workstreams in',
     description:
-      'Landing order computed from the evidence graph: which workstreams can land in PARALLEL (no observed interaction), and for entangled ones a min-entanglement sequence with the specific later merges to watch at every step. A heuristic with named evidence — never a conflict-free certificate.',
+      'Landing order from the evidence graph: which workstreams can land in PARALLEL, and a sequence for the entangled rest with the later merges to watch at each step. Heuristic, never a certificate.',
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
     name: 'holt_branches',
     title: 'The branch graveyard, classified by content',
     description:
-      'Audits local branches not checked out anywhere: landed (content delta empty AND ancestor — safe for git branch -d), content-landed (every line already in base but squash/cherry-pick broke ancestry — git -d will refuse; evidence reported, nothing auto-deleted), unlanded (held files named), unknown (instrument failed — refused, never safe). Read-only: deleting is `holt branches --apply` on the CLI, which uses -d only.',
+      'Audits local branches checked out nowhere: landed (safe -d), content-landed (squash/cherry-pick — content present, ancestry broken; never auto-deleted), unlanded (files named), unknown (refused). Read-only.',
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
     name: 'holt_partition',
     title: 'Pre-flight split for N agents',
     description:
-      'Before spawning N agents: disjoint top-level directory buckets balanced by tracked-file weight, plus every ALREADY-CONTESTED file (observed across live workstreams) assigned to exactly one owner. Advisory — holt cannot know your task split; it guarantees the buckets are disjoint and each hotspot has one owner.',
+      'Pre-flight split for N agents: disjoint balanced directory buckets, every observed hotspot assigned exactly one owner. Advisory — a collision-free starting map, not a work plan.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, agents: { type: 'number', description: 'How many agents you are about to spawn (default 2).' } },
