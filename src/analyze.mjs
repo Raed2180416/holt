@@ -23,7 +23,7 @@
  * research, and a confident wrong answer there is worse than no answer.
  */
 
-import { git, pmap } from './git.mjs';
+import { git, pmap, worktreeSnapshot } from './git.mjs';
 import { symbolKey } from './symbols.mjs';
 
 /* ------------------------------------------------------------------ helpers ---- */
@@ -254,6 +254,20 @@ export async function collisions(scanResult, opts = {}) {
   const pairs = overlappingPairs(live);
   const { keep } = discriminativeSymbols(live);
 
+  // One snapshot per worktree, shared by every pair it appears in — N snapshots, not N².
+  // A CLEAN worktree needs none: its HEAD already IS its full state, so the common case costs
+  // nothing. A snapshot that fails resolves to the head, which reproduces the old behaviour for
+  // that pair rather than inventing an answer.
+  const snapCache = new Map();
+  const sideOf = async (w) => {
+    const dirty = w.uncommitted.count > 0 || (w.untracked?.count ?? 0) > 0;
+    if (!dirty || scanResult.strictReadOnly) return w.head ?? null;
+    if (!snapCache.has(w.id)) {
+      snapCache.set(w.id, worktreeSnapshot(w.path, w.head, { timeout }).then((c) => c ?? w.head ?? null));
+    }
+    return snapCache.get(w.id);
+  };
+
   const results = await pmap(
     pairs,
     async (p) => {
@@ -263,13 +277,23 @@ export async function collisions(scanResult, opts = {}) {
       const aKeys = setOf(discriminativeKeys(a, keep));
       const sharedSymbols = intersect(aKeys, discriminativeKeys(b, keep));
 
-      // Can merge-tree see both sides? Only if both have committed content that base lacks.
-      const bothCommitted = a.committed.count > 0 && b.committed.count > 0;
+      // PROVE IT AGAINST WHAT IS ACTUALLY THERE, not just what was committed.
+      //
+      // This used to merge the two committed HEADS, because "merge-tree cannot see uncommitted
+      // sides". That premise was false and it cost the flagship answer: two worktrees editing the
+      // same line of the same file, uncommitted, reported "No collisions. No two workstreams
+      // contest the same content." Every worktree shares one object database, so each side's
+      // full working state becomes a real commit (see worktreeSnapshot) and merge-tree answers
+      // for real. Snapshots are computed once per worktree and reused across every pair.
+      const [aSide, bSide] = await Promise.all([sideOf(a), sideOf(b)]);
       let proven = null;
-      if (bothCommitted && !scanResult.strictReadOnly && a.head && b.head) {
-        const mt = await git(['merge-tree', '--write-tree', a.head, b.head], {
+      if (!scanResult.strictReadOnly && aSide && bSide) {
+        const mt = await git(['merge-tree', '--write-tree', aSide, bSide], {
           cwd: scanResult.root, timeout,
         });
+        // Anything other than 0/1 is merge-tree failing to answer — that is UNKNOWN, never
+        // "clean". Reporting an unanswerable pair as clean is the fail-open shape that lets a
+        // real conflict through silently.
         if (mt.code <= 1) proven = mt.code === 1;
       }
 
@@ -307,10 +331,10 @@ export async function collisions(scanResult, opts = {}) {
         severity,
         mergeTreeConflict: proven,
         why:
-          proven === true ? 'git merge-tree reports a real conflict between these two heads'
+          proven === true ? 'git merge-tree reports a real conflict between these two worktrees, including their uncommitted work'
             : sharedSymbols.length > 0
               ? `both added the same symbol(s): ${sharedSymbols.slice(0, 3).join(', ')}${sharedSymbols.length > 3 ? '…' : ''}` +
-                (uncommittedInvolved ? ' — and at least one side is uncommitted, so merge-tree cannot confirm it' : '')
+                (uncommittedInvolved ? ' — at least one side is uncommitted' : '')
               : `co-located in ${p.files.length} shared file(s), no symbol-level overlap`,
       };
     },

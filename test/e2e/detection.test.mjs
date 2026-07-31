@@ -354,3 +354,60 @@ test('SAFETY: recognisable build output does NOT block cleanup — the gate must
   const s = report.safe.find((x) => x.id === 'just-build-output' || x.id.endsWith('/just-build-output'));
   assert.equal(s.safe, true, `build output alone must remain disposable: ${JSON.stringify(s)}`);
 });
+
+test('P1 UNCOMMITTED CONFLICT: a conflict in work nobody has committed is PROVEN, not missed', async (t) => {
+  // THE DEFECT THIS PINS, and it was the flagship answer being wrong in the simplest case.
+  // Collisions used to run `merge-tree` against the two committed HEADS, on the stated grounds
+  // that "merge-tree cannot see uncommitted sides". Two worktrees editing the SAME LINE of the
+  // same file, uncommitted, therefore produced: "No collisions. No two workstreams contest the
+  // same content." A provable conflict, reported as no conflict.
+  //
+  // The premise was false. Every worktree shares one object database, so each side's working
+  // state becomes a real commit and git's own merge machinery answers for real — which is what
+  // `holt rescue` had been doing all along, 200 lines away in the same package.
+  const fx = await newRepo('uncommitted-conflict');
+  t.after(() => fx.cleanup());
+  await fx.write('shared.txt', 'line1\nline2\nline3\nline4\nline5\n');
+  await fx.commit('base');
+
+  const a = await fx.worktree('side-a');
+  const b = await fx.worktree('side-b');
+  // Same line, opposite content, NEITHER committed.
+  await fx.write('shared.txt', 'line1\nline2\nAAA\nline4\nline5\n', a);
+  await fx.write('shared.txt', 'line1\nline2\nBBB\nline4\nline5\n', b);
+
+  const { report } = await inspectFixture(fx);
+  const hit = (report.collisionsAll ?? report.collisions).find((c) => pairMatches(c, 'side-a', 'side-b'));
+  assert.ok(hit, 'two worktrees editing the same line must be related at all');
+  assert.equal(hit.kind, 'proven',
+    `this conflict is provable by merge-tree, so it must not be downgraded to a guess: ${JSON.stringify(hit)}`);
+  assert.equal(hit.severity, 'high', 'a proven conflict is high severity');
+  assert.equal(hit.mergeTreeConflict, true, 'and git itself must be the thing that said so');
+});
+
+test('P1 PRECISION: sharing a file is not a conflict when the edits actually merge', async (t) => {
+  // The other half, and the one that keeps this useful. Proving conflicts is worthless if
+  // everything that touches a shared file gets called a conflict — a near-complete graph of
+  // findings is strictly worse than none, because the real ones become unreachable.
+  const fx = await newRepo('uncommitted-clean');
+  t.after(() => fx.cleanup());
+  await fx.write('shared.txt', 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n');
+  await fx.commit('base');
+
+  const a = await fx.worktree('top');
+  const b = await fx.worktree('bottom');
+  // Same file, far-apart lines: git merges this cleanly.
+  await fx.write('shared.txt', 'TOP\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n', a);
+  await fx.write('shared.txt', 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nBOTTOM\n', b);
+
+  const { report } = await inspectFixture(fx);
+  const hit = (report.collisionsAll ?? report.collisions).find((c) => pairMatches(c, 'top', 'bottom'));
+  if (hit) {
+    assert.notEqual(hit.kind, 'proven',
+      `these merge cleanly, so calling it proven is a false positive: ${JSON.stringify(hit)}`);
+    assert.notEqual(hit.severity, 'high', 'a clean merge must never be high severity');
+  }
+  const visible = report.collisions.find((c) => pairMatches(c, 'top', 'bottom'));
+  assert.equal(visible, undefined,
+    'a pair git proves merges cleanly must not appear in the default collision report');
+});

@@ -25,6 +25,8 @@
  */
 
 import { execFile } from 'node:child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 /** git subcommands that touch nothing. */
 const SAFE = new Set([
@@ -314,6 +316,59 @@ export async function authorEnv(cwd) {
     GIT_COMMITTER_EMAIL: email || 'holt@localhost',
   };
 }
+
+
+/**
+ * A commit OID representing a worktree's COMPLETE current state — committed, uncommitted and
+ * untracked — without touching the user's index, worktree, refs or stash.
+ *
+ * WHY THIS EXISTS AT THE GIT LAYER. holt's collision detection used to run `merge-tree` against
+ * the two worktrees' committed HEADS, on the stated grounds that "merge-tree cannot see
+ * uncommitted sides". That premise is wrong, and the cost of believing it was measured: two
+ * worktrees editing the SAME LINE of the same file, uncommitted, produced "No collisions. No two
+ * workstreams contest the same content." A real, provable conflict reported as no conflict —
+ * a false negative on the flagship question, in the simplest case it exists to answer.
+ *
+ * Every worktree shares one object database, so a scratch index turns any worktree's working
+ * state into a first-class tree, and a tree into a commit. Then every commit-based primitive —
+ * merge-tree above all — applies unchanged. `holt rescue` has done exactly this since it was
+ * written; the analysis path simply never used it.
+ *
+ * Object-writing only: it creates unreferenced objects (collected by a later `git gc`) and
+ * mutates nothing reachable. Callers under strictReadOnly must not call it.
+ *
+ * @returns {Promise<string|null>} commit OID, or null if the worktree cannot be snapshotted —
+ *   callers must fall back rather than treat null as "no conflict".
+ */
+export async function worktreeSnapshot(wsPath, head, { timeout = 60_000 } = {}) {
+  // Unique per call: collisions() snapshots worktrees concurrently, and a shared index file
+  // would have them overwrite each other's staging area.
+  const idx = path.join(wsPath, `.git-holt-snap-${process.pid}-${snapCounter++}`);
+  const env = { GIT_INDEX_FILE: idx, ...(await authorEnv(wsPath)) };
+  try {
+    if (head) {
+      const seed = await git(['read-tree', head], { cwd: wsPath, env, allowMutation: true, timeout });
+      if (seed.code !== 0) return null;
+    }
+    // --force so ignored files count too: an agent's uncommitted work is no less real for being
+    // gitignored, and a collision it causes is no less real either.
+    // Deliberately not gitOk — a PARTIAL add (a nested git repo inside the worktree makes `add`
+    // exit non-zero while still indexing everything else) should still yield a usable tree.
+    await git(['add', '--all', '--force', '--', '.'], { cwd: wsPath, env, allowMutation: true, timeout });
+    const tree = await git(['write-tree'], { cwd: wsPath, env, allowMutation: true, timeout });
+    if (tree.code !== 0) return null;
+    const args = ['commit-tree', tree.stdout.trim(), '-m', 'holt snapshot'];
+    if (head) args.push('-p', head);
+    const commit = await git(args, { cwd: wsPath, env, allowMutation: true, timeout });
+    return commit.code === 0 ? commit.stdout.trim() : null;
+  } catch {
+    return null;
+  } finally {
+    await fs.rm(idx, { force: true }).catch(() => {});
+  }
+}
+
+let snapCounter = 0;
 
 export async function gitOk(argv, opts) {
   const r = await git(argv, opts);

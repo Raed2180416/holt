@@ -70,6 +70,16 @@ async function repoFingerprint() {
  */
 const MUTATIONS = [
   {
+    "id": "collisions-head-only",
+    "defect": "collisions fall back to committed heads, so a conflict in UNCOMMITTED work — the flagship case — is reported as no collision",
+    "file": "src/analyze.mjs",
+    "find": "    if (!dirty || scanResult.strictReadOnly) return w.head ?? null;",
+    "replace": "    return w.head ?? null; // mutated: uncommitted sides invisible again",
+    "tests": [
+      "test/e2e/detection.test.mjs"
+    ]
+  },
+  {
     "id": "mutation-verbs-uncovered",
     "defect": "the reset --hard rule is removed — holt blocks worktree DELETION but allows the command that destroys the same work in place",
     "file": "src/agent.mjs",
