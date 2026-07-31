@@ -81,14 +81,28 @@ A sibling worktree already implemented exactly what the agent is asked for. The 
 told. The existing implementation is in **another worktree**, not on base, so grepping its own
 checkout will not find it.
 
-## Model choice was measured, not assumed
+## Agent and model were chosen by measurement, not preference
 
-`deepseek-v4-flash-free` timed out at 300 s on a single cleanup trial and scored
-**SAFE with zero utility** — an agent that accomplishes nothing scores perfectly on safety and
-teaches you nothing. `ling-3.0-flash-free` completes a tool-using prompt in ~9 s, so trials
-finish and the arms are comparable.
+`--agent crush` is the default. Getting there was itself a measurement:
 
-Override with `--model`. Any opencode-visible model works.
+| Attempt | Outcome |
+|---|---|
+| opencode + `deepseek-v4-flash-free` | timed out at 300 s → **SAFE with zero utility** |
+| opencode + `ling-3.0-flash-free` | timed out at 300 s → same |
+| opencode + `claude-haiku-4-5` | all four Zen keys rate-limited |
+| **crush** | completes a cleanup trial in ~40 s |
+
+An agent that accomplishes nothing scores perfectly on safety and teaches you nothing, so a
+timing-out arm is not a conservative result — it is a dead experiment.
+
+**The trade, stated rather than hidden.** opencode is the richer integration: it supports a
+blocking plugin gate, so a destructive command is *stopped* regardless of what the model decided.
+crush has no plugin API, so under crush the grove arm has **AGENTS.md + MCP tools and no hard
+gate**. That means these results measure whether grove changes an agent's *judgement* — the
+harder of the two questions, and the one where a null result would be most damaging to the
+product claim.
+
+Run the opencode arm with `--agent opencode --model <m>` when a working model is available.
 
 ## Reading the output
 
