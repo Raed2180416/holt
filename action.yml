@@ -21,13 +21,25 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    # Inputs are passed through the ENVIRONMENT, never interpolated into the script with
+    # ${{ }}. Interpolating an input straight into a run: block lets a value derived from a PR
+    # title or branch name inject shell — the classic GitHub Actions script-injection hole.
+    # In env, an input is only ever data; the script quotes it and holt itself validates it.
     - shell: bash
+      env:
+        HOLT_IN_BASE: ${{ inputs.base }}
+        HOLT_IN_FAIL: ${{ inputs.fail-on-unlanded }}
+        HOLT_IN_AGE: ${{ inputs.max-age-days }}
+        HOLT_IN_IGNORE: ${{ inputs.ignore }}
       run: |
-        npm install -g github:Raed2180416/holt >/dev/null 2>&1 || npm install -g holt >/dev/null 2>&1
-        ARGS=""
-        [ "${{ inputs['fail-on-unlanded'] }}" = "true" ] && ARGS="$ARGS --fail-on-unlanded"
-        [ -n "${{ inputs['max-age-days'] }}" ] && ARGS="$ARGS --max-age-days ${{ inputs['max-age-days'] }}"
-        [ -n "${{ inputs.base }}" ] && ARGS="$ARGS --base ${{ inputs.base }}"
-        IFS=',' read -ra IG <<< "${{ inputs.ignore }}"
-        for b in "${IG[@]}"; do [ -n "$b" ] && ARGS="$ARGS --ignore $b"; done
-        holt ci $ARGS
+        set -euo pipefail
+        npm install -g "github:Raed2180416/holt" >/dev/null 2>&1 || npm install -g holt >/dev/null 2>&1
+        ARGS=()
+        [ "$HOLT_IN_FAIL" = "true" ] && ARGS+=(--fail-on-unlanded)
+        [ -n "$HOLT_IN_AGE" ] && ARGS+=(--max-age-days "$HOLT_IN_AGE")
+        [ -n "$HOLT_IN_BASE" ] && ARGS+=(--base "$HOLT_IN_BASE")
+        if [ -n "$HOLT_IN_IGNORE" ]; then
+          IFS=',' read -ra IG <<< "$HOLT_IN_IGNORE"
+          for b in "${IG[@]}"; do [ -n "$b" ] && ARGS+=(--ignore "$b"); done
+        fi
+        holt ci "${ARGS[@]}"

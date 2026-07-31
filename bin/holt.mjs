@@ -86,7 +86,7 @@ AGENT INTEGRATION
 
 OPTIONS
   --json              machine-readable output
-  --export <fmt>      journal: json | csv                                       [team]
+  --export <fmt>      journal: json | csv  (your own repo log — free)
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
   --base <ref>        compare against <ref>            (default: origin/HEAD, then main/master…)
   --cwd <path>        repository to inspect            (default: cwd)
@@ -592,12 +592,11 @@ async function main() {
   if (cmd === 'journal') {
     const events = await readJournal(opts.cwd);
     if (opts.exportFmt) {
-      const ent = checkEntitlement('journal-export');
-      if (!ent.entitled) {
-        if (opts.json) { emitJson({ ok: false, entitlement: ent }); process.exit(3); }
-        process.stderr.write(paint('yellow', `holt journal --export: ${ent.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
-        process.exit(3);
-      }
+      // A single repository's audit log is the USER'S OWN DATA, and `holt journal --json`
+      // already prints all of it for free — gating a CSV of the same rows would be a gate in
+      // name only. So single-repo export is free. The paid audit product is the FLEET-level
+      // aggregation across many repositories and the continuous webhook sink, which is where
+      // the work and the value actually are.
       const fmt = String(opts.exportFmt).toLowerCase();
       if (fmt === 'json') return emitJson({ exportedAt: new Date().toISOString(), repo: opts.cwd, count: events.length, events });
       if (fmt === 'csv') {

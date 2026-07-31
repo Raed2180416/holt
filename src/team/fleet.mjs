@@ -18,6 +18,15 @@ import { discover } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze } from '../analyze.mjs';
 import { branchAudit } from '../branches.mjs';
+import { checkEntitlement } from '../license.mjs';
+
+export class EntitlementError extends Error {
+  constructor(entitlement) {
+    super(entitlement.reason);
+    this.name = 'EntitlementError';
+    this.entitlement = entitlement;
+  }
+}
 
 /** Find git repositories under `roots`, bounded in depth so a home directory cannot be walked. */
 export async function findRepos(roots, { maxDepth = 3 } = {}) {
@@ -49,7 +58,15 @@ export async function findRepos(roots, { maxDepth = 3 } = {}) {
  * Scan every repository and aggregate. Concurrency-bounded: a fleet scan must not fork-bomb a
  * laptop, and git is I/O bound anyway.
  */
-export async function fleetScan(roots, { concurrency = 4, maxDepth = 3, ...opts } = {}) {
+export async function fleetScan(roots, { concurrency = 4, maxDepth = 3, env = process.env, ...opts } = {}) {
+  // The entitlement check lives HERE, at the feature, not only in the CLI dispatcher — so that
+  // importing this module directly is gated the same way the command is. It is still
+  // tamper-evident rather than tamper-proof (the source is public and can be edited), but a
+  // developer must now deliberately remove the check, not merely bypass the CLI to reach the
+  // paid feature by import.
+  const ent = checkEntitlement('fleet', { env });
+  if (!ent.entitled) throw new EntitlementError(ent);
+
   const repos = await findRepos(roots, { maxDepth });
   const rows = [];
   const failures = [];

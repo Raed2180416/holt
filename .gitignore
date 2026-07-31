@@ -5,3 +5,13 @@ holt-graph.html
 coverage/
 *.tgz
 .stryker-tmp/
+
+# Operational — must never be committed
+.env
+.env.*
+*.key
+*-signing.key
+server/data/
+licenses.jsonl
+.holt-fixtures/
+.holt-work/

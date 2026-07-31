@@ -59,12 +59,15 @@ export const TIERS = ['free', 'team', 'enterprise'];
  * a new feature is free until somebody deliberately prices it.
  */
 export const FEATURE_TIER = {
-  // Deliberately NOT priced: `holt ci` with inline flags. A single repo failing its own build
-  // on unlanded work is the adoption wedge and stays free forever. What a TEAM pays for is
-  // managing that centrally, across repos, with an audit trail.
+  // Deliberately NOT priced, because each is either the adoption wedge or the user's own data:
+  //   - `holt ci` with inline flags: a single repo failing its own build on unlanded work.
+  //   - `holt journal` and its --export: one repo's audit log is the user's own data, and
+  //     `journal --json` already prints all of it. A gate there would be illusory, so there is
+  //     none. The PAID audit product is fleet-level aggregation and the streaming webhook sink.
+  // What a TEAM pays for is managing this centrally, across repos, with policy and a paper trail.
   'policy-file': 'team',      // .holt/policy.json — policy as code, richer rules than flags
-  'journal-export': 'team',   // audit export / webhook sink
   fleet: 'team',              // multi-repo aggregation
+  'audit-sink': 'team',       // continuous export of the journal to an external system (webhook)
   sso: 'enterprise',
   'air-gap': 'enterprise',
 };
