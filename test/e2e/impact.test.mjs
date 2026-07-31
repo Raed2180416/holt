@@ -1,7 +1,7 @@
 /**
- * grove — cross-workstream impact.
+ * holt — cross-workstream impact.
  *
- * The claim under test is narrow and precise, which is the point: grove finds a PRODUCER/CONSUMER
+ * The claim under test is narrow and precise, which is the point: holt finds a PRODUCER/CONSUMER
  * relationship that collision detection structurally cannot see, and it does NOT claim the
  * relationship is a conflict.
  *

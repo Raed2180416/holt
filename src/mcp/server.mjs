@@ -1,17 +1,17 @@
 /**
- * grove — MCP server.
+ * holt — MCP server.
  *
  * TOOL DESIGN FOLLOWS THE 2026 CONSENSUS, WHICH IS NOT DECORATION:
  * a five-server / 58-tool setup can burn ~55K tokens on schemas alone, and the highest-leverage
  * fix is to return only what the agent needs and to aggregate server-side — expose
  * `get_sales_summary_by_region`, never `get_all_sales_records`.
  *
- * grove's own numbers make the case. Against the repository this was built for, the useful
+ * holt's own numbers make the case. Against the repository this was built for, the useful
  * answer was "4 of 69 workstreams hold unique work". A `list_all_worktrees` tool would spend
  * thousands of tokens delivering 69 objects so the model could rediscover that 4 matter.
  * So every tool here returns a DECISION with its evidence, and every list takes a `limit`.
  *
- * All tools are read-only (annotated as such). grove cannot modify a repository — see
+ * All tools are read-only (annotated as such). holt cannot modify a repository — see
  * src/git.mjs and test/unit/safety.test.mjs.
  */
 
@@ -65,14 +65,14 @@ const REPO_ARG = {
 
 const TOOLS = [
   {
-    name: 'grove_status',
+    name: 'holt_status',
     title: 'Parallel work status',
     description:
       'The decision surface for all parallel workstreams (git worktrees / jj workspaces): how many hold work that exists nowhere else, how many collide, how many are disposable, and how much review is actually needed. Start here.',
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
-    name: 'grove_at_risk',
+    name: 'holt_at_risk',
     title: 'Work that exists nowhere else',
     description:
       'Workstreams holding unique work, ranked by risk. Work that exists only as UNCOMMITTED changes ranks highest because no git command can relate it — deleting that worktree destroys it silently.',
@@ -83,7 +83,7 @@ const TOOLS = [
     },
   },
   {
-    name: 'grove_check_workstream',
+    name: 'holt_check_workstream',
     title: 'Is this workstream safe to delete?',
     description:
       'Single-workstream verdict before deleting or pruning it. Returns safe / holds-work / unknown with reasons. Fail-closed: a workstream that could not be scanned is "unknown", never "safe". Call this before any worktree removal.',
@@ -95,7 +95,7 @@ const TOOLS = [
     },
   },
   {
-    name: 'grove_collisions',
+    name: 'holt_collisions',
     title: 'Workstreams that will fight',
     description:
       'Pairs contesting the same content. "proven" means git merge-tree reports a real conflict; "predicted" means at least one side is uncommitted so merge-tree cannot see it — confidence is highest when both sides added the same symbol.',
@@ -106,7 +106,7 @@ const TOOLS = [
     },
   },
   {
-    name: 'grove_duplicates',
+    name: 'holt_duplicates',
     title: 'Workstreams that built the same thing',
     description:
       'Pairs that produced overlapping work. Cross-dispatch overlap is waste; same-family overlap is expected fan-out. Set deep:true to additionally run token-level clone detection (jscpd), which catches the same logic written under different names.',
@@ -121,7 +121,7 @@ const TOOLS = [
     },
   },
   {
-    name: 'grove_context',
+    name: 'holt_context',
     title: 'What my siblings are doing',
     description:
       'For an agent working IN a workstream: which other workstreams contest its files, and which symbols it is about to build that already exist next door. This is the fix for context blindness — each agent otherwise sees the repo only as it was when it started.',
@@ -133,7 +133,7 @@ const TOOLS = [
     },
   },
   {
-    name: 'grove_impact',
+    name: 'holt_impact',
     title: 'Who depends on what another workstream changed',
     description:
       'Producer/consumer pairs across workstreams: A defines a symbol, B references it, and they share no file — so collision detection cannot see it. This is a DEPENDENCY relationship, NOT a conflict: it does not tell you the interaction breaks anything. Use before landing a workstream to see whose code will start running against your changes.',
@@ -145,7 +145,7 @@ const TOOLS = [
   },
   /* ------------------------------------------------------------- ACTING ----
    * MEASURED: agents diagnosed correctly through MCP and then could not ACT. Both routed trials
-   * read AGENTS.md, chose `grove clean`, and were stopped by the host's Bash permission
+   * read AGENTS.md, chose `holt clean`, and were stopped by the host's Bash permission
    * classifier — "the permission classifier is blocking the execution". Diagnosis without a way
    * to act is not a product; the agent freezes holding the right answer.
    *
@@ -155,7 +155,7 @@ const TOOLS = [
    * on their real risk rather than on a blanket claim.
    */
   {
-    name: 'grove_clean',
+    name: 'holt_clean',
     title: 'Remove provably-disposable worktrees',
     description:
       'Removes worktrees that hold nothing base lacks, and their merged branches. DRY RUN unless apply:true. Re-verifies each worktree immediately before removing it, never touches one holding work found nowhere else, and never touches one it could not assess. Use this instead of deciding which worktrees are disposable yourself.',
@@ -170,10 +170,10 @@ const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   {
-    name: 'grove_rescue',
+    name: 'holt_rescue',
     title: 'Preserve a workstream\'s unique work to a verifiable ref',
     description:
-      'Captures a worktree\'s full state — tracked modifications and untracked files — as a commit on refs/grove/rescue/<id>, verifies the capture, and optionally releases grove\'s lock so the worktree becomes disposable. Fails loudly if the capture cannot be verified. Use this when a worktree is locked and you need it gone; never disarm the lock by hand.',
+      'Captures a worktree\'s full state — tracked modifications and untracked files — as a commit on refs/holt/rescue/<id>, verifies the capture, and optionally releases holt\'s lock so the worktree becomes disposable. Fails loudly if the capture cannot be verified. Use this when a worktree is locked and you need it gone; never disarm the lock by hand.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -188,7 +188,7 @@ const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
-    name: 'grove_protect',
+    name: 'holt_protect',
     title: 'Lock every workstream holding unique work',
     description:
       'Applies git\'s own worktree lock to each workstream holding work found nowhere else, with a reason naming what is at stake. A locked worktree refuses `git worktree remove --force`. Does not stop `rm -rf`.',
@@ -203,7 +203,7 @@ const TOOLS = [
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
   {
-    name: 'grove_landing_plan',
+    name: 'holt_landing_plan',
     title: 'What to land, in what order',
     description:
       'Reduces N workstreams to a review queue: drops provably-disposable ones, collapses duplicates to one representative, and orders the rest least-entangled-first so each landing does not invalidate the next.',
@@ -229,7 +229,7 @@ async function handle(name, args) {
   const limit = Math.max(1, Math.min(Number(args?.limit) || 10, 100));
 
   switch (name) {
-    case 'grove_status': {
+    case 'holt_status': {
       const { report, _ageMs } = await getReport(cwd);
       const r = report.plan.reviewReduction;
       return {
@@ -251,7 +251,7 @@ async function handle(name, args) {
       };
     }
 
-    case 'grove_at_risk': {
+    case 'holt_at_risk': {
       const { report } = await getReport(cwd);
       const rows = report.unique.filter((u) => u.uniqueSymbolCount > 0 || u.uncommittedOnlyCount > 0);
       return {
@@ -261,7 +261,7 @@ async function handle(name, args) {
       };
     }
 
-    case 'grove_check_workstream': {
+    case 'holt_check_workstream': {
       const { report } = await getReport(cwd);
       const v = report.safe.find((s) => s.id === args.id);
       if (!v) {
@@ -276,12 +276,12 @@ async function handle(name, args) {
         confidence: v.confidence,
         reasons: v.reasons,
         recommendation: v.confidence === 'unknown'
-          ? 'DO NOT DELETE — grove could not scan this workstream, so it cannot be called safe'
+          ? 'DO NOT DELETE — holt could not scan this workstream, so it cannot be called safe'
           : v.safe ? 'safe to delete' : 'DO NOT DELETE — holds work that would be lost',
       };
     }
 
-    case 'grove_collisions': {
+    case 'holt_collisions': {
       const { report } = await getReport(cwd);
       return {
         total: report.collisions.length,
@@ -294,7 +294,7 @@ async function handle(name, args) {
       };
     }
 
-    case 'grove_duplicates': {
+    case 'holt_duplicates': {
       const { report, scanned } = await getReport(cwd);
       const out = {
         total: report.duplicates.length,
@@ -321,7 +321,7 @@ async function handle(name, args) {
       return out;
     }
 
-    case 'grove_context': {
+    case 'holt_context': {
       const { scanned } = await getReport(cwd);
       const d = contextDigest(scanned, args.id);
       if (!d.ok) return { error: d.error, known: d.known.slice(0, 40) };
@@ -340,7 +340,7 @@ async function handle(name, args) {
       };
     }
 
-    case 'grove_impact': {
+    case 'holt_impact': {
       const { scanned } = await getReport(cwd);
       const { impact } = await import('../impact.mjs');
       const imp = await impact(scanned, {});
@@ -355,12 +355,12 @@ async function handle(name, args) {
           definedIn: p.definedIn.slice(0, 2),
         })),
         // Repeated on every response on purpose: a model that reads only the payload must not
-        // be able to conclude grove detected a conflict.
-        important: 'These are DEPENDENCIES, not conflicts. grove cannot tell you whether an interaction breaks anything. References are matched textually, so an occurrence in a comment or string counts.',
+        // be able to conclude holt detected a conflict.
+        important: 'These are DEPENDENCIES, not conflicts. holt cannot tell you whether an interaction breaks anything. References are matched textually, so an occurrence in a comment or string counts.',
       };
     }
 
-    case 'grove_clean': {
+    case 'holt_clean': {
       const { clean } = await import('../actions.mjs');
       // Any mutation invalidates the cached scan.
       cache.clear();
@@ -383,7 +383,7 @@ async function handle(name, args) {
           };
     }
 
-    case 'grove_rescue': {
+    case 'holt_rescue': {
       const { rescue } = await import('../actions.mjs');
       cache.clear();
       const r = await rescue(cwd, args.id, { release: args?.release === true });
@@ -400,7 +400,7 @@ async function handle(name, args) {
       };
     }
 
-    case 'grove_protect': {
+    case 'holt_protect': {
       const { protect } = await import('../actions.mjs');
       cache.clear();
       const r = await protect(cwd, { dryRun: args?.dryRun === true });
@@ -414,7 +414,7 @@ async function handle(name, args) {
       };
     }
 
-    case 'grove_landing_plan': {
+    case 'holt_landing_plan': {
       const { report } = await getReport(cwd);
       const p = report.plan;
       return {
@@ -438,7 +438,7 @@ async function handle(name, args) {
 
 export function createServer() {
   const server = new Server(
-    { name: 'grove', version: '0.1.0' },
+    { name: 'holt', version: '0.1.0' },
     { capabilities: { tools: {} } },
   );
 
@@ -449,7 +449,7 @@ export function createServer() {
       description: t.description,
       inputSchema: t.inputSchema,
       // Per-tool annotations, defaulting to read-only for the diagnostic majority. A blanket
-      // readOnlyHint:true would now be a LIE for grove_clean, and a host that auto-approves
+      // readOnlyHint:true would now be a LIE for holt_clean, and a host that auto-approves
       // read-only tools would auto-approve a deletion. The annotation is a safety contract, so
       // it has to be per-tool and true.
       annotations: t.annotations

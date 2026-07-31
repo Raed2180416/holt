@@ -1,16 +1,16 @@
 /**
- * grove — adversarial states.
+ * holt — adversarial states.
  *
- * The happy-path suite proves grove works. This one proves it does not LIE when the repository
+ * The happy-path suite proves holt works. This one proves it does not LIE when the repository
  * is in a state nobody designed for. Every case here is a real thing that happens to real
  * repositories, and for each the requirement is the same:
  *
- *     grove must produce a correct answer, or an explicit refusal.
+ *     holt must produce a correct answer, or an explicit refusal.
  *     It must never produce a confident wrong one — and in particular must never report a
  *     workstream as SAFE TO DELETE because it failed to look at it.
  *
  * A cleanup tool that fails open destroys work. So the assertion in most of these is not
- * "grove got the right number", it is "grove did not say safe".
+ * "holt got the right number", it is "holt did not say safe".
  */
 
 import { test } from 'node:test';
@@ -31,8 +31,8 @@ function sh(cmd, args, cwd) {
       cwd, timeout: 60_000, maxBuffer: 16 * 1024 * 1024,
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: 'grove test', GIT_AUTHOR_EMAIL: 't@grove.invalid',
-        GIT_COMMITTER_NAME: 'grove test', GIT_COMMITTER_EMAIL: 't@grove.invalid',
+        GIT_AUTHOR_NAME: 'holt test', GIT_AUTHOR_EMAIL: 't@holt.invalid',
+        GIT_COMMITTER_NAME: 'holt test', GIT_COMMITTER_EMAIL: 't@holt.invalid',
         GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C',
       },
     }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? -1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') }));
@@ -53,7 +53,7 @@ test('ADVERSARIAL: same extension, different languages, resolved by CONTENT', as
   const enry = await detectEnry();
   if (!enry.available) return t.skip('enry not installed');
 
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-amb-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-amb-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
   // The exact trap: extension mapping alone gets HALF of these wrong, silently.
@@ -102,7 +102,7 @@ test('ADVERSARIAL: filenames with spaces, quotes, unicode and dashes', async (t)
 
   assert.ok(row, 'hostile worktree not scanned');
   // Every file must be seen. If argv construction were shell-based, the flag-looking and
-  // quoted names would silently vanish and grove would report less work than exists.
+  // quoted names would silently vanish and holt would report less work than exists.
   const seen = report.graph.nodes.find((n) => n.id === 'hostile');
   assert.ok(seen.uncommittedFiles >= nasty.length,
     `expected >= ${nasty.length} uncommitted files, got ${seen.uncommittedFiles}`);
@@ -137,7 +137,7 @@ test('ADVERSARIAL: worktree directory deleted underneath us => unknown, NOT safe
   const { report } = await inspect(fx.root);
   const v = verdictFor(report, 'vanishing');
   assert.ok(v, 'vanished worktree must still be reported');
-  assert.equal(v.safe, false, 'a worktree grove could not read must never be called safe');
+  assert.equal(v.safe, false, 'a worktree holt could not read must never be called safe');
   assert.equal(v.confidence, 'unknown');
 });
 
@@ -183,7 +183,7 @@ test('ADVERSARIAL: merge in progress (MERGE_HEAD present) does not break the sca
 });
 
 test('ADVERSARIAL: an empty repository with worktrees does not crash', async (t) => {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-empty-'));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-empty-'));
   t.after(() => fs.rm(tmp, { recursive: true, force: true }));
   const root = path.join(tmp, 'repo');
   await fs.mkdir(root, { recursive: true });

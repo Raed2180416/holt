@@ -1,5 +1,5 @@
 /**
- * grove — detection, against hand-constructed ground truth.
+ * holt — detection, against hand-constructed ground truth.
  *
  * Structure follows one rule: PROVE THE INSTRUMENT CAN DETECT PRESENCE BEFORE TRUSTING ITS
  * SILENCE. Each detector is asserted first on a case that MUST be found, and only then on a
@@ -155,7 +155,7 @@ test('P6 FAIL-CLOSED: an unscannable workstream is "unknown", never "safe"', asy
   const disc = await discover(fx.root);
   // Simulate the worktree directory having vanished underneath us.
   disc.workstreams = disc.workstreams.map((w) =>
-    w.id === 'empty' ? { ...w, path: '/nonexistent/grove/definitely-not-here' } : w);
+    w.id === 'empty' ? { ...w, path: '/nonexistent/holt/definitely-not-here' } : w);
 
   const report = await analyze(await scan(disc, {}), {});
   const row = byId(report.safe, 'empty');

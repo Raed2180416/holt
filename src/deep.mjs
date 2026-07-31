@@ -1,11 +1,11 @@
 /**
- * grove — deep duplicate detection (P3), built on jscpd.
+ * holt — deep duplicate detection (P3), built on jscpd.
  *
  * WHY jscpd AND NOT OUR OWN:
  *   jscpd is a maintained copy/paste detector — Rabin-Karp token matching over 150+ languages,
  *   v5 rewritten in Rust, prebuilt binaries, JSON reporter, optional git-blame enrichment.
  *   Writing a clone detector to sit beside it would be pure reinvention. It is an OPTIONAL
- *   dependency: when absent, grove still reports symbol-identity duplicates and says plainly
+ *   dependency: when absent, holt still reports symbol-identity duplicates and says plainly
  *   that the deep lane did not run.
  *
  * WHAT THIS ADDS OVER SYMBOL IDENTITY:
@@ -148,7 +148,7 @@ export async function deepDuplicates(scanResult, { minTokens = 50, minLines = 5,
     };
   }
 
-  const tmpRoot = await fs.mkdtemp(path.join(scratchDir(), 'grove-deep-'));
+  const tmpRoot = await fs.mkdtemp(path.join(scratchDir(), 'holt-deep-'));
   const outDir = path.join(tmpRoot, '.report');
 
   try {

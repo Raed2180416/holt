@@ -1,6 +1,6 @@
 name: ci
 
-# grove's optional backends are the interesting part of CI: the tool must work WITHOUT them
+# holt's optional backends are the interesting part of CI: the tool must work WITHOUT them
 # (degraded, and saying so) and correctly WITH them. Both are exercised, because "works on the
 # maintainer's machine where everything is installed" is how a degradation path rots unnoticed.
 
@@ -25,14 +25,14 @@ jobs:
       - run: npm ci
       # The portable core: safety classifier, detection against ground truth, the CLI as a
       # binary, actions (protect/rescue/clean), and the invariant fuzzer. No optional backends —
-      # the point of this job is that grove's CORE is correct on every OS, degraded loudly.
+      # the point of this job is that holt's CORE is correct on every OS, degraded loudly.
       # Known portability hazards already fixed by this matrix existing: URL.pathname vs
       # fileURLToPath (file:///C:/x -> /C:/x), and jj's JJ_CONFIG=/dev/null (jj is Rust; no
       # MSYS translation on Windows — os.devNull).
       - run: node --test test/unit/safety.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs
-      - run: node bin/grove.mjs doctor --json
+      - run: node bin/holt.mjs doctor --json
       - name: the tool must run against its own repository on this OS
-        run: node bin/grove.mjs status --json
+        run: node bin/holt.mjs status --json
 
   bare:
     name: no optional backends (degradation path)
@@ -46,12 +46,12 @@ jobs:
           ! command -v ctags || (echo "ctags present; this job must test the degraded path" && exit 1)
           ! command -v enry  || (echo "enry present; this job must test the degraded path" && exit 1)
       - run: npm ci --omit=optional
-      - run: node bin/grove.mjs doctor --json
+      - run: node bin/holt.mjs doctor --json
       - name: unit + safety must pass with no backends at all
         run: node --test "test/unit/safety.test.mjs"
-      - name: grove must still answer, degraded and labelled
+      - name: holt must still answer, degraded and labelled
         run: |
-          node bin/grove.mjs status --json > /tmp/out.json
+          node bin/holt.mjs status --json > /tmp/out.json
           node -e "
             const r = require('/tmp/out.json');
             if (!r.backend.degraded) { console.error('expected degraded backend'); process.exit(1); }
@@ -84,7 +84,7 @@ jobs:
       - run: npm ci
 
       - name: doctor
-        run: node bin/grove.mjs doctor
+        run: node bin/holt.mjs doctor
 
       - name: clone real repositories for the end-to-end suite
         run: bash scripts/clone-fixtures.sh
@@ -92,10 +92,10 @@ jobs:
       - name: full suite
         run: npm test
         env:
-          GROVE_REAL_REPOS: ${{ github.workspace }}/.grove-fixtures
+          HOLT_REAL_REPOS: ${{ github.workspace }}/.holt-fixtures
 
       - name: the tool must be able to inspect its own repository
-        run: node bin/grove.mjs status
+        run: node bin/holt.mjs status
 
       - name: mutation testing — prove the tests would FAIL on a real defect
         # A green suite proves the tests RAN. This proves they would have caught the specific
@@ -114,14 +114,14 @@ jobs:
       - name: pack and install globally from the tarball
         run: |
           npm pack
-          npm install -g ./grovekit-*.tgz
+          npm install -g ./holt-*.tgz
       - name: the installed binary must run from a clean directory
         run: |
           mkdir -p /tmp/clean && cd /tmp/clean
           git init -q && git commit -q --allow-empty -m base
-          grove doctor
-          grove status
+          holt doctor
+          holt status
       - name: the published tarball must not ship tests or fixtures
         run: |
-          tar -tzf grovekit-*.tgz | tee /tmp/files.txt
+          tar -tzf holt-*.tgz | tee /tmp/files.txt
           ! grep -q 'package/test/' /tmp/files.txt || (echo "tests leaked into the package" && exit 1)

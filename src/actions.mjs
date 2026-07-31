@@ -1,14 +1,14 @@
 /**
- * grove — the MUTATING half: protect, rescue, clean.
+ * holt — the MUTATING half: protect, rescue, clean.
  *
- * Everything else in grove diagnoses. These three act, and they exist because a measured A/B
+ * Everything else in holt diagnoses. These three act, and they exist because a measured A/B
  * showed diagnosis alone is not enough:
  *
- *   - a grove-arm agent ignored AGENTS.md and the plugin sitting in its own repository, and
+ *   - a holt-arm agent ignored AGENTS.md and the plugin sitting in its own repository, and
  *     reasoned from `git log` instead                              -> PROTECT
  *   - agents repeatedly tried to rescue the valuable file by hand before deleting the worktree,
  *     inventing three different ad-hoc schemes                     -> RESCUE
- *   - a grove-arm agent got the right answer and then asked for confirmation instead of acting,
+ *   - a holt-arm agent got the right answer and then asked for confirmation instead of acting,
  *     scoring zero utility                                         -> CLEAN
  *
  * THE READ-ONLY GUARANTEE IS NOT WEAKENED. Every call here passes allowMutation:true explicitly;
@@ -24,7 +24,7 @@ import { discover } from './discover.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete } from './analyze.mjs';
 
-const LOCK_PREFIX = 'grove:';
+const LOCK_PREFIX = 'holt:';
 
 /** One scan shared by every action, so protect/rescue/clean cannot disagree with each other. */
 async function assess(cwd, opts = {}) {
@@ -82,7 +82,7 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
     // whoever tries to delete this. It has to say what is at stake and how to resolve it.
     const reason = `${LOCK_PREFIX} holds work found nowhere else`
       + (sample ? ` (e.g. ${sample})` : '')
-      + `. Run 'grove rescue ${s.id}' to preserve it, or 'grove risk' to inspect.`;
+      + `. Run 'holt rescue ${s.id}' to preserve it, or 'holt risk' to inspect.`;
 
     if (!dryRun) {
       const r = await git(['worktree', 'lock', '--reason', reason, ws.path],
@@ -108,7 +108,7 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
   };
 }
 
-/** Release protection. Only ever unlocks locks grove placed. */
+/** Release protection. Only ever unlocks locks holt placed. */
 export async function unprotect(cwd, { id = null, force = false, ...opts } = {}) {
   const { report } = await assess(cwd, opts);
   const targets = report.graph.nodes.filter((n) => (id ? n.id === id : true));
@@ -118,7 +118,7 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
     if (!ws.path) continue;
     const st = await lockState(ws.path, cwd);
     if (!st.locked) continue;
-    // Locks placed by something else are left alone: grove must not quietly disarm a protection
+    // Locks placed by something else are left alone: holt must not quietly disarm a protection
     // a human or another tool put there deliberately.
     if (!st.reason.startsWith(LOCK_PREFIX) && !force) {
       actions.push({ id: ws.id, action: 'skipped-foreign-lock', reason: st.reason });
@@ -134,9 +134,9 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
  * Un-C-quote a porcelain value.
  *
  * MEASURED: when a lock reason contains a character git treats as special (newline, quote,
- * non-ASCII — and grove's own reasons embed symbol names, which can be non-ASCII), porcelain
- * emits it C-QUOTED: `locked "grove: …"`. Read naively, the quotes arrive in the string,
- * startsWith('grove:') fails, and unprotect classifies grove's OWN lock as foreign — leaving
+ * non-ASCII — and holt's own reasons embed symbol names, which can be non-ASCII), porcelain
+ * emits it C-QUOTED: `locked "holt: …"`. Read naively, the quotes arrive in the string,
+ * startsWith('holt:') fails, and unprotect classifies holt's OWN lock as foreign — leaving
  * `rescue --release` unable to release it. The quoting is also what keeps a reason containing
  * `\nworktree /etc/passwd` from corrupting the porcelain stream (verified live) — a feature to
  * decode, not a quirk.
@@ -184,7 +184,7 @@ async function lockState(wtPath, cwd) {
  * Map a workstream id to a component git will accept in a refname.
  *
  * FOUND BY ATTACKING IT: the old sanitizer only stripped characters, so an id of `..` passed
- * straight through and `update-ref refs/grove/rescue/..` failed — git refuses `..`, leading
+ * straight through and `update-ref refs/holt/rescue/..` failed — git refuses `..`, leading
  * dots, and `.lock` suffixes in refnames (verified with `git check-ref-format`). A worktree
  * genuinely can be named `..something` or `x.lock` (detached — git refuses .lock in branch
  * names too), and a rescue that dies at update-ref AFTER building its capture is a confusing
@@ -208,8 +208,8 @@ export function refSafeId(id) {
  *
  *   - complete       tracked modifications AND untracked files, in one object
  *   - verifiable     the ref is diffed against the worktree before anything is released
- *   - discoverable   `git log refs/grove/rescue/<id>` months later
- *   - reversible     `git checkout refs/grove/rescue/<id> -- .` restores it
+ *   - discoverable   `git log refs/holt/rescue/<id>` months later
+ *   - reversible     `git checkout refs/holt/rescue/<id> -- .` restores it
  *   - inert          it is not a branch, so it never appears in normal branch listings
  *
  * The index is built in a TEMPORARY index file, so the worktree's own index is untouched — the
@@ -231,13 +231,13 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     return { ok: true, nothingToRescue: true, id, note: 'this worktree holds nothing base lacks' };
   }
 
-  const ref = `refs/grove/rescue/${refSafeId(id)}`;
+  const ref = `refs/holt/rescue/${refSafeId(id)}`;
   if (dryRun) {
     return { ok: true, dryRun: true, id, ref, wouldCapture: { files, committedDelta } };
   }
 
   // Build a tree from the worktree's CURRENT state in a scratch index.
-  const tmpIndex = path.join(ws.path, '.git-grove-rescue-index');
+  const tmpIndex = path.join(ws.path, '.git-holt-rescue-index');
   const env = { GIT_INDEX_FILE: tmpIndex };
   try {
     // Seed from HEAD so committed content is included, then overlay everything on disk.
@@ -257,7 +257,7 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     const treeR = await gitOk(['write-tree'], { cwd: ws.path, env, allowMutation: true });
     const tree = treeR.stdout.trim();
 
-    const msg = `grove rescue: ${id}\n\n`
+    const msg = `holt rescue: ${id}\n\n`
       + `Captured ${files.length} uncommitted/untracked file(s) and the worktree's committed state.\n`
       + `Restore with:  git checkout ${ref} -- .\n`;
     const commitR = await gitOk(
@@ -319,14 +319,14 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
   }
 }
 
-/** List every rescue grove has ever taken in this repo. */
+/** List every rescue holt has ever taken in this repo. */
 export async function rescues(cwd) {
-  const r = await git(['for-each-ref', '--format=%(refname) %(objectname) %(creatordate:iso)', 'refs/grove/rescue'],
+  const r = await git(['for-each-ref', '--format=%(refname) %(objectname) %(creatordate:iso)', 'refs/holt/rescue'],
     { cwd });
   if (r.code !== 0) return [];
   return r.stdout.split('\n').filter(Boolean).map((line) => {
     const [refname, oid, ...date] = line.split(' ');
-    return { ref: refname, commit: oid, at: date.join(' '), id: refname.replace('refs/grove/rescue/', '') };
+    return { ref: refname, commit: oid, at: date.join(' '), id: refname.replace('refs/holt/rescue/', '') };
   });
 }
 
@@ -336,7 +336,7 @@ export async function rescues(cwd) {
  * Remove provably-disposable worktrees, and their branches.
  *
  * The documented everyday pain is not danger, it is friction: "add is one command, rm is two
- * more (worktree + branch), and almost no one runs both reliably across ten merged PRs." Grove
+ * more (worktree + branch), and almost no one runs both reliably across ten merged PRs." Holt
  * already knows exactly which worktrees hold nothing base lacks — it just never acted on it, and
  * a measured trial showed an agent reaching the right answer and then stalling for confirmation.
  *

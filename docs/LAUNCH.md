@@ -1,4 +1,4 @@
-# grove — launch, growth, and monetisation plan
+# holt — launch, growth, and monetisation plan
 
 *Working document. Everything here is a plan, not a promise; the measured numbers it cites are
 in the README and eval/.*
@@ -9,15 +9,15 @@ in the README and eval/.*
 
 | Audience | The sentence |
 |---|---|
-| Dev running agents | *"Your agents create worktrees faster than you can safely delete them. Grove knows which ones hold the only copy of something — and locks them so `--force` bounces."* |
+| Dev running agents | *"Your agents create worktrees faster than you can safely delete them. Holt knows which ones hold the only copy of something — and locks them so `--force` bounces."* |
 | Team lead | *"The landing layer for parallel agent work: what N agents produced, what's redundant, what collides, what can go."* |
 | Agent-framework author | *"A content-level safety oracle your tool can call: `gate` exit codes, MCP tools, a PreToolUse hook."* |
 | HN reader | *"An AI agent deleted 13 of 16 worktrees including the only copy of a security fix — because of their names. We measured it, then built the thing that makes it impossible."* |
 
-**What grove is NOT positioned as:** another worktree manager (saturated, free), or "AI safety"
+**What holt is NOT positioned as:** another worktree manager (saturated, free), or "AI safety"
 (vague). It is the missing *relationship layer* — git has no primitive that relates uncommitted
 work across worktrees, and neither does anything else. Claude Code now locks worktrees *by
-session*; grove locks *by content*. That contrast is the moat sentence.
+session*; holt locks *by content*. That contrast is the moat sentence.
 
 ## 2. The launch story (this is the marketing asset)
 
@@ -35,36 +35,36 @@ The A/B trials write the launch post themselves. The narrative arc that lands:
    instruments lied to us, documented, because that's why the suite looks like this.
 
 Content pipeline from that arc:
-- **Show HN**: "Grove — an AI agent deleted the only copy of a security fix, so we built the
+- **Show HN**: "Holt — an AI agent deleted the only copy of a security fix, so we built the
   layer git is missing" (post = condensed README, lead with the transcript).
 - **Blog series** (each is already written in commit messages): the fabricated eval result; the
   answer-key leak; "availability is not adoption"; ls-tree quotes unicode; the freeze.
 - **r/git, r/ClaudeAI, r/LocalLLaMA, lobste.rs**: tailored angle each.
 - **Directories**: MCP registries (Smithery, mcp.so, PulseMCP), awesome-claude-code,
-  awesome-git, agent-tool lists. `grove integrate` supporting 8+ hosts is the hook.
+  awesome-git, agent-tool lists. `holt integrate` supporting 8+ hosts is the hook.
 
 ## 3. Built-in traction loops (the product markets itself)
 
 - **The lock reason is an ad.** Every time anyone — agent or human — hits a protected worktree,
-  *git itself* prints `grove: holds work found nowhere else… Run 'grove rescue <id>'`. That line
+  *git itself* prints `holt: holds work found nowhere else… Run 'holt rescue <id>'`. That line
   travels in screenshots, CI logs, and bug reports.
-- **AGENTS.md blocks are public.** Repos that `grove integrate` carry a visible grove section;
+- **AGENTS.md blocks are public.** Repos that `holt integrate` carry a visible holt section;
   every reader of that repo learns the tool exists.
-- **Rescue refs are discoverable.** `refs/grove/rescue/*` in a repo is a breadcrumb months later.
+- **Rescue refs are discoverable.** `refs/holt/rescue/*` in a repo is a breadcrumb months later.
 - **The gauntlet as a public benchmark** (see §5) invites other tools to compete — every
   submission is marketing.
 
 ## 4. Monetisation — free core, paid coordination
 
-The FSL license enforces the boundary: anyone can *use* grove, nobody can *sell* grove.
+The FSL license enforces the boundary: anyone can *use* holt, nobody can *sell* holt.
 What we sell is what teams need above the single-repo CLI:
 
 | Tier | What | Price signal |
 |---|---|---|
-| **grove (CLI/MCP/TUI)** | everything in this repo, forever | free (FSL → MIT after 2y) |
-| **grove Fleet** | one dashboard over N repos × M machines: org-wide at-risk view, who-holds-what, rescue browser, Slack alerts | per-seat SaaS |
-| **grove CI** | GitHub/GitLab app: PR check that fails when a merge would orphan work; scheduled `clean` with audit trail; policy (e.g. "no worktree older than 14 days unprotected") | per-org |
-| **grove Enterprise** | SSO, on-prem fleet, support SLA, custom policy engines | contract |
+| **holt (CLI/MCP/TUI)** | everything in this repo, forever | free (FSL → MIT after 2y) |
+| **holt Fleet** | one dashboard over N repos × M machines: org-wide at-risk view, who-holds-what, rescue browser, Slack alerts | per-seat SaaS |
+| **holt CI** | GitHub/GitLab app: PR check that fails when a merge would orphan work; scheduled `clean` with audit trail; policy (e.g. "no worktree older than 14 days unprotected") | per-org |
+| **holt Enterprise** | SSO, on-prem fleet, support SLA, custom policy engines | contract |
 | **Sponsorship** | GitHub Sponsors from day one for individuals who just want to support | goodwill |
 
 Sequencing: CLI free forever → Fleet waitlist at launch (gauge demand before building) → CI app
@@ -84,7 +84,7 @@ Two instruments, both already in-repo, both reproducible by anyone:
 ## 6. Risks, named
 
 - **Platform absorption** (Claude Code/Cursor building content-aware locking): our counter is
-  neutrality — grove works across *all* agents, and the relationship layer (impact/duplicates/
+  neutrality — holt works across *all* agents, and the relationship layer (impact/duplicates/
   verify) is much deeper than a lock.
 - **FSL scares some contributors**: mitigated by MIT-after-2-years and plain-English license
   section; monitor and revisit if it measurably costs adoption.
@@ -96,8 +96,8 @@ Two instruments, both already in-repo, both reproducible by anyone:
 - [ ] macOS + Windows CI matrix green (config landed; needs a push to GitHub to run)
 - [ ] A/B at n≥10/arm for the headline table
 - [ ] `npm pack` audit: no eval/, no test/, no fixtures in the tarball (CI-checked already)
-- [ ] Version pinned, CHANGELOG started, `grove --version`
-- [ ] Name check: `grovekit` free on npm (verified); decide final name once
+- [ ] Version pinned, CHANGELOG started, `holt --version`
+- [ ] Name check: `holt` free on npm (verified); decide final name once
 - [ ] Security pass: no telemetry, no network calls anywhere in src/ (grep-verified per release)
 - [ ] The rollback guard: release builds only from committed HEAD; `git status --porcelain`
       must be empty and the CLI reachability test green *on the tag*

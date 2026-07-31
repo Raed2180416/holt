@@ -1,16 +1,16 @@
 /**
- * grove — BREAK IT.
+ * holt — BREAK IT.
  *
- * The other suites ask "does grove find what we planted?". This one asks the opposite and much
- * more important question: **can grove be made to give a DANGEROUS wrong answer?**
+ * The other suites ask "does holt find what we planted?". This one asks the opposite and much
+ * more important question: **can holt be made to give a DANGEROUS wrong answer?**
  *
  * There is exactly one catastrophic failure mode for this tool. Not a missed duplicate, not a
  * noisy collision — those cost attention. The catastrophic one is:
  *
- *      grove says SAFE TO DELETE, and it is not.
+ *      holt says SAFE TO DELETE, and it is not.
  *
  * Every scenario below is built to force that outcome, from a real thing agents do. A scenario
- * that grove handles correctly is not a passing test — it is a failed attack, and it is recorded
+ * that holt handles correctly is not a passing test — it is a failed attack, and it is recorded
  * as such so nobody mistakes this file for a victory lap.
  *
  * Written adversarially on purpose: these are not "does the feature work" tests, they are
@@ -34,8 +34,8 @@ function sh(cmd, args, cwd) {
       cwd, timeout: 60_000, maxBuffer: 16 * 1024 * 1024,
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: 'grove test', GIT_AUTHOR_EMAIL: 't@grove.invalid',
-        GIT_COMMITTER_NAME: 'grove test', GIT_COMMITTER_EMAIL: 't@grove.invalid',
+        GIT_AUTHOR_NAME: 'holt test', GIT_AUTHOR_EMAIL: 't@holt.invalid',
+        GIT_COMMITTER_NAME: 'holt test', GIT_COMMITTER_EMAIL: 't@holt.invalid',
         GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C',
       },
     }, (err, stdout, stderr) => resolve({
@@ -56,16 +56,16 @@ function mustNotBeSafe(report, id, attack) {
   const v = verdict(report, id);
   assert.ok(v, `ATTACK "${attack}": workstream '${id}' vanished from the report entirely`);
   assert.equal(v.safe, false,
-    `ATTACK SUCCEEDED — "${attack}": grove called '${id}' disposable. Reasons given: ${v.reasons.join('; ')}`);
+    `ATTACK SUCCEEDED — "${attack}": holt called '${id}' disposable. Reasons given: ${v.reasons.join('; ')}`);
 }
 
 /* =========================================================== deletions ==== */
 
-test('ATTACK: a workstream that only DELETES code (grove tracks ADDED symbols)', async (t) => {
+test('ATTACK: a workstream that only DELETES code (holt tracks ADDED symbols)', async (t) => {
   const fx = await newRepo('del');
   t.after(() => fx.cleanup());
 
-  // grove's symbol layer computes head-minus-base — deletions produce NO added symbols at all.
+  // holt's symbol layer computes head-minus-base — deletions produce NO added symbols at all.
   // If safety rested on symbols alone, a worktree that removes a critical function would look
   // empty and be recommended for deletion, destroying the removal.
   const wt = await fx.worktree('deleter');
@@ -139,7 +139,7 @@ test('ATTACK: the worktree changes DURING the scan', async (t) => {
   const wt = await fx.worktree('racer');
   await fx.write('src/first.js', 'export function FIRST_SYMBOL() {}\n', wt);
 
-  // Start a scan and mutate the worktree while it runs. grove must not crash, and must not
+  // Start a scan and mutate the worktree while it runs. holt must not crash, and must not
   // report the workstream as safe on the strength of a half-read state.
   const scanning = inspect(fx.root);
   await fx.write('src/second.js', 'export function SECOND_SYMBOL() {}\n', wt);
@@ -187,7 +187,7 @@ test('ATTACK: a worktree BEHIND base (ancestor, not descendant)', async (t) => {
 
   const report = await inspect(fx.root);
   // A worktree strictly behind base holds nothing base lacks — it genuinely IS disposable.
-  // The attack is the inverse: grove must not invent work here.
+  // The attack is the inverse: holt must not invent work here.
   const v = verdict(report, 'behind');
   assert.equal(v.safe, true,
     `a worktree strictly behind base holds nothing; got: ${v.reasons.join('; ')}`);
@@ -254,11 +254,11 @@ test('ATTACK: work hidden ONLY inside a .gitignore-d path', async (t) => {
   const report = await inspect(fx.root);
   const v = verdict(report, 'hidden');
 
-  // Honest position: git ignores it, so grove does too, and the worktree IS disposable by
-  // grove's definition. This test PINS that behaviour so it is a documented limitation rather
+  // Honest position: git ignores it, so holt does too, and the worktree IS disposable by
+  // holt's definition. This test PINS that behaviour so it is a documented limitation rather
   // than a surprise — an agent storing work in an ignored path is outside what git can protect.
   assert.equal(v.safe, true,
-    'gitignored content is invisible to git and therefore to grove — pinned as a known limit');
+    'gitignored content is invisible to git and therefore to holt — pinned as a known limit');
 });
 
 test('ATTACK: a huge fan-out where the needle is a single deleted line', async (t) => {

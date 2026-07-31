@@ -1,5 +1,5 @@
 /**
- * grove — terminal rendering.
+ * holt — terminal rendering.
  *
  * Output is designed to be read by a human in a hurry and piped by a script. Every command
  * has a --json twin that emits the same data unformatted; nothing is computed only for the
@@ -37,11 +37,11 @@ function padStart(s, n) {
   return str.length >= n ? str : ' '.repeat(n - str.length) + str;
 }
 
-/** Header shown by every command: what grove measured against, and how. */
+/** Header shown by every command: what holt measured against, and how. */
 export function renderHeader(report) {
   const lines = [];
   lines.push(
-    `${c('bold', 'grove')} ${c('grey', '·')} ${report.root}`,
+    `${c('bold', 'holt')} ${c('grey', '·')} ${report.root}`,
   );
   const baseNote = report.base.how === 'primary-head-fallback'
     ? c('yellow', `${report.base.ref} (fallback — no conventional base branch found)`)
@@ -185,7 +185,7 @@ export function renderRisk(report) {
 
   const unknown = report.safe.filter((s) => s.confidence === 'unknown');
   if (unknown.length) {
-    out.push('', c('yellow', `UNKNOWN (${unknown.length}) — grove could not scan these, so they are NOT safe`));
+    out.push('', c('yellow', `UNKNOWN (${unknown.length}) — holt could not scan these, so they are NOT safe`));
     for (const s of unknown.slice(0, 10)) out.push(c('grey', `  ? ${pad(s.id, 40)} ${s.reasons[0]}`));
   }
   out.push('');
@@ -316,7 +316,7 @@ export function renderImpact(imp) {
 
 export function renderContext(digest) {
   if (!digest.ok) {
-    return c('red', `grove: ${digest.error}`) + '\n' + c('grey', `known: ${digest.known.join(', ')}`);
+    return c('red', `holt: ${digest.error}`) + '\n' + c('grey', `known: ${digest.known.join(', ')}`);
   }
   const out = [];
   out.push(c('bold', `CONTEXT for ${digest.workstream}`) + c('grey', `  (family ${digest.family})`));

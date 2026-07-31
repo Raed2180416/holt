@@ -1,5 +1,5 @@
 #
-# grove — gap-language definitions for universal-ctags.
+# holt — gap-language definitions for universal-ctags.
 #
 # MEASURED, NOT ASSUMED. universal-ctags 6.2.1 ships 164 languages, but `ctags --print-language`
 # returns NONE for these:
@@ -23,14 +23,14 @@
 #   are tuned to over-extract rather than under-extract: a spurious symbol produces a finding a
 #   human dismisses, while a missed symbol produces silence that reads as "nothing there".
 #
-# Users can extend this: point GROVE_CTAGS_OPTIONS at your own .ctags file and it is loaded
+# Users can extend this: point HOLT_CTAGS_OPTIONS at your own .ctags file and it is loaded
 # after this one, so your definitions win.
 #
 
 ### Adjustments to ctags' own parsers ##########################################
 #
 # Function prototypes are OFF by default in the C/C++ parsers, because a prototype is not a
-# definition. For grove that default is wrong: two agents each declaring `void handle();` in the
+# definition. For holt that default is wrong: two agents each declaring `void handle();` in the
 # same header is precisely the collision we exist to report, and with prototypes disabled it is
 # invisible. Measured: `void cppMethod();` produced no tag at all until this was enabled.
 --kinds-C=+p
@@ -42,12 +42,12 @@
 # every Forth repository, and the same problem recurs for .m (Objective-C vs MATLAB vs Mercury),
 # .h (C vs C++ vs Objective-C), .pl (Perl vs Prolog) and a dozen more.
 #
-# grove resolves these by CONTENT using enry (github.com/go-enry/go-enry) — the Go port of
+# holt resolves these by CONTENT using enry (github.com/go-enry/go-enry) — the Go port of
 # GitHub Linguist, with Linguist's own Bayesian classifier trained on Linguist's samples.
 # Verified: F#-content .fs -> F#, Forth-content .fs -> Forth, Objective-C .m -> Objective-C,
 # MATLAB .m -> MATLAB. See resolveAmbiguous() in src/symbols.mjs.
 #
-# When enry is not installed, grove falls back to ctags' own extension mapping and REPORTS the
+# When enry is not installed, holt falls back to ctags' own extension mapping and REPORTS the
 # degradation rather than silently guessing.
 
 ### Swift ######################################################################
@@ -159,6 +159,8 @@
 ### Dockerfile #################################################################
 --langdef=Dockerfile
 --map-Dockerfile=+(Dockerfile)
+--map-Dockerfile=+(Dockerfile.*)
+--map-Dockerfile=+(*.Dockerfile)
 --map-Dockerfile=+.dockerfile
 --kinddef-Dockerfile=s,stage,build stages
 --kinddef-Dockerfile=a,arg,build arguments

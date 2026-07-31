@@ -1,7 +1,7 @@
 /**
- * grove — the safety contract, proven rather than asserted.
+ * holt — the safety contract, proven rather than asserted.
  *
- * grove's headline promise is that it never modifies the repository it inspects. That promise
+ * holt's headline promise is that it never modifies the repository it inspects. That promise
  * is worth nothing as prose. These tests exercise the classifier directly AND run a full scan
  * against a real repository, then verify byte-for-byte that nothing in the repo changed.
  *
@@ -90,7 +90,7 @@ test('classifier: refuses WRITE forms that differ from reads only by positional 
     assert.equal(v.allowed, false, `git ${argv.join(' ')} MUST be refused, got ${JSON.stringify(v)}`);
   }
 
-  // …while the read forms grove actually uses stay allowed.
+  // …while the read forms holt actually uses stay allowed.
   for (const argv of [
     ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'],
     ['config', '--get', 'user.name'],
@@ -133,7 +133,7 @@ test('classifier: refuses repo-redirecting and escalating global flags', () => {
   }
 });
 
-test('classifier: allows the reads grove actually needs', () => {
+test('classifier: allows the reads holt actually needs', () => {
   const mustAllow = [
     [['worktree', 'list', '--porcelain'], 'SAFE'],
     [['status', '--porcelain=v1', '-z'], 'SAFE'],
@@ -164,7 +164,7 @@ test('classifier: rejects malformed argv rather than passing it through', () => 
 // (2026-07-31) — the working tree reverted to HEAD and uncommitted work was destroyed by
 // the very run meant to verify it. Live ammunition points at a disposable target, always.
 async function disposableRepo(t) {
-  const dir = await fs.mkdtemp(path.join(process.env.GROVE_TMPDIR ?? (await import('node:os')).tmpdir(), 'grove-refusal-'));
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR ?? (await import('node:os')).tmpdir(), 'holt-refusal-'));
   await new Promise((resolve, reject) => {
     execFile('git', ['init', '-q', dir], (e) => (e ? reject(e) : resolve()));
   });
@@ -239,7 +239,7 @@ test('e2e: a full scan modifies nothing in the repository or its worktrees', asy
 
   for (const r of roots) {
     const changes = diffSnapshots(before.get(r), await snapshot(r));
-    assert.deepEqual(changes, [], `grove modified files under ${r}:\n${changes.join('\n')}`);
+    assert.deepEqual(changes, [], `holt modified files under ${r}:\n${changes.join('\n')}`);
   }
 });
 

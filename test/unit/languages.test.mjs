@@ -1,5 +1,5 @@
 /**
- * grove — language coverage, proven per language.
+ * holt — language coverage, proven per language.
  *
  * A tool that claims to work on "any project" has to show it. Each case below is a real source
  * fragment with a symbol that MUST be found by name. This is presence-detection: a suite that
@@ -7,7 +7,7 @@
  *
  * The gap languages (Swift, Scala, Dart, Groovy, Solidity, Zig, Nim, Crystal, F#, Prolog,
  * Dockerfile, GraphQL) are included specifically because universal-ctags 6.2.1 reports
- * `--print-language: NONE` for all of them. If grove's optlib pack regresses, those cases fail
+ * `--print-language: NONE` for all of them. If holt's optlib pack regresses, those cases fail
  * and nothing else does.
  */
 
@@ -64,7 +64,7 @@ const CASES = [
   ['objc.m', '#import <Foundation/Foundation.h>\n@interface ObjcClass : NSObject\n@end\n', ['ObjcClass']],
   ['matlab.m', 'function y = matlab_fn(x)\n  y = x;\nend\n', ['matlab_fn']],
 
-  // --- grove optlib gap pack ------------------------------------------------
+  // --- holt optlib gap pack ------------------------------------------------
   ['a.swift', 'public class SwiftClass {\n    func swiftMethod() -> Int { return 1 }\n}\n', ['SwiftClass', 'swiftMethod']],
   ['a.scala', 'class ScalaClass {\n  def scalaMethod(): Int = 1\n}\nobject ScalaObj\n', ['ScalaClass', 'scalaMethod', 'ScalaObj']],
   ['a.dart', 'class DartClass {\n  int dartMethod() => 1;\n}\n', ['DartClass', 'dartMethod']],
@@ -86,7 +86,7 @@ test('ctags is available (every language assertion below depends on it)', async 
 
 test('language coverage: every case yields its named symbols', async (t) => {
   const backend = await resolveBackend();
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-lang-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-lang-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
   const files = [];
@@ -111,7 +111,7 @@ test('language coverage: every case yields its named symbols', async (t) => {
 
 test('language coverage: the count is what we claim', async (t) => {
   const backend = await resolveBackend();
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-langcount-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-langcount-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
   const files = [];
@@ -129,7 +129,7 @@ test('language coverage: the count is what we claim', async (t) => {
 
 test('an unknown extension yields no symbols WITHOUT throwing', async (t) => {
   const backend = await resolveBackend();
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-unknown-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-unknown-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
   await fs.writeFile(path.join(dir, 'thing.zzzunknown'), 'some content here\n', 'utf8');
@@ -143,7 +143,7 @@ test('an unknown extension yields no symbols WITHOUT throwing', async (t) => {
 
 test('binary and oversized files are skipped, not misparsed', async (t) => {
   const backend = await resolveBackend();
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-binary-'));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-binary-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
   await fs.writeFile(path.join(dir, 'blob.bin'), Buffer.from([0, 1, 2, 0, 255, 0]));

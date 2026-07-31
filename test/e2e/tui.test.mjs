@@ -1,5 +1,5 @@
 /**
- * grove — the TUI, tested through its snapshot path.
+ * holt — the TUI, tested through its snapshot path.
  *
  * --snapshot renders ONE frame through exactly the renderer the interactive mode uses, then
  * exits. That is the deal that makes a TUI testable: if the snapshot is right, the screen is
@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { standardFixture } from '../fixtures.mjs';
 import { buildModel, renderFrame } from '../../src/tui.mjs';
 
-const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'grove.mjs');
+const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 const strip = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 
 test('TUI: the model buckets every workstream correctly', async (t) => {
@@ -46,7 +46,7 @@ test('TUI: the frame shows the story a human needs', async (t) => {
   assert.match(frame, /uniqueUncommitted/, 'the at-risk workstream must be visible');
   assert.match(frame, /do not delete/, 'the verdict must be stated in words');
   assert.match(frame, /UNCOMMITTED_ONLY_SYMBOL/, 'the detail pane must NAME what deletion would lose');
-  assert.match(frame, /grove rescue uniqueUncommitted --release/,
+  assert.match(frame, /holt rescue uniqueUncommitted --release/,
     'the pane must state the exact resolving command — a dashboard that only alarms is noise');
 });
 
@@ -76,7 +76,7 @@ test('TUI: --snapshot works end-to-end through the real binary and exits', async
 
   assert.equal(r.code, 0, `tui --snapshot must exit 0: ${r.stderr.slice(0, 300)}`);
   const text = strip(r.stdout);
-  assert.match(text, /grove/, 'header present');
+  assert.match(text, /holt/, 'header present');
   assert.match(text, /at-risk/, 'counts present');
   // The crucial property: it EXITED. An interactive TUI that ignores --snapshot would hang here
   // and the timeout would fail the test.

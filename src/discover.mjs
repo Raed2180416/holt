@@ -1,5 +1,5 @@
 /**
- * grove — workstream discovery.
+ * holt — workstream discovery.
  *
  * A "workstream" is one parallel line of work. Today that is a git worktree or a jj
  * workspace, but the model is deliberately VCS-agnostic: a workstream is
@@ -22,7 +22,7 @@ import path from 'node:path';
  *
  * This is heuristic, and it is the single most likely thing to be wrong on a layout we
  * have not seen. It is therefore (a) overridable via config and (b) reported, so a user
- * can see the grouping grove chose rather than having it silently applied.
+ * can see the grouping holt chose rather than having it silently applied.
  */
 const FAMILY_PATTERNS = [
   // wf_11177c4b-466-1  ->  wf_11177c4b-466      (Claude Code / workflow fan-out)
@@ -121,7 +121,7 @@ export async function discoverGitWorktrees(cwd) {
 export { discoverJjWorkspaces } from './jj.mjs';
 
 /**
- * Full discovery. Returns every workstream grove can see, tagged by backend,
+ * Full discovery. Returns every workstream holt can see, tagged by backend,
  * with families assigned.
  */
 export async function discover(cwd, { familyOverrides = [], includeJj = true } = {}) {
@@ -165,7 +165,7 @@ export async function discover(cwd, { familyOverrides = [], includeJj = true } =
  * FOUND ON A REAL REPOSITORY: six worktrees at
  *   .../landing/A-memory-core/stage, .../landing/B-context-compiler/stage, …
  * all had the basename `stage`. Everything downstream keys on id — unique work, collisions,
- * the delete gate — so six distinct workstreams silently became one. `grove gate stage` would
+ * the delete gate — so six distinct workstreams silently became one. `holt gate stage` would
  * have answered about whichever happened to be found first, which for a tool that authorises
  * deletion is the worst possible kind of wrong.
  *

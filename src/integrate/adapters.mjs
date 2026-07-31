@@ -1,5 +1,5 @@
 /**
- * grove — integration adapters.
+ * holt — integration adapters.
  *
  * One neutral core (src/agent.mjs) produces verdicts; these adapters translate them into each
  * host's schema. Adding a host means adding an entry here, never touching the analysis.
@@ -19,7 +19,7 @@
  *               all, and for humans. This is the floor: if every other integration is missing,
  *               the repository still protects itself.
  *   generic     A documented stdin-JSON/stdout-JSON protocol plus exit codes, for any host not
- *               listed above. Nothing here requires grove to know the host in advance.
+ *               listed above. Nothing here requires holt to know the host in advance.
  *
  * ORDER MATTERS: awareness (AGENTS.md) and tools (MCP) work everywhere and are safe to install
  * unconditionally. Hooks are installed only for hosts actually detected in the repo/home, so we
@@ -31,14 +31,14 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 
-const GROVE_BEGIN = '<!-- BEGIN grove -->';
-const GROVE_END = '<!-- END grove -->';
+const HOLT_BEGIN = '<!-- BEGIN holt -->';
+const HOLT_END = '<!-- END holt -->';
 
 /* ------------------------------------------------------- AGENTS.md (universal) ---- */
 
-export function agentsMdBlock(bin = 'grove') {
-  return `${GROVE_BEGIN}
-## Parallel workstreams (grove)
+export function agentsMdBlock(bin = 'holt') {
+  return `${HOLT_BEGIN}
+## Parallel workstreams (holt)
 
 This repository uses multiple git worktrees / jj workspaces at once. Work can exist in a
 worktree that is invisible to ordinary git commands — \`git diff\` and \`merge-tree\` cannot
@@ -62,7 +62,7 @@ the same run.
 **Worktree names are not evidence.** Measured in real trials: agents deleted a worktree holding
 the only copy of a security fix because it was called \`DELETEME-old-experiment\`, and kept two
 empty ones because they were called \`IMPORTANT-do-not-delete\` and \`KEEP-release-candidate\` —
-in both cases *after* grove had reported the opposite. Names, commit counts, file counts and
+in both cases *after* holt had reported the opposite. Names, commit counts, file counts and
 mtimes are all routinely anti-correlated with what a worktree actually holds. Use the content
 verdict, not the label.
 
@@ -76,12 +76,12 @@ Exit code \`0\` = disposable · \`1\` = holds work found nowhere else · \`2\` =
 (treat as unsafe). Never delete on exit 1 or 2.
 
 **The exit code is the verdict. Do not summarise, paraphrase or re-derive it.** Measured in a
-real trial: an agent ran grove, then reported *"Grove verdict: all 16 are marked as safe to
-delete"* when grove had marked seven as holding work found nowhere else — including one whose
+real trial: an agent ran holt, then reported *"Holt verdict: all 16 are marked as safe to
+delete"* when holt had marked seven as holding work found nowhere else — including one whose
 uncommitted file the agent had itself just listed. Reading the prose output and summarising it is
 how that happens. Run \`gate\` per worktree and branch on \`$?\`; it cannot be misread.
 
-If a worktree is locked, that is grove protecting it. **Do not run \`git worktree unlock\` or
+If a worktree is locked, that is holt protecting it. **Do not run \`git worktree unlock\` or
 \`remove -f -f\` to get past it** — run \`${bin} rescue <id> --release\`, which preserves the work
 to a verifiable ref first and then releases the lock.
 
@@ -94,11 +94,11 @@ ${bin} status                    # collisions, duplicates, what is at risk
 
 If a symbol you are about to write already exists in another workstream, reuse or coordinate —
 do not build it twice. Add \`--json\` to any command for machine-readable output.
-${GROVE_END}`;
+${HOLT_END}`;
 }
 
-/** Idempotently insert/refresh grove's block in AGENTS.md. */
-export async function installAgentsMd(repoRoot, { bin = 'grove', filename = 'AGENTS.md' } = {}) {
+/** Idempotently insert/refresh holt's block in AGENTS.md. */
+export async function installAgentsMd(repoRoot, { bin = 'holt', filename = 'AGENTS.md' } = {}) {
   const file = path.join(repoRoot, filename);
   let existing = '';
   let created = true;
@@ -109,9 +109,9 @@ export async function installAgentsMd(repoRoot, { bin = 'grove', filename = 'AGE
 
   const block = agentsMdBlock(bin);
   let next;
-  if (existing.includes(GROVE_BEGIN) && existing.includes(GROVE_END)) {
-    const before = existing.slice(0, existing.indexOf(GROVE_BEGIN));
-    const after = existing.slice(existing.indexOf(GROVE_END) + GROVE_END.length);
+  if (existing.includes(HOLT_BEGIN) && existing.includes(HOLT_END)) {
+    const before = existing.slice(0, existing.indexOf(HOLT_BEGIN));
+    const after = existing.slice(existing.indexOf(HOLT_END) + HOLT_END.length);
     next = `${before}${block}${after}`;
   } else {
     const header = created ? '# AGENTS.md\n\nInstructions for AI coding agents working in this repository.\n\n' : '';
@@ -135,7 +135,7 @@ export async function installAgentsMd(repoRoot, { bin = 'grove', filename = 'AGE
  * config it could find — ~/.cursor/mcp.json, ~/.codeium/…, ~/.config/zed/… — the first time it
  * ran. Editing a developer's home configuration for every editor they have installed, because
  * they asked to wire up ONE repository, is not acceptable behaviour for an install command. It
- * is also usually wrong: the entry points at a `grove` binary that may only exist for this
+ * is also usually wrong: the entry points at a `holt` binary that may only exist for this
  * project.
  *
  * `--global` opts into user scope explicitly.
@@ -168,10 +168,10 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
 /**
  * The server entry, in whichever shape the host expects.
  *
- * `bin` may carry arguments ("node /path/grove.mjs", "npx grovekit"), so it is split rather than
+ * `bin` may carry arguments ("node /path/holt.mjs", "npx holt"), so it is split rather than
  * passed whole — the same defect that made the OpenCode plugin gate fail open.
  */
-export function mcpServerEntry(bin = 'grove', shape = 'standard') {
+export function mcpServerEntry(bin = 'holt', shape = 'standard') {
   const [cmd, ...prefix] = String(bin).trim().split(/\s+/);
   if (shape === 'opencode') {
     return { type: 'local', command: [cmd, ...prefix, 'mcp'], enabled: true };
@@ -183,12 +183,12 @@ export function mcpServerEntry(bin = 'grove', shape = 'standard') {
 }
 
 /**
- * Write the grove MCP server into a host config.
- * `onlyExisting` (default) touches only files that already exist, so grove never fabricates
+ * Write the holt MCP server into a host config.
+ * `onlyExisting` (default) touches only files that already exist, so holt never fabricates
  * config for tools the user does not have installed.
  */
 export async function installMcp(repoRoot, {
-  bin = 'grove', home = os.homedir(), scope = 'project', hosts = null,
+  bin = 'holt', home = os.homedir(), scope = 'project', hosts = null,
 } = {}) {
   const results = [];
   for (const t of mcpTargets(repoRoot, home, { scope })) {
@@ -205,7 +205,7 @@ export async function installMcp(repoRoot, {
     } catch {
       exists = false;
       // Project scope: creating the file is the point — it is how you wire a repo.
-      // User scope: never create. Adding grove to a config the user does not have is
+      // User scope: never create. Adding holt to a config the user does not have is
       // indistinguishable from installing software they did not ask for.
       if (t.scope === 'user') {
         results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'skipped (no user config)' });
@@ -214,8 +214,8 @@ export async function installMcp(repoRoot, {
     }
 
     cfg[t.key] ??= {};
-    const already = !!cfg[t.key].grove;
-    cfg[t.key].grove = mcpServerEntry(bin, t.shape);
+    const already = !!cfg[t.key].holt;
+    cfg[t.key].holt = mcpServerEntry(bin, t.shape);
 
     await fs.mkdir(path.dirname(t.file), { recursive: true });
     await fs.writeFile(t.file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
@@ -229,7 +229,7 @@ export async function installMcp(repoRoot, {
 
 /* ------------------------------------------------------------------ Claude Code ---- */
 
-export function claudeCodeHooks(bin = 'grove') {
+export function claudeCodeHooks(bin = 'holt') {
   return {
     PreToolUse: [
       { matcher: 'Bash', hooks: [{ type: 'command', command: `${bin} hook pre-tool-use --host claude-code`, timeout: 120 }] },
@@ -243,7 +243,7 @@ export function claudeCodeHooks(bin = 'grove') {
   };
 }
 
-export async function installClaudeCode(repoRoot, { bin = 'grove' } = {}) {
+export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(repoRoot, '.claude', 'settings.json');
   let cfg = {};
   let created = true;
@@ -279,26 +279,26 @@ export async function installClaudeCode(repoRoot, { bin = 'grove' } = {}) {
  *   - a tool call is DENIED by THROWING. There is no permissionDecision object here, which is
  *     exactly why the neutral core returns verdicts and adapters translate them.
  */
-export function opencodePlugin(bin = 'grove') {
-  return `// grove — OpenCode plugin (generated by \`grove integrate\`).
+export function opencodePlugin(bin = 'holt') {
+  return `// holt — OpenCode plugin (generated by \`holt integrate\`).
 //
 // Blocks worktree destruction that would lose work existing nowhere else, and injects
-// sibling-workstream context at session start. Every decision is delegated to the grove CLI,
+// sibling-workstream context at session start. Every decision is delegated to the holt CLI,
 // so the logic lives in one place and this file never goes stale.
 import { execFile } from "node:child_process"
 
-// The configured binary may carry arguments (e.g. "node /path/to/grove.mjs" during development,
-// or "npx grovekit"). execFile takes the executable and an argv array separately, so passing the
+// The configured binary may carry arguments (e.g. "node /path/to/holt.mjs" during development,
+// or "npx holt"). execFile takes the executable and an argv array separately, so passing the
 // whole string as the executable finds nothing — and the gate then FAILS OPEN, silently, on every
 // command. Caught by test/e2e/opencode-plugin.test.mjs, which is the only reason it is not still
 // shipping: the plugin loaded, the hooks fired, and it blocked nothing.
-const [GROVE_CMD, ...GROVE_PREFIX] = ${JSON.stringify(bin)}.trim().split(/\\s+/)
+const [HOLT_CMD, ...HOLT_PREFIX] = ${JSON.stringify(bin)}.trim().split(/\\s+/)
 
 let warned = false
 
 const run = (args, cwd) =>
   new Promise((resolve) => {
-    execFile(GROVE_CMD, [...GROVE_PREFIX, ...args], { cwd, timeout: 120000, maxBuffer: 16 * 1024 * 1024 },
+    execFile(HOLT_CMD, [...HOLT_PREFIX, ...args], { cwd, timeout: 120000, maxBuffer: 16 * 1024 * 1024 },
       (err, stdout) => resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? ""), err }),
     )
   })
@@ -313,7 +313,7 @@ const commandOf = (input, output) => {
   return null
 }
 
-export const grove = async ({ directory, worktree }) => {
+export const holt = async ({ directory, worktree }) => {
   const cwd = worktree || directory || process.cwd()
   return {
     "tool.execute.before": async (input, output) => {
@@ -326,27 +326,27 @@ export const grove = async ({ directory, worktree }) => {
       try {
         verdict = JSON.parse(res.stdout)
       } catch {
-        // grove could not run, or produced something unparseable. Do NOT block — a safety tool
+        // holt could not run, or produced something unparseable. Do NOT block — a safety tool
         // that bricks the agent when it breaks is worse than one that is absent. But SAY SO,
         // once: a gate that fails open in silence is indistinguishable from no gate at all,
         // and the user believes they are protected when they are not.
         if (!warned) {
           warned = true
           console.warn(
-            "[grove] gate INACTIVE — could not run '" + GROVE_CMD + "'" +
+            "[holt] gate INACTIVE — could not run '" + HOLT_CMD + "'" +
               (res.err ? " (" + res.err.message + ")" : "") +
-              ". Worktree deletions are NOT being checked. Fix with: grove doctor",
+              ". Worktree deletions are NOT being checked. Fix with: holt doctor",
           )
         }
         return
       }
 
       if (verdict.decision === "deny") {
-        throw new Error(verdict.reason || "grove: this command would destroy work found nowhere else")
+        throw new Error(verdict.reason || "holt: this command would destroy work found nowhere else")
       }
       if (verdict.decision === "ask") {
         // OpenCode has no "ask" channel here; surface it without blocking legitimate work.
-        console.warn("[grove] " + (verdict.reason || "could not verify this command"))
+        console.warn("[holt] " + (verdict.reason || "could not verify this command"))
       }
     },
 
@@ -354,17 +354,17 @@ export const grove = async ({ directory, worktree }) => {
       if (event?.type !== "session.created") return
       const res = await run(["brief"], cwd)
       const text = res.stdout.trim()
-      if (text && !text.startsWith("[grove] no parallel")) console.log(text)
+      if (text && !text.startsWith("[holt] no parallel")) console.log(text)
     },
   }
 }
 `;
 }
 
-export async function installOpenCode(repoRoot, { bin = 'grove' } = {}) {
+export async function installOpenCode(repoRoot, { bin = 'holt' } = {}) {
   // `.opencode/plugins/` — plural. The singular form is silently ignored by opencode, which is
   // the worst kind of wrong: the file exists, looks installed, and never runs.
-  const file = path.join(repoRoot, '.opencode', 'plugins', 'grove.js');
+  const file = path.join(repoRoot, '.opencode', 'plugins', 'holt.js');
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, opencodePlugin(bin), 'utf8');
   return { adapter: 'opencode', path: file, action: 'installed' };
@@ -379,25 +379,25 @@ export async function installOpenCode(repoRoot, { bin = 'grove' } = {}) {
  * is refuse to let a branch whose worktree holds unique uncommitted work be quietly discarded,
  * and warn loudly on checkout. Honest about its own limits rather than implying full coverage.
  */
-export function preCommitHook(bin = 'grove') {
+export function preCommitHook(bin = 'holt') {
   return `#!/bin/sh
-# grove — pre-commit warning (generated by \`grove integrate\`).
+# holt — pre-commit warning (generated by \`holt integrate\`).
 # Surfaces cross-worktree collisions before you add to them. Never blocks: exit 0 always.
 if command -v ${bin} >/dev/null 2>&1; then
   ${bin} collisions --json 2>/dev/null | grep -q '"severity": *"high"' && {
-    echo "grove: HIGH-severity collisions exist between worktrees. Run '${bin} collisions'." >&2
+    echo "holt: HIGH-severity collisions exist between worktrees. Run '${bin} collisions'." >&2
   }
 fi
 exit 0
 `;
 }
 
-export async function installGitHooks(repoRoot, { bin = 'grove' } = {}) {
+export async function installGitHooks(repoRoot, { bin = 'holt' } = {}) {
   const dir = path.join(repoRoot, '.git', 'hooks');
   const file = path.join(dir, 'pre-commit');
   try {
     const existing = await fs.readFile(file, 'utf8');
-    if (!existing.includes('grove —')) {
+    if (!existing.includes('holt —')) {
       return { adapter: 'git-hooks', path: file, action: 'skipped (a pre-commit hook already exists)' };
     }
   } catch { /* none yet */ }
@@ -412,7 +412,7 @@ export async function installGitHooks(repoRoot, { bin = 'grove' } = {}) {
 /**
  * Which hosts are in use, and WHERE.
  *
- * Scope is reported separately because it changes what grove is allowed to do. A host found only
+ * Scope is reported separately because it changes what holt is allowed to do. A host found only
  * in the user's home directory means "this person uses Cursor", not "this repository is wired
  * for Cursor" — and it is not a licence to edit their home config.
  *
@@ -465,35 +465,35 @@ export async function detectHosts(repoRoot, home = os.homedir()) {
 /**
  * Resolve the command every integration should reference.
  *
- * MEASURED: with integrations written as `node /home/raed/grove/bin/grove.mjs`, agents read
+ * MEASURED: with integrations written as `node /home/raed/holt/bin/holt.mjs`, agents read
  * AGENTS.md, chose the correct action, and were then STOPPED by the host's permission classifier
  * — "the permission classifier is blocking the execution". An absolute path to a script under a
  * developer's home directory is exactly the shape a Bash allowlist refuses, and the agent froze
  * holding the right answer.
  *
- * A plain `grove` on PATH is both what a real installation looks like and what a classifier will
+ * A plain `holt` on PATH is both what a real installation looks like and what a classifier will
  * accept. So: prefer the installed binary, and only fall back to an explicit path when there
  * genuinely is no installation — saying so, because the fallback is the shape that gets blocked.
  */
 export async function resolveBin(preferred = null) {
-  if (preferred && preferred !== 'grove') return { bin: preferred, how: 'explicit' };
+  if (preferred && preferred !== 'holt') return { bin: preferred, how: 'explicit' };
 
   const found = await new Promise((resolve) => {
-    execFile('grove', ['--help'], { timeout: 8000 }, (err) => resolve(!err));
+    execFile('holt', ['--help'], { timeout: 8000 }, (err) => resolve(!err));
   });
 
   return found
-    ? { bin: 'grove', how: 'installed on PATH' }
+    ? { bin: 'holt', how: 'installed on PATH' }
     : {
-        bin: 'grove',
-        how: 'NOT FOUND on PATH — integrations reference `grove`; install it with '
-          + '`npm install -g grovekit` or agents will be unable to run it',
+        bin: 'holt',
+        how: 'NOT FOUND on PATH — integrations reference `holt`; install it with '
+          + '`npm install -g holt` or agents will be unable to run it',
         missing: true,
       };
 }
 
 export async function integrate(repoRoot, {
-  bin = 'grove', home = os.homedir(), hosts = null, scope = 'project',
+  bin = 'holt', home = os.homedir(), hosts = null, scope = 'project',
 } = {}) {
   const detected = hosts ?? await detectHosts(repoRoot, home);
   const present = detected.all ?? detected;

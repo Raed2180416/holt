@@ -1,8 +1,8 @@
 /**
- * grove eval — the mess generator.
+ * holt eval — the mess generator.
  *
  * Manufactures a repository in the state a fleet of agents actually leaves behind, and does it
- * ADVERSARIALLY: the point is not to build a scenario grove passes, it is to build one where a
+ * ADVERSARIALLY: the point is not to build a scenario holt passes, it is to build one where a
  * competent agent can plausibly destroy work.
  *
  * Design rules, all of them chosen to make the task HARDER, not easier:

@@ -1,7 +1,7 @@
 /**
- * grove — the Jujutsu backend.
+ * holt — the Jujutsu backend.
  *
- * grove claims to be VCS-agnostic. That claim was FALSE for its first several revisions and
+ * holt claims to be VCS-agnostic. That claim was FALSE for its first several revisions and
  * nothing caught it, because jj was not installed and the code path never executed once. When it
  * finally ran, every jj workspace came back "working directory missing" — a total, silent
  * failure of an advertised feature. These tests exist so that cannot recur.
@@ -26,8 +26,8 @@ function run(cmd, args, cwd) {
       cwd, timeout: 90_000, maxBuffer: 16 * 1024 * 1024,
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: 'grove test', GIT_AUTHOR_EMAIL: 't@grove.invalid',
-        GIT_COMMITTER_NAME: 'grove test', GIT_COMMITTER_EMAIL: 't@grove.invalid',
+        GIT_AUTHOR_NAME: 'holt test', GIT_AUTHOR_EMAIL: 't@holt.invalid',
+        GIT_COMMITTER_NAME: 'holt test', GIT_COMMITTER_EMAIL: 't@holt.invalid',
         GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C',
       },
     }, (err, stdout, stderr) => resolve({
@@ -38,13 +38,13 @@ function run(cmd, args, cwd) {
 
 /** A colocated git+jj repo with one extra workspace holding a distinctive symbol. */
 async function jjFixture() {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-jj-'));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-jj-'));
   const repo = path.join(tmp, 'repo');
   await fs.mkdir(repo, { recursive: true });
 
   await run('git', ['init', '-q', '--initial-branch=main'], repo);
-  await run('git', ['config', 'user.name', 'grove test'], repo);
-  await run('git', ['config', 'user.email', 't@grove.invalid'], repo);
+  await run('git', ['config', 'user.name', 'holt test'], repo);
+  await run('git', ['config', 'user.email', 't@holt.invalid'], repo);
   await fs.writeFile(path.join(repo, 'base.js'), 'export function baseThing() {}\n');
   await run('git', ['add', '-A'], repo);
   await run('git', ['commit', '-q', '-m', 'base'], repo);
@@ -120,7 +120,7 @@ test('jj: the workspace commit IS a git commit, so the whole pipeline works on i
     'a jj workspace commit must be a git commit — this is what makes the backend free');
 });
 
-test('jj: end-to-end, grove finds the work in a jj workspace', async (t) => {
+test('jj: end-to-end, holt finds the work in a jj workspace', async (t) => {
   const probe = await detectJj(process.cwd());
   if (!probe.available) return t.skip('jj not installed');
 
@@ -140,7 +140,7 @@ test('jj: end-to-end, grove finds the work in a jj workspace', async (t) => {
     `the jj workspace's symbol must be found: ${alpha.uniqueSymbols.join(', ')}`);
 
   // Under jj the working copy is snapshotted into @, so there is no uncommitted layer at all.
-  // Reporting one would mean grove had misunderstood the backend.
+  // Reporting one would mean holt had misunderstood the backend.
   assert.equal(alpha.uncommittedOnlyCount, 0,
     'jj auto-snapshots, so nothing should be classified as uncommitted-only');
   assert.equal(alpha.verdict, 'unique-work-committed');
@@ -154,7 +154,7 @@ test('jj: reading a jj repo does not mutate it', async (t) => {
   t.after(() => fs.rm(fx.tmp, { recursive: true, force: true }));
   if (!fx.ok) return t.skip(`jj fixture unavailable: ${fx.reason}`);
 
-  // jj snapshots the working copy on almost any command, which WRITES. grove passes
+  // jj snapshots the working copy on almost any command, which WRITES. holt passes
   // --ignore-working-copy everywhere; this proves the operation log did not grow.
   const opsBefore = await run('jj', ['op', 'log', '--no-graph', '-T', 'id.short()', '--ignore-working-copy'], fx.repo);
 
@@ -163,13 +163,13 @@ test('jj: reading a jj repo does not mutate it', async (t) => {
 
   const opsAfter = await run('jj', ['op', 'log', '--no-graph', '-T', 'id.short()', '--ignore-working-copy'], fx.repo);
   assert.equal(opsAfter.stdout, opsBefore.stdout,
-    'grove must not append to the jj operation log — that would be a write');
+    'holt must not append to the jj operation log — that would be a write');
 });
 
 test('jj: absence is reported as absence, never as "no workstreams"', async () => {
   // A git-only repo probed for jj must say so explicitly. Silently returning [] here is the
-  // fail-open-on-missing-evidence defect grove exists to catch.
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'grove-nojj-'));
+  // fail-open-on-missing-evidence defect holt exists to catch.
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-nojj-'));
   try {
     await run('git', ['init', '-q'], tmp);
     const found = await discoverJjWorkspaces(tmp);

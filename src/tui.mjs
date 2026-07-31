@@ -1,5 +1,5 @@
 /**
- * grove — the TUI.  `grove tui`
+ * holt — the TUI.  `holt tui`
  *
  * The product started life as "a graph tool for humans and AI to deeply understand worktrees."
  * The AI half is MCP/hooks/AGENTS.md. This is the human half: one screen that answers, at a
@@ -139,7 +139,7 @@ export function renderFrame(model, state, size) {
   // header
   const k = report.counts;
   out.push(
-    paint('bold', ' grove ') + paint('grey', '· ') + paint('cyan', model.root)
+    paint('bold', ' holt ') + paint('grey', '· ') + paint('cyan', model.root)
     + paint('grey', `  base ${report.base.ref}@${report.base.oid.slice(0, 8)}`),
   );
   const counts = [
@@ -224,8 +224,8 @@ function detailLines(row, width, height) {
 
   L.push('');
   L.push(paint('grey', row.verdict?.safe
-    ? 'grove clean --apply would remove this'
-    : `grove rescue ${row.id} --release preserves then unlocks`));
+    ? 'holt clean --apply would remove this'
+    : `holt rescue ${row.id} --release preserves then unlocks`));
 
   return L.map((l) => l.length > width ? `${l.slice(0, width - 1)}…` : l);
 }

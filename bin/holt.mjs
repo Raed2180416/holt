@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * grove — CLI.
+ * holt — CLI.
  *
- * grove never writes to the repository it inspects. See src/git.mjs for the enforced
+ * holt never writes to the repository it inspects. See src/git.mjs for the enforced
  * contract and test/unit/safety.test.mjs for the proof.
  */
 
@@ -28,10 +28,10 @@ import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
 
 const USAGE = `
-grove — the landing layer for parallel agent work
+holt — the landing layer for parallel agent work
 
 USAGE
-  grove [command] [options]
+  holt [command] [options]
 
 COMMANDS
   status              what your workstreams produced and what to do about it  (default)
@@ -49,7 +49,7 @@ COMMANDS
 ACTING  (these MUTATE the repo; everything above is read-only)
   protect             git-lock every workstream holding unique work   [--dry-run]
                       a locked worktree REFUSES 'git worktree remove --force'
-  unprotect [<id>]    release grove's locks (never touches locks it did not place)
+  unprotect [<id>]    release holt's locks (never touches locks it did not place)
   rescue <id>         capture unique work to a verifiable ref  [--release] [--dry-run]
                       exits non-zero if the capture cannot be verified
   rescued             list every rescue taken in this repo
@@ -58,7 +58,7 @@ ACTING  (these MUTATE the repo; everything above is read-only)
                       only what the COMBINATION breaks  [--run "<cmd>"]  (executes code)
 
 AGENT INTEGRATION
-  integrate           wire grove into every agent found here (AGENTS.md + MCP + hooks)
+  integrate           wire holt into every agent found here (AGENTS.md + MCP + hooks)
   brief               plain-text sibling-workstream briefing for any agent
   mcp                 run as an MCP server over stdio
   hook <event>        hook entry point; reads the host event as JSON on stdin
@@ -75,7 +75,7 @@ OPTIONS
   --include-primary   also scan the primary worktree
   --deep              duplicates: additionally run jscpd token clone detection
   --html <file>       graph: write an interactive HTML graph
-  --global            integrate: ALSO add grove to user-level editor configs.
+  --global            integrate: ALSO add holt to user-level editor configs.
                       Default is project scope — nothing outside the repo is touched.
   -h, --help          this
 `;
@@ -85,7 +85,7 @@ function parseArgs(argv) {
     _: [], json: false, base: null, cwd: process.cwd(), symbols: true,
     strictReadOnly: false, concurrency: 8, includePrimary: false,
     deep: false, html: null, help: false,
-    host: 'generic', command: null, bin: 'grove', global: false,
+    host: 'generic', command: null, bin: 'holt', global: false,
     dryRun: false, apply: false, release: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -131,7 +131,7 @@ function emitJson(v) { out(JSON.stringify(v, null, 2)); }
 async function buildReport(opts) {
   const disc = await discover(opts.cwd, opts);
   if (!disc.root) {
-    process.stderr.write(paint('red', `grove: not a git repository (searched from ${opts.cwd})\n`));
+    process.stderr.write(paint('red', `holt: not a git repository (searched from ${opts.cwd})\n`));
     process.exit(2);
   }
   const scanned = await scan(disc, opts);
@@ -178,7 +178,7 @@ async function cmdDoctor(opts) {
 
   if (opts.json) return emitJson(info);
 
-  out(paint('bold', 'grove doctor'));
+  out(paint('bold', 'holt doctor'));
   out('');
   out(`  node              ${info.node}`);
   out(`  repository        ${info.repo ?? paint('red', 'not a git repository')}`);
@@ -195,7 +195,7 @@ async function cmdDoctor(opts) {
   }
   out('');
 
-  // Every absence above is optional — grove already said what each one costs. Close the loop
+  // Every absence above is optional — holt already said what each one costs. Close the loop
   // by saying how to fix it, per platform, so setup is one pasted command, not a scavenger hunt.
   const missing = [];
   if (!ctags.available) missing.push('ctags');
@@ -212,7 +212,7 @@ async function cmdDoctor(opts) {
       ['brew', (names) => `brew install ${names.join(' ')}`],
       ['winget', (names) => names.map((n) => `winget install ${n}`).join(' && ')],
     ];
-    out(paint('bold', '  TO ENABLE THE MISSING LAYERS') + paint('grey', '  (optional — grove works without them)'));
+    out(paint('bold', '  TO ENABLE THE MISSING LAYERS') + paint('grey', '  (optional — holt works without them)'));
     for (const [mgr, fmt] of managers) {
       const names = missing.map((m) => pkgs[m][mgr]).filter(Boolean);
       if (names.length) out(`    ${(mgr + '        ').slice(0, 8)}  ${fmt(names)}`);
@@ -275,20 +275,20 @@ async function cmdHook(opts) {
     return;
   }
 
-  process.stderr.write(paint('red', `grove hook: unknown event '${event}'\n`));
+  process.stderr.write(paint('red', `holt hook: unknown event '${event}'\n`));
   process.exit(2);
 }
 
 async function cmdBrief(opts) {
   const text = await buildBrief(opts.cwd);
   if (opts.json) return emitJson({ context: text });
-  out(text ?? '[grove] no parallel workstream findings.');
+  out(text ?? '[holt] no parallel workstream findings.');
 }
 
 async function cmdIntegrate(opts) {
   const disc = await discover(opts.cwd, opts);
   if (!disc.root) {
-    process.stderr.write(paint('red', `grove: not a git repository (${opts.cwd})\n`));
+    process.stderr.write(paint('red', `holt: not a git repository (${opts.cwd})\n`));
     process.exit(2);
   }
 
@@ -296,7 +296,7 @@ async function cmdIntegrate(opts) {
   const { detected, results } = await integrate(disc.root, { bin: opts.bin, scope });
   if (opts.json) return emitJson({ detected, scope, results });
 
-  out(paint('bold', 'grove integrate') + paint('grey', `  (${scope} scope)`));
+  out(paint('bold', 'holt integrate') + paint('grey', `  (${scope} scope)`));
   out('');
   out(`  in this repo     ${detected.project.length ? detected.project.join(', ') : paint('grey', 'none')}`);
   out(`  on this machine  ${detected.user.length ? detected.user.join(', ') : paint('grey', 'none')}`);
@@ -312,7 +312,7 @@ async function cmdIntegrate(opts) {
   out(paint('grey', '  AGENTS.md and MCP reach every agent that reads them; hooks add enforcement where supported.'));
   if (!opts.global) {
     out(paint('grey', '  Project scope only — nothing outside this repository was modified. Use --global to also'));
-    out(paint('grey', '  add grove to your user-level editor configs (existing files only, never created).'));
+    out(paint('grey', '  add holt to your user-level editor configs (existing files only, never created).'));
   }
   out('');
 }
@@ -322,7 +322,7 @@ async function main() {
   try {
     opts = parseArgs(process.argv.slice(2));
   } catch (e) {
-    process.stderr.write(paint('red', `grove: ${e.message}\n`));
+    process.stderr.write(paint('red', `holt: ${e.message}\n`));
     process.exit(2);
   }
 
@@ -339,7 +339,7 @@ async function main() {
   if (cmd === 'tui') return runTui(opts.cwd, { snapshot: opts.snapshot, columns: opts.columns, rows: opts.rowsOpt });
 
   // The MUTATING commands, dispatched before buildReport() because each runs its own assessment.
-  // These were once implemented, exported and covered by 19 passing tests while `grove protect`
+  // These were once implemented, exported and covered by 19 passing tests while `holt protect`
   // printed "unknown command" — nothing exercised the CLI. test/e2e/cli.test.mjs now does.
   if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));
   if (cmd === 'unprotect') return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
@@ -348,7 +348,7 @@ async function main() {
   if (cmd === 'verify') {
     const [, a, b] = opts._;
     if (!a || !b) {
-      process.stderr.write(paint('red', 'grove verify: needs two workstream ids\n'));
+      process.stderr.write(paint('red', 'holt verify: needs two workstream ids\n'));
       process.exit(2);
     }
     const r = await verifyPair(opts.cwd, a, b, { run: opts.run ?? null });
@@ -360,13 +360,13 @@ async function main() {
   if (cmd === 'rescue') {
     const target = opts._[1];
     if (!target) {
-      process.stderr.write(paint('red', 'grove rescue: needs a workstream id\n'));
+      process.stderr.write(paint('red', 'holt rescue: needs a workstream id\n'));
       process.exit(2);
     }
     const r = await rescue(opts.cwd, target, opts);
     cmdAction(r);
     // An unverified capture MUST exit non-zero: a script chaining
-    //   grove rescue X && git worktree remove X
+    //   holt rescue X && git worktree remove X
     // has to stop here, or that chain destroys the work it was meant to save.
     if (r.ok === false) process.exit(1);
     return;
@@ -416,7 +416,7 @@ async function main() {
     case 'context': {
       const id = opts._[1];
       if (!id) {
-        process.stderr.write(paint('red', 'grove context: needs a workstream id\n'));
+        process.stderr.write(paint('red', 'holt context: needs a workstream id\n'));
         process.exit(2);
       }
       const digest = contextDigest(scanned, id);
@@ -427,17 +427,17 @@ async function main() {
       // Pre-delete gate. Exit 0 = disposable, 1 = holds unique work, 2 = unknown.
       const id = opts._[1];
       if (!id) {
-        process.stderr.write(paint('red', 'grove gate: needs a workstream id\n'));
+        process.stderr.write(paint('red', 'holt gate: needs a workstream id\n'));
         process.exit(2);
       }
       const verdict = report.safe.find((s) => s.id === id);
       if (!verdict) {
-        process.stderr.write(paint('red', `grove gate: no workstream '${id}'\n`));
+        process.stderr.write(paint('red', `holt gate: no workstream '${id}'\n`));
         process.exit(2);
       }
       if (opts.json) emitJson(verdict);
       else if (verdict.confidence === 'unknown') {
-        out(paint('yellow', `? ${id}: UNKNOWN — grove could not scan it. Refusing to call it safe.`));
+        out(paint('yellow', `? ${id}: UNKNOWN — holt could not scan it. Refusing to call it safe.`));
         for (const r of verdict.reasons) out(paint('grey', `    ${r}`));
       } else if (verdict.safe) {
         out(paint('green', `✓ ${id}: disposable — ${verdict.reasons[0]}`));
@@ -450,13 +450,13 @@ async function main() {
     }
 
     default:
-      process.stderr.write(paint('red', `grove: unknown command '${cmd}'\n`));
+      process.stderr.write(paint('red', `holt: unknown command '${cmd}'\n`));
       out(USAGE);
       process.exit(2);
   }
 }
 
 main().catch((err) => {
-  process.stderr.write(paint('red', `grove: ${err?.stack ?? err?.message ?? String(err)}\n`));
+  process.stderr.write(paint('red', `holt: ${err?.stack ?? err?.message ?? String(err)}\n`));
   process.exit(1);
 });

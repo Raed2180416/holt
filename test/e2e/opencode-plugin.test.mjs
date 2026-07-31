@@ -1,10 +1,10 @@
 /**
- * grove — the OpenCode plugin, driven exactly as OpenCode drives it.
+ * holt — the OpenCode plugin, driven exactly as OpenCode drives it.
  *
  * VERIFIED AGAINST THE REAL HOST, not a doc summary. `opencode debug config` on a repo where
- * `grove integrate` had run shows:
+ * `holt integrate` had run shows:
  *
- *   "plugin": ["file:///…/.opencode/plugins/grove.js"],
+ *   "plugin": ["file:///…/.opencode/plugins/holt.js"],
  *   "plugin_origins": [{ "spec": "…", "source": "…/.opencode", "scope": "local" }]
  *
  * so the file is genuinely discovered and loaded. An earlier revision wrote to
@@ -27,8 +27,8 @@ import { fileURLToPath } from 'node:url';
 import { standardFixture } from '../fixtures.mjs';
 import { opencodePlugin, installOpenCode } from '../../src/integrate/adapters.mjs';
 
-const GROVE_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'grove.mjs');
-const BIN_CMD = `${process.execPath} ${GROVE_BIN}`;
+const HOLT_BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
+const BIN_CMD = `${process.execPath} ${HOLT_BIN}`;
 
 /** Load the generated plugin the way OpenCode does, and instantiate its hooks. */
 async function loadPlugin(repoRoot, { bin = BIN_CMD } = {}) {
@@ -38,7 +38,7 @@ async function loadPlugin(repoRoot, { bin = BIN_CMD } = {}) {
 
   // Cache-bust so each test gets a fresh module instance.
   const mod = await import(`file://${file}?t=${Math.random().toString(36).slice(2)}`);
-  assert.equal(typeof mod.grove, 'function', 'plugin must export an async factory named grove');
+  assert.equal(typeof mod.holt, 'function', 'plugin must export an async factory named holt');
 
   const ctx = {
     project: { id: 'test-project' },
@@ -47,7 +47,7 @@ async function loadPlugin(repoRoot, { bin = BIN_CMD } = {}) {
     directory: repoRoot,
     worktree: repoRoot,
   };
-  const hooks = await mod.grove(ctx);
+  const hooks = await mod.holt(ctx);
   return { hooks, file };
 }
 
@@ -67,7 +67,7 @@ test('OPENCODE: the plugin is written where OpenCode actually looks', async (t) 
 
   const { file } = await loadPlugin(fx.root);
   const rel = path.relative(fx.root, file);
-  assert.equal(rel, path.join('.opencode', 'plugins', 'grove.js'),
+  assert.equal(rel, path.join('.opencode', 'plugins', 'holt.js'),
     'OpenCode loads .opencode/plugins/ — the singular form is silently ignored');
   await fs.access(file);
 });
@@ -145,13 +145,13 @@ test('OPENCODE: a tool call with no command is ignored without error', async (t)
   assert.equal(await callBefore(hooks, 'edit', { filePath: 'x', old: 'a', new: 'b' }), null);
 });
 
-test('OPENCODE: when grove is broken the plugin fails open — but says so LOUDLY', async (t) => {
+test('OPENCODE: when holt is broken the plugin fails open — but says so LOUDLY', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
 
   // Point the plugin at a binary that does not exist. A safety tool that bricks the agent when
   // it breaks is worse than one that is absent — fail open on OUR failure, closed on real risk.
-  const { hooks } = await loadPlugin(fx.root, { bin: '/nonexistent/grove-binary-that-is-not-there' });
+  const { hooks } = await loadPlugin(fx.root, { bin: '/nonexistent/holt-binary-that-is-not-there' });
 
   const warnings = [];
   const originalWarn = console.warn;
@@ -165,7 +165,7 @@ test('OPENCODE: when grove is broken the plugin fails open — but says so LOUDL
     console.warn = originalWarn;
   }
 
-  assert.equal(err, null, 'a broken grove must not block the agent from working');
+  assert.equal(err, null, 'a broken holt must not block the agent from working');
   // Silence here is the actual danger: the user believes deletions are gated when they are not.
   assert.ok(warnings.some((w) => /gate INACTIVE/.test(w)),
     `a failed-open gate MUST announce itself; warnings were: ${JSON.stringify(warnings)}`);
@@ -186,7 +186,7 @@ test('OPENCODE: the session hook emits a brief when there is something to say', 
   }
 
   assert.ok(logs.length > 0, 'a repo with at-risk work must produce a session brief');
-  assert.match(logs.join('\n'), /grove/);
+  assert.match(logs.join('\n'), /holt/);
 });
 
 test('OPENCODE: unrelated events produce nothing', async (t) => {
@@ -211,9 +211,9 @@ test('OPENCODE: the generated plugin has no imports OpenCode cannot resolve', as
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
 
-  const src = opencodePlugin('grove');
+  const src = opencodePlugin('holt');
   // Anything beyond node builtins would have to be installed next to the plugin, which
-  // `grove integrate` does not do — so it would fail at load time in a real session.
+  // `holt integrate` does not do — so it would fail at load time in a real session.
   const imports = [...src.matchAll(/from\s+["']([^"']+)["']/g)].map((m) => m[1]);
   for (const spec of imports) {
     assert.ok(spec.startsWith('node:'),
@@ -238,6 +238,6 @@ test('OPENCODE: opencode itself loads the plugin (skips if opencode is absent)',
   try { cfg = JSON.parse(probe.stdout); } catch { return t.skip('opencode debug config was not JSON'); }
 
   const plugins = JSON.stringify(cfg.plugin ?? []) + JSON.stringify(cfg.plugin_origins ?? []);
-  assert.match(plugins, /grove\.js/,
+  assert.match(plugins, /holt\.js/,
     `opencode did not discover the plugin. Resolved plugin config: ${plugins.slice(0, 400)}`);
 });

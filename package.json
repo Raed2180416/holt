@@ -1,10 +1,10 @@
 {
-  "name": "grovekit",
+  "name": "holt",
   "version": "0.1.0",
   "description": "The landing layer for parallel agent work. Answers what your N agents produced, what's redundant, what collides, what's safe to delete, and what you're about to lose.",
   "type": "module",
   "bin": {
-    "grove": "./bin/grove.mjs"
+    "holt": "./bin/holt.mjs"
   },
   "exports": {
     ".": "./src/index.mjs",
@@ -22,7 +22,7 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "test:unit": "node --test \"test/unit/*.test.mjs\"",
     "test:e2e": "node --test \"test/e2e/*.test.mjs\"",
-    "selfcheck": "node bin/grove.mjs doctor",
+    "selfcheck": "node bin/holt.mjs doctor",
     "test:mutation": "node test/mutation.mjs",
     "test:all": "npm test && npm run test:mutation"
   },

@@ -1,7 +1,7 @@
 /**
- * grove — differential verification, against ground truth.
+ * holt — differential verification, against ground truth.
  *
- * The claim: `grove verify A B` runs YOUR tests on A alone, B alone, and A+B merged, and reports
+ * The claim: `holt verify A B` runs YOUR tests on A alone, B alone, and A+B merged, and reports
  * only what the COMBINATION breaks. The fixture manufactures a textbook semantic conflict:
  *
  *   base    LIMIT = 10 (limit.mjs), FACTOR = 2 (factor.mjs); a test asserts LIMIT * FACTOR < 100.
@@ -98,7 +98,7 @@ test('VERIFY: refuses to run without an explicit test command', async (t) => {
   const fx = await semanticFixture();
   t.after(() => fx.cleanup());
 
-  // No --run, no groveTest in package.json: grove must refuse rather than guess. Running an
+  // No --run, no holtTest in package.json: holt must refuse rather than guess. Running an
   // inferred command in someone's repository is the failure, not the fallback.
   const r = await verifyPair(fx.root, 'raise-limit', 'raise-factor', {});
   assert.equal(r.ok, false);
@@ -142,7 +142,7 @@ test('VERIFY: leaves the repository and its worktrees untouched', async (t) => {
   const { execFile } = await import('node:child_process');
   const list = await new Promise((res) => execFile('git', ['worktree', 'list'], { cwd: fx.root },
     (e, so) => res(String(so ?? ''))));
-  assert.ok(!list.includes('grove-verify'), `scratch worktrees leaked:\n${list}`);
+  assert.ok(!list.includes('holt-verify'), `scratch worktrees leaked:\n${list}`);
 });
 
 test('extractFailures: parses the frameworks it claims to', () => {

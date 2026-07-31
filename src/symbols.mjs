@@ -1,5 +1,5 @@
 /**
- * grove — "what did this workstream ADD?"
+ * holt — "what did this workstream ADD?"
  *
  * BUILT ON EXISTING OSS, deliberately.
  *
@@ -15,7 +15,7 @@
  *   a gap there would be a gap in the case that matters most. So this is a complement to
  *   ctags on formats it skips, NOT a competing implementation of what it already does.
  *
- *   FALLBACK: a minimal declaration regex, used only when ctags is absent entirely, so grove
+ *   FALLBACK: a minimal declaration regex, used only when ctags is absent entirely, so holt
  *   degrades instead of failing. It is labelled 'regex' in output so nobody mistakes reduced
  *   coverage for a clean result.
  *
@@ -85,7 +85,7 @@ function isNoise(tag) {
   return false;
 }
 
-/** Largest file grove will hand to ctags. Beyond this the tags cost more than they inform. */
+/** Largest file holt will hand to ctags. Beyond this the tags cost more than they inform. */
 const MAX_TAG_FILE_BYTES = 2 * 1024 * 1024;
 
 /**
@@ -120,17 +120,17 @@ const CTAGS_EXCLUDES = [
 ];
 
 /**
- * grove's gap-language pack, plus any user pack.
+ * holt's gap-language pack, plus any user pack.
  *
  * Loaded via ctags' own --options, so the 12 languages ctags 6.2.1 does not know
  * (Swift, Scala, Dart, Groovy, Solidity, Zig, Nim, Crystal, F#, Prolog, Dockerfile, GraphQL)
- * flow through the SAME pipeline as the 164 it does. See src/optlib/grove.ctags.
+ * flow through the SAME pipeline as the 164 it does. See src/optlib/holt.ctags.
  */
-const OPTLIB = path.join(path.dirname(fileURLToPath(import.meta.url)), 'optlib', 'grove.ctags');
+const OPTLIB = path.join(path.dirname(fileURLToPath(import.meta.url)), 'optlib', 'holt.ctags');
 
 function optionFlags() {
   const flags = [`--options=${OPTLIB}`];
-  const user = process.env.GROVE_CTAGS_OPTIONS;
+  const user = process.env.HOLT_CTAGS_OPTIONS;
   if (user) flags.push(`--options=${user}`); // loaded second, so user definitions win
   return flags;
 }
@@ -236,7 +236,7 @@ export function isKeyFormat(file) {
  * Extensions that more than one language legitimately claims.
  *
  * Extension-only mapping is wrong for every one of these, and wrong SILENTLY: ctags maps `.fs`
- * to Forth, so an F# repository yields zero symbols and grove reports "no duplicates" with
+ * to Forth, so an F# repository yields zero symbols and holt reports "no duplicates" with
  * total confidence. The list comes from Linguist's own ambiguity data; only these pay the cost
  * of content classification, so the common path stays one batched ctags call.
  */
@@ -426,7 +426,7 @@ export function fallbackExtract(file, content) {
  * cross-workstream comparison on the raw kind would therefore mean that two agents who
  * implement the same function with different syntax — `function parseConfig() {}` in one
  * worktree, `const parseConfig = () => {}` in the other — land in different kinds and NEVER
- * match. That is a silent false negative in duplicate and collision detection: grove would
+ * match. That is a silent false negative in duplicate and collision detection: holt would
  * report "no duplicates" and be wrong, which is the single worst failure mode for a tool
  * whose whole job is to notice that two agents did the same work.
  *
@@ -513,15 +513,15 @@ export async function symbolsOnDisk(dir, relPaths, backend) {
 const MAX_TEXT_BYTES = 4 * 1024 * 1024;
 
 /**
- * Where grove materialises scratch content.
+ * Where holt materialises scratch content.
  *
- * Never inside the repository. Honours GROVE_TMPDIR then TMPDIR before falling back to the
+ * Never inside the repository. Honours HOLT_TMPDIR then TMPDIR before falling back to the
  * platform default, because os.tmpdir() is a RAM-backed tmpfs on many Linux setups and a
  * large scan can fill it — a tool that ENOSPCs the machine it was asked to help with has
  * failed in a way no amount of correct output makes up for.
  */
 export function scratchDir() {
-  return process.env.GROVE_TMPDIR || process.env.TMPDIR || os.tmpdir();
+  return process.env.HOLT_TMPDIR || process.env.TMPDIR || os.tmpdir();
 }
 
 async function readTextIfSmall(abs) {
@@ -546,7 +546,7 @@ export async function symbolsAtBase(repoRoot, baseOid, relPaths, backend) {
   const result = new Map();
   if (relPaths.length === 0) return result;
 
-  const tmp = await fs.mkdtemp(path.join(scratchDir(), 'grove-base-'));
+  const tmp = await fs.mkdtemp(path.join(scratchDir(), 'holt-base-'));
   try {
     const materialised = [];
     await pmap(relPaths, async (rel) => {

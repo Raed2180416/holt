@@ -1,5 +1,5 @@
 /**
- * grove — the scanner.
+ * holt — the scanner.
  *
  * Produces, for every workstream, the two deltas that matter:
  *
@@ -14,7 +14,7 @@
  *
  *   uncommitted — tracked modifications plus untracked files.
  *                 THIS IS THE LAYER GIT CANNOT RELATE. No git command compares uncommitted
- *                 state across worktrees; merge-tree sees only commits. In the repo grove
+ *                 state across worktrees; merge-tree sees only commits. In the repo holt
  *                 was built against, the committed layer flagged 4 interesting worktrees
  *                 while the uncommitted layer held 52 registry keys absent from base.
  *                 A tool that scanned only the committed layer would have been confidently,
@@ -39,14 +39,14 @@ const BASE_CANDIDATES = ['main', 'master', 'trunk', 'develop', 'default'];
 export async function resolveBase(root, explicit) {
   if (explicit) {
     const oid = await resolveRef(root, explicit);
-    if (!oid) throw new Error(`grove: base ref '${explicit}' does not resolve in ${root}`);
+    if (!oid) throw new Error(`holt: base ref '${explicit}' does not resolve in ${root}`);
     return { ref: explicit, oid, how: 'explicit' };
   }
 
   // origin/HEAD is the correct source for "what is this project's default branch" and is the
-  // documented best practice. But it answers a DIFFERENT question from the one grove asks.
+  // documented best practice. But it answers a DIFFERENT question from the one holt asks.
   //
-  // grove asks: what will this work be landed INTO? That is the local branch. Measured on a
+  // holt asks: what will this work be landed INTO? That is the local branch. Measured on a
   // real repository whose local `main` sat 363 commits ahead of `origin/main`: taking
   // origin/HEAD as the base made every one of 39 worktrees appear to carry ~1,700 files of
   // unique work, and reported ZERO as safe to delete. The tool was not wrong about the diff —
@@ -90,7 +90,7 @@ export async function resolveBase(root, explicit) {
   const oid = await resolveRef(root, 'HEAD');
   if (oid) return { ref: 'HEAD', oid, how: 'primary-head-fallback' };
 
-  throw new Error(`grove: could not determine a base ref in ${root} (is this an empty repository?)`);
+  throw new Error(`holt: could not determine a base ref in ${root} (is this an empty repository?)`);
 }
 
 async function pathUsable(p) {
@@ -266,7 +266,7 @@ async function scanFiles(ws, ctx) {
       addedSymbols: 0,
     };
   } catch (err) {
-    if (err instanceof GitRefused) throw err; // a refusal is a grove bug, never swallowed
+    if (err instanceof GitRefused) throw err; // a refusal is a holt bug, never swallowed
     result.reason = `scan error: ${err.message}`;
   }
 
@@ -280,7 +280,7 @@ async function scanFiles(ws, ctx) {
  * @param {object} opts  {base, strictReadOnly, concurrency, timeout, symbols, includePrimary}
  */
 export async function scan(disc, opts = {}) {
-  if (!disc.root) throw new Error('grove: not a git repository');
+  if (!disc.root) throw new Error('holt: not a git repository');
 
   const base = await resolveBase(disc.root, opts.base);
   const ctx = {

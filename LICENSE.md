@@ -6,7 +6,7 @@ FSL-1.1-MIT
 
 ## Notice
 
-Copyright 2026 grove contributors
+Copyright 2026 holt contributors
 
 ## Terms and Conditions
 

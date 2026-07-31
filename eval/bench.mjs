@@ -1,5 +1,5 @@
 /**
- * grove — the scale benchmark.
+ * holt — the scale benchmark.
  *
  * Correctness at N=8 says nothing about N=300, and "fast on my repo" is not a number. This
  * builds a repository with a configurable number of worktrees in a fixed composition, then
@@ -31,8 +31,8 @@ import { scan } from '../src/scan.mjs';
 import { analyze } from '../src/analyze.mjs';
 
 const COUNT = Number(process.argv[2] ?? 100);
-const WORK = process.env.GROVE_BENCH_WORK
-  ?? path.join(os.homedir(), '.agentic-os-tmp', 'grove-bench');
+const WORK = process.env.HOLT_BENCH_WORK
+  ?? path.join(os.homedir(), '.agentic-os-tmp', 'holt-bench');
 
 function sh(cmd, args, cwd) {
   return new Promise((resolve, reject) => {
@@ -58,7 +58,7 @@ async function write(dir, rel, content) {
 }
 
 async function main() {
-  console.log(`grove bench · ${COUNT} worktrees\n`);
+  console.log(`holt bench · ${COUNT} worktrees\n`);
   await fs.rm(WORK, { recursive: true, force: true });
   const root = path.join(WORK, 'repo');
   await fs.mkdir(root, { recursive: true });
@@ -110,7 +110,7 @@ async function main() {
     }
   }
   const buildMs = Date.now() - t0;
-  console.log(`  build         ${(buildMs / 1000).toFixed(1)}s (${COUNT} worktrees, fixture cost — not grove)`);
+  console.log(`  build         ${(buildMs / 1000).toFixed(1)}s (${COUNT} worktrees, fixture cost — not holt)`);
 
   // ---- measure -------------------------------------------------------------
   const t1 = Date.now();

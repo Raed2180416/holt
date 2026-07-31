@@ -1,5 +1,5 @@
 /**
- * grove — the monster round, pinned.
+ * holt — the monster round, pinned.
  *
  * eval/monster.mjs builds the worst repository we know how to build — 40+ worktrees here
  * (80–150 in the full runs, all survived), four languages, junk heaps, buried gold, lying names,
@@ -23,11 +23,11 @@ import { fileURLToPath } from 'node:url';
 const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'eval', 'monster.mjs');
 
 test('MONSTER: 40 worktrees of every trap at once — full loop, every byte graded', async () => {
-  const work = path.join(os.tmpdir(), `grove-monster-ci-${process.pid}`);
+  const work = path.join(os.tmpdir(), `holt-monster-ci-${process.pid}`);
   const r = await new Promise((resolve) => {
     execFile(process.execPath, [SCRIPT, '40'], {
       timeout: 600_000, maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, GROVE_MONSTER_WORK: work },
+      env: { ...process.env, HOLT_MONSTER_WORK: work },
     }, (err, stdout, stderr) => resolve({
       code: err ? (err.code ?? 1) : 0, out: `${stdout}\n${stderr}`,
     }));

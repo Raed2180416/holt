@@ -1,5 +1,5 @@
 /**
- * grove — protect / rescue / clean, attacked.
+ * holt — protect / rescue / clean, attacked.
  *
  * These three commands MUTATE the repository, which makes every claim about them dangerous if
  * wrong. Each test below tries to construct the failure, not to confirm the feature:
@@ -31,8 +31,8 @@ function sh(cmd, args, cwd) {
       cwd, timeout: 60_000, maxBuffer: 16 * 1024 * 1024,
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: 'grove test', GIT_AUTHOR_EMAIL: 't@grove.invalid',
-        GIT_COMMITTER_NAME: 'grove test', GIT_COMMITTER_EMAIL: 't@grove.invalid',
+        GIT_AUTHOR_NAME: 'holt test', GIT_AUTHOR_EMAIL: 't@holt.invalid',
+        GIT_COMMITTER_NAME: 'holt test', GIT_COMMITTER_EMAIL: 't@holt.invalid',
         GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C',
       },
     }, (err, stdout, stderr) => resolve({
@@ -46,7 +46,7 @@ const inspect = async (root) => analyze(await scan(await discover(root), {}), {}
 /* ============================================== the mutation boundary ==== */
 
 test('BOUNDARY: mutating commands are UNREACHABLE without an explicit opt-in', () => {
-  // The read-only guarantee is a core reason to trust grove. Adding write features must not
+  // The read-only guarantee is a core reason to trust holt. Adding write features must not
   // widen the default door — only open a clearly-marked second one.
   const mutating = [
     ['worktree', 'lock', 'p'], ['worktree', 'unlock', 'p'], ['worktree', 'remove', 'p'],
@@ -92,8 +92,8 @@ test('PROTECT ATTACK: does a locked worktree actually survive --force?', async (
   assert.notEqual(rm.code, 0, 'a locked worktree must REFUSE `worktree remove --force`');
   assert.match(rm.stderr, /locked working tree/i);
   // git must surface OUR reason — that is how the agent learns what to do.
-  assert.match(rm.stderr, /grove:/, `git should print grove's lock reason, got: ${rm.stderr}`);
-  assert.match(rm.stderr, /grove rescue/, 'the reason must say how to resolve it');
+  assert.match(rm.stderr, /holt:/, `git should print holt's lock reason, got: ${rm.stderr}`);
+  assert.match(rm.stderr, /holt rescue/, 'the reason must say how to resolve it');
 
   const content = await fs.readFile(path.join(wt, 'src/precious.js'), 'utf8');
   assert.match(content, /PRECIOUS_WORK/, 'the work must still be there');
@@ -107,7 +107,7 @@ test('PROTECT ATTACK: -f -f still overrides, and we must not pretend otherwise',
   await fx.write('src/p.js', 'export function P() {}\n', wt);
   await protect(fx.root, {});
 
-  // git's documented escape hatch. grove's note must not claim protection it does not have.
+  // git's documented escape hatch. holt's note must not claim protection it does not have.
   const rm = await sh('git', ['worktree', 'remove', '-f', '-f', wt], fx.root);
   assert.equal(rm.code, 0, 'double --force is git\'s documented override and must still work');
 
@@ -138,7 +138,7 @@ test('PROTECT ATTACK: unknown workstreams are reported, never silently unprotect
 
   const p = await protect(fx.root, {});
   assert.ok(p.unknown.length >= 1,
-    'a workstream grove could not assess must be surfaced, not dropped from the report');
+    'a workstream holt could not assess must be surfaced, not dropped from the report');
 });
 
 test('PROTECT: unprotect leaves FOREIGN locks alone', async (t) => {
@@ -151,7 +151,7 @@ test('PROTECT: unprotect leaves FOREIGN locks alone', async (t) => {
   await sh('git', ['worktree', 'lock', '--reason', 'ON A USB STICK - do not touch', wt], fx.root);
 
   const u = await unprotect(fx.root, {});
-  assert.equal(u.unlocked, 0, 'grove must not disarm a lock somebody else placed');
+  assert.equal(u.unlocked, 0, 'holt must not disarm a lock somebody else placed');
   assert.ok(u.actions.some((a) => a.action === 'skipped-foreign-lock'));
 });
 
@@ -228,7 +228,7 @@ test('RESCUE ATTACK: does NOT disturb the worktree it rescues', async (t) => {
     'rescue must leave the working tree and index exactly as it found them');
 
   // And the scratch index must not be left behind.
-  const leftover = await fs.stat(path.join(wt, '.git-grove-rescue-index')).then(() => true, () => false);
+  const leftover = await fs.stat(path.join(wt, '.git-holt-rescue-index')).then(() => true, () => false);
   assert.equal(leftover, false, 'the temporary index must be cleaned up');
 });
 
@@ -267,7 +267,7 @@ test('RESCUE: rescues are discoverable months later', async (t) => {
   await rescue(fx.root, 'holder', {});
   const list = await rescues(fx.root);
   assert.ok(list.some((r) => r.id === 'holder'), `rescue should be listed: ${JSON.stringify(list)}`);
-  assert.match(list[0].ref, /^refs\/grove\/rescue\//);
+  assert.match(list[0].ref, /^refs\/holt\/rescue\//);
 });
 
 /* ============================================================ CLEAN ==== */
@@ -351,7 +351,7 @@ test('CLEAN ATTACK: an unmerged branch must not be silently deleted', async (t) 
   const c = await clean(fx.root, { apply: true });
   const acted = c.actions.find((x) => x.id === 'landed');
   assert.ok(acted, 'the landed worktree should be actioned');
-  // grove uses `branch -d`, never -D: git refusing an unmerged branch is a feature, and a
+  // holt uses `branch -d`, never -D: git refusing an unmerged branch is a feature, and a
   // cleanup tool that forces past it would destroy history nobody asked it to.
   if (acted.action === 'removed' && !acted.branchRemoved) {
     assert.ok(true, 'branch retained because git considered it unmerged — correct');
@@ -366,7 +366,7 @@ test('CLEAN: unknown workstreams are reported and never removed', async (t) => {
 
   const c = await clean(fx.root, {});
   assert.ok(!c.wouldRemove.some((w) => w.id === 'ghost'),
-    'a workstream grove could not assess must never be queued for deletion');
+    'a workstream holt could not assess must never be queued for deletion');
 });
 
 /* ================================================== injection attacks ==== */
@@ -375,11 +375,11 @@ test('ATTACK: hostile worktree ids cannot produce invalid rescue refs', async ()
   const { refSafeId } = await import('../../src/actions.mjs');
 
   // Found by attacking it: `..` passed the old character-class sanitizer and
-  // `update-ref refs/grove/rescue/..` failed — git refuses .., leading dots, and .lock
+  // `update-ref refs/holt/rescue/..` failed — git refuses .., leading dots, and .lock
   // suffixes (verified with check-ref-format).
   const hostile = ['..', '../..', '.hidden', 'x.lock', 'a/../b', 'a//b', '...', '.', ''];
   for (const id of hostile) {
-    const ref = `refs/grove/rescue/${refSafeId(id)}`;
+    const ref = `refs/holt/rescue/${refSafeId(id)}`;
     const ok = await sh('git', ['check-ref-format', ref], process.cwd());
     assert.equal(ok.code, 0, `refSafeId(${JSON.stringify(id)}) -> ${ref} must be a VALID refname`);
   }
@@ -407,14 +407,14 @@ test('ATTACK: rescue works end-to-end on a hostile worktree NAME', async (t) => 
   assert.match(show.stdout, /HOSTILE_NAME_WORK/);
 });
 
-test('ATTACK: a C-quoted lock reason is still recognised as grove own lock', async (t) => {
+test('ATTACK: a C-quoted lock reason is still recognised as holt own lock', async (t) => {
   const fx = await newRepo('quoted-lock');
   t.after(() => fx.cleanup());
 
   const wt = await fx.worktree('unicode-held');
   // Non-ASCII file -> non-ASCII symbol name -> non-ASCII lock reason -> git C-QUOTES it in
-  // porcelain. The old parser read `"grove: …"` with quotes, startsWith failed, and unprotect
-  // refused to release grove's OWN lock as "foreign" — stranding rescue --release.
+  // porcelain. The old parser read `"holt: …"` with quotes, startsWith failed, and unprotect
+  // refused to release holt's OWN lock as "foreign" — stranding rescue --release.
   await fx.write('src/unicodé.js', 'export function unicodé_wörk() { return 1; }\n', wt);
 
   const p = await protect(fx.root, {});
@@ -422,14 +422,14 @@ test('ATTACK: a C-quoted lock reason is still recognised as grove own lock', asy
 
   const u = await unprotect(fx.root, { id: 'unicode-held' });
   assert.equal(u.unlocked, 1,
-    `grove must recognise and release its own quoted lock: ${JSON.stringify(u.actions)}`);
+    `holt must recognise and release its own quoted lock: ${JSON.stringify(u.actions)}`);
   assert.ok(!u.actions.some((a) => a.action === 'skipped-foreign-lock'),
-    'grove own lock must never be classified foreign');
+    'holt own lock must never be classified foreign');
 });
 
 /* ============================================ the guarantee still holds ==== */
 
-test('GUARANTEE: a plain scan still modifies nothing, even now that grove can mutate', async (t) => {
+test('GUARANTEE: a plain scan still modifies nothing, even now that holt can mutate', async (t) => {
   const fx = await newRepo('still-readonly');
   t.after(() => fx.cleanup());
   const wt = await fx.worktree('w');

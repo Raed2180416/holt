@@ -1,10 +1,10 @@
 /**
- * grove — cross-workstream IMPACT.  (the honest neighbour of P4)
+ * holt — cross-workstream IMPACT.  (the honest neighbour of P4)
  *
  * ============================================================================================
  * WHAT THIS IS NOT
  * ============================================================================================
- * This is NOT semantic conflict detection. grove does not claim to tell you whether two changes
+ * This is NOT semantic conflict detection. holt does not claim to tell you whether two changes
  * that merge cleanly will break at runtime. That problem is unresolved, and the 2026 literature
  * is unambiguous about why:
  *
@@ -31,7 +31,7 @@
  * collision detection structurally cannot see — P1 works by file overlap, and here there is
  * none. When both land, B's code runs against A's definition of X for the first time.
  *
- * grove reports the relationship and the evidence. It does not tell you the interaction is a
+ * holt reports the relationship and the evidence. It does not tell you the interaction is a
  * problem, because it cannot know that.
  *
  * MEASURED on a real 37-workstream repository: 694 interaction pairs, of which 307 were NOT
@@ -251,7 +251,7 @@ export async function impact(scanResult, { limitPerSide = 300, concurrency = 4 }
       high: pairs.filter((p) => p.confidence === 'high').length,
     },
     caveats: [
-      'This is a DEPENDENCY relationship, not a conflict. grove cannot tell you whether the interaction breaks anything.',
+      'This is a DEPENDENCY relationship, not a conflict. holt cannot tell you whether the interaction breaks anything.',
       'References are matched TEXTUALLY and word-bounded: an occurrence inside a comment or string counts as a reference.',
       'Only discriminative, structured symbol names are searched; short or repo-wide-common names are excluded as uninformative.',
       'Semantic conflict detection proper (P4) is not attempted — see the module header for why.',

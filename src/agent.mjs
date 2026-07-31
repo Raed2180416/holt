@@ -1,19 +1,19 @@
 /**
- * grove — agent integration CORE (agent-neutral).
+ * holt — agent integration CORE (agent-neutral).
  *
  * MCP gives an agent tools it must CHOOSE to call. That is not enough for this problem, because
- * the two failures grove exists to prevent both happen when nobody thought to ask:
+ * the two failures holt exists to prevent both happen when nobody thought to ask:
  *
  *   - an agent deletes a worktree holding the only copy of some work;
  *   - an agent rebuilds something the worktree next door already built.
  *
- * So grove integrates on three levels, and only the third is agent-specific:
+ * So holt integrates on three levels, and only the third is agent-specific:
  *
  *   1. MCP server            — universal tool access (src/mcp/server.mjs)
  *   2. AGENTS.md             — universal awareness. The Linux Foundation AAIF standard read by
  *                              30+ agents (Codex, Cursor, Copilot, Gemini CLI, Aider, Zed,
  *                              Windsurf, Jules, Factory, Devin…). Any agent that reads the repo
- *                              learns grove exists and that it must check before deleting.
+ *                              learns holt exists and that it must check before deleting.
  *   3. Hooks                 — deterministic ENFORCEMENT, where the agent supports it. Every
  *                              agent's hook schema differs, so this file computes agent-neutral
  *                              VERDICTS and src/integrate/adapters/* translate them.
@@ -38,7 +38,7 @@ import { git } from './git.mjs';
 /**
  * A pre-tool hook runs in the agent's critical path, so a cold 20 s scan on every call is not
  * acceptable. The cache is keyed on a FINGERPRINT of the thing being measured — the worktree
- * list plus every worktree's full status — so it invalidates the moment anything grove reports
+ * list plus every worktree's full status — so it invalidates the moment anything holt reports
  * on changes. A time-based TTL alone would be wrong: answering "safe to delete" from a stale
  * scan is exactly the failure this tool exists to prevent.
  */
@@ -60,7 +60,7 @@ async function fingerprint(root) {
 
 function cachePath(root) {
   const key = createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 16);
-  return path.join(scratchDir(), `grove-cache-${key}.json`);
+  return path.join(scratchDir(), `holt-cache-${key}.json`);
 }
 
 export async function cachedReport(cwd, opts = {}) {
@@ -105,7 +105,7 @@ const GIT_GLOBALS = '(?:-[cC]\\s+\\S+\\s+|--(?:git-dir|work-tree|namespace|exec-
 const DESTRUCTIVE = [
   // DISARMING THE PROTECTION IS ITSELF A DESTRUCTIVE ACT.
   //
-  // MEASURED: an agent hit `grove protect`, read the lock reason naming the exact symbol at
+  // MEASURED: an agent hit `holt protect`, read the lock reason naming the exact symbol at
   // risk, ran `git worktree unlock`, and deleted the worktree anyway — justifying it from the
   // worktree's NAME ("DELETEME-old-experiment"), which is precisely the trap the scenario is
   // built from. A lock is one command away from being undone, so a gate that only watches
@@ -163,13 +163,13 @@ export async function assessCommand(command, cwd = process.cwd()) {
   try {
     ({ report } = await cachedReport(cwd));
   } catch (err) {
-    // grove could not measure. It must NOT silently allow a destructive command it failed to
+    // holt could not measure. It must NOT silently allow a destructive command it failed to
     // check — but it must not hard-block work on its own bug either, so it asks.
     return {
       decision: 'ask',
       kind: hit.kind,
       targets: [],
-      reason: `grove could not verify what this would destroy (${err.message}). Confirm manually before proceeding.`,
+      reason: `holt could not verify what this would destroy (${err.message}). Confirm manually before proceeding.`,
     };
   }
 
@@ -198,11 +198,11 @@ export async function assessCommand(command, cwd = process.cwd()) {
     kind: hit.kind,
     targets: holding.map((h) => h.id),
     reason:
-      `grove blocked this: ${hit.kind} would destroy work that exists nowhere else.\n${detail}\n` +
+      `holt blocked this: ${hit.kind} would destroy work that exists nowhere else.\n${detail}\n` +
       (unknown.length
-        ? `  ${unknown.length} of these could not be scanned, so grove cannot confirm they are safe.\n`
+        ? `  ${unknown.length} of these could not be scanned, so holt cannot confirm they are safe.\n`
         : '') +
-      'Run `grove risk` to inspect, or `grove gate <id>` for one workstream. ' +
+      'Run `holt risk` to inspect, or `holt gate <id>` for one workstream. ' +
       'If the work is genuinely disposable, commit or discard it explicitly first.',
   };
 }
@@ -256,6 +256,6 @@ export async function buildBrief(cwd = process.cwd()) {
 
   if (lines.length === 0) return null;
 
-  return `[grove — parallel workstream state]\n${lines.join('\n')}\n` +
-    '(Before deleting ANY worktree run: grove gate <id> — exit 0 disposable, 1 holds unique work, 2 unknown.)';
+  return `[holt — parallel workstream state]\n${lines.join('\n')}\n` +
+    '(Before deleting ANY worktree run: holt gate <id> — exit 0 disposable, 1 holds unique work, 2 unknown.)';
 }

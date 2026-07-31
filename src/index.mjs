@@ -1,5 +1,5 @@
 /**
- * grove — public API.
+ * holt — public API.
  *
  * The landing layer for parallel agent work. One scan answers: what did N agents produce,
  * what's redundant, what collides, what's safe to delete, and what you're about to lose.
@@ -32,7 +32,7 @@ import { analyze } from './analyze.mjs';
 export async function inspect(cwd = process.cwd(), opts = {}) {
   const disc = await discover(cwd, opts);
   if (!disc.root) {
-    const err = new Error(`grove: not a git repository (searched from ${cwd})`);
+    const err = new Error(`holt: not a git repository (searched from ${cwd})`);
     err.code = 'ENOTREPO';
     throw err;
   }

@@ -1,5 +1,5 @@
 /**
- * grove — the relationship graph and the decisions that fall out of it.
+ * holt — the relationship graph and the decisions that fall out of it.
  *
  * This is the layer that does not exist anywhere else. Verified against the closest prior
  * art: treehouse-worktree (MCP) exposes create/list/status/remove/lock/conflicts and treats
@@ -171,7 +171,7 @@ export function uniqueWork(scanResult) {
 /**
  * Provably disposable: nothing committed that base lacks, nothing uncommitted, nothing unique.
  *
- * FAIL-CLOSED BY CONSTRUCTION. Any workstream grove could not fully scan is reported as
+ * FAIL-CLOSED BY CONSTRUCTION. Any workstream holt could not fully scan is reported as
  * 'unknown', never as safe. Absence of evidence must produce a refusal, not a green light —
  * a cleanup tool that says "safe" because it failed to look is the worst possible defect.
  */
@@ -304,7 +304,7 @@ export async function collisions(scanResult, opts = {}) {
  * Same-family duplication is usually expected (a fan-out deliberately samples the same task
  * N times), so it is reported but ranked below cross-family.
  *
- * Symbol-identity is the cheap signal and it is exact. `grove duplicates --deep` additionally
+ * Symbol-identity is the cheap signal and it is exact. `holt duplicates --deep` additionally
  * runs jscpd (Rabin-Karp token clone detection, 150+ languages, Rust engine) to catch the
  * case symbol-identity misses: the same logic written twice under different names.
  */
@@ -454,8 +454,8 @@ function buildAdvice(contested, alreadyBuilt) {
  * be landed and forgotten; one that collides with four others should be landed when the
  * others are already resolved, so its conflicts are real rather than speculative.
  *
- * Executing the rebases is explicitly NOT grove's job — git-machete, stack-pr and Graphite
- * already do stacked-branch restacking well. grove produces the order; they apply it.
+ * Executing the rebases is explicitly NOT holt's job — git-machete, stack-pr and Graphite
+ * already do stacked-branch restacking well. holt produces the order; they apply it.
  */
 export function landingPlan(scanResult, { collisions: cols = [], duplicates: dups = [] } = {}) {
   const uniq = uniqueWork(scanResult);
@@ -515,7 +515,7 @@ export function landingPlan(scanResult, { collisions: cols = [], duplicates: dup
       toReview: toLand.length,
     },
     reviewSurface: reviewSurface(live, safeIds),
-    note: 'grove produces the ORDER. Executing rebases is git-machete / stack-pr / Graphite territory.',
+    note: 'holt produces the ORDER. Executing rebases is git-machete / stack-pr / Graphite territory.',
   };
 }
 

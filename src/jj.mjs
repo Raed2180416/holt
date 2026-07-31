@@ -1,10 +1,10 @@
 /**
- * grove — Jujutsu (jj) backend.
+ * holt — Jujutsu (jj) backend.
  *
  * WHY jj MATTERS HERE, and it is not politeness:
  *   jj snapshots the working copy automatically, so the "uncommitted layer" that git cannot
  *   relate across worktrees does not exist in the same form. jj also lets several workspaces
- *   share a bookmark, which git worktrees forbid. Grove's whole model is content-relationships
+ *   share a bookmark, which git worktrees forbid. Holt's whole model is content-relationships
  *   between N workstreams; that question is identical under jj, so jj is a BACKEND, not a
  *   competitor. Modelling it that way is why the analysis layer needed no changes.
  *
@@ -26,7 +26,7 @@
  *      defensively and never trusted on its own.
  *   3. EVERY resolved path is VERIFIED by checking it is a real directory containing `.jj`.
  *      Anything that fails verification is reported as unresolved WITH ITS NAME — never
- *      silently dropped, because a workstream grove cannot see is exactly what it exists to
+ *      silently dropped, because a workstream holt cannot see is exactly what it exists to
  *      warn about.
  */
 
@@ -243,7 +243,7 @@ export async function discoverJjWorkspaces(cwd) {
  *
  * `--ignore-working-copy` IS LOAD-BEARING, not a performance flag. jj snapshots the working copy
  * on almost any command, which creates a new commit and appends to the operation log — a WRITE.
- * grove promises never to modify the repository it inspects, and that promise has to hold for
+ * holt promises never to modify the repository it inspects, and that promise has to hold for
  * jj too. The cost is that jj workstreams are analysed as of their last snapshot, which is
  * reported (`snapshotBased`) rather than hidden.
  */

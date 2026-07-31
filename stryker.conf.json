@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
-  "_comment": "Mutation testing: break the code deliberately and check the tests notice. A green suite proves the tests RAN; a mutation score proves they would have FAILED on a real defect. Scoped to the modules where a wrong answer is dangerous — analyze.mjs decides what is safe to delete, git.mjs decides what grove is allowed to run.",
+  "_comment": "Mutation testing: break the code deliberately and check the tests notice. A green suite proves the tests RAN; a mutation score proves they would have FAILED on a real defect. Scoped to the modules where a wrong answer is dangerous — analyze.mjs decides what is safe to delete, git.mjs decides what holt is allowed to run.",
   "packageManager": "npm",
   "testRunner": "command",
   "commandRunner": {

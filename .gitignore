@@ -1,6 +1,7 @@
 node_modules/
 *.log
 .DS_Store
-grove-graph.html
+holt-graph.html
 coverage/
 *.tgz
+.stryker-tmp/

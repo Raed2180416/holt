@@ -1,8 +1,8 @@
 /**
- * grove — ground-truth fixture builder.
+ * holt — ground-truth fixture builder.
  *
  * Every fixture is a real git repository with a KNOWN, hand-constructed answer. Tests assert
- * against that answer, never against "whatever grove printed last time".
+ * against that answer, never against "whatever holt printed last time".
  *
  * The governing rule here: PROVE THE INSTRUMENT CAN DETECT PRESENCE BEFORE TRUSTING ITS
  * SILENCE. Every empty result has two explanations — the thing is absent, or the detector is
@@ -28,8 +28,8 @@ function run(cmd, args, cwd) {
       maxBuffer: 32 * 1024 * 1024,
       env: {
         ...process.env,
-        GIT_AUTHOR_NAME: 'grove test', GIT_AUTHOR_EMAIL: 'test@grove.invalid',
-        GIT_COMMITTER_NAME: 'grove test', GIT_COMMITTER_EMAIL: 'test@grove.invalid',
+        GIT_AUTHOR_NAME: 'holt test', GIT_AUTHOR_EMAIL: 'test@holt.invalid',
+        GIT_COMMITTER_NAME: 'holt test', GIT_COMMITTER_EMAIL: 'test@holt.invalid',
         GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null',
         GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C',
       },
@@ -83,13 +83,13 @@ export class Fixture {
 
 /** A bare-minimum repo with a main branch and one base commit. */
 export async function newRepo(label = 'repo') {
-  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), `grove-fx-${label}-`));
+  const tmp = await fs.mkdtemp(path.join(os.tmpdir(), `holt-fx-${label}-`));
   const root = path.join(tmp, 'repo');
   await fs.mkdir(root, { recursive: true });
 
   await run('git', ['init', '--initial-branch=main', '-q'], root);
-  await run('git', ['config', 'user.name', 'grove test'], root);
-  await run('git', ['config', 'user.email', 'test@grove.invalid'], root);
+  await run('git', ['config', 'user.name', 'holt test'], root);
+  await run('git', ['config', 'user.email', 'test@holt.invalid'], root);
   await run('git', ['config', 'commit.gpgsign', 'false'], root);
 
   const fx = new Fixture(root);

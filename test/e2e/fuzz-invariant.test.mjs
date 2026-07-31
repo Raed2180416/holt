@@ -1,23 +1,23 @@
 /**
- * grove — the safety invariant, under randomized attack with an INDEPENDENT oracle.
+ * holt — the safety invariant, under randomized attack with an INDEPENDENT oracle.
  *
  * Every hand-written test encodes its author's imagination, and this project has already caught
  * its author's imagination failing four separate times. So this suite stops imagining:
  *
  *   1. Generate a repository whose worktree states are RANDOM compositions of every dimension
- *      grove reasons about: committed-ahead / committed-but-landed / uncommitted-tracked /
+ *      holt reasons about: committed-ahead / committed-but-landed / uncommitted-tracked /
  *      untracked / deleted files / renames / detached vs branched / nested junk.
- *   2. Compute ground truth with an INDEPENDENT ORACLE that shares no code with grove: for each
+ *   2. Compute ground truth with an INDEPENDENT ORACLE that shares no code with holt: for each
  *      worktree, does any file's content differ from base, or exist that base lacks — measured
  *      by direct file comparison against a pristine base checkout, plus raw `git status`.
  *   3. Assert THE invariant of the whole product:
  *
- *         if the oracle says a worktree holds recoverable content grove could lose,
- *         grove must NOT call it safe — and clean --apply must NOT remove it.
+ *         if the oracle says a worktree holds recoverable content holt could lose,
+ *         holt must NOT call it safe — and clean --apply must NOT remove it.
  *
  * The oracle is deliberately crude. It cannot rank, dedupe, or attribute — but on the single
  * question "is there content here that base does not have", crude and independent beats clever
- * and shared. If grove and the oracle disagree, grove is wrong until proven otherwise.
+ * and shared. If holt and the oracle disagree, holt is wrong until proven otherwise.
  *
  * Seeded PRNG: failures reproduce exactly (the seed is in the assertion message), so a fuzz
  * failure is a bug report, not a shrug.
@@ -112,7 +112,7 @@ const MOVES = [
 ];
 
 /**
- * INDEPENDENT ORACLE. Shares no code with grove's scanner.
+ * INDEPENDENT ORACLE. Shares no code with holt's scanner.
  *
  * A worktree holds at-risk content iff, versus a pristine base checkout:
  *   - any non-generated file exists whose content base does not have anywhere in its tree, OR
@@ -176,7 +176,7 @@ async function runFuzzRound(seed, worktreeCount) {
     expected.set(id, state);
   }
 
-  // Grove's verdicts.
+  // Holt's verdicts.
   const disc = await discover(fx.root);
   const report = await analyze(await scan(disc, {}), {});
 
@@ -185,14 +185,14 @@ async function runFuzzRound(seed, worktreeCount) {
   for (const [id] of expected) {
     const node = report.graph.nodes.find((n) => n.id === id);
     const verdict = report.safe.find((s) => s.id === id);
-    if (!node || !verdict) { violations.push(`${id}: missing from grove's report entirely`); continue; }
+    if (!node || !verdict) { violations.push(`${id}: missing from holt's report entirely`); continue; }
 
     const oracle = await oracleRisky(node.path, fx.root);
     // THE INVARIANT — one direction only. The oracle over-approximates risk (it cannot tell a
-    // landed rename from new work), so oracle=false with grove=unsafe is conservatism, not a
-    // bug. oracle=true with grove=safe is the catastrophe.
+    // landed rename from new work), so oracle=false with holt=unsafe is conservatism, not a
+    // bug. oracle=true with holt=safe is the catastrophe.
     if (oracle && verdict.safe) {
-      violations.push(`${id}: oracle finds at-risk content but grove says SAFE (${verdict.reasons.join('; ')})`);
+      violations.push(`${id}: oracle finds at-risk content but holt says SAFE (${verdict.reasons.join('; ')})`);
     }
   }
 
@@ -216,7 +216,7 @@ async function runFuzzRound(seed, worktreeCount) {
 
 // Rounds are independent; seeds are fixed so any failure is a permanent, reproducible case.
 for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
-  test(`FUZZ INVARIANT seed=${seed}: grove never calls at-risk content safe, never removes it`, async () => {
+  test(`FUZZ INVARIANT seed=${seed}: holt never calls at-risk content safe, never removes it`, async () => {
     const violations = await runFuzzRound(seed, 6);
     assert.deepEqual(violations, [],
       `INVARIANT VIOLATED (reproduce with seed=${seed}):\n${violations.join('\n')}`);

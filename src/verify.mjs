@@ -1,12 +1,12 @@
 /**
- * grove — differential verification of a suspected interaction.
+ * holt — differential verification of a suspected interaction.
  *
  * ============================================================================================
  * THE QUESTION THIS ANSWERS, AND THE ONE IT DOES NOT
  * ============================================================================================
- * `grove impact` reports a FACT: A defines symbol X, B references X, and they share no file, so
+ * `holt impact` reports a FACT: A defines symbol X, B references X, and they share no file, so
  * collision detection cannot see the relationship. That is checkable and true, and it is where
- * grove stopped — leaving the user with "these two interact" and no way to find out whether the
+ * holt stopped — leaving the user with "these two interact" and no way to find out whether the
  * interaction is a problem.
  *
  * This module closes that gap for a SPECIFIC pair, empirically:
@@ -19,14 +19,14 @@
  * precision 0.65 / recall 0.88, and it is Java-only because the generators are. Generating a
  * specification is the hard, language-bound, imprecise part.
  *
- * grove does not need to generate one. Real repositories already ship a specification: their
- * test suite. So instead of inventing tests, grove runs the ones that already exist, against a
+ * holt does not need to generate one. Real repositories already ship a specification: their
+ * test suite. So instead of inventing tests, holt runs the ones that already exist, against a
  * speculative merge. That is language-agnostic (any test command), needs no generator, and
  * inherits the project's own quality bar.
  *
  * THE DIFFERENTIAL IS THE WHOLE DESIGN. Running the suite on A+B and reporting failures would be
  * useless: most real repositories have failures already, and a change may legitimately break a
- * test on its own. So grove runs THREE times — A alone, B alone, A+B — and reports only what the
+ * test on its own. So holt runs THREE times — A alone, B alone, A+B — and reports only what the
  * COMBINATION breaks:
  *
  *     failed in A+B  AND  passed in A alone  AND  passed in B alone   ->  the interaction broke it
@@ -42,14 +42,14 @@
  * ============================================================================================
  * SAFETY — THIS EXECUTES THE PROJECT'S CODE
  * ============================================================================================
- * Every other grove command reads. This one runs a command the user supplies, so it is gated:
+ * Every other holt command reads. This one runs a command the user supplies, so it is gated:
  *
- *   - the command must be given EXPLICITLY (--run) or via groveTest in package.json. grove never
+ *   - the command must be given EXPLICITLY (--run) or via holtTest in package.json. holt never
  *     guesses a test command and never auto-executes one it inferred;
  *   - it runs in a SCRATCH worktree built from the speculative merge, never in the user's
  *     worktrees, so a destructive test cannot touch real work;
- *   - the scratch worktree is created and removed by grove and lives outside the repo;
- *   - it is never invoked by `grove status`, by the MCP tools, or by any hook. A user or an agent
+ *   - the scratch worktree is created and removed by holt and lives outside the repo;
+ *   - it is never invoked by `holt status`, by the MCP tools, or by any hook. A user or an agent
  *     has to ask for it by name.
  */
 
@@ -87,11 +87,11 @@ function runCommand(command, cwd, timeoutMs) {
  * Uses `git worktree add --detach` on a temporary commit so the checkout is real and complete.
  */
 async function runAgainstTree(root, tree, command, { timeoutMs, label }) {
-  const scratch = await fs.mkdtemp(path.join(scratchDir(), `grove-verify-${label}-`));
+  const scratch = await fs.mkdtemp(path.join(scratchDir(), `holt-verify-${label}-`));
   const wt = path.join(scratch, 'wt');
   let commit = null;
   try {
-    const c = await gitOk(['commit-tree', tree, '-m', `grove verify: ${label}`],
+    const c = await gitOk(['commit-tree', tree, '-m', `holt verify: ${label}`],
       { cwd: root, allowMutation: true });
     commit = c.stdout.trim();
 
@@ -101,7 +101,7 @@ async function runAgainstTree(root, tree, command, { timeoutMs, label }) {
       return { label, ran: false, reason: `could not materialise the tree: ${add.stderr.trim()}` };
     }
     // Populate the scratch checkout from the speculative tree. read-tree -u writes the files;
-    // `reset --hard` would be the usual idiom and is deliberately not on grove's allowlist.
+    // `reset --hard` would be the usual idiom and is deliberately not on holt's allowlist.
     const rt = await git(['read-tree', '-m', '-u', tree], { cwd: wt, allowMutation: true });
     if (rt.code !== 0) {
       return { label, ran: false, reason: `could not populate the scratch tree: ${rt.stderr.trim()}` };
@@ -140,7 +140,7 @@ export function extractFailures(text) {
  * @param {string} idA
  * @param {string} idB
  * @param {object} opts
- * @param {string} opts.run      the test command. REQUIRED — grove never guesses one.
+ * @param {string} opts.run      the test command. REQUIRED — holt never guesses one.
  * @param {number} opts.timeout  per-run timeout in ms (default 10 min)
  */
 export async function verifyPair(cwd, idA, idB, { run = null, timeout = 600_000, ...opts } = {}) {
@@ -151,8 +151,8 @@ export async function verifyPair(cwd, idA, idB, { run = null, timeout = 600_000,
   if (!command) {
     return {
       ok: false,
-      error: 'no test command. Pass --run "<cmd>" or add "groveTest" to package.json.',
-      why: 'grove never guesses a command to execute — running the wrong thing in your repo is '
+      error: 'no test command. Pass --run "<cmd>" or add "holtTest" to package.json.',
+      why: 'holt never guesses a command to execute — running the wrong thing in your repo is '
         + 'a worse outcome than not answering.',
     };
   }
@@ -197,7 +197,7 @@ export async function verifyPair(cwd, idA, idB, { run = null, timeout = 600_000,
     if (r.timedOut) {
       return {
         ok: false, error: `run '${k}' timed out after ${timeout}ms`,
-        why: 'a timeout is not a pass — grove will not report a clean result it did not observe',
+        why: 'a timeout is not a pass — holt will not report a clean result it did not observe',
       };
     }
   }
@@ -235,13 +235,13 @@ export async function verifyPair(cwd, idA, idB, { run = null, timeout = 600_000,
   };
 }
 
-/** A project-declared test command. Opt-in by construction: grove never infers one. */
+/** A project-declared test command. Opt-in by construction: holt never infers one. */
 async function testCommandFromConfig(root) {
   try {
     const pkg = JSON.parse(await fs.readFile(path.join(root, 'package.json'), 'utf8'));
     // Deliberately NOT scripts.test — running `npm test` because it happens to exist is exactly
     // the kind of inference that executes something the user did not intend.
-    return typeof pkg.groveTest === 'string' ? pkg.groveTest : null;
+    return typeof pkg.holtTest === 'string' ? pkg.holtTest : null;
   } catch {
     return null;
   }

@@ -1,8 +1,8 @@
-# grove — published benchmarks
+# holt — published benchmarks
 
 Every number on this page is reproducible from this repository with the command shown beside it.
 No number is published without its conditions. Machine for the figures below: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics, Linux,
-Node v24.18.0, grove @ `e5cfa43`.
+Node v24.18.0, holt @ `e5cfa43`.
 
 ## 1 · Correctness at scale
 
@@ -42,8 +42,8 @@ bug (rescue refused correct captures), the Dockerfile-variant mapping gap
 ## 3 · Randomized invariant fuzzing (independent oracle)
 
 8 seeded rounds × 6 worktrees of random state compositions, checked against an oracle that
-shares no code with grove (raw `git status` + direct content comparison against base):
-*grove never calls oracle-risky content safe, and `clean --apply` never removes it.*
+shares no code with holt (raw `git status` + direct content comparison against base):
+*holt never calls oracle-risky content safe, and `clean --apply` never removes it.*
 
 **48/48 states, zero violations.** Reproduce: `node --test test/e2e/fuzz-invariant.test.mjs`
 
@@ -58,14 +58,14 @@ shares no code with grove (raw `git status` + direct content comparison against 
 
 ## 5 · Agent A/B (pilot — n stated, never dropped)
 
-Claude Haiku 4.5 subagents, identical prompts that never mention grove, graded from filesystem
+Claude Haiku 4.5 subagents, identical prompts that never mention holt, graded from filesystem
 state. The gauntlet: 16 worktrees where every surface signal lies.
 
 | Arm | Irreplaceable survived | Acted |
 |---|---|---|
 | naked | 4/6 (one trial destroyed all 5) | 3/6 |
-| grove, warnings only | 6/6 | 0/6 — froze |
-| grove, shipped (MCP acting tools + routed AGENTS.md + protect) | 5/5, 5/5, 5/5 | 8/9, 8/9, 1/9 removed |
+| holt, warnings only | 6/6 | 0/6 — froze |
+| holt, shipped (MCP acting tools + routed AGENTS.md + protect) | 5/5, 5/5, 5/5 | 8/9, 8/9, 1/9 removed |
 
 Two shipped-config trials ran the full loop autonomously (rescue refs verifiable in-trial).
 **These are pilots**: 3–6 trials/arm. Earlier cleanup-scenario run: +33 pts safety / +30 pts

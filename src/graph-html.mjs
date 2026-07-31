@@ -1,8 +1,8 @@
 /**
- * grove — self-contained HTML graph.
+ * holt — self-contained HTML graph.
  *
  * DELIBERATELY ZERO-DEPENDENCY. Cytoscape.js is the right choice for a hosted dashboard and
- * is where this should go if grove ever grows one — it brings graph algorithms, not just
+ * is where this should go if holt ever grows one — it brings graph algorithms, not just
  * rendering. For a CLI's `--html` export it would be the wrong trade: the output must open
  * from a file:// path on a laptop with no network, inside corporate CSP, months after it was
  * written. A CDN <script> fails all three. So the layout here is a small force simulation
@@ -30,7 +30,7 @@ export function renderHtml(report) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>grove — ${esc(report.root.split('/').pop() || 'repository')}</title>
+<title>holt — ${esc(report.root.split('/').pop() || 'repository')}</title>
 <style>
   :root {
     --bg:#0f1115; --panel:#171a21; --line:#252a35; --fg:#e6e9ef; --muted:#8b93a7;
@@ -69,7 +69,7 @@ export function renderHtml(report) {
 </head>
 <body>
 <header>
-  <h1>grove</h1>
+  <h1>holt</h1>
   <span class="meta">${esc(report.root)}</span>
   <span class="meta">base ${esc(report.base.ref)} @ ${esc(report.base.oid.slice(0, 8))}</span>
   <span class="meta">${report.counts.scanned}/${report.counts.workstreams} workstreams · ${report.counts.families} families</span>

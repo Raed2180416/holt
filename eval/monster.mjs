@@ -1,8 +1,8 @@
 /**
- * grove — the MONSTER round.
+ * holt — the MONSTER round.
  *
  * Builds the worst repository we know how to build — deliberately hard to follow, deliberately
- * hard to manage — then runs grove's complete loop against it and grades every verdict against
+ * hard to manage — then runs holt's complete loop against it and grades every verdict against
  * planted ground truth. This is the recursive stress instrument: every gap it finds becomes a
  * fix and a permanent test, then the monster runs again.
  *
@@ -18,7 +18,7 @@
  *     broken registrations (directory deleted), gitignored-only content (a documented limit),
  *     empty-file-only trees, huge generated files
  *
- * GRADING IS THE POINT. For every planted item the script asserts grove's verdict; for the
+ * GRADING IS THE POINT. For every planted item the script asserts holt's verdict; for the
  * destructive path it runs protect -> clean --apply -> rescue --release on a sample and
  * re-checks content survival by bytes. Exit non-zero on ANY wrong verdict.
  *
@@ -35,8 +35,8 @@ import { analyze } from '../src/analyze.mjs';
 import { protect, clean, rescue } from '../src/actions.mjs';
 
 const COUNT = Math.max(20, Number(process.argv[2] ?? 80));
-const WORK = process.env.GROVE_MONSTER_WORK
-  ?? path.join(os.homedir(), '.agentic-os-tmp', 'grove-monster');
+const WORK = process.env.HOLT_MONSTER_WORK
+  ?? path.join(os.homedir(), '.agentic-os-tmp', 'holt-monster');
 
 function sh(cmd, args, cwd) {
   return new Promise((resolve) => {
@@ -63,7 +63,7 @@ async function write(dir, rel, content) {
 
 /**
  * GOLD50 — the full 50-language corpus, embedded from test/unit/languages.test.mjs so the
- * monster buries valuable work in EVERY language grove claims. Each entry's first symbol name
+ * monster buries valuable work in EVERY language holt claims. Each entry's first symbol name
  * doubles as the byte marker; grading asserts (a) the verdict is not-safe, (b) the bytes
  * survive the destructive loop, and (c) the SYMBOL layer itself flagged the tree — so a
  * language whose extractor silently regressed fails the monster, not just the unit corpus.
@@ -113,7 +113,7 @@ const GOLD50 = [
   ['objc.m', '#import <Foundation/Foundation.h>\n@interface ObjcClass : NSObject\n@end\n', ['ObjcClass']],
   ['matlab.m', 'function y = matlab_fn(x)\n  y = x;\nend\n', ['matlab_fn']],
 
-  // --- grove optlib gap pack ------------------------------------------------
+  // --- holt optlib gap pack ------------------------------------------------
   ['a.swift', 'public class SwiftClass {\n    func swiftMethod() -> Int { return 1 }\n}\n', ['SwiftClass', 'swiftMethod']],
   ['a.scala', 'class ScalaClass {\n  def scalaMethod(): Int = 1\n}\nobject ScalaObj\n', ['ScalaClass', 'scalaMethod', 'ScalaObj']],
   ['a.dart', 'class DartClass {\n  int dartMethod() => 1;\n}\n', ['DartClass', 'dartMethod']],
@@ -145,7 +145,7 @@ async function heapJunk(wt, i) {
 }
 
 async function main() {
-  console.log(`grove MONSTER · ${COUNT} worktrees · every trap at once\n`);
+  console.log(`holt MONSTER · ${COUNT} worktrees · every trap at once\n`);
   await fs.rm(WORK, { recursive: true, force: true });
   const root = path.join(WORK, 'repo');
   await fs.mkdir(root, { recursive: true });
@@ -269,7 +269,7 @@ async function main() {
         truth.mustSurvive.set(id, [`src/${L.ext}/b_${n}.${L.ext}`, marker]);
         break;
       }
-      case 8: { // gitignored-only content — DOCUMENTED LIMIT: grove must call it disposable
+      case 8: { // gitignored-only content — DOCUMENTED LIMIT: holt must call it disposable
         await write(wt, 'secret-cache/only-here.txt', `IGNORED_${n}\n`);
         truth.gitignoredOnly.add(id);
         truth.disposable.add(id);
@@ -355,13 +355,13 @@ async function main() {
   for (const [id] of truth.mustSurvive) {
     const v = verdictOf(id);
     if (!v) { errors.push(`${id}: MISSING from report`); continue; }
-    if (v.safe) errors.push(`${id}: holds irreplaceable content but grove says SAFE`);
+    if (v.safe) errors.push(`${id}: holds irreplaceable content but holt says SAFE`);
   }
   for (const id of truth.disposable) {
     const v = verdictOf(id);
     if (!v) { errors.push(`${id}: MISSING from report`); continue; }
     if (!v.safe && !truth.foreignLocked.has(id)) {
-      errors.push(`${id}: planted disposable but grove refuses (${v.reasons.join('; ')})`);
+      errors.push(`${id}: planted disposable but holt refuses (${v.reasons.join('; ')})`);
     }
   }
   for (const id of truth.unknownExpected) {

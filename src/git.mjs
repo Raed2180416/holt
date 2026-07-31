@@ -1,5 +1,5 @@
 /**
- * grove — git engine.
+ * holt — git engine.
  *
  * SAFETY MODEL (this is a contract, enforced here and proven by test/unit/safety.test.mjs):
  *
@@ -61,23 +61,23 @@ const OBJECT_WRITE = new Set(['merge-tree']);
  * Tier MUTATE — commands that genuinely change the repository.
  *
  * These are UNREACHABLE unless a caller passes `allowMutation: true`, which only the explicitly
- * destructive/protective commands do (`grove protect`, `grove rescue`, `grove clean`). Scanning
+ * destructive/protective commands do (`holt protect`, `holt rescue`, `holt clean`). Scanning
  * and analysis can never reach them, and test/unit/safety.test.mjs proves a full scan still
  * changes nothing byte-for-byte.
  *
- * The read-only guarantee is a core reason to trust grove, so adding write features must not
+ * The read-only guarantee is a core reason to trust holt, so adding write features must not
  * quietly widen the default. It does not: the default for every code path in the scanner remains
  * allowMutation:false, and a mutating command that forgets to opt in fails loudly rather than
  * silently succeeding.
  *
  * Each entry is here because a specific feature needs it, and nothing else is:
- *   worktree lock/unlock  -> `grove protect`  (git's own protection; defeats a single --force)
- *   worktree remove       -> `grove clean`    (removing provably-disposable worktrees)
- *   branch -d/-D          -> `grove clean`    (the second command nobody runs)
- *   commit-tree/hash-object/update-ref/write-tree/read-tree -> `grove rescue` (capture work)
+ *   worktree lock/unlock  -> `holt protect`  (git's own protection; defeats a single --force)
+ *   worktree remove       -> `holt clean`    (removing provably-disposable worktrees)
+ *   branch -d/-D          -> `holt clean`    (the second command nobody runs)
+ *   commit-tree/hash-object/update-ref/write-tree/read-tree -> `holt rescue` (capture work)
  */
 const MUTATE_SUBVERBS = {
-  // `add` is here for `grove verify`, which materialises a SPECULATIVE MERGE into a scratch
+  // `add` is here for `holt verify`, which materialises a SPECULATIVE MERGE into a scratch
   // worktree (outside the repo, removed afterwards) to run the user's tests against it. It is
   // still refused without the explicit opt-in, so the scanner can never create worktrees.
   worktree: new Set(['lock', 'unlock', 'remove', 'prune', 'add']),
@@ -85,7 +85,7 @@ const MUTATE_SUBVERBS = {
 };
 const MUTATE_COMMANDS = new Set([
   'commit-tree', 'update-ref', 'write-tree', 'read-tree', 'update-index', 'mktree',
-  // `add` is here for `grove rescue` ONLY, and it is safe there because rescue runs it with
+  // `add` is here for `holt rescue` ONLY, and it is safe there because rescue runs it with
   // GIT_INDEX_FILE pointed at a scratch index — the user's real index is never touched, which
   // test/e2e/actions.test.mjs asserts by comparing `git status` before and after.
   // The hand-rolled update-index fallback that preceded this silently failed to capture files,
@@ -175,11 +175,11 @@ export function classify(argv, { allowMutation = false } = {}) {
   if (DESTRUCTIVE_ALWAYS.has(sub)) {
     return {
       allowed: false, gate: 'destructive',
-      reason: `'git ${sub}' rewrites working-tree or history state; grove never runs it (no opt-in exists)`,
+      reason: `'git ${sub}' rewrites working-tree or history state; holt never runs it (no opt-in exists)`,
     };
   }
 
-  // MUTATE tier — only reachable with an explicit opt-in from a mutating grove command.
+  // MUTATE tier — only reachable with an explicit opt-in from a mutating holt command.
   if (allowMutation) {
     if (MUTATE_COMMANDS.has(sub)) return { allowed: true, tier: 'MUTATE' };
     const mutable = MUTATE_SUBVERBS[sub];
@@ -196,7 +196,7 @@ export function classify(argv, { allowMutation = false } = {}) {
         return {
           allowed: false,
           reason: `'git ${sub} ${bare}' mutates the repository`
-            + (MUTATE_SUBVERBS[sub]?.has(bare) ? ' (needs an explicit mutating grove command)' : ''),
+            + (MUTATE_SUBVERBS[sub]?.has(bare) ? ' (needs an explicit mutating holt command)' : ''),
         };
       }
     }
@@ -222,7 +222,7 @@ export function classify(argv, { allowMutation = false } = {}) {
 
   if (OBJECT_WRITE.has(sub)) return { allowed: true, tier: 'OBJECT_WRITE' };
   if (SAFE.has(sub)) return { allowed: true, tier: 'SAFE' };
-  return { allowed: false, reason: `'git ${sub}' is not on grove's allowlist` };
+  return { allowed: false, reason: `'git ${sub}' is not on holt's allowlist` };
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -238,12 +238,12 @@ export function git(argv, {
 } = {}) {
   const verdict = classify(argv, { allowMutation });
   if (!verdict.allowed) {
-    return Promise.reject(new GitRefused(`grove refused to run \`git ${argv.join(' ')}\`: ${verdict.reason}`));
+    return Promise.reject(new GitRefused(`holt refused to run \`git ${argv.join(' ')}\`: ${verdict.reason}`));
   }
   if (verdict.tier === 'OBJECT_WRITE' && !allowObjectWrite) {
     return Promise.reject(
       new GitRefused(
-        `grove refused \`git ${argv[0]}\`: it writes unreferenced objects and strictReadOnly is set`,
+        `holt refused \`git ${argv[0]}\`: it writes unreferenced objects and strictReadOnly is set`,
       ),
     );
   }
@@ -327,8 +327,8 @@ export async function pmap(items, fn, concurrency = 8) {
  * be standing in.
  *
  * `rev-parse --show-toplevel` returns the CURRENT worktree. Run from inside a linked worktree it
- * returns that worktree, which made grove treat it as the repository root and then exclude it
- * from its own report as "primary". An agent running grove from inside its own worktree got a
+ * returns that worktree, which made holt treat it as the repository root and then exclude it
+ * from its own report as "primary". An agent running holt from inside its own worktree got a
  * briefing about every workstream EXCEPT the one it was working in — the single most important
  * one. Found by test/e2e/integration.test.mjs.
  *

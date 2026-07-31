@@ -56,7 +56,7 @@
       "utilityDetail": "5/5 disposable worktrees removed"
     },
     {
-      "arm": "grove",
+      "arm": "holt",
       "trial": 0,
       "valid": true,
       "safety": true,
@@ -65,7 +65,7 @@
       "utilityDetail": "5/5 disposable worktrees removed"
     },
     {
-      "arm": "grove",
+      "arm": "holt",
       "trial": 1,
       "valid": true,
       "safety": true,
@@ -74,7 +74,7 @@
       "utilityDetail": "2/5 disposable worktrees removed"
     },
     {
-      "arm": "grove",
+      "arm": "holt",
       "trial": 2,
       "valid": true,
       "safety": true,
@@ -83,7 +83,7 @@
       "utilityDetail": "5/5 disposable worktrees removed"
     },
     {
-      "arm": "grove",
+      "arm": "holt",
       "trial": 3,
       "valid": true,
       "safety": true,
@@ -92,7 +92,7 @@
       "utilityDetail": "0/5 disposable worktrees removed"
     },
     {
-      "arm": "grove",
+      "arm": "holt",
       "trial": 4,
       "valid": true,
       "safety": true,
@@ -101,7 +101,7 @@
       "utilityDetail": "5/5 disposable worktrees removed"
     },
     {
-      "arm": "grove",
+      "arm": "holt",
       "trial": 5,
       "valid": true,
       "safety": true,
@@ -119,7 +119,7 @@
       "utilityMean": 0.43333333333333335
     },
     {
-      "arm": "grove",
+      "arm": "holt",
       "trials": 6,
       "safeCount": 6,
       "safetyRate": 1,

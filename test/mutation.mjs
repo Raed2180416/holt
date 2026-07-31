@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * grove — targeted mutation testing.
+ * holt — targeted mutation testing.
  *
  * A green test suite proves the tests RAN. It does not prove they would have FAILED on a real
  * defect. This harness answers that directly: it deliberately breaks a specific, high-stakes
@@ -30,21 +30,21 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 /**
  * ISOLATION IS LOAD-BEARING. Every mutation is applied to a disposable COPY of this repo and
  * the tests run there — never in the live tree. Proven necessary the hard way: the
- * `allowlist-open` mutation disables grove's refusal layer, and the safety suite asserts
+ * `allowlist-open` mutation disables holt's refusal layer, and the safety suite asserts
  * refusal by CALLING git() — so under that mutation, the command expected to be refused
  * actually executed. With tests running in the live repo, `git reset --hard` really ran here,
  * and erased uncommitted work three separate times before it was diagnosed (2026-07-31). The
  * pre-commit verification run was the destroyer. Defense in depth now: (1) tests point live
  * ammunition only at throwaway fixtures, (2) src/git.mjs refuses destroyers at a structurally
- * independent first gate, (3) this harness never lets a mutated grove near the real tree —
+ * independent first gate, (3) this harness never lets a mutated holt near the real tree —
  * and the tripwire below proves (3) on every single run.
  */
 const COPY_SKIP = new Set(['.git', 'node_modules']);
 
 async function makeWorkCopy() {
-  const base = process.env.GROVE_TMPDIR ?? os.tmpdir();
+  const base = process.env.HOLT_TMPDIR ?? os.tmpdir();
   await fs.mkdir(base, { recursive: true });
-  const work = await fs.mkdtemp(path.join(base, 'grove-mutation-'));
+  const work = await fs.mkdtemp(path.join(base, 'holt-mutation-'));
   await fs.cp(ROOT, work, {
     recursive: true,
     filter: (src) => {
@@ -103,9 +103,9 @@ const MUTATIONS = [
   },
   {
     id: 'allowlist-open',
-    defect: 'the git allowlist permits everything — grove could run any command',
+    defect: 'the git allowlist permits everything — holt could run any command',
     file: 'src/git.mjs',
-    find: "  return { allowed: false, reason: `'git ${sub}' is not on grove's allowlist` };",
+    find: "  return { allowed: false, reason: `'git ${sub}' is not on holt's allowlist` };",
     replace: "  return { allowed: true, tier: 'SAFE' };",
     tests: ['test/unit/safety.test.mjs'],
   },
@@ -179,7 +179,7 @@ function run(cmd, args, cwd, timeout = 600_000) {
   return new Promise((resolve) => {
     execFile(cmd, args, {
       cwd, timeout, maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, GROVE_TMPDIR: process.env.GROVE_TMPDIR ?? undefined },
+      env: { ...process.env, HOLT_TMPDIR: process.env.HOLT_TMPDIR ?? undefined },
     }, (err, stdout, stderr) => resolve({
       code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''),
     }));
@@ -202,7 +202,7 @@ async function main() {
     return;
   }
 
-  console.log(`grove mutation testing — ${MUTATIONS.length} deliberate defects\n`);
+  console.log(`holt mutation testing — ${MUTATIONS.length} deliberate defects\n`);
   console.log('Each one must make the tests GO RED. A survivor is a hole in the suite.\n');
 
   const before = await repoFingerprint();
@@ -237,7 +237,7 @@ async function main() {
         const now = await repoFingerprint();
         if (now !== before) {
           console.error(`\n  ✖ TRIPWIRE: the LIVE repository changed during mutation '${m.id}'.`);
-          console.error('    A mutated grove reached outside its scratch copy. Fix that before anything else;');
+          console.error('    A mutated holt reached outside its scratch copy. Fix that before anything else;');
           console.error('    every result above is suspect and uncommitted work may have been altered.');
           process.exitCode = 2;
           return;
