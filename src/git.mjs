@@ -109,6 +109,21 @@ const FORBIDDEN_SUBVERBS = {
 /** Global flags that can redirect git at another repo or escalate it. Never allowed from callers. */
 const FORBIDDEN_GLOBAL = new Set(['--exec-path', '-c', '--config-env', '--namespace', '--work-tree', '--git-dir']);
 
+/**
+ * Subcommands that rewrite working-tree or history state. Refused unconditionally, BEFORE any
+ * allow-logic, as a structurally independent first gate — no opt-in reaches them, including
+ * `allowMutation`. Two gates exist on purpose: mutation testing proved that when the final
+ * allowlist fallthrough alone stood between "classified refused" and "actually executed", a
+ * single-line defect opened everything at once — and a test that asserted refusal by executing
+ * then ran `git reset --hard` for real (2026-07-31). Refusals from this gate carry
+ * `gate: 'destructive'` so tests can prove WHICH layer refused, making a defect in either gate
+ * independently detectable.
+ */
+const DESTRUCTIVE_ALWAYS = new Set([
+  'reset', 'checkout', 'restore', 'switch', 'stash', 'clean', 'push', 'rebase', 'merge',
+  'pull', 'cherry-pick', 'revert', 'am', 'gc', 'reflog', 'filter-branch', 'replace', 'rm',
+]);
+
 export class GitRefused extends Error {
   constructor(msg) {
     super(msg);
@@ -154,6 +169,15 @@ export function classify(argv, { allowMutation = false } = {}) {
   if (!sub) return { allowed: false, reason: 'no subcommand' };
 
   const rest = argv.slice(i + 1);
+
+  // First gate: destructive subcommands are refused before any allow-logic runs, and no
+  // option — not even allowMutation — is consulted. See DESTRUCTIVE_ALWAYS.
+  if (DESTRUCTIVE_ALWAYS.has(sub)) {
+    return {
+      allowed: false, gate: 'destructive',
+      reason: `'git ${sub}' rewrites working-tree or history state; grove never runs it (no opt-in exists)`,
+    };
+  }
 
   // MUTATE tier — only reachable with an explicit opt-in from a mutating grove command.
   if (allowMutation) {

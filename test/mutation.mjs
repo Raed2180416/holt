@@ -20,11 +20,49 @@
  */
 
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+/**
+ * ISOLATION IS LOAD-BEARING. Every mutation is applied to a disposable COPY of this repo and
+ * the tests run there — never in the live tree. Proven necessary the hard way: the
+ * `allowlist-open` mutation disables grove's refusal layer, and the safety suite asserts
+ * refusal by CALLING git() — so under that mutation, the command expected to be refused
+ * actually executed. With tests running in the live repo, `git reset --hard` really ran here,
+ * and erased uncommitted work three separate times before it was diagnosed (2026-07-31). The
+ * pre-commit verification run was the destroyer. Defense in depth now: (1) tests point live
+ * ammunition only at throwaway fixtures, (2) src/git.mjs refuses destroyers at a structurally
+ * independent first gate, (3) this harness never lets a mutated grove near the real tree —
+ * and the tripwire below proves (3) on every single run.
+ */
+const COPY_SKIP = new Set(['.git', 'node_modules']);
+
+async function makeWorkCopy() {
+  const base = process.env.GROVE_TMPDIR ?? os.tmpdir();
+  await fs.mkdir(base, { recursive: true });
+  const work = await fs.mkdtemp(path.join(base, 'grove-mutation-'));
+  await fs.cp(ROOT, work, {
+    recursive: true,
+    filter: (src) => {
+      const rel = path.relative(ROOT, src);
+      if (rel === '') return true;
+      return !COPY_SKIP.has(rel.split(path.sep)[0]);
+    },
+  });
+  return work;
+}
+
+/** Byte-level state of the REAL repo: HEAD + full porcelain status. Any drift = isolation broken. */
+async function repoFingerprint() {
+  const head = await run('git', ['rev-parse', 'HEAD'], ROOT);
+  if (head.code !== 0) return null; // not a git checkout (e.g. unpacked tarball) — tripwire unavailable
+  const st = await run('git', ['status', '--porcelain=v2', '--untracked-files=all'], ROOT);
+  return `${head.stdout}\n${st.stdout}`;
+}
 
 /**
  * Each mutation states the DEFECT it simulates, so a survivor reads as a missing test rather
@@ -127,6 +165,14 @@ const MUTATIONS = [
     replace: '    keep.add(k); if (false)',
     tests: ['test/e2e/break-it.test.mjs'],
   },
+  {
+    id: 'forbidden-open',
+    defect: 'the destructive first gate is dead — reset/stash/checkout rely on the allowlist fallthrough alone',
+    file: 'src/git.mjs',
+    find: '  if (DESTRUCTIVE_ALWAYS.has(sub)) {',
+    replace: '  if (false) {',
+    tests: ['test/unit/safety.test.mjs'],
+  },
 ];
 
 function run(cmd, args, cwd, timeout = 600_000) {
@@ -140,8 +186,8 @@ function run(cmd, args, cwd, timeout = 600_000) {
   });
 }
 
-async function applyMutation(m) {
-  const file = path.join(ROOT, m.file);
+async function applyMutation(work, m) {
+  const file = path.join(work, m.file);
   const original = await fs.readFile(file, 'utf8');
   if (!original.includes(m.find)) {
     return { ok: false, original, error: `anchor not found in ${m.file}: ${m.find.slice(0, 70)}` };
@@ -159,25 +205,47 @@ async function main() {
   console.log(`grove mutation testing — ${MUTATIONS.length} deliberate defects\n`);
   console.log('Each one must make the tests GO RED. A survivor is a hole in the suite.\n');
 
+  const before = await repoFingerprint();
+  if (!before) console.log('  (tripwire unavailable: not running from a git checkout)\n');
+
+  const work = await makeWorkCopy();
   const results = [];
-  for (const m of MUTATIONS) {
-    process.stdout.write(`  ${m.id.padEnd(24)} `);
+  try {
+    for (const m of MUTATIONS) {
+      process.stdout.write(`  ${m.id.padEnd(24)} `);
 
-    const applied = await applyMutation(m);
-    if (!applied.ok) {
-      console.log(`SKIP  (${applied.error})`);
-      results.push({ ...m, outcome: 'skipped', detail: applied.error });
-      continue;
-    }
+      const applied = await applyMutation(work, m);
+      if (!applied.ok) {
+        console.log(`SKIP  (${applied.error})`);
+        results.push({ ...m, outcome: 'skipped', detail: applied.error });
+        continue;
+      }
 
-    try {
-      const r = await run(process.execPath, ['--test', ...m.tests], ROOT);
-      const killed = r.code !== 0;
-      console.log(killed ? 'killed  (tests caught it)' : 'SURVIVED  ← HOLE IN THE SUITE');
-      results.push({ ...m, outcome: killed ? 'killed' : 'survived' });
-    } finally {
-      await fs.writeFile(path.join(ROOT, m.file), applied.original, 'utf8');
+      try {
+        const r = await run(process.execPath, ['--test', ...m.tests], work);
+        const killed = r.code !== 0;
+        console.log(killed ? 'killed  (tests caught it)' : 'SURVIVED  ← HOLE IN THE SUITE');
+        results.push({ ...m, outcome: killed ? 'killed' : 'survived' });
+      } finally {
+        await fs.writeFile(path.join(work, m.file), applied.original, 'utf8');
+      }
+
+      // The tripwire: after EVERY mutation, the real repo must be byte-identical to how this
+      // run found it. If it is not, isolation is broken and nothing else this harness prints
+      // can be trusted — name the mutation and stop the world.
+      if (before) {
+        const now = await repoFingerprint();
+        if (now !== before) {
+          console.error(`\n  ✖ TRIPWIRE: the LIVE repository changed during mutation '${m.id}'.`);
+          console.error('    A mutated grove reached outside its scratch copy. Fix that before anything else;');
+          console.error('    every result above is suspect and uncommitted work may have been altered.');
+          process.exitCode = 2;
+          return;
+        }
+      }
     }
+  } finally {
+    await fs.rm(work, { recursive: true, force: true });
   }
 
   const killed = results.filter((r) => r.outcome === 'killed').length;

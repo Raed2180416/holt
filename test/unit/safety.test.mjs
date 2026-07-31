@@ -51,6 +51,31 @@ test('classifier: refuses every destructive git command', () => {
   }
 });
 
+test('classifier: working-tree destroyers are refused by the FIRST gate, even with allowMutation', () => {
+  // Two structurally independent gates exist because a mutation once opened the allowlist
+  // fallthrough — the only thing refusing `reset` — and a refusal-assertion test executed
+  // `git reset --hard` against the live repo. Asserting the GATE, not just the refusal,
+  // makes a defect in either gate independently detectable: if the first gate dies, these
+  // argvs fall through to the allowlist refusal and the gate label changes.
+  const destroyers = [
+    ['reset', '--hard'],
+    ['checkout', '--', '.'],
+    ['stash'],
+    ['clean', '-fd'],
+    ['push', 'origin', 'main'],
+    ['rm', '-r', 'src'],
+  ];
+  for (const argv of destroyers) {
+    for (const opts of [{}, { allowMutation: true }]) {
+      const v = classify(argv, opts);
+      assert.equal(v.allowed, false,
+        `git ${argv.join(' ')} with ${JSON.stringify(opts)} MUST be refused`);
+      assert.equal(v.gate, 'destructive',
+        `git ${argv.join(' ')} must be stopped by the destructive first gate, got ${JSON.stringify(v)}`);
+    }
+  }
+});
+
 test('classifier: refuses WRITE forms that differ from reads only by positional count', () => {
   // Found by this test against an earlier flag-only allowlist, which let all three through.
   const mustRefuse = [
@@ -132,16 +157,33 @@ test('classifier: rejects malformed argv rather than passing it through', () => 
   assert.equal(classify(['--json']).allowed, false); // flags only, no subcommand
 });
 
-test('git(): a refused command rejects and never spawns', async () => {
+// Refusal-assertion tests that call git() NEVER run with cwd anywhere near a repo anyone
+// cares about. This is not paranoia: mutation testing deliberately breaks the refusal layer,
+// and when it does, the command these tests expect to see refused ACTUALLY EXECUTES. With
+// cwd = process.cwd(), that executed `git reset --hard` in this repository three times
+// (2026-07-31) — the working tree reverted to HEAD and uncommitted work was destroyed by
+// the very run meant to verify it. Live ammunition points at a disposable target, always.
+async function disposableRepo(t) {
+  const dir = await fs.mkdtemp(path.join(process.env.GROVE_TMPDIR ?? (await import('node:os')).tmpdir(), 'grove-refusal-'));
+  await new Promise((resolve, reject) => {
+    execFile('git', ['init', '-q', dir], (e) => (e ? reject(e) : resolve()));
+  });
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+test('git(): a refused command rejects and never spawns', async (t) => {
+  const dir = await disposableRepo(t);
   await assert.rejects(
-    () => git(['reset', '--hard'], { cwd: process.cwd() }),
+    () => git(['reset', '--hard'], { cwd: dir }),
     (err) => err instanceof GitRefused && /refused/.test(err.message),
   );
 });
 
-test('git(): merge-tree is refused when strictReadOnly forbids object writes', async () => {
+test('git(): merge-tree is refused when strictReadOnly forbids object writes', async (t) => {
+  const dir = await disposableRepo(t);
   await assert.rejects(
-    () => git(['merge-tree', '--write-tree', 'a', 'b'], { cwd: process.cwd(), allowObjectWrite: false }),
+    () => git(['merge-tree', '--write-tree', 'a', 'b'], { cwd: dir, allowObjectWrite: false }),
     (err) => err instanceof GitRefused,
   );
 });
