@@ -33,7 +33,7 @@ import { discover } from '../src/discover.mjs';
 import { scan } from '../src/scan.mjs';
 import { analyze } from '../src/analyze.mjs';
 import { protect, clean, rescue } from '../src/actions.mjs';
-import { ctagsLanguages } from '../src/symbols.mjs';
+import { ctagsLanguages, languageCoverage } from '../src/symbols.mjs';
 
 const COUNT = Math.max(20, Number(process.argv[2] ?? 80));
 const WORK = process.env.HOLT_MONSTER_WORK
@@ -388,7 +388,12 @@ async function main() {
   // holt regression (Ubuntu 24.04 ships ctags 5.9.0 — no Terraform/Elm parser). Those trees are
   // reported as unsupported rather than counted as misses, so a correct build is never red on an
   // older toolchain — while every language this ctags CAN parse must still be detected.
+  // DEMONSTRATED, not declared. holt's optlib pack loads cleanly on an older ctags, which then
+  // LISTS Terraform and Elm and extracts nothing from either — so asking `--list-languages`
+  // counted those trees as misses and turned a correct build red.
   const langProbe = await ctagsLanguages();
+  const cov = await languageCoverage([...new Set(truth.gold50Lang?.values() ?? [])]);
+  const unparseable = new Set(cov.available ? cov.missing : []);
   let goldSeen = 0;
   let goldUnsupported = 0;
   for (const [id, sym] of truth.gold50) {
@@ -397,7 +402,7 @@ async function main() {
     const names = [...u.byLayer.uncommitted, ...u.byLayer.untracked, ...u.byLayer.committed].map((x) => x.key);
     if (!names.some((k) => k.endsWith(`:${sym}`))) {
       const lang = truth.gold50Lang?.get(id);
-      if (lang && langProbe.available && !langProbe.languages.has(lang)) { goldUnsupported++; continue; }
+      if (lang && langProbe.available && unparseable.has(lang)) { goldUnsupported++; continue; }
       errors.push(`${id}: SYMBOL LAYER MISSED ${sym} — language extractor regressed for this tree`);
     } else goldSeen++;
   }
