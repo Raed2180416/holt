@@ -30,6 +30,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
+import { HOSTS, getHost, strengthLabel, CLOUD_CAVEAT } from './hosts.mjs';
 
 const HOLT_BEGIN = '<!-- BEGIN holt -->';
 const HOLT_END = '<!-- END holt -->';
@@ -440,28 +441,11 @@ export async function installGitHooks(repoRoot, { bin = 'holt' } = {}) {
  * @returns {Promise<{all: string[], project: string[], user: string[]}>}
  */
 export async function detectHosts(repoRoot, home = os.homedir()) {
-  // Each host is detected by a marker UNIQUE to it. AGENTS.md is deliberately NOT a marker for
-  // any host: it is the cross-tool standard many agents now read, so its presence says nothing
-  // about which host is installed — treating it as a codex marker made every repo with an
-  // AGENTS.md report "codex present", which was wrong.
-  const probes = [
-    { host: 'claude-code', project: ['.claude', 'CLAUDE.md'], user: ['.claude'] },
-    { host: 'opencode', project: ['.opencode'], user: ['.config/opencode'] },
-    { host: 'cursor', project: ['.cursor', '.cursorrules'], user: ['.cursor'] },
-    { host: 'windsurf', project: ['.windsurf', '.windsurfrules'], user: ['.codeium/windsurf'] },
-    { host: 'gemini-cli', project: ['.gemini', 'GEMINI.md'], user: ['.gemini'] },
-    { host: 'codex', project: ['.codex'], user: ['.codex'] },
-    { host: 'copilot', project: ['.github/copilot-instructions.md'], user: [] },
-    { host: 'zed', project: ['.zed'], user: ['.config/zed'] },
-    { host: 'continue', project: ['.continuerc.json'], user: ['.continue'] },
-    { host: 'aider', project: ['.aider.conf.yml'], user: ['.aider.conf.yml', '.config/aider'] },
-    { host: 'cline', project: ['.clinerules'], user: [] },
-    { host: 'roo', project: ['.roo', '.roorules'], user: [] },
-    { host: 'goose', project: ['.goosehints'], user: ['.config/goose'] },
-    { host: 'crush', project: ['.crush'], user: ['.config/crush'] },
-    { host: 'amp', project: ['.amp'], user: ['.config/amp'] },
-    { host: 'vscode', project: ['.vscode'], user: [] },
-  ];
+  // Detection markers come from the single host manifest (src/integrate/hosts.mjs), each UNIQUE
+  // to its host. AGENTS.md is deliberately NOT a marker for any host: it is the cross-tool
+  // standard many agents read, so its presence says nothing about which host is installed —
+  // treating it as a codex marker made every repo with an AGENTS.md report "codex present".
+  const probes = HOSTS.map((h) => ({ host: h.id, project: h.detect.project, user: h.detect.user }));
 
   const hit = async (base, rels) => {
     for (const rel of rels) {
@@ -477,6 +461,34 @@ export async function detectHosts(repoRoot, home = os.homedir()) {
     if (await hit(home, p.user)) user.push(p.host);
   }
   return { all: [...new Set([...project, ...user])], project, user };
+}
+
+/**
+ * The transparent coverage matrix: every host holt knows, its detection state here, and — the
+ * honest part — the actual integration strength it gets. `holt hosts` prints this so a user is
+ * never told "works everywhere" when the truth is "blocks on two, advises on the rest".
+ */
+export async function hostsReport(repoRoot, home = os.homedir()) {
+  const detected = await detectHosts(repoRoot, home);
+  const present = new Set(detected.all);
+  const rows = HOSTS.map((h) => ({
+    id: h.id, name: h.name, env: h.env,
+    strength: h.strength, blockCapable: !!h.blockCapable,
+    label: strengthLabel(h),
+    detectedHere: present.has(h.id),
+    rulesFile: h.rulesFile, mcp: !!h.mcp, note: h.note,
+  }));
+  return {
+    detectedHere: [...present].map((id) => getHost(id)?.name ?? id),
+    counts: {
+      known: HOSTS.length,
+      blocking: HOSTS.filter((h) => h.strength === 'block').length,
+      blockCapablePlanned: HOSTS.filter((h) => h.blockCapable).length,
+      cloudAdvisoryOnly: HOSTS.filter((h) => h.env === 'cloud').length,
+    },
+    cloudCaveat: CLOUD_CAVEAT,
+    hosts: rows,
+  };
 }
 
 /**

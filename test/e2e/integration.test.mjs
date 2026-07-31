@@ -412,3 +412,37 @@ test('AGENTS.md text tells an agent the exit-code contract', () => {
   assert.match(block, /holt context/);
   assert.match(block, /--json/, 'agents need to know machine output exists');
 });
+
+test('HOSTS: the manifest is well-formed and holt is honest about strength', async () => {
+  const { HOSTS, strengthLabel, CLOUD_CAVEAT } = await import('../../src/integrate/hosts.mjs');
+  assert.ok(HOSTS.length >= 18, 'the manifest should cover the real 2026 landscape');
+  const ids = new Set();
+  for (const h of HOSTS) {
+    assert.ok(h.id && h.name, 'every host needs an id and name');
+    assert.ok(!ids.has(h.id), `duplicate host id ${h.id}`); ids.add(h.id);
+    assert.ok(['block', 'mcp', 'advisory', 'git'].includes(h.strength), `${h.id}: bad strength`);
+    assert.ok(['local', 'cloud'].includes(h.env), `${h.id}: bad env`);
+    // Honesty invariant: a cloud host can NEVER be reported as blocking — the lock cannot apply.
+    if (h.env === 'cloud') assert.notEqual(h.strength, 'block', `${h.id}: a cloud host must not claim blocking`);
+    assert.ok(strengthLabel(h).length > 0);
+  }
+  // Only the two VERIFIED adapters claim 'block'; nothing else overclaims.
+  const blocking = HOSTS.filter((h) => h.strength === 'block').map((h) => h.id).sort();
+  assert.deepEqual(blocking, ['claude-code', 'opencode'], 'only verified adapters may claim blocking');
+  assert.match(CLOUD_CAVEAT, /do not apply to cloud/i, 'the cloud limit must be stated plainly');
+});
+
+test('HOSTS: hostsReport marks what is detected and never claims cloud blocking', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-hosts-'));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-hosthome-'));
+  t.after(() => Promise.all([fs.rm(dir, { recursive: true, force: true }), fs.rm(home, { recursive: true, force: true })]));
+  const { hostsReport } = await import('../../src/integrate/adapters.mjs');
+
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  const rep = await hostsReport(dir, home);
+  assert.ok(rep.counts.blocking === 2, 'exactly two blocking adapters today');
+  assert.ok(rep.detectedHere.includes('Claude Code'), 'a real marker is detected');
+  const cloud = rep.hosts.filter((h) => h.env === 'cloud');
+  assert.ok(cloud.length >= 3, 'the cloud segment is enumerated');
+  for (const c of cloud) assert.match(c.label, /cloud/i, 'cloud hosts are labelled as such');
+});

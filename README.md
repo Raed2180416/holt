@@ -158,10 +158,19 @@ The one-sentence version: **everyone else manages worktrees or gates the shared 
 $ holt integrate
 ```
 
-- **AGENTS.md** — the cross-tool standard read by 30+ agents. Routes to the *permitted* action first: warnings-only measured as ineffective (row two of the table).
-- **MCP** — 14 tools in the schema each host actually reads (three hosts, three different config shapes, all verified live). Diagnostic tools annotated read-only; `holt_clean` honestly `destructiveHint: true`, because a host that auto-approves read-only tools must never auto-approve a deletion.
+- **AGENTS.md** — the cross-tool standard the widest set of agents read, written as an idempotent fenced block that **preserves an existing AGENTS.md verbatim** (it is a common file — holt never overwrites it, only refreshes its own `<!-- BEGIN holt -->` region).
+- **MCP** — 14 tools in the schema each host actually reads (three config shapes, all verified live). Diagnostic tools annotated read-only; `holt_clean` honestly `destructiveHint: true`.
 - **Hooks** — Claude Code PreToolUse deny + OpenCode plugin (throws to block, fails open *loudly* if holt is broken) + a git pre-commit warning as the floor.
 - Project-scoped by default. Your `~/.config` is never touched, never created.
+
+### Honest coverage — run `holt hosts` to see it per agent
+
+holt knows ~20 agent hosts and tells you exactly what protection each gets, because "works everywhere" would be a lie:
+
+- **Deterministic blocking (a destructive command is refused before it runs):** Claude Code and OpenCode today — the two adapters holt has *verified*. Several more hosts (Cursor, Codex, Gemini, Cline, Copilot, Crush, Amp, Goose, Factory, Junie) *support* a deny hook and get MCP + advisory now, with verified deny adapters landing per host — holt ships a guessed hook format for none of them, because a wrong hook is worse than none.
+- **MCP + advisory:** any MCP-capable agent can call holt's tools and reads its AGENTS.md guidance.
+- **The universal floor needs no host at all:** git's own worktree lock refuses a `--force` whoever tries, and a git pre-commit hook fires regardless of what wrote the diff.
+- **Cloud/ephemeral agents (Google Jules, Replit Agent, Devin cloud) — stated plainly:** the worktree lock does **not** apply there (no local worktree), so holt reaches them only through advisory AGENTS.md. See [HOSTS.md](HOSTS.md).
 
 ---
 

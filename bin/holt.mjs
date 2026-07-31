@@ -22,7 +22,7 @@ import {
 import { renderHtml } from '../src/graph-html.mjs';
 import { assessCommand, buildBrief } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
-import { integrate, detectHosts, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
+import { integrate, detectHosts, hostsReport, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
 import { protect, unprotect, rescue, rescues, clean } from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
@@ -77,6 +77,7 @@ ACTING  (these MUTATE the repo; everything above is read-only)
                       only what the COMBINATION breaks  [--run "<cmd>"]  (executes code)
 
 AGENT INTEGRATION
+  hosts               coverage matrix: every known agent host + the strength holt gives it
   integrate           wire holt into every agent found here (AGENTS.md + MCP + hooks)
   brief               plain-text sibling-workstream briefing for any agent
   mcp                 run as an MCP server over stdio
@@ -681,6 +682,20 @@ async function main() {
     return;
   }
   if (cmd === 'brief') return cmdBrief(opts);
+  if (cmd === 'hosts') {
+    const rep = await hostsReport(opts.cwd);
+    if (opts.json) return emitJson(rep);
+    out(paint('bold', 'holt — agent host coverage') + paint('grey', `  ${rep.counts.known} known · ${rep.counts.blocking} blocking · ${rep.counts.cloudAdvisoryOnly} cloud (advisory only)`));
+    if (rep.detectedHere.length) out(`\n  ${paint('green', 'detected here:')} ${rep.detectedHere.join(', ')}`);
+    out('');
+    const strengthColor = (h) => h.env === 'cloud' ? 'yellow' : h.strength === 'block' ? 'green' : h.strength === 'mcp' ? 'cyan' : 'grey';
+    for (const h of rep.hosts) {
+      const mark = h.detectedHere ? paint('green', '●') : paint('grey', '○');
+      out(`  ${mark} ${(h.name + '                                   ').slice(0, 34)} ${paint(strengthColor(h), h.label)}`);
+    }
+    out(`\n  ${paint('grey', rep.cloudCaveat)}\n`);
+    return;
+  }
   if (cmd === 'integrate') return cmdIntegrate(opts);
 
   const { report, scanned } = await buildReport(opts);
