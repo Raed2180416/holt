@@ -300,9 +300,10 @@ test('rate limit: separate keys have separate buckets', () => {
   assert.equal(rl.take('a').allowed, false);
 });
 
-test('clientIp: prefers the platform header over anything client-controlled', () => {
+test('clientIp: prefers the platform header, then the RIGHTMOST forwarded hop', () => {
   assert.equal(clientIp({ headers: { 'fly-client-ip': '1.2.3.4', 'x-forwarded-for': '9.9.9.9' }, socket: {} }), '1.2.3.4');
-  assert.equal(clientIp({ headers: { 'x-forwarded-for': '9.9.9.9, 8.8.8.8' }, socket: {} }), '9.9.9.9');
+  // Rightmost (nearest our proxy), not leftmost (client-controllable) — see the hardening note.
+  assert.equal(clientIp({ headers: { 'x-forwarded-for': '9.9.9.9, 8.8.8.8' }, socket: {} }), '8.8.8.8');
   assert.equal(clientIp({ headers: {}, socket: { remoteAddress: '7.7.7.7' } }), '7.7.7.7');
 });
 
@@ -338,4 +339,25 @@ test('rotation: a token signed by ANY pinned key verifies; others do not', () =>
   assert.equal(verifyToken(underOld, { publicKeysB64: keys }).valid, true, 'old customers keep working during rotation');
   assert.equal(verifyToken(underNew, { publicKeysB64: keys }).valid, true, 'new licenses work');
   assert.equal(verifyToken(underEvil, { publicKeysB64: keys }).valid, false, 'a foreign key never verifies');
+});
+
+test('SECURITY: clientIp takes the rightmost X-Forwarded-For hop, not the spoofable leftmost', () => {
+  // An attacker stuffs the leftmost entry to rotate fake identities and dodge the limiter.
+  assert.equal(clientIp({ headers: { 'x-forwarded-for': 'evil-fake-1, evil-fake-2, 203.0.113.7' }, socket: {} }), '203.0.113.7');
+  // But the platform header still wins outright.
+  assert.equal(clientIp({ headers: { 'fly-client-ip': '198.51.100.9', 'x-forwarded-for': 'spoof' }, socket: {} }), '198.51.100.9');
+});
+
+test('E2E: the webhook endpoint is rate limited against an unsigned flood', async (t) => {
+  const { createServer } = await import('../../server/index.mjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'holt-wl-'));
+  const server = createServer({ env: { HOLT_SIGNING_KEY: SIGNING, STRIPE_WEBHOOK_SECRET: SECRET }, dataFile: path.join(dir, 'l.jsonl') });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const { port } = server.address();
+  t.after(() => { server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
+
+  const flood = Array.from({ length: 260 }, () => fetch(`http://127.0.0.1:${port}/webhooks/stripe`, { method: 'POST', headers: { 'stripe-signature': 'garbage' }, body: '{}' }));
+  const codes = (await Promise.all(flood)).map((r) => r.status);
+  assert.ok(codes.includes(429), 'a 260-request unsigned flood must hit the limiter');
+  assert.ok(codes.includes(400), 'and legitimate-shaped-but-unsigned ones still get 400 until the limiter trips');
 });

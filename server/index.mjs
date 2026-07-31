@@ -285,11 +285,22 @@ export class RateLimiter {
   }
 }
 
-/** Client IP for rate limiting: the platform-set header first (Fly sets fly-client-ip). */
+/**
+ * Client IP for rate limiting. The platform-set header is trusted first because the platform
+ * writes it; the client cannot forge `fly-client-ip` from outside Fly's edge. X-Forwarded-For
+ * is client-controllable, so we take the RIGHTMOST entry (the hop nearest our proxy), not the
+ * leftmost (which an attacker can stuff with random values to dodge the limiter by rotating a
+ * fake first hop). Rightmost still lets a botnet spread load, but no single client can mint
+ * unlimited fake identities from one connection.
+ */
 export function clientIp(req) {
-  return req.headers['fly-client-ip']
-    ?? req.headers['x-forwarded-for']?.split(',')[0]?.trim()
-    ?? req.socket?.remoteAddress ?? 'unknown';
+  if (req.headers['fly-client-ip']) return req.headers['fly-client-ip'];
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.length) {
+    const hops = xff.split(',').map((s) => s.trim()).filter(Boolean);
+    if (hops.length) return hops[hops.length - 1];
+  }
+  return req.socket?.remoteAddress ?? 'unknown';
 }
 
 /* ------------------------------------------------------------------ checkout ---- */
@@ -395,6 +406,10 @@ export function createServer({ env = process.env, dataFile = DATA } = {}) {
   // Tight buckets on anything that sends mail; a loose one on checkout redirects.
   const checkoutLimiter = new RateLimiter({ capacity: 30, refillPerSec: 0.5 });
   const resendLimiter = new RateLimiter({ capacity: 3, refillPerSec: 1 / 200 }); // ~3 then 1 per 3.3min
+  // The webhook is signature-gated, so this is not the primary defence — it is a cheap ceiling
+  // so a flood of INVALID (unsigned) posts cannot exhaust CPU on HMAC checks. Generous, because
+  // a legitimate Stripe retry storm is exactly what we must not throttle.
+  const webhookLimiter = new RateLimiter({ capacity: 200, refillPerSec: 20 });
   const siteOrigin = new URL(env.HOLT_SITE_URL || 'https://raed2180416.github.io').origin;
 
   return http.createServer(async (req, res) => {
@@ -462,6 +477,8 @@ export function createServer({ env = process.env, dataFile = DATA } = {}) {
       }
 
       if (req.method === 'POST' && req.url === '/webhooks/stripe') {
+        const rl = webhookLimiter.take(clientIp(req));
+        if (!rl.allowed) return send(429, { ok: false, reason: 'slow down' }, { 'Retry-After': String(rl.retryAfterSec) });
         const raw = await readBody(req);
         const sig = verifyStripeSignature(raw, req.headers['stripe-signature'], webhookSecret);
         if (!sig.ok) {

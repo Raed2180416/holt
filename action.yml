@@ -33,7 +33,10 @@ runs:
         HOLT_IN_IGNORE: ${{ inputs.ignore }}
       run: |
         set -euo pipefail
-        npm install -g "github:Raed2180416/holt" >/dev/null 2>&1 || npm install -g holt >/dev/null 2>&1
+        # Prefer the published npm release (immutable once published); the pinned GitHub tag
+        # is the fallback. Neither is an unpinned branch, so a consumer's CI cannot be moved
+        # under it by a force-push to main.
+        npm install -g "holt@^0" >/dev/null 2>&1 || npm install -g "github:Raed2180416/holt#v0.2.0" >/dev/null 2>&1
         ARGS=()
         [ "$HOLT_IN_FAIL" = "true" ] && ARGS+=(--fail-on-unlanded)
         [ -n "$HOLT_IN_AGE" ] && ARGS+=(--max-age-days "$HOLT_IN_AGE")

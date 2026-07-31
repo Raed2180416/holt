@@ -250,7 +250,18 @@ export function activateLicense(token, { now = Date.now() } = {}) {
   if (!v.valid) throw new LicenseError(`refusing to store an invalid license: ${v.reason}`, v.code);
   const target = licensePaths()[0];
   fs.mkdirSync(path.dirname(target), { recursive: true });
-  fs.writeFileSync(target, `${token.trim()}\n`, { mode: 0o600 });
+  // Refuse to follow a symlink at the target: if the license path is a symlink (planted by a
+  // shared-home attacker to redirect the write), O_NOFOLLOW makes the open fail rather than
+  // writing through it to somewhere the caller did not intend. Truncate-and-create with 0600.
+  let fd;
+  try {
+    fd = fs.openSync(target, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o600);
+  } catch (e) {
+    if (e.code === 'ELOOP') throw new LicenseError(`refusing to write through a symlink at ${target}`, 'unsafe-path');
+    throw e;
+  }
+  try { fs.writeSync(fd, `${token.trim()}\n`); } finally { fs.closeSync(fd); }
+  fs.chmodSync(target, 0o600); // in case the file pre-existed with looser bits
   return { stored: target, tier: v.claims.tier, org: v.claims.org ?? null, expires: new Date(v.claims.exp).toISOString() };
 }
 
