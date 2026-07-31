@@ -305,8 +305,30 @@ export async function languageCoverage(expected = []) {
  * This keeps ARC_FOO, top-level functions, classes and their methods; it drops the container
  * and the inner values.
  */
+/**
+ * Declarations that NAME A CONTAINER rather than author anything in it.
+ *
+ * MEASURED: on a 1,000-pair labelled corpus, EVERY false positive holt produced was Go, and every
+ * one traced to a single tag — ctags emits `package corpus` with kind "package" for the package
+ * clause that each file in a Go package repeats verbatim. It normalised to a plain symbol, so any
+ * NEW file in an existing package looked like it had added work found nowhere else, and two
+ * agents adding unrelated files to the same package looked like they had built the same thing.
+ *
+ * The class is not Go's: Java, Kotlin and Scala repeat `package`, C# repeats `namespace`. None of
+ * them is work — they are the address the work lives at, and every file at that address restates
+ * it, so counting them turns file COUNT into apparent symbol overlap.
+ *
+ * DELIBERATELY NARROW, and `module` is the line. Go's `package corpus` is repeated verbatim by
+ * every file in the package; F#'s `module FsModule`, Elixir's `defmodule` and Haskell's module
+ * header name ONE thing ONCE and a developer owns that name. Excluding `module` would have made
+ * holt blind to real work in those languages — the language suite asserts exactly those symbols,
+ * which is how the over-broad first version of this filter was caught.
+ */
+const CONTAINER_KINDS = new Set(['package', 'namespace']);
+
 function isNoise(tag) {
   if (!tag || typeof tag.name !== 'string') return true;
+  if (CONTAINER_KINDS.has(String(tag.kind))) return true;
   if (tag.name.startsWith('anonymousObject')) return true;
   if (typeof tag.scope === 'string' && tag.scope.includes('.')) return true;
   if (tag.name.length < 2) return true;

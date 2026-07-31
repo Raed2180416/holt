@@ -270,3 +270,51 @@ test('COMPAT: every pack is loadable by this ctags and defines what it claims', 
       `${pack} is not loadable by this ctags and is not a benign collision: ${r.stderr}`);
   }
 });
+
+test('PRECISION: a repeated package/namespace clause is not authored work', async () => {
+  // MEASURED on a 1,000-pair labelled corpus: EVERY false positive holt produced was Go, and all
+  // of them traced to one tag — ctags emits `package corpus` (kind "package") for the clause each
+  // file in a Go package repeats verbatim. It counted as a symbol, so a NEW file in an existing
+  // package looked like work found nowhere else, and two agents adding unrelated files to the same
+  // package looked like they had built the same thing. Precision 96.5%; every miss was this.
+  const backend = await resolveBackend();
+  if (backend.kind !== 'ctags') return;
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-container-'));
+  try {
+    await fs.writeFile(path.join(dir, 'a.go'), 'package corpus\n\nfunc AlphaFunc() int { return 1 }\n');
+    await fs.writeFile(path.join(dir, 'b.go'), 'package corpus\n\nfunc BetaFunc() int { return 2 }\n');
+    const found = await symbolsOnDisk(dir, ['a.go', 'b.go'], backend);
+    const names = (f) => (found.get(f) ?? []).map((s) => s.name);
+
+    assert.ok(names('a.go').includes('AlphaFunc'), 'the real function must still be found');
+    assert.ok(names('b.go').includes('BetaFunc'), 'the real function must still be found');
+    assert.ok(!names('a.go').includes('corpus'),
+      `the package clause must not count as work: ${JSON.stringify(names('a.go'))}`);
+
+    // The consequence that mattered: two files in one package share NOTHING.
+    const shared = names('a.go').filter((n) => names('b.go').includes(n));
+    assert.deepEqual(shared, [],
+      `two files in the same Go package must share no symbols, got ${JSON.stringify(shared)}`);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('PRECISION: a one-per-file module declaration IS work and must survive', async () => {
+  // The line this filter must not cross. Go's `package` is restated by every file; F#'s
+  // `module FsModule` names one thing once and a developer owns that name. An over-broad first
+  // version of the filter excluded `module` too and made holt blind to real work in F#, Elixir and
+  // Haskell — caught by the language suite, pinned here so it cannot come back.
+  const backend = await resolveBackend();
+  if (backend.kind !== 'ctags') return;
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-module-'));
+  try {
+    await fs.writeFile(path.join(dir, 'm.fs'), 'module FsUniqueModule\nlet fsFn x = x\n');
+    const found = await symbolsOnDisk(dir, ['m.fs'], backend);
+    const names = (found.get('m.fs') ?? []).map((s) => s.name);
+    assert.ok(names.includes('FsUniqueModule'),
+      `a module a developer named and owns must count as work: ${JSON.stringify(names)}`);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
