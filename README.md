@@ -6,8 +6,8 @@
 
 **You ran N agents. Holt answers: what did they produce, what's redundant, what collides,<br>what's safe to delete — and what you're about to lose.**
 
-[![tests](https://img.shields.io/badge/tests-345%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
-[![mutation score](https://img.shields.io/badge/mutation%20score-25%2F25%20killed-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-348%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+[![mutation score](https://img.shields.io/badge/mutation%20score-26%2F26%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
@@ -192,9 +192,9 @@ Every optional dependency degrades **loudly**: `holt doctor` shows exactly what'
 
 ## The test suite attacks itself
 
-345 tests, and the interesting ones are the hostile ones:
+348 tests, and the interesting ones are the hostile ones:
 
-- **25/25 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
+- **26/26 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
 - **The CLI is tested as a binary**, because at one point 169 tests passed while `holt protect` printed *"unknown command"* — every test called functions directly and the dispatcher was dead. Exit codes are asserted per command; they're the contract scripts chain on.
 - **The eval polices itself.** It refuses to score trials the agent never ran (a credits-exhausted run once fabricated "+17 pts" from agents that did nothing — that scenario is now a permanent regression test), and its answer key is proven unreachable from trial repos after an agent found it and scored by reading it.
@@ -213,7 +213,7 @@ because a claim you cannot back is worse than a gap you name.
 
 | Surface | How it was verified |
 |---|---|
-| Core scan, safety, actions, CLI | 345 tests + 25/25 deliberate-defect mutation kills, run on every commit |
+| Core scan, safety, actions, CLI | 348 tests + 26/26 deliberate-defect mutation kills, run on every commit |
 | Linux / macOS / Windows core | CI matrix runs the safety classifier, detection, CLI-as-binary, actions and the invariant fuzzer on all three |
 | Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
 | OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |
@@ -231,6 +231,12 @@ because a claim you cannot back is worse than a gap you name.
 | Windows *end-to-end* agent flows | The core suite passes on Windows in CI | Hooks + MCP under Windows agent hosts are untested by us |
 | Very large repos (10k+ files, 200+ worktrees) | Scans are linear and bounded; measured to 1000 worktrees synthetically | Not measured on a real repository of that size |
 | git-LFS, submodules, sparse-checkout | holt reads git's own output, which handles these | No dedicated test fixture yet |
+
+**Different on jj** — worth knowing before you adopt it there: Jujutsu auto-snapshots the working
+copy, so "work that exists only as uncommitted changes" largely stops being a category. holt's
+flagship value — *what you are about to lose* — is therefore mostly a **git**-specific value. On jj
+what remains is duplicates, collisions, landing order and review-load reduction: still a real
+product, but a different pitch, and we would rather say so than let you discover it.
 
 **Known not to apply** — stated plainly rather than glossed: cloud/ephemeral agents (Google Jules,
 Replit Agent, Devin cloud) have no local worktree, so the lock cannot protect them; holt reaches
