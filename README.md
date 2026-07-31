@@ -6,7 +6,7 @@
 
 **You ran N agents. Grove answers: what did they produce, what's redundant, what collides,<br>what's safe to delete — and what you're about to lose.**
 
-[![tests](https://img.shields.io/badge/tests-179%20passing-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-196%20passing-brightgreen)](#the-test-suite-attacks-itself)
 [![mutation score](https://img.shields.io/badge/mutation%20score-12%2F12%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
@@ -28,6 +28,8 @@ On the repository grove was built against, git's committed layer flagged **4** i
 Grove prevented that loss in **every** protected trial.
 
 ---
+
+**Full published numbers with reproduction commands: [BENCHMARKS.md](BENCHMARKS.md)** — correctness at N=1000, the 50-language monster round, invariant fuzzing, clean-room degradation.
 
 ## Measured: agents with grove vs without
 
