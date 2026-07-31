@@ -34,14 +34,35 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { git, pmap } from './git.mjs';
+import { ensureOnPath } from './toolchain.mjs';
 
 /* ------------------------------------------------------------------ ctags ---- */
 
 let _ctagsProbe = null;
 
+/**
+ * Forget every cached toolchain probe.
+ *
+ * `holt setup` probes for ctags, finds none, INSTALLS one, and then scans — all in one process.
+ * Without this the scan would use the memoised "unavailable" verdict from before the install and
+ * silently fall back to regex extraction, so the command that just fixed the toolchain would
+ * report the machine as if it had not.
+ */
+export function resetToolchainProbes() {
+  _ctagsProbe = null;
+  _enryProbe = null;
+  _langProbe = null;
+  _demoProbe = null;
+  _compat = null;
+  _extraFlags = [];
+}
+
 /** Detect universal-ctags once per process. Exuberant ctags is NOT accepted — no JSON. */
 export async function detectCtags() {
   if (_ctagsProbe) return _ctagsProbe;
+  // A portable ctags installed by `holt setup` lives in holt's own directory, not on the system
+  // PATH. Putting it on PATH here means every call site finds it without knowing it exists.
+  await ensureOnPath();
   _ctagsProbe = new Promise((resolve) => {
     execFile('ctags', ['--version'], { timeout: 5000 }, (err, stdout) => {
       if (err) return resolve({ available: false, reason: 'ctags-not-found' });

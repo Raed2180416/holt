@@ -66,6 +66,7 @@ COMMANDS
   graph               the relationship graph  [--html <file>]
   gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
   tui                 interactive risk-sorted dashboard  [--snapshot]
+  setup               ONE-COMMAND FIRST RUN: install backends, wire agents, show what is at risk
   doctor              environment and backend check  [--install [--yes]]
 
 ACTING  (these MUTATE the repo; everything above is read-only)
@@ -445,6 +446,124 @@ async function cmdBrief(opts) {
   out(text ?? '[holt] no parallel workstream findings.');
 }
 
+
+/**
+ * `holt setup` — the whole first run, in one command.
+ *
+ * THE UX PROBLEM THIS SOLVES. Everything holt needs already existed as separate commands
+ * (doctor --install, integrate, protect), which meant a new user's happy path was: install, run
+ * something, read a suggestion, run doctor, read another suggestion, run integrate, then finally
+ * get value. Every one of those steps is a place to stop.
+ *
+ * TWO THINGS ARE DELIBERATELY NOT DONE, and both are UX decisions rather than laziness:
+ *
+ *   npm postinstall does NOT fetch binaries. Package installs that download and execute things
+ *   are blocked by `--ignore-scripts` (which plenty of organisations enforce), break in CI, and
+ *   are a supply-chain smell. Fetching happens when a human asks for it, here.
+ *
+ *   `integrate` does NOT run automatically on first use. It writes files into the user's
+ *   repository — AGENTS.md, .claude/settings.json, .mcp.json. Writing to somebody's repo without
+ *   asking is precisely the behaviour holt exists to prevent, and doing it ourselves would be
+ *   indefensible. So this is one command, but it still shows what it will do and asks.
+ */
+async function cmdSetup(opts) {
+  const { detectCtags, detectEnry, resetToolchainProbes } = await import('../src/symbols.mjs');
+  const { installPortableCtags, portableTarget, holtBinDir } = await import('../src/toolchain.mjs');
+
+  out('');
+  out(paint('bold', 'holt setup') + paint('grey', '  — backends, agent wiring, and what is at risk right now'));
+  out('');
+
+  // ---- 1. backends -------------------------------------------------------------------------
+  out(paint('bold', '  1. analysis backends'));
+  let ctags = await detectCtags();
+  const enry = await detectEnry();
+  if (ctags.available) {
+    out(`     ${paint('green', 'ok')}  universal-ctags ${ctags.version}`);
+  } else {
+    out(`     ${paint('yellow', '--')}  universal-ctags missing — holt falls back to regex extraction and relates LESS work`);
+    const target = portableTarget();
+    if (target) {
+      out(paint('grey', `         holt can install a private copy into ${holtBinDir()}`));
+      out(paint('grey', '         (no sudo, nothing system-wide, pinned release, checksum verified)'));
+      const go = opts.yes || await confirm('     install it now?');
+      if (go) {
+        const r = await installPortableCtags((m) => out(paint('grey', `         ${m}`)));
+        if (r.ok) {
+          out(`     ${paint('green', 'ok')}  installed universal-ctags ${r.version}`);
+          // The probe already ran and cached "unavailable" a few lines above. Without this, the
+          // scan in step 3 would use that stale verdict and silently fall back to regex — the
+          // command that just fixed the toolchain reporting the machine as if it had not.
+          resetToolchainProbes();
+          ctags = { available: true, version: r.version };
+        } else {
+          out(`     ${paint('red', 'no')}  ${r.reason}`);
+          out(paint('grey', '         holt still works — symbol coverage is reduced, and it says so in every report.'));
+        }
+      }
+    } else {
+      out(paint('grey', `         no portable build for ${process.platform}-${process.arch}; use your package manager (holt doctor --install)`));
+    }
+  }
+  if (!enry.available) {
+    out(paint('grey', '     --  enry missing — only affects ambiguous extensions (.fs .m .h .pl); optional'));
+  }
+  out('');
+
+  // ---- 2. agent wiring ---------------------------------------------------------------------
+  out(paint('bold', '  2. agent wiring') + paint('grey', '  — writes into THIS repository'));
+  const { detectHosts } = await import('../src/integrate/adapters.mjs');
+  const hosts = await detectHosts(opts.cwd || process.cwd()).catch(() => null);
+  const names = hosts ? (hosts.detected ?? []).map((h) => h.name ?? h.id ?? h) : [];
+  out(names.length
+    ? paint('grey', `     detected: ${names.join(', ')}`)
+    : paint('grey', '     no agent host detected here — AGENTS.md is still written, every agent reads it'));
+  const doIntegrate = opts.yes || await confirm('     write agent config into this repository?');
+  if (doIntegrate) {
+    await cmdIntegrate({ ...opts, quiet: false });
+  } else {
+    out(paint('grey', '     skipped — run `holt integrate` whenever you want it.'));
+  }
+  out('');
+
+  // ---- 3. what is at risk RIGHT NOW ---------------------------------------------------------
+  out(paint('bold', '  3. this repository, right now'));
+  try {
+    const { report } = await buildReport(opts);
+    const atRisk = (report.unique ?? []).filter((u) => (u.uncommittedOnlyCount ?? 0) > 0);
+    if (!report.counts?.scanned) {
+      out(paint('grey', '     no worktrees yet — holt has nothing to relate until agents fan out.'));
+    } else if (atRisk.length) {
+      out(`     ${paint('red', String(atRisk.length))} workstream(s) hold work that exists NOWHERE ELSE:`);
+      for (const u of atRisk.slice(0, 5)) out(paint('grey', `       ${u.id}`));
+      out('');
+      out(paint('grey', '     `holt protect` locks these so git itself refuses to delete them.'));
+    } else {
+      out(paint('green', '     nothing at risk — every workstream\'s work exists somewhere else too.'));
+    }
+  } catch (e) {
+    out(paint('grey', `     could not scan here: ${e.message}`));
+  }
+
+  out('');
+  out(paint('bold', '  done.') + paint('grey', '  `holt status` any time. `holt setup` is safe to re-run.'));
+  out('');
+}
+
+/** One y/N prompt. Non-interactive contexts answer NO — never assume consent from silence. */
+async function confirm(question) {
+  if (!process.stdin.isTTY) {
+    out(paint('grey', `${question}  (not a terminal — skipped; re-run with --yes)`));
+    return false;
+  }
+  process.stdout.write(`${question} [y/N] `);
+  const answer = await new Promise((r) => {
+    process.stdin.setEncoding('utf8');
+    process.stdin.once('data', (d) => r(String(d).trim().toLowerCase()));
+  });
+  return answer === 'y' || answer === 'yes';
+}
+
 async function cmdIntegrate(opts) {
   const disc = await discover(opts.cwd, opts);
   if (!disc.root) {
@@ -812,6 +931,7 @@ async function main() {
     out(`\n  ${paint('grey', rep.cloudCaveat)}\n`);
     return;
   }
+  if (cmd === 'setup') return cmdSetup(opts);
   if (cmd === 'integrate') return cmdIntegrate(opts);
 
   const { report, scanned } = await buildReport(opts);

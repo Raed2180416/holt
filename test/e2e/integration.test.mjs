@@ -625,9 +625,13 @@ test('GATE: a worktree reached through a symlinked path is still protected', asy
 
   // The premise: git reports the REAL path, the command names the LINKED one. If those ever
   // coincide this test proves nothing, so assert they differ.
-  const listed = (await g(['worktree', 'list', '--porcelain'], real)).so;
-  assert.ok(listed.includes(path.join(real, 'gold-scratch')),
-    'PRECONDITION: git must report the real path');
+  // git prints POSIX separators even on Windows (D:/a/... not D:\a\...), so compare on a
+  // normalised form — otherwise this precondition fails on Windows for a reason that has nothing
+  // to do with what the test is checking.
+  const slash = (x) => String(x).split(path.sep).join('/');
+  const listed = slash((await g(['worktree', 'list', '--porcelain'], real)).so);
+  assert.ok(listed.toLowerCase().includes(slash(path.join(real, 'gold-scratch')).toLowerCase()),
+    `PRECONDITION: git must report the real path — got ${listed.slice(0, 300)}`);
   const viaLink = path.join(link, 'gold-scratch');
   assert.notEqual(viaLink, path.join(real, 'gold-scratch'),
     'PRECONDITION: the two routes must actually differ');
