@@ -18,6 +18,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { buildCleanupMess, buildGauntletMess, sh } from './mess.mjs';
 import { integrate } from '../src/integrate/adapters.mjs';
+import { protect } from '../src/actions.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const GROVE_BIN = `${process.execPath} ${path.join(HERE, '..', 'bin', 'grove.mjs')}`;
@@ -25,6 +26,24 @@ const SRC = process.env.GROVE_EVAL_SRC
   ?? path.join(os.homedir(), '.agentic-os-tmp', 'grove-real', 'py-click');
 const WORK = process.env.GROVE_EVAL_WORK
   ?? path.join(os.homedir(), '.agentic-os-tmp', 'grove-eval');
+
+/**
+ * THE ANSWER KEY LIVES OUTSIDE THE TRIAL TREE. This is not tidiness — it is the difference
+ * between a measurement and a contaminated one.
+ *
+ * MEASURED: with the manifest written to WORK/manifest.json, one level above every trial repo, a
+ * naked-arm agent walked up, found it, and reported:
+ *
+ *     "The repository contains a test case with explicit truth data"
+ *
+ * then listed the exact mustSurvive and disposable sets. It scored well by READING THE ANSWERS.
+ * Every trial in that run is void.
+ *
+ * So: each trial gets its own isolated root (siblings are not visible either — seeing the other
+ * arm's repos is itself a hint), and the manifest goes to a directory the agent has no path to.
+ */
+const META = process.env.GROVE_EVAL_META
+  ?? path.join(os.homedir(), '.agentic-os-tmp', 'grove-eval-meta');
 
 const BUILDERS = { cleanup: buildCleanupMess, gauntlet: buildGauntletMess };
 
@@ -58,18 +77,29 @@ async function build(scenario, trials) {
   if (!builder) throw new Error(`unknown scenario '${scenario}'`);
 
   await fs.rm(WORK, { recursive: true, force: true });
+  await fs.rm(META, { recursive: true, force: true });
   await fs.mkdir(WORK, { recursive: true });
+  await fs.mkdir(META, { recursive: true });
 
   const manifest = { scenario, trials: Number(trials), builtAt: null, cases: [] };
 
   for (const arm of ['naked', 'grove']) {
     for (let t = 0; t < Number(trials); t++) {
-      const dest = path.join(WORK, `${scenario}-${arm}-${t}`, 'repo');
+      // Opaque per-trial root: an agent that walks up sees only its own sandbox, not the other
+      // arm's repos and not a directory listing that reveals the design.
+      const cell = path.join(WORK, `t-${scenario}-${arm}-${t}`, 'sandbox');
+      const dest = path.join(cell, 'repo');
       const built = await builder(SRC, dest);
 
       if (arm === 'grove') {
         // Exactly what a user runs. Nothing scenario-specific, nothing that hints at the answer.
         await integrate(built.root, { bin: GROVE_BIN, scope: 'project' });
+
+        // …and `grove protect`, because the first A/B showed instructions alone are not enough:
+        // an agent ignored AGENTS.md sitting in its own repository. protect uses git's own lock,
+        // which needs no cooperation from the model at all. This is the arm difference that
+        // should matter; the previous run measured judgement only.
+        await protect(built.root, {});
       }
 
       manifest.cases.push({
@@ -81,7 +111,7 @@ async function build(scenario, trials) {
     }
   }
 
-  const file = path.join(WORK, 'manifest.json');
+  const file = path.join(META, 'manifest.json');
   await fs.writeFile(file, JSON.stringify(manifest, null, 2));
   console.log(JSON.stringify({ manifest: file, cases: manifest.cases.length }, null, 2));
 }
