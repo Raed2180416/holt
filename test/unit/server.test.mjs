@@ -360,12 +360,16 @@ test('E2E: the webhook endpoint is rate limited against an unsigned flood', asyn
   // platform's socket stack rather than of the limiter — on Windows a chunk of them never reach
   // the server at all, so the assertion became flaky there. Issued in order, the token bucket
   // (capacity 200, refill 20/s) is guaranteed to be empty well before the last request.
+  // Bounded concurrency, not 260-way and not fully sequential. Fully concurrent tests the
+  // platform's socket stack (Windows drops a chunk); fully sequential is so slow on Windows that
+  // the bucket REFILLS (20/s) faster than the requests arrive, and the limiter never trips.
+  // 20-at-a-time is safe everywhere and comfortably outpaces the refill.
   const codes = [];
-  for (let i = 0; i < 240; i++) {
-    const r = await fetch(`http://127.0.0.1:${port}/webhooks/stripe`, {
-      method: 'POST', headers: { 'stripe-signature': 'garbage' }, body: '{}',
-    }).catch(() => null);
-    if (r) codes.push(r.status);
+  const send = () => fetch(`http://127.0.0.1:${port}/webhooks/stripe`, {
+    method: 'POST', headers: { 'stripe-signature': 'garbage' }, body: '{}',
+  }).then((r) => codes.push(r.status)).catch(() => {});
+  for (let batch = 0; batch < 15; batch++) {
+    await Promise.all(Array.from({ length: 20 }, send));   // 300 total
   }
   assert.ok(codes.includes(429), `a sustained unsigned flood must hit the limiter (saw: ${[...new Set(codes)].join(',')})`);
   assert.ok(codes.includes(400), 'and unsigned-but-well-formed ones still get 400 until the limiter trips');

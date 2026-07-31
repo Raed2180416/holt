@@ -77,9 +77,21 @@ export async function detectCtags() {
 let _langProbe = null;
 export async function ctagsLanguages() {
   if (_langProbe) return _langProbe;
+  const parse = (stdout) => new Set(
+    String(stdout).split('\n').map((l) => l.trim().replace(/\s*\[disabled\]$/, '')).filter(Boolean),
+  );
   _langProbe = new Promise((resolve) => {
     execFile('ctags', [...optionFlags(), '--list-languages'], { timeout: 8000 }, (err, stdout) => {
-      if (err) return resolve({ available: false, languages: new Set(), count: 0 });
+      if (err) {
+        // An older ctags can reject the optlib pack outright. Retry WITHOUT it rather than
+        // reporting "no languages": a failed probe used to make every capability check fall back
+        // to asserting the full corpus, which is exactly the false failure this exists to prevent.
+        return execFile('ctags', ['--list-languages'], { timeout: 8000 }, (e2, out2) => {
+          if (e2) return resolve({ available: false, languages: new Set(), count: 0 });
+          const languages = parse(out2);
+          return resolve({ available: true, languages, count: languages.size, degraded: true });
+        });
+      }
       const languages = new Set(
         String(stdout).split('\n')
           .map((l) => l.trim().replace(/\s*\[disabled\]$/, ''))
