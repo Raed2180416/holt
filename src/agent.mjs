@@ -127,21 +127,57 @@ const DESTRUCTIVE = [
   // the actual worktree list below: a path that is not a worktree finds nothing and is allowed,
   // so `rm -rf node_modules` and `rm -rf dist` are unaffected.
   { re: /\brm\s+(?:-[a-zA-Z]+\s+)*(?<target>[^\s;|&]+)/, kind: 'rm of a worktree path' },
+
+  // ---- CONTENT-MUTATING VERBS ------------------------------------------------------------
+  // A lock stops `git worktree remove`. It does NOT stop the commands that destroy the SAME
+  // uncommitted work in place — and those are the ones that actually cost this project work
+  // during its own development. Deleting a worktree and hard-resetting it are the same loss,
+  // so covering only the deletion verb was a coverage gap, not a scope boundary.
+  //
+  // These carry no path argument: they act on the worktree they RUN IN, or wherever `git -C`
+  // points. Resolution still decides — a clean worktree has nothing to lose, so the verdict is
+  // allow and a developer never notices the rule exists.
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}reset\\s+(?:[^\\s;|&]+\\s+)*--hard\\b`), kind: 'git reset --hard (discards uncommitted work)', cwdTarget: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}clean\\s+-[a-zA-Z]*[fd][a-zA-Z]*\\b`), kind: 'git clean -fd (deletes untracked files)', cwdTarget: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}checkout\\s+(?:--\\s+|\\.$|--\\s*\\.)`), kind: 'git checkout -- . (discards changes)', cwdTarget: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}restore\\s+(?:[^\\s;|&]+\\s+)*(?:--worktree|--staged|\\.)`), kind: 'git restore (discards changes)', cwdTarget: true },
 ];
 
 export function classifyCommand(command) {
   if (typeof command !== 'string' || !command.trim()) return null;
-  for (const { re, kind, all } of DESTRUCTIVE) {
+  for (const { re, kind, all, cwdTarget } of DESTRUCTIVE) {
     const m = command.match(re);
     if (m) {
       return {
         kind,
         target: m.groups?.target ? m.groups.target.replace(/^['"]|['"]$/g, '') : null,
         all: !!all,
+        cwdTarget: !!cwdTarget,
       };
     }
   }
   return null;
+}
+
+
+/** `git -C <path> …` redirects which worktree a path-less verb acts on. */
+function gitCFlag(command) {
+  const m = /\bgit\s+(?:[^\s]+\s+)*?-C\s+([^\s;|&]+)/.exec(command);
+  return m ? m[1].replace(/^['"]|['"]$/g, '') : null;
+}
+
+/** The worktree CONTAINING this directory — for verbs that act on wherever they are run. */
+function containingWorkstream(report, cwd) {
+  const abs = path.resolve(cwd || process.cwd());
+  let best = null;
+  for (const s of report.safe) {
+    if (!s.path) continue;
+    const p = path.resolve(s.path);
+    if (abs === p || abs.startsWith(p + path.sep)) {
+      if (!best || p.length > path.resolve(best.path).length) best = s; // deepest match wins
+    }
+  }
+  return best;
 }
 
 function findWorkstream(report, target, cwd) {
@@ -199,7 +235,10 @@ export async function assessCommand(command, cwd = process.cwd()) {
 
   let report;
   try {
-    ({ report } = await cachedReport(cwd));
+    // includePrimary: git REFUSES to lock the main worktree, so for it the hook is the only
+    // protection there is — and it was excluded from the scan entirely. The one tree that can
+    // never be locked was also the one never watched.
+    ({ report } = await cachedReport(cwd, { includePrimary: true }));
   } catch (err) {
     // holt could not measure. It must NOT silently allow a destructive command it failed to
     // check — but it must not hard-block work on its own bug either, so it asks.
@@ -214,7 +253,9 @@ export async function assessCommand(command, cwd = process.cwd()) {
   // `worktree prune` affects every prunable worktree at once, so evaluate all of them.
   const targets = hit.all
     ? report.safe.filter((s) => !s.safe)
-    : [findWorkstream(report, hit.target, cwd)].filter(Boolean);
+    : hit.cwdTarget
+      ? [findWorkstream(report, gitCFlag(command) ?? cwd, cwd) ?? containingWorkstream(report, cwd)].filter(Boolean)
+      : [findWorkstream(report, hit.target, cwd)].filter(Boolean);
 
   const holding = targets.filter((s) => !s.safe);
   if (holding.length === 0) {
