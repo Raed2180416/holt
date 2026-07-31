@@ -21,6 +21,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { newRepo } from '../fixtures.mjs';
@@ -205,4 +206,42 @@ test('CLI: --help lists every command that exists', async (t) => {
     assert.match(r.stdout, new RegExp(`\\b${cmd}\\b`),
       `--help does not mention '${cmd}' — an undocumented command is an unreachable one`);
   }
+});
+
+test('FIRST RUN: a repo with no commits gets a one-line message, never a stack trace', async (t) => {
+  // The single most common first-run state: create a repo, run the tool before committing.
+  // This previously printed a Node stack trace containing the maintainer's own file paths.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-empty-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await new Promise((res) => execFile('git', ['init', '-q', '-b', 'main'], { cwd: dir }, res));
+
+  for (const cmd of [[], ['status'], ['risk'], ['plan']]) {
+    const r = await holt(cmd, dir);
+    assert.equal(r.code, 2, `holt ${cmd.join(' ') || '(default)'} should exit 2, got ${r.code}`);
+    assert.ok(!/node:internal|\bat async\b/.test(r.stderr), `no stack trace, got: ${r.stderr.slice(0, 200)}`);
+    assert.match(r.stderr, /empty repository|base ref/i, 'and must explain the state in plain words');
+  }
+});
+
+test('FIRST RUN: branches outside a repo matches every other command', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-nogit-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  for (const cmd of ['branches', 'status']) {
+    const r = await holt([cmd], dir);
+    assert.equal(r.code, 2, `${cmd} outside a repo must exit 2, got ${r.code}`);
+    assert.ok(!/node:internal|\bat async\b/.test(r.stderr), `${cmd} must not print a stack trace`);
+    assert.match(r.stderr, /not a git repository/i);
+  }
+});
+
+test('SCRIPTABILITY: context exits non-zero for an unknown id, zero for a real one', async (t) => {
+  const fx = await newRepo('ctx-exit');
+  t.after(() => fx.cleanup());
+  await fx.worktree('realwt');
+
+  const bad = await holt(['context', 'no-such-id'], fx.root);
+  assert.notEqual(bad.code, 0, 'an unknown id is a failed lookup, not a successful empty answer');
+
+  const good = await holt(['context', 'realwt'], fx.root);
+  assert.equal(good.code, 0, `a real id must succeed: ${good.stderr}`);
 });

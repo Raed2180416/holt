@@ -154,6 +154,13 @@ function parseArgs(argv) {
   return opts;
 }
 
+// Piping any command into `head`, `less` or `grep -m1` closes stdout early. Without this the
+// process dies with an unhandled EPIPE and prints a Node-internals stack trace — a bad look for
+// the most ordinary shell idiom there is.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (e) => { if (e?.code === 'EPIPE') process.exit(0); throw e; });
+}
+
 function out(s) { process.stdout.write(s.endsWith('\n') ? s : `${s}\n`); }
 function emitJson(v) { out(JSON.stringify(v, null, 2)); }
 
@@ -763,7 +770,12 @@ async function main() {
         process.exit(2);
       }
       const digest = contextDigest(scanned, id);
-      return opts.json ? emitJson(digest) : out(renderContext(digest));
+      if (opts.json) emitJson(digest); else out(renderContext(digest));
+      // An unknown id is a FAILED lookup, not a successful empty answer. Exiting 0 here made
+      // `holt context $ID || handle_error` silently succeed on a typo — the same silent-success
+      // class `gate` already exits non-zero for.
+      if (digest?.ok === false) process.exit(2);
+      return;
     }
 
     case 'gate': {
@@ -799,7 +811,25 @@ async function main() {
   }
 }
 
+/**
+ * Errors that are a normal STATE of the user's repository, not a bug in holt. These get the same
+ * one-line treatment as "not a git repository": the message is already written for a human, and
+ * printing a Node stack trace with the maintainer's own file paths on the most common first run
+ * (a brand-new repo with no commits yet) reads as "crashes on first use".
+ */
+const EXPECTED_STATE = [
+  /could not determine a base ref/i,
+  /not a git repository/i,
+  /no usable base to compare against/i,
+];
+
 main().catch((err) => {
-  process.stderr.write(paint('red', `holt: ${err?.stack ?? err?.message ?? String(err)}\n`));
+  const msg = err?.message ?? String(err);
+  if (EXPECTED_STATE.some((re) => re.test(msg))) {
+    // The message already says what to do; strip any duplicated "holt:" prefix and print it once.
+    process.stderr.write(paint('red', `holt: ${msg.replace(/^holt:\s*/, '')}\n`));
+    process.exit(2);
+  }
+  process.stderr.write(paint('red', `holt: ${err?.stack ?? msg}\n`));
   process.exit(1);
 });
