@@ -15,8 +15,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { standardFixture } from '../fixtures.mjs';
+import { __test } from '../../src/mcp/server.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -278,4 +280,23 @@ test('MCP PROTOCOL: responses stay small enough to be worth calling', async (t) 
   const status = await client.send('tools/call', { name: 'holt_status', arguments: { repo: fx.root } });
   const bytes = status.result.content[0].text.length;
   assert.ok(bytes < 3000, `holt_status returned ${bytes} chars — should be a decision, not a dump`);
+});
+
+test('SAFETY: holt_check_workstream never answers from cache — the verdict that licenses a deletion must be live', async (t) => {
+  // The failure this prevents: the agent asks "is X safe to delete?" at T0, gets a cached
+  // "safe", a human writes new work into X at T0+5s, the agent deletes at T0+10s — inside the
+  // 15s TTL. The aggregate/advisory tools may cache; this one may not.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  const empty = fx.wt('empty');
+  const first = await __test.handle('holt_check_workstream', { repo: fx.root, id: 'empty' });
+  assert.equal(first.safeToDelete, true, `an empty worktree starts disposable: ${JSON.stringify(first)}`);
+
+  // Write real work into it — WITHOUT clearing any cache, exactly as a human or sibling agent would.
+  await fs.writeFile(path.join(empty, 'suddenly-important.js'), 'export function NOW_UNIQUE() {}\n');
+
+  const second = await __test.handle('holt_check_workstream', { repo: fx.root, id: 'empty' });
+  assert.equal(second.safeToDelete, false,
+    `the verdict must reflect work written seconds ago, not a cached scan: ${JSON.stringify(second)}`);
 });

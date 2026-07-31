@@ -41,11 +41,24 @@ import { deepDuplicates } from '../deep.mjs';
 const CACHE_TTL_MS = 15_000;
 const cache = new Map();
 
-async function getReport(cwd, opts = {}) {
+/**
+ * @param {object} o
+ * @param {boolean} [o.fresh] bypass the cache entirely — REQUIRED for any answer that licenses a
+ *   deletion. A cached "safe to delete" is the one stale answer that can destroy work: the
+ *   verdict is read at T0 and the agent acts at T0+10s, inside the TTL, after a human or another
+ *   agent has written new work into that worktree. Advisory/aggregate tools may use the cache;
+ *   the per-workstream safety verdict never does.
+ */
+async function getReport(cwd, opts = {}, { fresh = false } = {}) {
   const key = `${cwd}::${JSON.stringify(opts)}`;
-  const hit = cache.get(key);
   const now = Date.now();
-  if (hit && now - hit.at < CACHE_TTL_MS) {
+  // Opportunistic eviction: this process lives for hours and every distinct opts combination
+  // created an entry that was never removed. Sweep expired keys instead of growing forever.
+  if (cache.size > 32) {
+    for (const [k, v] of cache) if (now - v.at >= CACHE_TTL_MS) cache.delete(k);
+  }
+  const hit = cache.get(key);
+  if (!fresh && hit && now - hit.at < CACHE_TTL_MS) {
     return { ...hit.value, _ageMs: now - hit.at };
   }
   const disc = await discover(cwd, opts);
@@ -307,7 +320,9 @@ async function handle(name, args) {
     }
 
     case 'holt_check_workstream': {
-      const { report } = await getReport(cwd);
+      // Always FRESH: this tool's own description tells the agent to call it before removing a
+      // worktree, so it must never answer from cached state that has since changed.
+      const { report } = await getReport(cwd, {}, { fresh: true });
       const v = report.safe.find((s) => s.id === args.id);
       if (!v) {
         return {
