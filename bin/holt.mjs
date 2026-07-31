@@ -36,7 +36,7 @@ import { readJournal, appendEvent } from '../src/journal.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
 import { git } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
-import { loadPolicy, evaluatePolicy } from '../src/team/policy.mjs';
+import { loadGatePolicy, evaluatePolicy, ciPolicyOutcome, policySourceOf } from '../src/team/policy.mjs';
 import { fleetScan } from '../src/team/fleet.mjs';
 
 const USAGE = `
@@ -772,46 +772,11 @@ async function main() {
     if (!audit.ok) { process.stderr.write(paint('red', `holt ci: ${audit.reason}\n`)); process.exit(2); }
     const ignore = new Set([...(opts.ignore ?? []), process.env.GITHUB_HEAD_REF].filter(Boolean));
 
-    // Policy as code, when the repository declares one. A declared policy that cannot be
-    // enforced is a hard failure in BOTH directions: unreadable policy exits 2, and an
-    // unlicensed policy exits 3 — never a silent pass, which would tell a team they are
-    // covered when nothing ran.
-    let loaded;
-    try {
-      loaded = await loadPolicy(audit.base ? (await discover(opts.cwd, opts)).root : opts.cwd);
-    } catch (e) {
-      if (opts.json) { emitJson({ ok: false, code: e.code, reason: e.message }); process.exit(2); }
-      process.stderr.write(paint('red', `holt ci: ${e.message}\n`));
-      process.exit(2);
-    }
-    if (loaded.found) {
-      const ent = checkEntitlement('policy-file');
-      if (!ent.entitled) {
-        const payload = { ok: false, code: 'unlicensed-policy', policy: loaded.path, entitlement: ent,
-          reason: `${loaded.path} declares a policy but ${ent.reason}. Refusing to pass a build against a policy that did not run.` };
-        if (opts.json) { emitJson(payload); process.exit(3); }
-        process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
-        process.exit(3);
-      }
-      const { report } = await buildReport(opts).catch(() => ({ report: null }));
-      const res = evaluatePolicy(loaded.policy, { audit, report, ignore: [...ignore] });
-      const payload = {
-        ok: res.ok, mode: 'policy', policy: loaded.path, entitlement: { tier: ent.tier, org: ent.org ?? null },
-        rulesEvaluated: res.rulesEvaluated, errors: res.errors, warnings: res.warnings,
-        violations: res.violations, exempted: res.exempted,
-        note: 'requires full refs (actions/checkout with fetch-depth: 0)',
-      };
-      if (opts.json) { emitJson(payload); process.exit(res.ok ? 0 : 1); }
-      out(paint('bold', `holt ci — policy ${loaded.path}`) + paint('grey', `  ${res.rulesEvaluated.length} rule(s) · ${ent.tier} license`));
-      for (const v of res.violations) {
-        const c = v.severity === 'error' ? 'red' : 'yellow';
-        out(`  ${paint(c, v.severity.toUpperCase())} ${paint('bold', v.rule)}  ${v.message}`);
-        for (const e of v.evidence ?? []) out(paint('grey', `      ${e}`));
-      }
-      if (res.ok) out(paint('green', `\n  PASS — ${res.warnings} warning(s), 0 errors\n`));
-      else out(paint('red', `\n  FAIL — ${res.errors} error(s), ${res.warnings} warning(s)\n`));
-      process.exit(res.ok ? 0 : 1);
-    }
+    // The inline-flag failures are computed FIRST and unconditionally, because an UNTRUSTED
+    // policy — one the base ref does not carry, so it can only have come from the candidate — is
+    // allowed to ADD failures and never to remove them. Computing them inside the `else` branch
+    // is what let "add a permissive .holt/policy.json" cancel the `--fail-on-unlanded` the
+    // repository owner asked for on the command line.
     const unlanded = audit.unlanded.filter((b) => !ignore.has(b.name));
     const overAge = opts.maxAgeDays
       ? unlanded.filter((b) => b.ageDays != null && b.ageDays > opts.maxAgeDays) : [];
@@ -824,6 +789,62 @@ async function main() {
     }
     if ((opts.failOnUnlanded || opts.maxAgeDays) && audit.unknown.length) {
       failures.push(`${audit.unknown.length} branch(es) could not be classified (instrument failure) — refusing to pass policy on missing evidence`);
+    }
+
+    // Policy as code, when the repository declares one. A declared policy that cannot be
+    // enforced is a hard failure in BOTH directions: unreadable policy exits 2, and an
+    // unlicensed policy exits 3 — never a silent pass, which would tell a team they are
+    // covered when nothing ran.
+    //
+    // WHERE THE RULES CAME FROM IS PART OF THE GATE. They are read from the BASE ref, the way
+    // GitHub reads CODEOWNERS, so a change cannot rewrite the rules that judge it; and when holt
+    // cannot establish a base independent of the candidate it says so rather than render a
+    // verdict it cannot stand behind.
+    const ciRoot = (await discover(opts.cwd, opts)).root ?? opts.cwd;
+    let loaded;
+    try {
+      loaded = await loadGatePolicy(ciRoot, {
+        base: audit.base,
+        headOid: (await git(['rev-parse', 'HEAD'], { cwd: ciRoot }).catch(() => null))?.stdout?.trim() ?? null,
+      });
+    } catch (e) {
+      if (opts.json) { emitJson({ ok: false, code: e.code, reason: e.message }); process.exit(2); }
+      process.stderr.write(paint('red', `holt ci: ${e.message}\n`));
+      process.exit(2);
+    }
+    if (loaded.found) {
+      const ent = checkEntitlement('policy-file');
+      if (!ent.entitled) {
+        // The provenance is reported even here: a team evaluating holt before buying runs exactly
+        // this path, and "a policy exists but you are not licensed" is only actionable if it also
+        // says WHICH policy holt would have run, and from where.
+        const payload = { ok: false, code: 'unlicensed-policy', policy: loaded.path,
+          policySource: policySourceOf(loaded), entitlement: ent,
+          reason: `${loaded.path} declares a policy but ${ent.reason}. Refusing to pass a build against a policy that did not run.` };
+        if (opts.json) { emitJson(payload); process.exit(3); }
+        process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
+        process.exit(3);
+      }
+      const { report } = await buildReport(opts).catch(() => ({ report: null }));
+      const res = evaluatePolicy(loaded.policy, { audit, report, ignore: [...ignore] });
+      const { verdict, payload } = ciPolicyOutcome({ loaded, policyResult: res, flagFailures: failures, entitlement: ent });
+      if (opts.json) { emitJson(payload); process.exit(verdict.ok ? 0 : 1); }
+      const origin = loaded.source === 'base'
+        ? paint('green', `rules from base ${loaded.ref ?? ''}`)
+        : paint('yellow', 'rules from the WORKING TREE — untrusted');
+      out(paint('bold', `holt ci — policy ${loaded.path}`) + paint('grey', `  ${res.rulesEvaluated.length} rule(s) · ${ent.tier} license · `) + origin);
+      if (loaded.note) out(paint('yellow', `  ${loaded.note}`));
+      if (loaded.headDiffers) out(paint('yellow', '  NOTE this change proposes editing .holt/policy.json; the BASE copy is what was enforced'));
+      if (res.disabledRules?.length) out(paint('yellow', `  DISABLED rule(s) not evaluated: ${res.disabledRules.join(', ')}`));
+      for (const v of res.violations) {
+        const c = v.severity === 'error' ? 'red' : 'yellow';
+        out(`  ${paint(c, v.severity.toUpperCase())} ${paint('bold', v.rule)}  ${v.message}`);
+        for (const e of v.evidence ?? []) out(paint('grey', `      ${e}`));
+      }
+      for (const f of verdict.carriedFlagFailures) out(`  ${paint('red', 'ERROR')} ${paint('bold', 'inline-flag')}  ${f}`);
+      if (verdict.ok) out(paint('green', `\n  PASS — ${verdict.warnings} warning(s), 0 errors\n`));
+      else out(paint('red', `\n  FAIL — ${verdict.errors} error(s), ${verdict.warnings} warning(s)\n`));
+      process.exit(verdict.ok ? 0 : 1);
     }
     const result = {
       ok: failures.length === 0,
