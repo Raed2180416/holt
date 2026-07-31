@@ -42,13 +42,20 @@ test('command classifier: catches the ways worktrees actually get destroyed', ()
     'git worktree add ../new feature',
     'ls -la',
     'npm test',
-    'rm -rf node_modules',
-    'rm -rf dist',
     'git status',
     '',
   ];
   for (const c of mustIgnore) {
     assert.equal(classifyCommand(c), null, `must NOT classify as destructive: ${c}`);
+  }
+
+  // TWO-STAGE BY DESIGN: `rm` NOMINATES at the classifier and is resolved against the real
+  // worktree list before any verdict. The old single-stage rule required 'worktree'/'wt' in the
+  // path, so `rm -rf ../my-feature` — the natural way to delete a worktree — was never even
+  // considered. The classifier therefore matches any rm target; the ALLOW for ordinary deletes
+  // is asserted end-to-end in 'GATE ALLOW: non-destructive commands never trigger a scan'.
+  for (const c of ['rm -rf node_modules', 'rm -rf dist']) {
+    assert.ok(classifyCommand(c), `${c} is nominated at the classifier…`);
   }
 });
 
@@ -445,4 +452,25 @@ test('HOSTS: hostsReport marks what is detected and never claims cloud blocking'
   const cloud = rep.hosts.filter((h) => h.env === 'cloud');
   assert.ok(cloud.length >= 3, 'the cloud segment is enumerated');
   for (const c of cloud) assert.match(c.label, /cloud/i, 'cloud hosts are labelled as such');
+});
+
+test('GATE: rm -rf is caught for ANY worktree path, not only ones named "wt"', async (t) => {
+  // The rm rule previously required 'worktree'/'wt' in the path, so `rm -rf ../my-feature` — the
+  // most natural way to delete a worktree — bypassed the one defence holt has against rm.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  const target = fx.wt('uniqueUncommitted'); // path contains no 'wt' token
+  const v = await assessCommand(`rm -rf ${target}`, fx.root);
+  assert.equal(v.decision, 'deny', `rm of a work-holding worktree must be denied: ${JSON.stringify(v)}`);
+  assert.ok(v.targets.includes('uniqueUncommitted'));
+});
+
+test('GATE: broadening rm did NOT make it trigger-happy — ordinary deletes stay allowed', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  for (const cmd of ['rm -rf node_modules', 'rm -rf dist', 'rm -rf ./build', 'rm -f /tmp/scratch.log', 'rm -rf coverage']) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow', `${cmd} must stay allowed: ${JSON.stringify(v)}`);
+  }
 });

@@ -147,7 +147,17 @@ export function uniqueWork(scanResult) {
 
       // Work that only exists uncommitted is the highest-risk class: git itself cannot
       // relate it, so nothing else in the user's toolchain will warn before it is deleted.
-      const atRisk = byLayer.uncommitted.length + byLayer.untracked.length;
+      //
+      // COUNT FILES, NOT ONLY SYMBOLS. Symbol extraction finds nothing in notes.md, a .env, a
+      // CSV, a design asset or any file whose language has no parser — so a symbol-only count
+      // reported "0 at risk" for a worktree whose entire content was an untracked file. That is
+      // precisely the case this product exists for (the marquee anecdote is an agent deleting
+      // worktrees that "only contained untracked files"), and `gate` already refused to call it
+      // safe. The report must not contradict the guard: uncommitted FILES are risk on their own,
+      // whether or not a parser can see inside them.
+      const uncommittedFileCount = w.uncommitted?.count ?? 0;
+      const atRiskSymbols = byLayer.uncommitted.length + byLayer.untracked.length;
+      const atRisk = Math.max(atRiskSymbols, uncommittedFileCount);
 
       return {
         id: w.id,
@@ -157,6 +167,8 @@ export function uniqueWork(scanResult) {
         uniqueSymbols,
         byLayer,
         uncommittedOnlyCount: atRisk,
+        uncommittedFileCount,
+        atRiskSymbolCount: atRiskSymbols,
         committedFiles: w.committed.count,
         verdict:
           atRisk > 0 ? 'unique-work-uncommitted'
@@ -192,12 +204,28 @@ export function safeToDelete(scanResult, unique = null) {
     if (u && u.uniqueSymbolCount > 0) reasons.push(`${u.uniqueSymbolCount} symbol(s) found nowhere else`);
     if (w.locked) reasons.push(`locked${w.lockReason ? `: ${w.lockReason}` : ''}`);
 
+    // GITIGNORED CONTENT DOWNGRADES THE VERDICT, it does not silently vanish from it.
+    // git does not track ignored files, so holt cannot prove anything about them — but deleting
+    // the worktree destroys them all the same. A `.env` of live credentials or a hand-patched
+    // dependency was being called "provably nothing to lose". Recognisable build output is
+    // already filtered out upstream, so what reaches here is content a human plausibly wants.
+    const ignoredCount = w.ignored?.count ?? 0;
+    if (ignoredCount > 0) {
+      const sample = (w.ignored.files ?? []).slice(0, 3).join(', ');
+      reasons.push(`${ignoredCount} gitignored file(s) holt cannot verify${sample ? ` (e.g. ${sample})` : ''}`);
+    }
+
     return {
       id: w.id,
       path: w.path,
       family: w.family,
       safe: reasons.length === 0,
-      confidence: scanResult.strictReadOnly ? 'approximate' : 'measured',
+      // 'unverifiable' is distinct from 'measured': everything git CAN see is clean, but ignored
+      // content means holt did not have the evidence to call it disposable.
+      confidence: ignoredCount > 0 && reasons.length === 1
+        ? 'unverifiable'
+        : scanResult.strictReadOnly ? 'approximate' : 'measured',
+      ignoredFiles: ignoredCount ? (w.ignored.files ?? []).slice(0, 10) : undefined,
       reasons: reasons.length ? reasons : ['no committed delta, no uncommitted changes, no unique symbols'],
     };
   }).sort((a, b) => Number(b.safe) - Number(a.safe));
@@ -625,6 +653,10 @@ export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups
     edges.push({
       type: 'collision', source: c.a, target: c.b,
       weight: c.sharedFileCount, severity: c.severity, kind: c.kind, why: c.why,
+      // The contested content itself: a graph that only says "these two fight" is a picture;
+      // one that says WHICH symbol and WHICH file they fight over is a decision aid.
+      symbols: (c.sharedSymbols ?? []).slice(0, 8),
+      files: (c.sharedFiles ?? []).slice(0, 8),
     });
   }
   for (const d of dups) {
@@ -632,6 +664,7 @@ export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups
       type: 'duplicate', source: d.a, target: d.b,
       weight: d.sharedCount, similarity: Number(d.similarity.toFixed(3)),
       classification: d.classification,
+      symbols: (d.sharedSymbols ?? []).slice(0, 8),
     });
   }
 

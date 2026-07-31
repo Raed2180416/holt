@@ -120,7 +120,13 @@ const DESTRUCTIVE = [
 
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+remove\\s+(?:(?:--force|-f)\\s+)*(?<target>[^\\s;|&]+)`), kind: 'git worktree remove' },
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+prune\\b`), kind: 'git worktree prune', all: true },
-  { re: /\brm\s+(?:-[a-zA-Z]+\s+)*(?<target>[^\s;|&]*(?:worktree|\.worktrees|\bwt[-_/])[^\s;|&]*)/, kind: 'rm of a worktree path' },
+  // MATCH ANY rm TARGET, then let resolution decide. This rule previously required the path to
+  // contain 'worktree', '.worktrees' or 'wt' — so `rm -rf ../my-feature`, the most natural way to
+  // delete a worktree, sailed straight through the one defence holt has against rm (git's lock
+  // cannot stop a filesystem delete). Broadening is safe because the target is resolved against
+  // the actual worktree list below: a path that is not a worktree finds nothing and is allowed,
+  // so `rm -rf node_modules` and `rm -rf dist` are unaffected.
+  { re: /\brm\s+(?:-[a-zA-Z]+\s+)*(?<target>[^\s;|&]+)/, kind: 'rm of a worktree path' },
 ];
 
 export function classifyCommand(command) {
@@ -147,6 +153,27 @@ function findWorkstream(report, target, cwd) {
   return report.safe.find((s) => s.id === base || s.id.endsWith(`/${base}`)) ?? null;
 }
 
+
+/**
+ * Is this rm target actually a registered worktree? One `git worktree list` call, so the broad
+ * rm rule costs nothing on the overwhelmingly common case of deleting build output.
+ */
+async function targetIsWorktree(target, cwd) {
+  const abs = path.resolve(cwd || process.cwd(), target);
+  const r = await git(['worktree', 'list', '--porcelain'], { cwd }).catch(() => null);
+  if (!r || r.code !== 0) return true; // cannot tell -> fall through to the full check, never skip silently
+  for (const line of r.stdout.split('\n')) {
+    if (!line.startsWith('worktree ')) continue;
+    const wt = path.resolve(line.slice('worktree '.length).trim());
+    // Dangerous iff the target IS a worktree root, or CONTAINS one (deleting a parent directory
+    // takes the worktrees under it with it). Deleting something INSIDE a worktree — the common
+    // `rm -rf node_modules` — is ordinary file work and must stay allowed; treating it as
+    // destruction would flag every delete in the repo, since the repo root is itself a worktree.
+    if (wt === abs || wt.startsWith(abs + path.sep)) return true;
+  }
+  return false;
+}
+
 /* --------------------------------------------------------- neutral verdicts ---- */
 
 /**
@@ -159,6 +186,16 @@ function findWorkstream(report, target, cwd) {
 export async function assessCommand(command, cwd = process.cwd()) {
   const hit = classifyCommand(command);
   if (!hit) return { decision: 'allow', reason: null, kind: null, targets: [] };
+
+  // CHEAP PRE-CHECK before the expensive scan. The rm rule matches any target so that
+  // `rm -rf ../my-feature` is caught, but that would otherwise make every `rm -rf node_modules`
+  // in an agent session pay for a full repository scan. `git worktree list` is one fast call:
+  // if the target is not a worktree at all, there is nothing holt can protect and we allow it
+  // immediately. Only paths that ARE worktrees reach the real analysis.
+  if (hit.kind === 'rm of a worktree path' && hit.target) {
+    const isWt = await targetIsWorktree(hit.target, cwd);
+    if (!isWt) return { decision: 'allow', reason: null, kind: null, targets: [] };
+  }
 
   let report;
   try {

@@ -171,6 +171,13 @@ const GENERATED = [
   /(^|\/)node_modules\//, /(^|\/)\.git\//, /(^|\/)target\//, /(^|\/)dist\//, /(^|\/)build\//,
   /(^|\/)__pycache__\//, /(^|\/)\.venv\//, /(^|\/)venv\//, /(^|\/)vendor\//,
   /(^|\/)\.next\//, /(^|\/)coverage\//, /\.min\.(js|css)$/, /(^|\/)\.pytest_cache\//,
+  // OS and editor droppings, and plainly regenerable output. Without these, a single .DS_Store —
+  // created by merely opening a folder in Finder — would make every worktree on a Mac
+  // permanently unclearable, which is the "safety that freezes the tool" failure mode.
+  /(^|\/)\.DS_Store$/, /(^|\/)Thumbs\.db$/, /(^|\/)desktop\.ini$/, /(^|\/)\.AppleDouble\//,
+  /(^|\/)\.idea\//, /(^|\/)\.cache\//, /(^|\/)\.turbo\//, /(^|\/)\.parcel-cache\//,
+  /(^|\/)\.gradle\//, /(^|\/)\.terraform\//, /(^|\/)tmp\//, /(^|\/)temp\//,
+  /(^|\/)logs?\//, /\.log$/, /(^|\/)\.tox\//, /(^|\/)\.mypy_cache\//, /(^|\/)\.ruff_cache\//,
   // Dependency manifests. A lockfile records what a resolver decided, not what an agent wrote.
   // Left in, they contribute thousands of package-name "symbols" — measured on a real repo,
   // producing findings like `object:node_modules/@ts-morph/common` presented as unique work.
@@ -180,6 +187,37 @@ const GENERATED = [
 ];
 export function looksGenerated(p) {
   return GENERATED.some((re) => re.test(p));
+}
+
+
+/**
+ * Gitignored content a worktree is carrying.
+ *
+ * holt's analysis is built on git's view, and git deliberately does not track ignored files — so
+ * holt cannot prove anything about them. That is fine for ANALYSIS, and it is stated as a limit.
+ * It is NOT fine for DELETION: a worktree whose only extra content is a `.env` full of live
+ * credentials, or a node_modules with a hand-applied patch, was being called "provably nothing to
+ * lose" and removed. Absence of evidence is not evidence of absence — the same rule the rest of
+ * this file follows.
+ *
+ * Recognisable build output (node_modules, dist, target, caches — the GENERATED list) is excluded,
+ * because refusing to clean a worktree merely for having a dist/ would make the command useless.
+ * What remains is content a human plausibly cares about, and its presence downgrades the verdict
+ * from "provably disposable" to "holt cannot verify this".
+ */
+async function ignoredContent(wtPath, { timeout }) {
+  const r = await git(['status', '--porcelain', '-z', '--ignored=matching', '--untracked-files=all'],
+    { cwd: wtPath, timeout });
+  if (r.code !== 0) return { files: [], how: 'ignored-probe-failed', error: r.stderr?.trim() };
+  const files = [];
+  for (const entry of r.stdout.split('\0')) {
+    if (!entry || entry.length < 4) continue;
+    if (entry.slice(0, 2) !== '!!') continue;      // '!!' marks an ignored path
+    const p = entry.slice(3);
+    if (!p || looksGenerated(p) || p.endsWith('/')) continue;
+    files.push(p);
+  }
+  return { files: files.sort(), how: 'status --ignored' };
 }
 
 /** Phase 1: file-level deltas for one workstream. */
@@ -219,7 +257,7 @@ async function scanFiles(ws, ctx) {
   result.head = headOid;
 
   try {
-    const [committed, uncommitted] = await Promise.all([
+    const [committed, uncommitted, ignored] = await Promise.all([
       committedDelta(root, base.oid, headOid, { strictReadOnly, timeout }),
       // jj snapshots the working copy into `@` automatically, so under jj there IS no separate
       // uncommitted layer — the thing git cannot relate across worktrees simply does not exist.
@@ -228,6 +266,10 @@ async function scanFiles(ws, ctx) {
       ws.vcs === 'jj'
         ? Promise.resolve({ files: [], untracked: [], how: 'jj-snapshot (working copy is part of @)' })
         : uncommittedDelta(ws.path, { timeout }),
+      // Ignored content cannot be analysed, but it CAN be destroyed — so it must be seen.
+      ws.vcs === 'jj'
+        ? Promise.resolve({ files: [], how: 'n/a (jj)' })
+        : ignoredContent(ws.path, { timeout }),
     ]);
 
     // FAIL-CLOSED ON INSTRUMENT FAILURE. Found by probing partial (blobless) clones: when
@@ -258,6 +300,11 @@ async function scanFiles(ws, ctx) {
     result.uncommitted = {
       files: uFiles, untracked: uUntracked, count: uFiles.length + uUntracked.length,
       how: uncommitted.how,
+    };
+    result.ignored = {
+      files: (ignored?.files ?? []).slice(0, 50),
+      count: ignored?.files?.length ?? 0,
+      how: ignored?.how ?? 'not-run',
     };
     result.touched = [...new Set([...cFiles, ...uFiles, ...uUntracked])].sort();
     result.stats = {

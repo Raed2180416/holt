@@ -142,7 +142,11 @@ async function heapJunk(wt, i) {
   }
   await write(wt, 'dist/bundle.min.js', `console.log(${'0,'.repeat(2000)}0);\n`);
   await write(wt, `logs/run-${i}.log`, `${'noise\n'.repeat(200)}`);
-  await write(wt, 'blob.bin', Buffer.alloc(4096, i % 256));
+  // Junk lives where junk actually lives. A stray gitignored blob at the repo ROOT is not junk
+  // to holt — it could be a model file or a local dataset — and holt now (correctly) refuses to
+  // call a worktree disposable while carrying unverifiable ignored content. Realistic build
+  // output belongs under a recognised cache path.
+  await write(wt, '.cache/blob.bin', Buffer.alloc(4096, i % 256));
 }
 
 async function main() {

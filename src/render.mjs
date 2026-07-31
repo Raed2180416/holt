@@ -163,7 +163,12 @@ export function renderRisk(report) {
   const out = [renderHeader(report), ''];
   out.push(c('bold', 'UNIQUE WORK  —  what only exists here'));
   out.push('');
-  const rows = report.unique.filter((u) => u.uniqueSymbolCount > 0 || u.committedFiles > 0);
+  // Include FILE-level risk, not only symbol-level. A worktree whose entire content is an
+  // untracked notes.md has no extractable symbols, and filtering on symbols alone printed
+  // "Nothing unique anywhere" for exactly the case this tool exists to catch — while `gate`
+  // was simultaneously refusing to call it safe. The report must never contradict the guard.
+  const rows = report.unique.filter((u) => u.uniqueSymbolCount > 0 || u.committedFiles > 0
+    || u.uncommittedOnlyCount > 0);
   if (!rows.length) {
     out.push(c('green', '  Nothing unique anywhere. Every workstream is reproducible from base.'));
     out.push('');
@@ -173,7 +178,10 @@ export function renderRisk(report) {
   for (const u of rows.slice(0, 40)) {
     const flag = u.uncommittedOnlyCount > 0 ? c('red', '●') : u.uniqueSymbolCount > 0 ? c('yellow', '●') : c('grey', '●');
     out.push(
-      `  ${flag} ${pad(u.id, 32)} ${padStart(u.uniqueSymbolCount, 5)} ${padStart(u.uncommittedOnlyCount, 7)}  ${c('grey', u.verdict)}`,
+      `  ${flag} ${pad(u.id, 32)} ${padStart(u.uniqueSymbolCount, 5)} ${padStart(u.uncommittedOnlyCount, 7)}  ${c('grey', u.verdict)}`
+      + (u.uniqueSymbolCount === 0 && u.uncommittedFileCount > 0
+        ? c('grey', `\n      ${u.uncommittedFileCount} uncommitted file(s) with no parseable symbols — still lost if deleted`)
+        : ''),
     );
   }
   out.push('');

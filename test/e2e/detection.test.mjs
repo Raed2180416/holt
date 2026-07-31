@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { standardFixture, emptyFixture } from '../fixtures.mjs';
+import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze, contextDigest } from '../../src/analyze.mjs';
@@ -285,4 +285,72 @@ test('graph: every edge references nodes that exist', async (t) => {
   }
   assert.ok(report.graph.edges.some((e) => e.type === 'collision'), 'expected a collision edge');
   assert.ok(report.graph.edges.some((e) => e.type === 'duplicate'), 'expected a duplicate edge');
+});
+
+test('HEADLINE CLAIM: a worktree whose only content is an untracked file with NO symbols is AT RISK', async (t) => {
+  // The product's marquee anecdote is an agent deleting worktrees that "only contained untracked
+  // files". Symbol extraction finds nothing in notes.md / .env / a CSV / an image, so a
+  // symbol-only count reported "0 at risk" and `holt risk` printed "Nothing unique anywhere" for
+  // exactly that case — while `gate` was refusing to call it safe. The report must never
+  // contradict the guard.
+  const fx = await newRepo('file-only-risk');
+  t.after(() => fx.cleanup());
+
+  const wt = await fx.worktree('notes-only');
+  await fx.write('research.md', '# findings that exist nowhere else\n', wt);
+
+  const { report } = await inspectFixture(fx);
+  const u = report.unique.find((x) => x.id === 'notes-only' || x.id.endsWith('/notes-only'));
+  assert.ok(u, 'the workstream must appear in the unique report');
+  assert.ok(u.uncommittedOnlyCount > 0,
+    `a symbol-less untracked file must still count as at-risk: ${JSON.stringify(u)}`);
+  assert.equal(u.verdict, 'unique-work-uncommitted');
+
+  // And the safety verdict must agree with the counter — both directions.
+  const s = report.safe.find((x) => x.id === u.id);
+  assert.equal(s.safe, false, 'and it must never be reported safe to delete');
+
+  // The rendered report must not claim there is nothing unique.
+  const { renderRisk } = await import('../../src/render.mjs');
+  const text = renderRisk(report);
+  assert.ok(!/Nothing unique anywhere/.test(text),
+    'the human-readable report must not contradict the guard');
+  assert.match(text, /notes-only/, 'and must name the workstream at risk');
+});
+
+test('SAFETY: a worktree carrying gitignored content is NEVER "provably nothing to lose"', async (t) => {
+  // git does not track ignored files, so holt cannot prove anything about them — but deleting
+  // the worktree destroys them anyway. A .env of live credentials was being reported disposable.
+  const fx = await newRepo('ignored-secrets');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', '.env\nnode_modules/\n');
+  await fx.commit('add gitignore');
+
+  const wt = await fx.worktree('has-secrets');
+  await fx.write('.env', 'STRIPE_SECRET=sk_live_realmoney\n', wt);
+
+  const { report } = await inspectFixture(fx);
+  const s = report.safe.find((x) => x.id === 'has-secrets' || x.id.endsWith('/has-secrets'));
+  assert.ok(s, 'the workstream must be reported');
+  assert.equal(s.safe, false, `a worktree holding a gitignored .env must not be called disposable: ${JSON.stringify(s)}`);
+  assert.equal(s.confidence, 'unverifiable', 'and the confidence must say WHY it is not measured');
+  assert.match(s.reasons.join(' '), /gitignored/, 'the reason must name the cause');
+  assert.match(s.reasons.join(' '), /\.env/, 'and name the actual file, so the user can judge');
+});
+
+test('SAFETY: recognisable build output does NOT block cleanup — the gate must stay usable', async (t) => {
+  // The negative control. If ANY ignored file blocked deletion, every worktree with a dist/ or
+  // node_modules/ would be unclearable and the command would be useless.
+  const fx = await newRepo('ignored-build');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', 'node_modules/\ndist/\n');
+  await fx.commit('add gitignore');
+
+  const wt = await fx.worktree('just-build-output');
+  await fx.write('node_modules/left-pad/index.js', 'module.exports=1\n', wt);
+  await fx.write('dist/bundle.js', 'console.log(1)\n', wt);
+
+  const { report } = await inspectFixture(fx);
+  const s = report.safe.find((x) => x.id === 'just-build-output' || x.id.endsWith('/just-build-output'));
+  assert.equal(s.safe, true, `build output alone must remain disposable: ${JSON.stringify(s)}`);
 });
