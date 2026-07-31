@@ -230,6 +230,14 @@ const MUTATIONS = [
     tests: ['test/unit/server.test.mjs'],
   },
   {
+    id: 'idempotency-race',
+    defect: 'the event lock is bypassed, so concurrent deliveries of one payment can mint two licenses',
+    file: 'server/index.mjs',
+    find: '        const outcome = await withEventLock(event.id, dataFile, async () => {',
+    replace: '        const outcome = await (async () => {',
+    tests: ['test/e2e/purchase-path.test.mjs'],
+  },
+  {
     id: 'resend-rate-limit-open',
     defect: 'the resend endpoint loses its rate limit — a mail-sending endpoint becomes a spam cannon at our own customers',
     file: 'server/index.mjs',

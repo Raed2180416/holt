@@ -113,6 +113,37 @@ export function appendRecord(record, file = DATA) {
   }
 }
 
+/**
+ * A cross-process lock so two webhook deliveries of the SAME event cannot both pass the
+ * "already issued?" check and mint twice. `wx` (O_CREAT|O_EXCL) is atomic on POSIX and Windows:
+ * exactly one caller creates the lockfile, the rest spin briefly. The lock is per-process-safe
+ * for this single-instance service; a stale lock older than its TTL is reclaimed so a crash
+ * mid-issue cannot wedge the service forever.
+ */
+export async function withEventLock(eventId, file, fn, { ttlMs = 30_000, now = Date.now } = {}) {
+  const safe = String(eventId ?? 'noid').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 120);
+  const lockPath = `${file}.${safe}.lock`;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try {
+      const fd = fs.openSync(lockPath, 'wx');
+      fs.writeSync(fd, String(now()));
+      fs.closeSync(fd);
+      try { return await fn(); }
+      finally { try { fs.rmSync(lockPath); } catch { /* already gone */ } }
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      // Reclaim a stale lock left by a crashed request.
+      try {
+        const held = Number(fs.readFileSync(lockPath, 'utf8'));
+        if (Number.isFinite(held) && now() - held > ttlMs) { fs.rmSync(lockPath); continue; }
+      } catch { /* race on read; fall through to wait */ }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+  throw new Error(`could not acquire the event lock for ${safe} — another delivery is holding it`);
+}
+
 export function readRecords(file = DATA) {
   let raw;
   try { raw = fs.readFileSync(file, 'utf8'); } catch { return { records: [], torn: 0 }; }
@@ -440,26 +471,32 @@ export function createServer({ env = process.env, dataFile = DATA } = {}) {
         let event;
         try { event = JSON.parse(raw); } catch { return send(400, { ok: false, reason: 'body is not JSON' }); }
 
-        const already = findByEvent(event.id, dataFile);
-        if (already) return send(200, { ok: true, idempotent: true, action: already.action });
+        // The check-then-mint must be atomic against a concurrent delivery of the SAME event, or
+        // Stripe's own retry storm could mint two licenses for one payment. The lock is keyed on
+        // the event id, so unrelated events never contend.
+        const outcome = await withEventLock(event.id, dataFile, async () => {
+          const already = findByEvent(event.id, dataFile);
+          if (already) return { code: 200, body: { ok: true, idempotent: true, action: already.action } };
 
-        const result = licenseForEvent(event, signingKey);
-        if (result.action !== 'issue') {
-          appendRecord({ eventId: event.id, type: event.type, action: result.action, reason: result.reason }, dataFile);
-          // A refusal is still a 200: retrying will not change the outcome, and Stripe should
-          // stop. The ledger and /health are where a human sees it.
-          return send(200, { ok: true, action: result.action, reason: result.reason });
-        }
+          const result = licenseForEvent(event, signingKey);
+          if (result.action !== 'issue') {
+            appendRecord({ eventId: event.id, type: event.type, action: result.action, reason: result.reason }, dataFile);
+            // A refusal is still a 200: retrying will not change the outcome, and Stripe should
+            // stop. The ledger and /health are where a human sees it.
+            return { code: 200, body: { ok: true, action: result.action, reason: result.reason } };
+          }
 
-        appendRecord({
-          eventId: event.id, type: event.type, action: 'issue', tier: result.tier,
-          licenseId: result.claims.id, email: result.email, customer: result.customer,
-          exp: result.claims.exp, token: result.token,
-        }, dataFile);
+          appendRecord({
+            eventId: event.id, type: event.type, action: 'issue', tier: result.tier,
+            licenseId: result.claims.id, email: result.email, customer: result.customer,
+            exp: result.claims.exp, token: result.token,
+          }, dataFile);
 
-        const delivery = await deliverLicense(result, { env }).catch((e) => ({ delivered: false, reason: e.message }));
-        appendRecord({ eventId: event.id, action: 'deliver', licenseId: result.claims.id, ...delivery }, dataFile);
-        return send(200, { ok: true, action: 'issue', licenseId: result.claims.id, delivered: delivery.delivered });
+          const delivery = await deliverLicense(result, { env }).catch((e) => ({ delivered: false, reason: e.message }));
+          appendRecord({ eventId: event.id, action: 'deliver', licenseId: result.claims.id, ...delivery }, dataFile);
+          return { code: 200, body: { ok: true, action: 'issue', licenseId: result.claims.id, delivered: delivery.delivered } };
+        });
+        return send(outcome.code, outcome.body);
       }
 
       return send(404, { ok: false, reason: 'not found' });

@@ -164,3 +164,17 @@ test('E2E: the resend endpoint is rate limited — a mail endpoint cannot be a s
   assert.ok(codes.includes(429), `after a burst, some requests must be rate-limited (got ${codes.join(',')})`);
   assert.ok(codes.filter((c) => c === 200).length <= 5, 'only a small initial burst is allowed through');
 });
+
+test('E2E CONCURRENCY: many simultaneous deliveries of one event mint exactly one license', async (t) => {
+  const { base, dataFile } = await startServer(t);
+  const { body, sig } = signedWebhook({
+    id: 'evt_race', type: 'checkout.session.completed',
+    data: { object: { customer_details: { email: 'race@acme.test' }, metadata: { tier: 'team' }, line_items: { data: [{ quantity: 1, price: { id: 'price_team' } }] } } },
+  });
+  const post = () => fetch(`${base}/webhooks/stripe`, { method: 'POST', headers: { 'stripe-signature': sig }, body });
+  // Fire 12 concurrent identical deliveries — the Stripe-retry-storm worst case.
+  const results = await Promise.all(Array.from({ length: 12 }, post));
+  for (const r of results) assert.equal(r.status, 200);
+  const issued = readLedger(dataFile).filter((x) => x.action === 'issue');
+  assert.equal(issued.length, 1, `exactly one license despite 12 concurrent deliveries, got ${issued.length}`);
+});
