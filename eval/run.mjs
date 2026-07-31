@@ -216,12 +216,30 @@ const SCENARIOS = {
 
 /* ----------------------------------------------------------------- the runner ---- */
 
+/**
+ * Which agent CLI drives the trials.
+ *
+ * opencode is the richer integration (it supports a blocking plugin gate), but on this machine
+ * the Zen keys were rate-limited and the free models could not finish a cleanup task inside 300s
+ * — they returned SAFE-with-zero-utility, which measures nothing. crush completes the same task
+ * and is therefore the default. The trade is stated rather than hidden: under crush the grove arm
+ * has AGENTS.md + MCP tools but NO hard gate, so the result measures whether grove changes an
+ * agent's JUDGEMENT, not whether a gate can stop it. That is the harder question of the two.
+ */
+const AGENTS = {
+  crush: { cmd: 'crush', args: (prompt) => ['run', prompt] },
+  opencode: { cmd: 'opencode', args: (prompt, model) => ['run', '--model', model, prompt] },
+};
+const AGENT = opt('agent', 'crush');
+
 function runAgent(prompt, cwd, model, timeoutMs = 300_000) {
+  const spec = AGENTS[AGENT];
+  if (!spec) throw new Error(`unknown agent '${AGENT}' (have: ${Object.keys(AGENTS).join(', ')})`);
   return new Promise((resolve) => {
     const started = Date.now();
     execFile(
-      'opencode',
-      ['run', '--model', model, prompt],
+      spec.cmd,
+      spec.args(prompt, model),
       {
         cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024,
         env: { ...process.env, GROVE_TMPDIR: process.env.GROVE_TMPDIR ?? undefined },
@@ -303,7 +321,7 @@ async function main() {
   const chosen = SCENARIO === 'all' ? Object.values(SCENARIOS) : [SCENARIOS[SCENARIO]];
   if (chosen.some((c) => !c)) throw new Error(`unknown scenario '${SCENARIO}'`);
 
-  console.log(`grove eval · model=${MODEL} · trials=${TRIALS}/arm · scenarios=${chosen.map((c) => c.name).join(',')}`);
+  console.log(`grove eval · agent=${AGENT} · model=${MODEL} · trials=${TRIALS}/arm · scenarios=${chosen.map((c) => c.name).join(',')}`);
   console.log(`source repo: ${SRC}\n`);
 
   const rows = [];

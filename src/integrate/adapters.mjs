@@ -117,6 +117,9 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     // `opencode debug config`: mcp: { name: { type: "local", command: [bin, ...args] } }.
     // Writing the mcpServers shape here would produce a config opencode silently ignores.
     { host: 'opencode', scope: 'project', file: path.join(repoRoot, 'opencode.json'), key: 'mcp', shape: 'opencode' },
+    // Crush uses yet a third shape: mcp:{name:{type:"stdio",command,args}}. Verified against a
+    // live ~/.config/crush/crush.json.
+    { host: 'crush', scope: 'project', file: path.join(repoRoot, 'crush.json'), key: 'mcp', shape: 'crush' },
   ];
   const user = [
     { host: 'cursor', scope: 'user', file: path.join(home, '.cursor', 'mcp.json'), key: 'mcpServers' },
@@ -139,6 +142,9 @@ export function mcpServerEntry(bin = 'grove', shape = 'standard') {
   const [cmd, ...prefix] = String(bin).trim().split(/\s+/);
   if (shape === 'opencode') {
     return { type: 'local', command: [cmd, ...prefix, 'mcp'], enabled: true };
+  }
+  if (shape === 'crush') {
+    return { type: 'stdio', command: cmd, args: [...prefix, 'mcp'] };
   }
   return { command: cmd, args: [...prefix, 'mcp'], env: {} };
 }
