@@ -1,0 +1,208 @@
+/**
+ * grove — the CLI surface itself.
+ *
+ * THIS FILE EXISTS BECAUSE 157 TESTS PASSED WITH THREE COMMANDS COMPLETELY UNWIRED.
+ *
+ * `protect`, `rescue` and `clean` were implemented, exported, and covered by 19 passing tests —
+ * and `grove protect` printed "unknown command", because a scripted edit that was supposed to add
+ * the dispatch silently failed to match. Every test called the FUNCTIONS directly, so nothing
+ * noticed that the only interface a user or an agent actually touches was broken.
+ *
+ * A unit test proves the logic. It says nothing about whether the thing is reachable. So this
+ * suite runs the real binary as a subprocess, for every command, and checks exit codes — because
+ * the exit code is the contract that scripts and hooks chain on:
+ *
+ *     grove rescue X && git worktree remove X
+ *
+ * If `rescue` exits 0 on an unverified capture, that chain destroys work.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { newRepo } from '../fixtures.mjs';
+
+const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'grove.mjs');
+
+function grove(args, cwd) {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [BIN, ...args], {
+      cwd, timeout: 180_000, maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, NO_COLOR: '1' },
+    }, (err, stdout, stderr) => resolve({
+      code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''),
+    }));
+  });
+}
+
+/** A repo with one disposable and one work-holding worktree. */
+async function fixture(label) {
+  const fx = await newRepo(label);
+  await fx.worktree('spent');
+  const holds = await fx.worktree('holds');
+  await fx.write('src/valuable.js', 'export function CLI_VALUABLE() { return 1; }\n', holds);
+  return fx;
+}
+
+test('CLI: every command is REACHABLE and exits 0', async (t) => {
+  const fx = await fixture('cli-reach');
+  t.after(() => fx.cleanup());
+
+  // The exact failure this file was written for: a command that exists in src/ but was never
+  // wired into the dispatcher answers "unknown command".
+  const readOnly = [
+    ['status'], ['risk'], ['collisions'], ['duplicates'], ['plan'],
+    ['impact'], ['graph'], ['doctor'], ['brief'], ['rescued'],
+    ['context', 'holds'],
+  ];
+  for (const args of readOnly) {
+    const r = await grove([...args, '--cwd', fx.root, '--json'], fx.root);
+    assert.equal(r.code, 0, `grove ${args.join(' ')} exited ${r.code}: ${r.stderr.slice(0, 200)}`);
+    assert.ok(!/unknown command/.test(r.stderr + r.stdout),
+      `grove ${args.join(' ')} is not wired into the dispatcher`);
+  }
+});
+
+test('CLI: the MUTATING commands are reachable too', async (t) => {
+  const fx = await fixture('cli-mutating');
+  t.after(() => fx.cleanup());
+
+  for (const args of [['protect', '--dry-run'], ['clean'], ['unprotect']]) {
+    const r = await grove([...args, '--cwd', fx.root], fx.root);
+    assert.equal(r.code, 0, `grove ${args.join(' ')} exited ${r.code}: ${r.stderr.slice(0, 200)}`);
+    assert.ok(!/unknown command/.test(r.stderr + r.stdout),
+      `grove ${args.join(' ')} is not wired`);
+  }
+});
+
+test('CLI: --json output is parseable for every command that claims it', async (t) => {
+  const fx = await fixture('cli-json');
+  t.after(() => fx.cleanup());
+
+  for (const args of [['status'], ['risk'], ['collisions'], ['duplicates'], ['plan'], ['impact'], ['graph']]) {
+    const r = await grove([...args, '--cwd', fx.root, '--json'], fx.root);
+    assert.doesNotThrow(() => JSON.parse(r.stdout),
+      `grove ${args.join(' ')} --json produced unparseable output: ${r.stdout.slice(0, 200)}`);
+  }
+});
+
+/* ------------------------------------------------------------ exit codes ---- */
+
+test('CLI: `gate` exit codes are the documented contract', async (t) => {
+  const fx = await fixture('cli-gate');
+  t.after(() => fx.cleanup());
+
+  const disposable = await grove(['gate', 'spent', '--cwd', fx.root], fx.root);
+  assert.equal(disposable.code, 0, 'disposable must exit 0');
+
+  const holding = await grove(['gate', 'holds', '--cwd', fx.root], fx.root);
+  assert.equal(holding.code, 1, 'holds unique work must exit 1 — scripts branch on this');
+
+  const missing = await grove(['gate', 'no-such-thing', '--cwd', fx.root], fx.root);
+  assert.equal(missing.code, 2, 'unknown must exit 2, never 0');
+});
+
+test('CLI: a FAILED rescue must exit non-zero', async (t) => {
+  const fx = await newRepo('cli-rescue-exit');
+  t.after(() => fx.cleanup());
+
+  const wt = await fx.worktree('nested-holder');
+  await fx.write('src/normal.js', 'export function NORMAL() {}\n', wt);
+  // A nested git repo makes the capture genuinely partial.
+  await fs.mkdir(path.join(wt, 'nested'), { recursive: true });
+  await new Promise((res) => execFile('git', ['init', '-q'], { cwd: path.join(wt, 'nested') }, res));
+  await fs.writeFile(path.join(wt, 'nested', 'inner.txt'), 'INNER\n');
+
+  const r = await grove(['rescue', 'nested-holder', '--cwd', fx.root], fx.root);
+  // THE CONTRACT: `grove rescue X && git worktree remove X` must STOP here. Exiting 0 on an
+  // unverified capture would make that chain destroy work.
+  assert.equal(r.code, 1, `an incomplete rescue must exit non-zero, got ${r.code}: ${r.stdout.slice(0, 200)}`);
+  const payload = JSON.parse(r.stdout);
+  assert.equal(payload.ok, false);
+  assert.match(payload.error, /INCOMPLETE/);
+});
+
+test('CLI: a successful rescue exits 0 and reports a verified ref', async (t) => {
+  const fx = await fixture('cli-rescue-ok');
+  t.after(() => fx.cleanup());
+
+  const r = await grove(['rescue', 'holds', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 0, `a clean rescue must exit 0: ${r.stdout.slice(0, 200)}`);
+  const payload = JSON.parse(r.stdout);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.verified, true);
+  assert.match(payload.ref, /^refs\/grove\/rescue\//);
+});
+
+test('CLI: `rescue` with no id is an error, not a silent no-op', async (t) => {
+  const fx = await fixture('cli-rescue-noid');
+  t.after(() => fx.cleanup());
+
+  const r = await grove(['rescue', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /needs a workstream id/);
+});
+
+test('CLI: an unknown command exits non-zero and says so', async (t) => {
+  const fx = await fixture('cli-unknown');
+  t.after(() => fx.cleanup());
+
+  const r = await grove(['definitely-not-a-command', '--cwd', fx.root], fx.root);
+  assert.notEqual(r.code, 0);
+  assert.match(r.stderr, /unknown command/);
+});
+
+test('CLI: a non-repository exits 2 rather than crashing', async () => {
+  const r = await grove(['status', '--cwd', '/nonexistent/definitely/not/a/repo'], '/');
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /not a git repository/);
+});
+
+/* --------------------------------------------------- destructive defaults ---- */
+
+test('CLI: `clean` does NOT delete without --apply', async (t) => {
+  const fx = await fixture('cli-clean-default');
+  t.after(() => fx.cleanup());
+
+  const r = await grove(['clean', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 0);
+  const payload = JSON.parse(r.stdout);
+  assert.equal(payload.dryRun, true, 'clean must be dry-run by default at the CLI too');
+
+  // And the worktree is still there.
+  assert.ok(await fs.stat(fx.wt('spent')).then(() => true, () => false),
+    'dry-run must not have deleted anything');
+});
+
+test('CLI: `protect --dry-run` locks nothing', async (t) => {
+  const fx = await fixture('cli-protect-dry');
+  t.after(() => fx.cleanup());
+
+  const r = await grove(['protect', '--dry-run', '--cwd', fx.root], fx.root);
+  const payload = JSON.parse(r.stdout);
+  assert.equal(payload.dryRun, true);
+
+  // A dry run must leave the worktree removable.
+  const rm = await new Promise((res) => {
+    execFile('git', ['worktree', 'remove', '--force', fx.wt('holds')], { cwd: fx.root },
+      (err) => res(err ? 1 : 0));
+  });
+  assert.equal(rm, 0, 'protect --dry-run must not have actually locked anything');
+});
+
+test('CLI: --help lists every command that exists', async (t) => {
+  const fx = await fixture('cli-help');
+  t.after(() => fx.cleanup());
+
+  const r = await grove(['--help'], fx.root);
+  for (const cmd of [
+    'status', 'risk', 'collisions', 'duplicates', 'context', 'plan', 'impact',
+    'graph', 'gate', 'doctor', 'protect', 'rescue', 'clean', 'integrate', 'brief', 'mcp',
+  ]) {
+    assert.match(r.stdout, new RegExp(`\\b${cmd}\\b`),
+      `--help does not mention '${cmd}' — an undocumented command is an unreachable one`);
+  }
+});

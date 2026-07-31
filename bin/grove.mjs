@@ -23,6 +23,7 @@ import { renderHtml } from '../src/graph-html.mjs';
 import { assessCommand, buildBrief } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import { integrate, detectHosts, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
+import { protect, unprotect, rescue, rescues, clean } from '../src/actions.mjs';
 
 const USAGE = `
 grove — the landing layer for parallel agent work
@@ -41,6 +42,15 @@ COMMANDS
   graph               the relationship graph  [--html <file>]
   gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
   doctor              environment and backend check
+
+ACTING  (these MUTATE the repo; everything above is read-only)
+  protect             git-lock every workstream holding unique work   [--dry-run]
+                      a locked worktree REFUSES 'git worktree remove --force'
+  unprotect [<id>]    release grove's locks (never touches locks it did not place)
+  rescue <id>         capture unique work to a verifiable ref  [--release] [--dry-run]
+                      exits non-zero if the capture cannot be verified
+  rescued             list every rescue taken in this repo
+  clean               remove provably-disposable worktrees + branches  [--apply]
 
 AGENT INTEGRATION
   integrate           wire grove into every agent found here (AGENTS.md + MCP + hooks)
@@ -71,6 +81,7 @@ function parseArgs(argv) {
     strictReadOnly: false, concurrency: 8, includePrimary: false,
     deep: false, html: null, help: false,
     host: 'generic', command: null, bin: 'grove', global: false,
+    dryRun: false, apply: false, release: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -81,6 +92,9 @@ function parseArgs(argv) {
       case '--include-primary': opts.includePrimary = true; break;
       case '--global': opts.global = true; break;
       case '--deep': opts.deep = true; break;
+      case '--dry-run': opts.dryRun = true; break;
+      case '--apply': opts.apply = true; break;
+      case '--release': opts.release = true; break;
       case '-h': case '--help': opts.help = true; break;
       case '--base': opts.base = argv[++i]; break;
       case '--cwd': opts.cwd = argv[++i]; break;
@@ -114,6 +128,15 @@ async function buildReport(opts) {
   const scanned = await scan(disc, opts);
   const report = await analyze(scanned, opts);
   return { report, scanned };
+}
+
+/**
+ * Render an action result. Always JSON: these are the outputs a script or an agent chains on,
+ * and a prose summary of a destructive operation is harder to act on than the facts.
+ */
+function cmdAction(result) {
+  emitJson(result);
+  return result;
 }
 
 async function cmdDoctor(opts) {
@@ -278,6 +301,28 @@ async function main() {
   }
   if (cmd === 'doctor') return cmdDoctor(opts);
   if (cmd === 'hook') return cmdHook(opts);
+
+  // The MUTATING commands, dispatched before buildReport() because each runs its own assessment.
+  // These were once implemented, exported and covered by 19 passing tests while `grove protect`
+  // printed "unknown command" — nothing exercised the CLI. test/e2e/cli.test.mjs now does.
+  if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));
+  if (cmd === 'unprotect') return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
+  if (cmd === 'rescued') return void cmdAction(await rescues(opts.cwd));
+  if (cmd === 'clean') return void cmdAction(await clean(opts.cwd, opts));
+  if (cmd === 'rescue') {
+    const target = opts._[1];
+    if (!target) {
+      process.stderr.write(paint('red', 'grove rescue: needs a workstream id\n'));
+      process.exit(2);
+    }
+    const r = await rescue(opts.cwd, target, opts);
+    cmdAction(r);
+    // An unverified capture MUST exit non-zero: a script chaining
+    //   grove rescue X && git worktree remove X
+    // has to stop here, or that chain destroys the work it was meant to save.
+    if (r.ok === false) process.exit(1);
+    return;
+  }
   if (cmd === 'brief') return cmdBrief(opts);
   if (cmd === 'integrate') return cmdIntegrate(opts);
 
