@@ -29,10 +29,39 @@ jobs:
       # Known portability hazards already fixed by this matrix existing: URL.pathname vs
       # fileURLToPath (file:///C:/x -> /C:/x), and jj's JJ_CONFIG=/dev/null (jj is Rust; no
       # MSYS translation on Windows — os.devNull).
-      - run: node --test test/unit/safety.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs
+      # integration.test.mjs is here because it holds the guards that stop an agent destroying
+      # work in place — git reset --hard, clean -fd, checkout -- ., restore — plus the primary-tree
+      # scan and the no-git-identity rescue path. Every one of those is platform-sensitive (path
+      # separators, git's own behaviour, how a shell quotes), and they were being proven on Linux
+      # only while shipping to macOS and Windows users.
+      - run: node --test test/unit/safety.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs test/e2e/integration.test.mjs
       - run: node bin/holt.mjs doctor --json
       - name: the tool must run against its own repository on this OS
         run: node bin/holt.mjs status --json
+
+      # THE FIRST THING A USER DOES, PROVEN ON THEIR OS. The published install is a global install
+      # of the release tarball; it was verified in a Linux container and nowhere else, so the
+      # single most common failure mode for a Node CLI on Windows — a bin shim that does not
+      # resolve, or a path assumption that only holds under POSIX — could not have been caught.
+      - name: install the packed tarball globally and run it, as a user would
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --pack-destination "$RUNNER_TEMP" >/dev/null
+          TARBALL="$(ls "$RUNNER_TEMP"/holt-*.tgz | head -1)"
+          npm install -g "$TARBALL"
+          holt --version
+          # A directory that is NOT the holt checkout, so any reliance on the repo being present
+          # (relative optlib paths, fixtures, node_modules) fails here rather than at a user.
+          mkdir -p "$RUNNER_TEMP/victim" && cd "$RUNNER_TEMP/victim"
+          git init -q -b main .
+          git config user.email ci@holt.test && git config user.name CI
+          echo base > a.txt && git add -A && git commit -qm base
+          git worktree add -q --detach wt1
+          echo 'export function ONLY_COPY() {}' > wt1/only.js
+          holt status
+          holt risk --json > risk.json
+          node -e "const r=require('./risk.json');const u=(r.unique||r.workstreams||[]);if(!JSON.stringify(r).includes('wt1'))throw new Error('installed holt did not see the worktree: '+JSON.stringify(r).slice(0,300));console.log('  installed binary correctly analysed a fresh repo')"
 
   bare:
     name: no optional backends (degradation path)
