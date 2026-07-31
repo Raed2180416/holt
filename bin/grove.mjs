@@ -25,6 +25,7 @@ import { impact, detectRipgrep } from '../src/impact.mjs';
 import { integrate, detectHosts, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
 import { protect, unprotect, rescue, rescues, clean } from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
+import { runTui } from '../src/tui.mjs';
 
 const USAGE = `
 grove — the landing layer for parallel agent work
@@ -42,6 +43,7 @@ COMMANDS
   impact              who DEPENDS on what another workstream changed  (not a conflict check)
   graph               the relationship graph  [--html <file>]
   gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
+  tui                 interactive risk-sorted dashboard  [--snapshot]
   doctor              environment and backend check
 
 ACTING  (these MUTATE the repo; everything above is read-only)
@@ -99,6 +101,9 @@ function parseArgs(argv) {
       case '--apply': opts.apply = true; break;
       case '--release': opts.release = true; break;
       case '--run': opts.run = argv[++i]; break;
+      case '--snapshot': opts.snapshot = true; break;
+      case '--columns': opts.columns = Number(argv[++i]) || 120; break;
+      case '--rows': opts.rowsOpt = Number(argv[++i]) || 34; break;
       case '-h': case '--help': opts.help = true; break;
       case '--base': opts.base = argv[++i]; break;
       case '--cwd': opts.cwd = argv[++i]; break;
@@ -305,6 +310,7 @@ async function main() {
   }
   if (cmd === 'doctor') return cmdDoctor(opts);
   if (cmd === 'hook') return cmdHook(opts);
+  if (cmd === 'tui') return runTui(opts.cwd, { snapshot: opts.snapshot, columns: opts.columns, rows: opts.rowsOpt });
 
   // The MUTATING commands, dispatched before buildReport() because each runs its own assessment.
   // These were once implemented, exported and covered by 19 passing tests while `grove protect`
