@@ -899,7 +899,10 @@ async function main() {
     const r = await verifyPair(opts.cwd, a, b, { run: opts.run ?? null });
     cmdAction(r);
     if (r.ok === false) process.exit(2);
-    if (r.interactionFailures?.length) process.exit(1);
+    // Deny on the VERDICT, not on whether a failure name could be parsed. Keying the exit code
+    // off interactionFailures.length meant a runner whose output holt cannot parse exited 0 —
+    // allow — on a combination that demonstrably broke the suite.
+    if (r.interactionBreaks) process.exit(1);
     return;
   }
   if (cmd === 'rescue') {
