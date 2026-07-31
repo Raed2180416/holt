@@ -102,6 +102,27 @@ jobs:
       - name: the tool must be able to inspect its own repository
         run: node bin/holt.mjs status
 
+      - name: published numbers must match reality
+        # Doc numbers rot the instant they are written and nothing re-checks them — this repo
+        # already shipped README/BENCHMARKS disagreeing with each other AND with the suite. The
+        # fix is not vigilance, it is a gate: the claimed test count and mutation score are
+        # compared against what the suite actually reports, and a mismatch fails the build.
+        run: |
+          ACTUAL_TESTS=$(npm test 2>&1 | grep -oE '^# pass [0-9]+|^ℹ pass [0-9]+' | grep -oE '[0-9]+' | head -1)
+          ACTUAL_MUT=$(npm run test:mutation 2>&1 | grep -oE '[0-9]+/[0-9]+ mutations killed' | grep -oE '^[0-9]+/[0-9]+')
+          echo "suite reports: $ACTUAL_TESTS tests, $ACTUAL_MUT mutations"
+          fail=0
+          for f in README.md BENCHMARKS.md; do
+            if ! grep -q "$ACTUAL_TESTS" "$f"; then
+              echo "::error::$f does not mention the real test count ($ACTUAL_TESTS)"; fail=1
+            fi
+            if ! grep -q "$ACTUAL_MUT" "$f"; then
+              echo "::error::$f does not mention the real mutation score ($ACTUAL_MUT)"; fail=1
+            fi
+          done
+          [ "$fail" = 0 ] && echo "published numbers match the suite"
+          exit $fail
+
       - name: mutation testing — prove the tests would FAIL on a real defect
         # A green suite proves the tests RAN. This proves they would have caught the specific
         # defects that matter: a tool that authorises deleting work, or runs a command it

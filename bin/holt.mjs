@@ -710,7 +710,8 @@ async function main() {
     const strengthColor = (h) => h.env === 'cloud' ? 'yellow' : h.strength === 'block' ? 'green' : h.strength === 'mcp' ? 'cyan' : 'grey';
     for (const h of rep.hosts) {
       const mark = h.detectedHere ? paint('green', '●') : paint('grey', '○');
-      out(`  ${mark} ${(h.name + '                                   ').slice(0, 34)} ${paint(strengthColor(h), h.label)}`);
+      const nm = h.name.length > 33 ? `${h.name.slice(0, 32)}…` : h.name;
+      out(`  ${mark} ${(nm + '                                   ').slice(0, 34)} ${paint(strengthColor(h), h.label)}`);
     }
     out(`\n  ${paint('grey', rep.cloudCaveat)}\n`);
     return;
