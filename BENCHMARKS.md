@@ -156,10 +156,16 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 366 passing (`npm test`) |
+| tests | 365 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
 | deliberate-defect mutations | 29/29 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
+
+One test is deliberately excluded from that figure. `npm test` defines 366 tests; the opencode
+plugin test cannot execute without opencode installed, and a skipped test prints `ok` while never
+running — so counting it would inflate the claim. CI compares the published number against tests
+that actually PASSED, never against the total defined, and prints every skip. A developer with
+opencode installed sees 366.
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
 broken, not merely observed to be green. **Does not mean:** 28 hand-picked mutations amount to full
