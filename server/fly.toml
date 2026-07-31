@@ -1,0 +1,29 @@
+# Deploy:  fly launch --no-deploy  &&  fly secrets set HOLT_SIGNING_KEY=... STRIPE_WEBHOOK_SECRET=... && fly deploy
+app = "holt-licenses"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  HOLT_DATA = "/data/licenses.jsonl"
+
+# The ledger is the only state. A volume keeps it across deploys; back it up with
+#   fly ssh console -C "cat /data/licenses.jsonl" > backup-$(date +%F).jsonl
+[[mounts]]
+  source = "holt_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # never sleep: a missed Stripe webhook is a missed sale
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "10s"
+    method = "GET"
+    path = "/health"

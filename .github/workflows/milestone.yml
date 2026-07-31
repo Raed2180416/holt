@@ -1,0 +1,34 @@
+name: social-proof gate
+
+# Checks weekly whether holt has earned its badges. Below the threshold this does nothing at
+# all; at or above it, the README's social-proof block is switched on exactly once.
+on:
+  schedule:
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  milestone:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Evaluate milestone
+        id: gate
+        run: node scripts/milestone.mjs --apply || true
+      - name: Commit if the README changed
+        run: |
+          if [ -n "$(git status --porcelain README.md)" ]; then
+            git config user.name  'holt bot'
+            git config user.email 'bot@holt.dev'
+            git add README.md
+            git commit -m 'readme: social-proof threshold reached — badges enabled'
+            git push
+          else
+            echo "threshold not met or already enabled; nothing to do"
+          fi

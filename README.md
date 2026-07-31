@@ -14,6 +14,25 @@
 
 `npm install -g holt`
 
+<!-- HOLT:SOCIAL-PROOF:BEGIN
+Social proof stays commented out until the numbers can carry it: 500 stars or 1,000 weekly
+downloads, whichever lands first. scripts/milestone.mjs switches this block on by itself.
+
+<div align="center">
+
+[![stars](https://img.shields.io/github/stars/raed2180416/holt?style=for-the-badge&color=e2a154&labelColor=0a0b0d)](https://github.com/raed2180416/holt/stargazers)
+[![npm downloads](https://img.shields.io/npm/dw/holt?style=for-the-badge&color=7fb88f&labelColor=0a0b0d&label=downloads%2Fweek)](https://www.npmjs.com/package/holt)
+[![npm version](https://img.shields.io/npm/v/holt?style=for-the-badge&color=e2a154&labelColor=0a0b0d)](https://www.npmjs.com/package/holt)
+[![CI](https://img.shields.io/github/actions/workflow/status/raed2180416/holt/ci.yml?style=for-the-badge&labelColor=0a0b0d)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+
+<a href="https://star-history.com/#raed2180416/holt&Date">
+  <img alt="Star history" width="600" src="https://api.star-history.com/svg?repos=raed2180416/holt&type=Date&theme=dark">
+</a>
+
+</div>
+HOLT:SOCIAL-PROOF:END -->
+
+
 </div>
 
 ---
