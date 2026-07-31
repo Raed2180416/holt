@@ -6,6 +6,13 @@ holt's promise is that it never reports work as safe to delete when it is not. E
 judged against that first. If a change makes holt faster, cleaner, or more featureful while
 making that promise weaker, it will not be merged.
 
+## Sign your commits
+
+Every commit needs a `Signed-off-by` line — use `git commit -s`. That is the
+[Developer Certificate of Origin](https://developercertificate.org/): you are asserting you have
+the right to contribute that code under this project's license. CI checks it; nothing else about
+it will ever bother you.
+
 ## Before you open a pull request
 
 ```bash

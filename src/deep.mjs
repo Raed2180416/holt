@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: FSL-1.1-MIT
 /**
  * holt — deep duplicate detection (P3), built on jscpd.
  *

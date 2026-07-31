@@ -1,7 +1,7 @@
 {
   "name": "holt",
   "version": "0.2.0",
-  "description": "The landing layer for parallel agent work. Answers what your N agents produced, what's redundant, what collides, what's safe to delete, and what you're about to lose.",
+  "description": "holt\u2122 \u2014 the landing layer for parallel agent work: know what your agents produced, what collides, and what you are about to lose, before anything gets deleted.",
   "type": "module",
   "bin": {
     "holt": "./bin/holt.mjs"

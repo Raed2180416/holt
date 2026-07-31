@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: FSL-1.1-MIT
 /**
  * holt — CLI.
  *

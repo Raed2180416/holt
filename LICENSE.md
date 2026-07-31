@@ -89,6 +89,12 @@ Except for displaying the License Details and identifying us as the origin of
 the Software, you have no right under these Terms and Conditions to use our
 trademarks, trade names, service marks or product names.
 
+> **Note on the two-year clock (plain English, not part of the license text):** the conversion is
+> **per release, rolling**. "The Software" is defined above as *each version* made available under
+> these terms, so each release converts to MIT on **its own** second anniversary. Continuing to
+> ship means the newest code is always protected; only releases that are already two years old
+> become MIT. There is no single date on which the whole project becomes MIT.
+
 ## Grant of Future License
 
 We hereby irrevocably grant you an additional license to use the Software under

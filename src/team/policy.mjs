@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LicenseRef-holt-Commercial
+// Commercial license — see src/team/LICENSE. NOT covered by the repository FSL-1.1-MIT grant.
 /**
  * holt Team — policy as code.  (Commercial license: see src/team/LICENSE-TEAM.md)
  *
