@@ -114,6 +114,16 @@ body {
 .tier li::before { content: "✓"; color: var(--good); font-weight: 700; flex: none; }
 .tier li.muted::before { content: "·"; color: var(--text-faint); }
 .tier .btn { margin-top: auto; width: 100%; justify-content: center; text-align: center; }
+.tier.soon { background: var(--bg); border-style: dashed; }
+.tier.soon:hover { transform: none; border-color: var(--border); }
+.tier.soon .tier-name, .tier.soon .tier-price, .tier.soon .tier-note, .tier.soon li { color: var(--text-faint); }
+.tier.soon li::before { content: "·"; color: var(--text-faint); }
+.tier.soon .tier-badge { background: none; border: 1px solid var(--border); color: var(--text-faint); }
+.btn-soon { margin-top: auto; width: 100%; justify-content: center; text-align: center;
+  background: none; border: 1px dashed var(--border); color: var(--text-faint);
+  cursor: default; pointer-events: none; }
+.tier-interest { margin: 10px 0 0; font-size: 12.5px; color: var(--text-faint); text-align: center; }
+.tier-interest a { color: var(--text-dim); }
 .tier-fine { margin: 10px 0 0; font-size: 12.5px; line-height: 1.5; color: var(--text-faint); }
 
 .cmp { margin-top: 30px; border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; }
@@ -1277,7 +1287,8 @@ footer { padding: 44px 0 60px; }
     </p>
 
     <div class="tiers">
-      <div class="tier reveal">
+      <div class="tier featured reveal">
+        <span class="tier-badge">Available now</span>
         <span class="tier-name">Free</span>
         <div class="tier-price">$0<span class="unit"> / forever</span></div>
         <p class="tier-note">The complete tool. No account, no telemetry, no expiry.</p>
@@ -1288,11 +1299,11 @@ footer { padding: 44px 0 60px; }
           <li>CI gate for a single repository</li>
           <li>176 languages · 50 covered by test</li>
         </ul>
-        <a class="btn btn-ghost" href="#install">Install now</a>
+        <a class="btn btn-primary" href="#install">Install now</a>
       </div>
 
-      <div class="tier featured reveal">
-        <span class="tier-badge">Team</span>
+      <div class="tier soon reveal">
+        <span class="tier-badge">Coming soon</span>
         <span class="tier-name">Team</span>
         <div class="tier-price">$19<span class="unit"> / active repo / month</span></div>
         <p class="tier-note"><strong>Unlimited developers.</strong> No seat minimum. Priced by repositories under parallel agents — the thing that carries the risk. Annual: two months free.</p>
@@ -1304,13 +1315,12 @@ footer { padding: 44px 0 60px; }
           <li>Runs entirely on your machines — no data leaves, on any tier</li>
           <li>Priority support</li>
         </ul>
-        <a class="btn btn-primary" data-checkout="team"
-           href="mailto:team@holt.dev?subject=holt%20Team%20early%20access&body=Repos%20under%20parallel%20agents%3A%20%0ATeam%20size%3A%20%0AAgents%20in%20use%3A%20">Get Team early access</a>
-        <p class="tier-fine">Self-serve checkout opens with v1. Until then this reaches a human, and early-access
-          teams get their first year at half price — and shape what ships.</p>
+        <span class="btn btn-soon" data-checkout="team" aria-disabled="true">Coming soon</span>
+        <p class="tier-interest">Building it now. <a href="mailto:team@holt.dev?subject=holt%20Team%20early%20access&body=Repos%20under%20parallel%20agents%3A%20%0ATeam%20size%3A%20%0AAgents%20in%20use%3A%20">Tell us what you need</a> — early teams get the first year at half price.</p>
       </div>
 
-      <div class="tier reveal">
+      <div class="tier soon reveal">
+        <span class="tier-badge">Coming soon</span>
         <span class="tier-name">Enterprise</span>
         <div class="tier-price">Custom</div>
         <p class="tier-note">For organisations with compliance, procurement and air-gap requirements.</p>
@@ -1321,9 +1331,9 @@ footer { padding: 44px 0 60px; }
           <li>Security review, DPA, invoicing</li>
           <li>Support SLA</li>
         </ul>
-        <a class="btn btn-ghost"
-           href="mailto:enterprise@holt.dev?subject=holt%20Enterprise&body=Organisation%3A%20%0ARepos%3A%20%0ARequirements%20(SSO%2C%20self-host%2C%20air-gap%2C%20DPA)%3A%20">Talk to us</a>
-        <p class="tier-fine">Enterprise is always a conversation — security review, DPA and deployment shape the terms.</p>
+        <span class="btn btn-soon" aria-disabled="true">Coming soon</span>
+        <p class="tier-interest">Security review, DPA and deployment shape the terms.
+          <a href="mailto:enterprise@holt.dev?subject=holt%20Enterprise&body=Organisation%3A%20%0ARepos%3A%20%0ARequirements%20(SSO%2C%20self-host%2C%20air-gap%2C%20DPA)%3A%20">Start the conversation</a>.</p>
       </div>
     </div>
 
@@ -1424,11 +1434,21 @@ footer { padding: 44px 0 60px; }
   var API = "__HOLT_API__";
   if (API.indexOf("__") === 0) return;
   document.querySelectorAll("[data-checkout]").forEach(function (a) {
-    // A live service turns the early-access mailto into real self-serve checkout, and the
-    // surrounding fine print stops being true — so remove it at the same time.
+    // A live checkout host makes "coming soon" false, so the whole grey treatment lifts with it
+    // rather than leaving a purchasable plan wearing a disabled button.
+    var card = a.closest(".tier");
+    if (card) {
+      card.classList.remove("soon");
+      card.classList.add("featured");
+      var badge = card.querySelector(".tier-badge");
+      if (badge) badge.textContent = "Team";
+      var interest = card.querySelector(".tier-interest");
+      if (interest) interest.remove();
+    }
+    a.className = "btn btn-primary";
+    a.removeAttribute("aria-disabled");
+    a.style.pointerEvents = "";
     a.textContent = "Start a Team plan";
-    var fine = a.parentNode.querySelector(".tier-fine");
-    if (fine) fine.remove();
     a.addEventListener("click", function (e) {
       e.preventDefault();
       var plan = a.getAttribute("data-checkout");

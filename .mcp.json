@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "holt": {
+      "command": "holt",
+      "args": [
+        "mcp"
+      ],
+      "env": {}
+    }
+  }
+}

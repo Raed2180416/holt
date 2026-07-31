@@ -15,3 +15,11 @@ server/data/
 licenses.jsonl
 .holt-fixtures/
 .holt-work/
+
+# Host-specific agent configs are a function of the MACHINE, not the project.
+# Contributors run `holt integrate` for whichever host they use — that is the whole promise.
+.cursor/
+.gemini/
+.opencode/
+opencode.json
+crush.json
