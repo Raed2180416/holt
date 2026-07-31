@@ -194,6 +194,32 @@ async function cmdDoctor(opts) {
     out(`    ${(p.label + '                ').slice(0, 18)} ${mark}${p.reason ? paint('grey', `  ${p.reason}`) : ''}`);
   }
   out('');
+
+  // Every absence above is optional — grove already said what each one costs. Close the loop
+  // by saying how to fix it, per platform, so setup is one pasted command, not a scavenger hunt.
+  const missing = [];
+  if (!ctags.available) missing.push('ctags');
+  if (!enry.available) missing.push('enry');
+  if (missing.length) {
+    const pkgs = {
+      ctags: { pacman: 'ctags', apt: 'universal-ctags', dnf: 'ctags', brew: 'universal-ctags', winget: 'UniversalCtags.Ctags' },
+      enry: { pacman: null, apt: null, dnf: null, brew: 'enry', winget: null }, // most distros: go install
+    };
+    const managers = [
+      ['pacman', (names) => `sudo pacman -S ${names.join(' ')}`],
+      ['apt', (names) => `sudo apt install ${names.join(' ')}`],
+      ['dnf', (names) => `sudo dnf install ${names.join(' ')}`],
+      ['brew', (names) => `brew install ${names.join(' ')}`],
+      ['winget', (names) => names.map((n) => `winget install ${n}`).join(' && ')],
+    ];
+    out(paint('bold', '  TO ENABLE THE MISSING LAYERS') + paint('grey', '  (optional — grove works without them)'));
+    for (const [mgr, fmt] of managers) {
+      const names = missing.map((m) => pkgs[m][mgr]).filter(Boolean);
+      if (names.length) out(`    ${(mgr + '        ').slice(0, 8)}  ${fmt(names)}`);
+    }
+    if (missing.includes('enry')) out(paint('grey', '    enry elsewhere: go install github.com/go-enry/enry@latest (only needed for ambiguous extensions like .fs/.m/.pl)'));
+    out('');
+  }
 }
 
 /** Read a host's hook event from stdin. Absent/!TTY stdin is normal — not an error. */
