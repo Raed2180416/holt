@@ -6,8 +6,8 @@
 
 **You ran N agents. Grove answers: what did they produce, what's redundant, what collides,<br>what's safe to delete — and what you're about to lose.**
 
-[![tests](https://img.shields.io/badge/tests-196%20passing-brightgreen)](#the-test-suite-attacks-itself)
-[![mutation score](https://img.shields.io/badge/mutation%20score-12%2F12%20killed-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-199%20passing-brightgreen)](#the-test-suite-attacks-itself)
+[![mutation score](https://img.shields.io/badge/mutation%20score-13%2F13%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
 
@@ -122,15 +122,15 @@ Every optional dependency degrades **loudly**: `grove doctor` shows exactly what
 
 ## The test suite attacks itself
 
-179 tests, and the interesting ones are the hostile ones:
+199 tests, and the interesting ones are the hostile ones:
 
-- **12/12 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI.
+- **13/13 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
 - **The CLI is tested as a binary**, because at one point 169 tests passed while `grove protect` printed *"unknown command"* — every test called functions directly and the dispatcher was dead. Exit codes are asserted per command; they're the contract scripts chain on.
 - **The eval polices itself.** It refuses to score trials the agent never ran (a credits-exhausted run once fabricated "+17 pts" from agents that did nothing — that scenario is now a permanent regression test), and its answer key is proven unreachable from trial repos after an agent found it and scored by reading it.
 - Byte-for-byte proof that scanning changes nothing; jj op-log proven unchanged; read-only vs MUTATE tiers with mutation unreachable without explicit opt-in — `reset --hard`, `push`, `stash` refused even *with* it.
 
-Four times in this project, the thing meant to detect a problem wasn't itself under test — a ctags flag silently dropping symbols, the fabricated eval result, a grader checking the wrong path, the leaked answer key. Each one is now a named regression test. That history is why the suite looks the way it does.
+Five times in this project, the thing meant to detect a problem wasn't itself under test — a ctags flag silently dropping symbols, the fabricated eval result, a grader checking the wrong path, the leaked answer key, and the mutation harness itself executing the very defect it simulated against the live repo. Each one is now a named regression test or a permanent tripwire. That history is why the suite looks the way it does.
 
 ---
 

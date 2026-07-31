@@ -76,13 +76,15 @@ Reproduce: `node eval/prep.mjs build gauntlet 6` → drive any agent → `node e
 
 | Instrument | Result |
 |---|---|
-| tests | 196+ passing (`npm test`) |
-| deliberate-defect mutations | 12/12 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
+| tests | 199 passing (`npm test`) |
+| deliberate-defect mutations | 13/13 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
+| mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
 
 ## Falsification policy
 
-Four times during development, the measuring instrument itself was wrong (a fabricated A/B
-result, a grader checking the wrong path, a leaked answer key, a silently-dropped symbol class).
-Each is now a named regression test. If you find a number on this page you cannot reproduce,
-that is a bug — file it.
+Five times during development, the measuring instrument itself was wrong (a fabricated A/B
+result, a grader checking the wrong path, a leaked answer key, a silently-dropped symbol class,
+and the mutation harness executing the very defect it simulated against the live repo).
+Each is now a named regression test or a permanent tripwire. If you find a number on this page
+you cannot reproduce, that is a bug — file it.
