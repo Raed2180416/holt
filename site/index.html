@@ -1,0 +1,1212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>holt — the landing layer for parallel agent work</title>
+<meta name="description" content="You ran N agents. Holt answers what they produced, what's redundant, what collides, what's safe to delete — and what you're about to lose. A local git-worktree safety net for parallel coding agents.">
+<meta property="og:title" content="holt — the landing layer for parallel agent work">
+<meta property="og:description" content="You ran N agents. Holt answers what they produced, what's redundant, what collides, what's safe to delete — and what you're about to lose.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%23e2a154'/%3E%3Ctext x='50' y='70' font-size='58' font-family='monospace' font-weight='700' text-anchor='middle' fill='%230a0b0d'%3Eh%3C/text%3E%3C/svg%3E">
+<style>
+/* ---------- reset ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; }
+ul, ol { margin: 0; padding: 0; list-style: none; }
+h1, h2, h3, h4, p, dl, dd { margin: 0; }
+img { max-width: 100%; display: block; }
+a { color: inherit; text-decoration: none; }
+button { font: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+table { border-collapse: collapse; }
+code, pre { font-family: var(--mono); }
+
+/* ---------- design tokens ---------- */
+:root {
+  --bg: #0a0b0d;
+  --bg-raised: #121417;
+  --bg-raised-2: #191c20;
+  --bg-terminal: #0d0f12;
+  --border: #262a30;
+  --border-soft: #1b1e23;
+  --text: #eae7e1;
+  --text-dim: #a8adb4;
+  --text-faint: #6b7178;
+  --accent: #e2a154;
+  --accent-strong: #f0b56e;
+  --accent-soft: rgba(226, 161, 84, 0.12);
+  --accent-border: rgba(226, 161, 84, 0.35);
+  --good: #7fb88f;
+  --good-soft: rgba(127, 184, 143, 0.12);
+  --good-border: rgba(127, 184, 143, 0.35);
+  --bad: #e2685c;
+  --bad-soft: rgba(226, 104, 92, 0.12);
+  --bad-border: rgba(226, 104, 92, 0.35);
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --radius-s: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+  --maxw: 1180px;
+  --maxw-prose: 760px;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* faint ambient backdrop */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(700px 420px at 12% -8%, rgba(226,161,84,0.10), transparent 60%),
+    radial-gradient(600px 380px at 92% 8%, rgba(127,184,143,0.06), transparent 60%);
+}
+
+.wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+.prose { max-width: var(--maxw-prose); }
+
+section { padding: 88px 0; border-bottom: 1px solid var(--border-soft); }
+section:last-of-type { border-bottom: none; }
+
+.kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  padding: 5px 12px;
+  border-radius: 999px;
+  margin-bottom: 20px;
+}
+.kicker.good { color: var(--good); background: var(--good-soft); border-color: var(--good-border); }
+
+h2.section-title {
+  font-size: clamp(26px, 3.6vw, 36px);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: #fff;
+  margin-bottom: 14px;
+}
+p.section-sub {
+  color: var(--text-dim);
+  font-size: 17px;
+  max-width: var(--maxw-prose);
+  margin-bottom: 46px;
+}
+
+code.inline {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: var(--bg-raised-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.1em 0.45em;
+  color: var(--accent-strong);
+}
+
+/* ---------- nav ---------- */
+header.nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(10, 11, 13, 0.78);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border-soft);
+}
+.nav-inner {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 14px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 700;
+  font-size: 17px;
+  color: #fff;
+}
+.brand-mark {
+  width: 24px; height: 24px;
+  border-radius: 6px;
+  background: linear-gradient(155deg, var(--accent-strong), var(--accent));
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-weight: 800; font-size: 13px; color: #0a0b0d;
+}
+.nav-links { display: flex; align-items: center; gap: 28px; }
+.nav-links a {
+  font-size: 14.5px;
+  color: var(--text-dim);
+  transition: color .15s ease;
+}
+.nav-links a:hover { color: var(--text); }
+.nav-cta {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--bg-raised-2);
+  border: 1px solid var(--border);
+  padding: 7px 14px;
+  border-radius: var(--radius-s);
+  color: var(--text);
+}
+.nav-cta:hover { border-color: var(--accent-border); color: var(--accent-strong); }
+
+@media (max-width: 760px) {
+  .nav-links a.hide-sm { display: none; }
+}
+
+/* ---------- buttons ---------- */
+.btn-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.btn {
+  display: inline-flex; align-items: center; gap: 10px;
+  padding: 12px 20px;
+  border-radius: var(--radius-s);
+  font-size: 15px; font-weight: 600;
+  border: 1px solid transparent;
+  transition: transform .12s ease, border-color .15s ease, background .15s ease;
+}
+.btn:active { transform: translateY(1px); }
+.btn-primary {
+  background: var(--accent);
+  color: #201203;
+  font-family: var(--mono);
+}
+.btn-primary:hover { background: var(--accent-strong); }
+.btn-primary .btn-icon { opacity: .65; font-size: 13px; }
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+}
+.btn-ghost:hover { border-color: var(--accent-border); color: var(--text); }
+
+/* ---------- hero ---------- */
+.hero { padding-top: 96px; padding-bottom: 64px; }
+.hero-inner { max-width: 760px; }
+h1 {
+  font-size: clamp(34px, 5.4vw, 54px);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 22px;
+}
+h1 .accent-text { color: var(--accent-strong); }
+.hero-pitch {
+  font-size: clamp(17px, 2vw, 19px);
+  color: var(--text-dim);
+  max-width: 620px;
+  margin-bottom: 34px;
+}
+.hero-foot {
+  margin-top: 22px;
+  font-size: 13.5px;
+  color: var(--text-faint);
+  font-family: var(--mono);
+}
+
+/* ---------- terminal ---------- */
+.terminal-shell {
+  margin-top: 56px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--bg-terminal);
+  box-shadow: 0 30px 80px -30px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.02) inset;
+  overflow: hidden;
+}
+.terminal-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-raised);
+}
+.terminal-dot { width: 11px; height: 11px; border-radius: 50%; }
+.terminal-dot.r { background: #e2685c; }
+.terminal-dot.y { background: #e2b154; }
+.terminal-dot.g { background: #7fb88f; }
+.terminal-title {
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+.terminal-body {
+  padding: 22px 24px 26px;
+  font-family: var(--mono);
+  font-size: 13.6px;
+  overflow-x: auto;
+}
+.term-line {
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0;
+  animation: termIn .5s ease forwards;
+  padding: 1.5px 0;
+}
+.term-line.gap { height: 10px; padding: 0; }
+.term-line .prompt { color: var(--accent-strong); }
+.term-line .cmd { color: #fff; }
+.term-line .out { color: var(--text-dim); }
+.term-line .out-good { color: var(--good); }
+.term-line .out-bad { color: var(--bad); }
+.term-line .tag {
+  font-size: 11.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  margin-left: 6px;
+}
+.tag.risk { background: var(--accent-soft); color: var(--accent-strong); border: 1px solid var(--accent-border); }
+.tag.collision { background: var(--bad-soft); color: #ef9089; border: 1px solid var(--bad-border); }
+.tag.safe { background: var(--good-soft); color: var(--good); border: 1px solid var(--good-border); }
+
+.cursor-blink::after {
+  content: "▌";
+  color: var(--good);
+  animation: blink 1s step-end infinite;
+  margin-left: 4px;
+}
+
+@keyframes termIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+@keyframes blink { 50% { opacity: 0; } }
+
+.term-line:nth-child(1)  { animation-delay: .05s; }
+.term-line:nth-child(2)  { animation-delay: .35s; }
+.term-line:nth-child(3)  { animation-delay: .55s; }
+.term-line:nth-child(4)  { animation-delay: .70s; }
+.term-line:nth-child(5)  { animation-delay: .85s; }
+.term-line:nth-child(6)  { animation-delay: 1.15s; }
+.term-line:nth-child(7)  { animation-delay: 1.55s; }
+.term-line:nth-child(8)  { animation-delay: 1.95s; }
+.term-line:nth-child(9)  { animation-delay: 2.30s; }
+.term-line:nth-child(10) { animation-delay: 2.42s; }
+.term-line:nth-child(11) { animation-delay: 2.54s; }
+.term-line:nth-child(12) { animation-delay: 3.00s; }
+.term-line:nth-child(13) { animation-delay: 3.40s; }
+.term-line:nth-child(14) { animation-delay: 3.85s; }
+.term-line:nth-child(15) { animation-delay: 4.25s; }
+
+.terminal-caption {
+  margin-top: 16px;
+  font-size: 13.5px;
+  color: var(--text-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .term-line { animation: none; opacity: 1; }
+  .cursor-blink::after { animation: none; }
+}
+
+/* ---------- proof / A-B ---------- */
+.stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 40px 0 36px; }
+.stat-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px 22px 20px;
+}
+.stat-card.bad { border-color: var(--bad-border); background: linear-gradient(180deg, var(--bad-soft), transparent 60%), var(--bg-raised); }
+.stat-card.warn { border-color: var(--border); }
+.stat-card.good { border-color: var(--good-border); background: linear-gradient(180deg, var(--good-soft), transparent 60%), var(--bg-raised); }
+.stat-label {
+  font-family: var(--mono); font-size: 12px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--text-faint); margin-bottom: 12px;
+}
+.stat-num { font-size: 30px; font-weight: 700; color: #fff; letter-spacing: -0.01em; }
+.stat-num.small { font-size: 20px; }
+.stat-detail { margin-top: 8px; font-size: 13.5px; color: var(--text-dim); }
+.stat-sub { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-soft); font-size: 13px; color: var(--text-faint); }
+
+blockquote.pull {
+  border-left: 3px solid var(--accent);
+  padding: 4px 0 4px 22px;
+  margin: 36px 0;
+  font-size: 17px;
+  color: var(--text);
+}
+blockquote.pull cite {
+  display: block; font-style: normal; margin-top: 10px;
+  font-family: var(--mono); font-size: 12.5px; color: var(--text-faint);
+}
+
+.method-note {
+  font-size: 13.5px;
+  color: var(--text-faint);
+  border-top: 1px solid var(--border-soft);
+  padding-top: 18px;
+  margin-top: 8px;
+}
+
+@media (max-width: 860px) {
+  .stat-row { grid-template-columns: 1fr; }
+}
+
+/* ---------- cards grid (commands) ---------- */
+.grid-cmds {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+}
+.cmd-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: border-color .15s ease, transform .15s ease;
+}
+.cmd-card:hover { border-color: var(--accent-border); transform: translateY(-2px); }
+.cmd-card .cmd-name {
+  font-family: var(--mono);
+  font-size: 14.5px;
+  color: var(--accent-strong);
+  margin-bottom: 10px;
+}
+.cmd-card .cmd-name .p { color: var(--text-faint); }
+.cmd-card h4 {
+  font-size: 15.5px; color: #fff; font-weight: 600; margin-bottom: 8px;
+}
+.cmd-card p {
+  font-size: 13.8px; color: var(--text-dim);
+}
+.cmd-card .cmd-flag {
+  display: inline-block; margin-top: 10px;
+  font-family: var(--mono); font-size: 11px; color: var(--text-faint);
+  background: var(--bg-raised-2); border: 1px solid var(--border-soft);
+  padding: 2px 8px; border-radius: 999px;
+}
+
+@media (max-width: 940px) { .grid-cmds { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 620px) { .grid-cmds { grid-template-columns: 1fr; } }
+
+/* ---------- OSS strip ---------- */
+.oss-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 14px;
+}
+.oss-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  background: var(--bg-raised);
+}
+.oss-card .oss-name { font-family: var(--mono); font-size: 13.5px; color: #fff; margin-bottom: 6px; }
+.oss-card p { font-size: 12.6px; color: var(--text-faint); }
+@media (max-width: 980px) { .oss-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 620px) { .oss-grid { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---------- architecture diagram ---------- */
+.arch { max-width: 880px; margin: 0 auto; }
+.arch-row { display: flex; gap: 16px; justify-content: center; flex-wrap: wrap; }
+.arch-sources { gap: 10px; margin-bottom: 4px; }
+.arch-node {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  flex: 1;
+  min-width: 220px;
+}
+.arch-node.small {
+  flex: 0 0 auto; min-width: 0;
+  font-family: var(--mono); font-size: 12.5px; color: var(--text-faint);
+  padding: 8px 14px; border-radius: 999px;
+}
+.arch-node.wide { flex: 1 1 100%; }
+.arch-node.accent { border-color: var(--accent-border); background: linear-gradient(180deg, var(--accent-soft), transparent 70%), var(--bg-raised); }
+.arch-node.lock { border-color: var(--good-border); background: linear-gradient(180deg, var(--good-soft), transparent 70%), var(--bg-raised); }
+.arch-node h4 { color: #fff; font-size: 15px; margin-bottom: 8px; }
+.arch-node p { font-size: 13.5px; color: var(--text-dim); }
+.arch-node p strong { color: var(--text); }
+.arch-connector {
+  width: 1px; height: 30px;
+  background: var(--border);
+  margin: 0 auto;
+  position: relative;
+}
+.arch-connector::after {
+  content: "";
+  position: absolute; bottom: -1px; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-top-color: var(--border);
+}
+
+@media (max-width: 760px) {
+  .arch-row { flex-direction: column; }
+  .arch-node { min-width: 0; }
+}
+
+/* ---------- integrate ---------- */
+.integrate-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-bottom: 40px; }
+.integrate-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 22px;
+}
+.integrate-card h4 {
+  font-family: var(--mono); font-size: 14px; color: var(--accent-strong); margin-bottom: 12px;
+}
+.integrate-card p { font-size: 13.8px; color: var(--text-dim); }
+@media (max-width: 860px) { .integrate-grid { grid-template-columns: 1fr; } }
+
+/* ---------- generic code block ---------- */
+.code-block {
+  background: var(--bg-terminal);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+  font-family: var(--mono);
+  font-size: 13.4px;
+  overflow-x: auto;
+  position: relative;
+}
+.code-block .cl { white-space: pre; }
+.code-block .prompt { color: var(--accent-strong); }
+.code-block .out { color: var(--text-dim); }
+.code-block .cmt { color: var(--text-faint); }
+
+.copy-btn {
+  position: absolute; top: 12px; right: 12px;
+  font-family: var(--mono); font-size: 11.5px;
+  color: var(--text-faint);
+  border: 1px solid var(--border);
+  background: var(--bg-raised-2);
+  padding: 4px 10px; border-radius: 6px;
+}
+.copy-btn:hover { color: var(--text); border-color: var(--accent-border); }
+
+/* ---------- benchmarks ---------- */
+.bench-meta {
+  font-family: var(--mono); font-size: 12.5px; color: var(--text-faint);
+  border: 1px solid var(--border-soft); border-radius: var(--radius-s);
+  padding: 12px 16px; margin-bottom: 44px; background: var(--bg-raised);
+}
+.bench-block { margin-bottom: 64px; }
+.bench-block:last-child { margin-bottom: 0; }
+.bench-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 6px; }
+.bench-head h3 { font-size: 19px; color: #fff; font-weight: 650; }
+.bench-repro { font-family: var(--mono); font-size: 12px; color: var(--text-faint); }
+.bench-repro code { color: var(--accent-strong); }
+
+.bench-cols { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 40px; align-items: start; }
+@media (max-width: 900px) { .bench-cols { grid-template-columns: 1fr; gap: 24px; } }
+
+.bench-explain dl { display: grid; grid-template-columns: max-content 1fr; gap: 8px 14px; font-size: 13.6px; }
+.bench-explain dt { color: var(--text-faint); font-family: var(--mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; padding-top: 2px; }
+.bench-explain dd { color: var(--text-dim); margin: 0 0 10px 0; }
+.bench-explain dd strong { color: var(--text); }
+
+/* bar chart */
+.bars { display: flex; align-items: flex-end; gap: 28px; height: 190px; padding: 0 6px; }
+.bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+.bar-val { font-family: var(--mono); font-size: 12.5px; color: var(--text-dim); margin-bottom: 8px; }
+.bar {
+  width: 100%; max-width: 64px;
+  background: linear-gradient(180deg, var(--accent-strong), var(--accent));
+  border-radius: 6px 6px 2px 2px;
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.05) inset;
+}
+.bar-label { margin-top: 10px; font-family: var(--mono); font-size: 12px; color: var(--text-faint); text-align: center; }
+.bar-label b { color: var(--text); display: block; font-size: 12.5px; }
+
+/* result table */
+.rtable { width: 100%; border-collapse: collapse; font-size: 13.6px; }
+.rtable th, .rtable td { border: 1px solid var(--border); padding: 10px 14px; text-align: left; }
+.rtable th { background: var(--bg-raised-2); color: var(--text-dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+.rtable td { color: var(--text); }
+.rtable tr:nth-child(even) td { background: var(--bg-raised); }
+.table-wrap { overflow-x: auto; }
+
+.tile-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.tile-row.tri { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 640px) { .tile-row, .tile-row.tri { grid-template-columns: 1fr; } }
+.tile {
+  border: 1px solid var(--border); background: var(--bg-raised); border-radius: var(--radius);
+  padding: 18px 20px;
+}
+.tile .tile-num { font-size: 24px; font-weight: 700; color: #fff; }
+.tile .tile-label { margin-top: 6px; font-size: 12.8px; color: var(--text-dim); }
+
+.badge-mono {
+  display: inline-block; font-family: var(--mono); font-size: 12.5px;
+  background: var(--bad-soft); border: 1px solid var(--bad-border); color: #ef9089;
+  padding: 4px 10px; border-radius: 6px;
+}
+
+/* ---------- boundaries ---------- */
+.boundaries-list { display: grid; gap: 14px; max-width: var(--maxw-prose); }
+.boundaries-list li { display: flex; gap: 12px; font-size: 14.5px; color: var(--text-dim); }
+.boundaries-list li::before { content: "—"; color: var(--text-faint); flex-shrink: 0; }
+.boundaries-list li strong { color: var(--text); }
+
+/* ---------- install ---------- */
+.install-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 48px; align-items: start; }
+@media (max-width: 900px) { .install-grid { grid-template-columns: 1fr; } }
+.license-card {
+  border: 1px solid var(--border); background: var(--bg-raised); border-radius: var(--radius-lg);
+  padding: 26px 26px 24px;
+}
+.license-card h4 { font-size: 16px; color: #fff; margin-bottom: 14px; }
+.license-card ul { display: grid; gap: 10px; }
+.license-card li { font-size: 13.8px; color: var(--text-dim); display: flex; gap: 10px; }
+.license-card li::before { content: "✓"; color: var(--good); flex-shrink: 0; }
+.license-tag {
+  display: inline-block; font-family: var(--mono); font-size: 12.5px;
+  background: var(--accent-soft); border: 1px solid var(--accent-border); color: var(--accent-strong);
+  padding: 4px 10px; border-radius: 6px; margin-bottom: 16px;
+}
+
+/* ---------- footer ---------- */
+footer { padding: 44px 0 60px; }
+.footer-inner {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px;
+  font-size: 13px; color: var(--text-faint);
+}
+.footer-inner .brand { font-size: 14px; }
+.footer-oss { font-family: var(--mono); font-size: 12px; }
+
+@media (max-width: 640px) {
+  section { padding: 64px 0; }
+  .hero { padding-top: 56px; }
+}
+</style>
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#top">
+      <span class="brand-mark">h</span>
+      holt
+    </a>
+    <nav class="nav-links">
+      <a class="hide-sm" href="#proof">Proof</a>
+      <a class="hide-sm" href="#commands">Commands</a>
+      <a class="hide-sm" href="#architecture">How it works</a>
+      <a href="#benchmarks">Benchmarks</a>
+      <a class="nav-cta" href="#install">npm i -g holt</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+<!-- ============ HERO ============ -->
+<section class="hero" id="top">
+  <div class="wrap">
+    <div class="hero-inner">
+      <span class="kicker">local · offline · git-native</span>
+      <h1>The landing layer for<br><span class="accent-text">parallel agent work.</span></h1>
+      <p class="hero-pitch">
+        You ran N agents. They forked into worktrees. Holt answers what they produced, what's
+        redundant, what collides, what's safe to delete — and what you're about to lose —
+        before anything gets deleted.
+      </p>
+      <div class="btn-row">
+        <button class="btn btn-primary" id="copy-install" type="button">
+          <span class="btn-icon">$</span> npm install -g holt
+        </button>
+        <a class="btn btn-ghost" href="#proof">See what a naked agent deleted →</a>
+      </div>
+      <div class="hero-foot">no cloud account · no telemetry · runs entirely on your machine</div>
+    </div>
+
+    <div class="terminal-shell">
+      <div class="terminal-bar">
+        <span class="terminal-dot r"></span>
+        <span class="terminal-dot y"></span>
+        <span class="terminal-dot g"></span>
+        <span class="terminal-title">your-repo — holt</span>
+      </div>
+      <div class="terminal-body">
+        <div class="term-line"><span class="prompt">$</span> <span class="cmd">holt status</span></div>
+        <div class="term-line"><span class="out">39 worktrees scanned in 1.16s</span></div>
+        <div class="term-line"><span class="out">  wt/task-scratch-03</span><span class="tag risk">unique work, uncommitted</span></div>
+        <div class="term-line"><span class="out">  wt/feature-auth</span><span class="tag collision">collides with wt/feature-auth-2</span></div>
+        <div class="term-line"><span class="out">  wt/old-spike-04</span><span class="tag safe">safe to delete</span></div>
+        <div class="term-line gap"></div>
+        <div class="term-line"><span class="prompt">$</span> <span class="cmd">holt protect</span></div>
+        <div class="term-line"><span class="out-good">locked 1 worktree — holt: holds work found nowhere else</span></div>
+        <div class="term-line gap"></div>
+        <div class="term-line"><span class="prompt">$</span> <span class="cmd">git worktree remove --force wt/task-scratch-03</span></div>
+        <div class="term-line"><span class="out-bad">fatal: cannot remove a locked working tree, lock reason: holt: holds work found</span></div>
+        <div class="term-line"><span class="out-bad">nowhere else (e.g. callable:acquire_token_budget). Run 'holt rescue task-scratch-03'</span></div>
+        <div class="term-line"><span class="out-bad">to preserve it, or 'holt risk' to inspect.</span></div>
+        <div class="term-line gap"></div>
+        <div class="term-line"><span class="prompt">$</span> <span class="cmd">holt rescue task-scratch-03 --release</span></div>
+        <div class="term-line"><span class="out-good">verified capture → refs/holt/rescue/task-scratch-03 → unlocked</span></div>
+        <div class="term-line gap"></div>
+        <div class="term-line"><span class="prompt">$</span> <span class="cmd">holt clean --apply</span></div>
+        <div class="term-line cursor-blink"><span class="out-good">removed 1 worktree — provably held nothing, re-verified</span></div>
+      </div>
+    </div>
+    <p class="terminal-caption">
+      git itself prints holt's lock reason — no plugin, no MCP, no model cooperation required to see it.
+    </p>
+  </div>
+</section>
+
+<!-- ============ PROOF / A-B ============ -->
+<section id="proof">
+  <div class="wrap prose">
+    <span class="kicker">measured, not hypothetical</span>
+    <h2 class="section-title">An unaided agent deleted 13 of 16 worktrees — including all five that mattered.</h2>
+    <p class="section-sub">
+      Real coding agents (Claude Haiku 4.5), identical prompts that never mention holt,
+      manufactured-messy repos built from real upstream projects, graded from filesystem state —
+      never from what the agent claimed. The scenario is <em>the gauntlet</em>: 16 worktrees where
+      every surface signal lies — rich commit history on disposable trees, no commits on
+      irreplaceable ones, names anti-correlated with content.
+    </p>
+  </div>
+
+  <div class="wrap">
+    <div class="stat-row">
+      <div class="stat-card bad">
+        <div class="stat-label">naked agent</div>
+        <div class="stat-num">4 / 6</div>
+        <div class="stat-detail">irreplaceable trials survived — one trial destroyed all five</div>
+        <div class="stat-sub">3 / 6 trials performed cleanup</div>
+      </div>
+      <div class="stat-card warn">
+        <div class="stat-label">holt — warnings only</div>
+        <div class="stat-num">6 / 6</div>
+        <div class="stat-detail">irreplaceable trials survived</div>
+        <div class="stat-sub">0 / 6 trials performed cleanup — agents froze</div>
+      </div>
+      <div class="stat-card good">
+        <div class="stat-label">holt — shipped product</div>
+        <div class="stat-num small">5/5 · 5/5 · 5/5</div>
+        <div class="stat-detail">irreplaceable, across three trial batches</div>
+        <div class="stat-sub">8/9 · 8/9 · 1/9 disposable worktrees removed</div>
+      </div>
+    </div>
+
+    <blockquote class="pull">
+      “wip-1, wip-2: only contained untracked files” — the naked agent's own reasoning, moments
+      before deleting both. It kept two empty decoy worktrees instead, because they were named
+      <code class="inline">IMPORTANT-do-not-delete</code> and <code class="inline">KEEP-release-candidate</code>.
+      Names in both directions, content in neither.
+      <cite>from the gauntlet trial · naked arm</cite>
+    </blockquote>
+
+    <p class="prose" style="color:var(--text-dim); font-size:15px; margin-bottom:24px;">
+      The middle row is why holt is built the way it is: safety that freezes the agent is
+      worthless. The fix wasn't more warnings — it was giving agents a permitted action
+      (<code class="inline">holt clean</code>) and tools that act (<code class="inline">holt_clean</code>,
+      <code class="inline">holt_rescue</code> over MCP) instead of only rules that forbid. In two
+      shipped-product trials, agents autonomously ran the full loop —
+      diagnose → rescue to a verified ref → release → clean.
+    </p>
+
+    <p class="method-note">
+      Method: Claude Haiku 4.5 subagents · prompts never mention holt · graded from filesystem
+      state, not agent self-report · <strong style="color:var(--text-dim)">3–6 trials per arm</strong>.
+      Small N, stated plainly — directional and adversarially graded, not a benchmark paper.
+      Full protocol and reproduction: <a href="#benchmarks" style="color:var(--accent-strong); border-bottom:1px dotted var(--accent-border);">Benchmarks §5</a>.
+    </p>
+  </div>
+</section>
+
+<!-- ============ COMMANDS ============ -->
+<section id="commands">
+  <div class="wrap">
+    <span class="kicker">the command surface</span>
+    <h2 class="section-title">One scan, eleven answers.</h2>
+    <p class="section-sub">
+      Five of the seven documented parallel-agent problems reduce to one query — what is the
+      content relationship between N workstreams? — so one scan answers most of them.
+      <strong style="color:var(--text)">1.16 s for 39 worktrees.</strong>
+    </p>
+
+    <div class="grid-cmds">
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt status</div>
+        <h4>The decision surface</h4>
+        <p>What your workstreams produced and what to do about it. The default command — 1–2 s.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt risk</div>
+        <h4>Work invisible to git (P0)</h4>
+        <p>Unique work and what is provably safe to delete. The uncommitted layer git's own commands cannot see at all.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt collisions</div>
+        <h4>Hotspot collisions (P1)</h4>
+        <p>Workstream pairs that will fight over the same routes, configs, or registries.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt duplicates</div>
+        <h4>Rebuilt work (P3)</h4>
+        <p>Pairs of agents that built the same thing twice. <span class="cmd-flag">--deep</span></p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt order</div>
+        <h4>Landing order</h4>
+        <p>Which workstreams land in parallel, and the min-entanglement sequence for the rest — exact lanes, every watched merge named.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt partition</div>
+        <h4>Pre-flight split</h4>
+        <p>How N agents should divide the repo before they collide — disjoint buckets, each observed hotspot gets one owner. <span class="cmd-flag">--agents n</span></p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt branches</div>
+        <h4>The other graveyard</h4>
+        <p>Branches nobody dares delete. Content-landed squash merges detected by comparing trees, not ancestry. <span class="cmd-flag">--apply uses -d, never -D</span></p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt verify a b</div>
+        <h4>The tractable core of P4</h4>
+        <p>Runs your test suite three times — A alone, B alone, A+B speculatively merged — and reports only what the combination breaks.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt journal</div>
+        <h4>Who deleted what</h4>
+        <p>Append-only audit of every protect, rescue, clean, and branch-delete — with the evidence, months later.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt tui</div>
+        <h4>Interactive dashboard</h4>
+        <p>A risk-sorted terminal dashboard over the same scan the CLI uses. <span class="cmd-flag">--snapshot</span></p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name"><span class="p">$</span> holt mcp</div>
+        <h4>Runs as an MCP server</h4>
+        <p>Every command above, exposed as a tool an agent can call directly over stdio — read-only tools and acting tools clearly separated.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ BUILT ON OSS ============ -->
+<section id="oss">
+  <div class="wrap">
+    <span class="kicker">assembled, not reinvented</span>
+    <h2 class="section-title">Built on proven OSS.</h2>
+    <p class="section-sub">
+      Holt assembles instruments rather than reinventing them. Every optional dependency
+      degrades loudly: <code class="inline">holt doctor</code> shows exactly what's present and
+      what the absence costs.
+    </p>
+    <div class="oss-grid">
+      <div class="oss-card">
+        <div class="oss-name">universal-ctags</div>
+        <p>Symbols across 164 languages, plus a tested optlib pack for 12 more it lacks (Swift, Scala, Dart, Solidity, Zig…).</p>
+      </div>
+      <div class="oss-card">
+        <div class="oss-name">enry</div>
+        <p>Content-based language detection — <code class="inline">.fs</code> resolves to F# or Forth by what's actually in the file.</p>
+      </div>
+      <div class="oss-card">
+        <div class="oss-name">jscpd</div>
+        <p>Token-level clone detection powering the deep duplicate scan.</p>
+      </div>
+      <div class="oss-card">
+        <div class="oss-name">git merge-tree</div>
+        <p>The correct committed-delta instrument — <code class="inline">git diff base...head</code> over-reports, and holt's suite proves the difference.</p>
+      </div>
+      <div class="oss-card">
+        <div class="oss-name">jj</div>
+        <p>A first-class backend — workspaces resolved from the workspace store, op-log proven untouched by scans.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ HOW IT WORKS ============ -->
+<section id="architecture">
+  <div class="wrap">
+    <span class="kicker">how it works</span>
+    <h2 class="section-title">The layer git doesn't have.</h2>
+    <p class="section-sub">
+      Git has no primitive that relates uncommitted work across worktrees —
+      <code class="inline">merge-tree</code> sees only commits. Holt adds the layers underneath.
+    </p>
+
+    <div class="arch">
+      <div class="arch-row arch-sources">
+        <div class="arch-node small">wt/a</div>
+        <div class="arch-node small">wt/b</div>
+        <div class="arch-node small">wt/c</div>
+        <div class="arch-node small">wt/…</div>
+      </div>
+      <div class="arch-connector"></div>
+      <div class="arch-row arch-split">
+        <div class="arch-node">
+          <h4>Committed layer</h4>
+          <p>What git alone can see — commits and branches, resolved with <code class="inline">git merge-tree</code>, not <code class="inline">diff base...head</code> (which over-reports).</p>
+        </div>
+        <div class="arch-node">
+          <h4>Uncommitted layer</h4>
+          <p>Staged, working-tree, and untracked content — hashed directly, because no git command relates this across worktrees at all.</p>
+        </div>
+      </div>
+      <div class="arch-connector"></div>
+      <div class="arch-row">
+        <div class="arch-node wide">
+          <h4>Symbol layer</h4>
+          <p>A cross-file define/reference graph, ctags-derived. Catches impact that's invisible to collision detection by construction — <em>A defines symbol X; B references X; they share no file.</em> On a real repo: <strong>694</strong> producer/consumer pairs, <strong>307</strong> not reported by any collision check.</p>
+        </div>
+      </div>
+      <div class="arch-connector"></div>
+      <div class="arch-row">
+        <div class="arch-node accent">
+          <h4>Verdict</h4>
+          <p>safe · holds-work · collision — recomputed fresh; a verdict from seconds ago never authorises a deletion now.</p>
+        </div>
+      </div>
+      <div class="arch-connector"></div>
+      <div class="arch-row">
+        <div class="arch-node lock">
+          <h4>Lock</h4>
+          <p>A git worktree lock, reason keyed to content: <code class="inline">holt: holds work found nowhere else</code>. Whoever tries to remove it — human, agent, or script — reads the reason from git itself.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ INTEGRATE ============ -->
+<section id="integrate">
+  <div class="wrap">
+    <span class="kicker">zero cooperation required</span>
+    <h2 class="section-title">One command wires everything.</h2>
+    <p class="section-sub">
+      The 2026 guardrails consensus, reproduced from scratch in holt's own trials:
+      probabilistic instruction-following is not a control. Agents ignored AGENTS.md, mis-summarised
+      holt's output, and overrode verdicts based on directory names. So the primary mechanism is
+      git's own lock — and everything below is the belt-and-suspenders around it.
+    </p>
+
+    <div class="code-block" style="margin-bottom:36px;">
+      <div class="cl"><span class="prompt">$</span> holt integrate</div>
+      <div class="cl out">wired: AGENTS.md · MCP · hooks — project-scoped, ~/.config untouched</div>
+    </div>
+
+    <div class="integrate-grid">
+      <div class="integrate-card">
+        <h4>AGENTS.md</h4>
+        <p>The cross-tool standard read by 30+ agents. Routes to the <em>permitted</em> action first — because warnings-only measured 0/6 agents acting on them at all.</p>
+      </div>
+      <div class="integrate-card">
+        <h4>MCP</h4>
+        <p>14 tools in the schema each host actually reads — three hosts, three different config shapes, all verified live. Diagnostic tools are annotated read-only; <code class="inline">holt_clean</code> is honestly <code class="inline">destructiveHint: true</code>.</p>
+      </div>
+      <div class="integrate-card">
+        <h4>Hooks</h4>
+        <p>Claude Code PreToolUse deny, an OpenCode plugin (throws to block, fails open loudly if holt itself is broken), and a git pre-commit warning as the floor.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ BENCHMARKS ============ -->
+<section id="benchmarks">
+  <div class="wrap">
+    <span class="kicker">§ benchmarks</span>
+    <h2 class="section-title">Every number here is reproducible.</h2>
+    <p class="section-sub">
+      No number is published without its conditions. If you find one on this page you cannot
+      reproduce, that's a bug.
+    </p>
+    <div class="bench-meta">
+      machine: AMD Ryzen 7 7840HS w/ Radeon 780M Graphics · Linux · Node v24.18.0 · holt @ e5cfa43
+    </div>
+
+    <!-- 1: correctness at scale -->
+    <div class="bench-block">
+      <div class="bench-head">
+        <h3>1 · Correctness at scale</h3>
+        <span class="bench-repro">reproduce: <code>node eval/bench.mjs 1000</code></span>
+      </div>
+      <div class="bench-cols">
+        <div>
+          <div class="bars">
+            <div class="bar-col">
+              <div class="bar-val">532 ms</div>
+              <div class="bar" style="height:10%"></div>
+              <div class="bar-label"><b>N = 100</b>100/100 correct</div>
+            </div>
+            <div class="bar-col">
+              <div class="bar-val">1.33 s</div>
+              <div class="bar" style="height:24%"></div>
+              <div class="bar-label"><b>N = 300</b>300/300 correct</div>
+            </div>
+            <div class="bar-col">
+              <div class="bar-val">5.44 s</div>
+              <div class="bar" style="height:100%"></div>
+              <div class="bar-label"><b>N = 1000</b>1000/1000 correct</div>
+            </div>
+          </div>
+          <p style="margin-top:18px; font-size:13px; color:var(--text-faint);">
+            per-worktree: 5.3 ms · 4.4 ms · 5.4 ms — flat as N grows 10×. Linear in N.
+          </p>
+        </div>
+        <div class="bench-explain">
+          <dl>
+            <dt>what</dt>
+            <dd>Every verdict re-graded against ground truth as N grows from 100 to 1000 worktrees — not just wall-clock time.</dd>
+            <dt>how</dt>
+            <dd><code class="inline">eval/bench.mjs</code> builds N worktrees in a fixed planted composition (30% committed-ahead, 20% uncommitted-only, 30% landed-decoy, 20% empty), scans, then re-grades every verdict. A scan that gets faster by skipping work fails the run — it doesn't just time out.</dd>
+            <dt>means</dt>
+            <dd>The tool doesn't fall over on a large agent fan-out, and the speed was never bought by skipping the correctness check.</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2: monster round -->
+    <div class="bench-block">
+      <div class="bench-head">
+        <h3>2 · The monster round (worst case)</h3>
+        <span class="bench-repro">reproduce: <code>node eval/monster.mjs 120</code></span>
+      </div>
+      <div class="bench-cols">
+        <div>
+          <div class="table-wrap">
+            <table class="rtable">
+              <thead>
+                <tr><th>trees</th><th>gold50 symbol detections</th><th>verdicts</th><th>bytes after destructive loop</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>121</td><td>41 / 41</td><td>all correct</td><td>all intact</td></tr>
+                <tr><td>151 (pre-gold50 composition)</td><td>—</td><td>all correct</td><td>all intact</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p style="margin-top:16px; font-size:13px; color:var(--text-faint);">
+            a 40-tree round is pinned permanently in CI (<code class="inline">test/e2e/monster.test.mjs</code>).
+          </p>
+        </div>
+        <div class="bench-explain">
+          <dl>
+            <dt>what</dt>
+            <dd>One repository containing every hazard at once: junk heaps, buried gold, lying names in both directions, unicode names, nested git repos, foreign locks, and valuable work buried in each of 50 supported languages — graded on symbol detection, verdict correctness, and byte survival through <code class="inline">protect → clean --apply → rescue</code>.</dd>
+            <dt>how</dt>
+            <dd>One synthesized worst-case repo, scanned and then run through the full destructive loop.</dd>
+            <dt>means</dt>
+            <dd>Correctness holds under adversarial composition, not just the easy average case. This round has a track record: it caught a unicode-quoting bug that made rescue refuse correct captures, and a Dockerfile-variant parser gap, before either shipped.</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3 + 4 side by side -->
+    <div class="bench-block">
+      <div class="tile-row">
+        <div>
+          <div class="bench-head">
+            <h3>3 · Invariant fuzzing</h3>
+            <span class="bench-repro">reproduce: <code>node --test test/e2e/fuzz-invariant.test.mjs</code></span>
+          </div>
+          <div class="tile-row" style="margin-top:16px; margin-bottom:16px;">
+            <div class="tile"><div class="tile-num">48 / 48</div><div class="tile-label">states, zero violations</div></div>
+            <div class="tile"><div class="tile-num">8 × 6</div><div class="tile-label">seeded rounds × worktrees</div></div>
+          </div>
+          <div class="bench-explain">
+            <dl>
+              <dt>what</dt>
+              <dd>holt checked against an independent oracle that shares no code with it — raw <code class="inline">git status</code> plus direct content comparison against base.</dd>
+              <dt>how</dt>
+              <dd>8 seeded rounds of 6 random worktree-state compositions each; the oracle asserts holt never calls risky content safe, and <code class="inline">clean --apply</code> never removes it.</dd>
+              <dt>means</dt>
+              <dd>This is the check that catches a subtle logic bug the hand-written scenario tests didn't think to ask for.</dd>
+            </dl>
+          </div>
+        </div>
+        <div>
+          <div class="bench-head">
+            <h3>4 · Clean-room degradation</h3>
+            <span class="bench-repro">CI job: <code>bare</code></span>
+          </div>
+          <div style="margin: 16px 0;">
+            <span class="badge-mono">backend: regex fallback (ctags-not-found)</span>
+          </div>
+          <div class="tile-row" style="margin-bottom:16px;">
+            <div class="tile"><div class="tile-num">47 / 47</div><div class="tile-label">pass, no optional backends</div></div>
+          </div>
+          <div class="bench-explain">
+            <dl>
+              <dt>what</dt>
+              <dd>Safety, detection, CLI, and the invariant fuzzer, run with zero optional dependencies installed.</dd>
+              <dt>how</dt>
+              <dd><code class="inline">node:22-slim</code>, git only — no ctags, no enry, no jscpd, no jj.</dd>
+              <dt>means</dt>
+              <dd>holt degrades to a regex fallback and says so loudly, not silently — safety doesn't quietly depend on an optional tool being installed.</dd>
+            </dl>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5: A/B pilot -->
+    <div class="bench-block">
+      <div class="bench-head">
+        <h3>5 · Agent A/B (pilot)</h3>
+        <span class="bench-repro">reproduce: <code>node eval/prep.mjs build gauntlet 6</code> → drive any agent → <code>node eval/prep.mjs grade</code></span>
+      </div>
+      <div class="bench-cols">
+        <div>
+          <div class="table-wrap">
+            <table class="rtable">
+              <thead>
+                <tr><th>arm</th><th>irreplaceable survived</th><th>acted</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>naked</td><td>4/6 (one trial destroyed all 5)</td><td>3/6</td></tr>
+                <tr><td>holt, warnings only</td><td>6/6</td><td>0/6 — froze</td></tr>
+                <tr><td>holt, shipped</td><td>5/5, 5/5, 5/5</td><td>8/9, 8/9, 1/9 removed</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p style="margin-top:16px; font-size:13px; color:var(--text-faint);">
+            two shipped-config trials ran the full loop autonomously (rescue refs verifiable in-trial).
+            earlier cleanup-scenario run: +33 pts safety / +30 pts utility, Fisher exact p = 0.227 at n = 6 —
+            directional, not significant.
+          </p>
+        </div>
+        <div class="bench-explain">
+          <dl>
+            <dt>what</dt>
+            <dd>Whether real agents preserve irreplaceable work and still perform cleanup, under three conditions: no protection, holt as passive warnings, and holt as a shipped product (acting MCP tools + routed AGENTS.md + protect).</dd>
+            <dt>how</dt>
+            <dd>Claude Haiku 4.5, identical prompts that never mention holt, graded from filesystem state — never the agent's own claim. n = 3–6 trials per arm.</dd>
+            <dt>means</dt>
+            <dd>These are small pilots, not a benchmark paper — but directionally, warnings alone froze agents into inaction; the shipped product is the only arm that both protected everything and still let cleanup happen.</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+    <!-- 6: test suite integrity -->
+    <div class="bench-block">
+      <div class="bench-head">
+        <h3>6 · Test-suite integrity</h3>
+      </div>
+      <div class="bench-cols">
+        <div>
+          <div class="tile-row tri">
+            <div class="tile"><div class="tile-num">199</div><div class="tile-label">tests passing (<code class="inline">npm test</code>)</div></div>
+            <div class="tile"><div class="tile-num">13/13</div><div class="tile-label">deliberate defects killed (<code class="inline">npm run test:mutation</code>)</div></div>
+            <div class="tile"><div class="tile-num">50</div><div class="tile-label">languages asserted by symbol name</div></div>
+          </div>
+        </div>
+        <div class="bench-explain">
+          <dl>
+            <dt>what</dt>
+            <dd>Whether the safety net has holes the ordinary test suite wouldn't find. <code class="inline">test/mutation.mjs</code> breaks high-stakes behaviors on purpose — <code class="inline">safeToDelete</code> returning true for everything, the git allowlist permitting everything, rescue skipping verification — and requires the suite to go red.</dd>
+            <dt>how</dt>
+            <dd>Mutations run in a disposable repo copy, never the live tree; a tripwire fingerprints the live repo after every mutation and exits 2 on any drift — proven able to fire by deliberate sabotage.</dd>
+            <dt>means</dt>
+            <dd>The first mutation run scored 10/12, not 13/13 — both survivors were real holes, now fixed and killed by tests built on real mechanisms. That falsification history is why the suite looks the way it does.</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============ HONEST BOUNDARIES ============ -->
+<section id="boundaries">
+  <div class="wrap">
+    <span class="kicker good">honest boundaries</span>
+    <h2 class="section-title">What holt doesn't do.</h2>
+    <ul class="boundaries-list">
+      <li><strong>Gitignored content is invisible</strong> — to git, therefore to holt. Pinned by a test as a documented limit.</li>
+      <li><strong>P4 in general remains unsolved.</strong> <code class="inline">verify</code> decides a specific suspected pair empirically; it does not certify compatibility.</li>
+      <li><strong>jj workstreams are analyzed as of their last snapshot</strong> — holt passes <code class="inline">--ignore-working-copy</code> because letting jj snapshot would itself be a write.</li>
+      <li><strong>A/B results are small-N pilots</strong> with confidence intervals, not benchmarks.</li>
+      <li><strong>Linux-tested</strong>; macOS/Windows CI pending. 1000+-worktree scale unmeasured.</li>
+      <li><strong>The lock doesn't stop <code class="inline">rm -rf</code></strong> — that's filesystem-level; the PreToolUse hook covers it where hooks exist. <code class="inline">git worktree unlock</code> and <code class="inline">remove -f -f</code> are classified destructive and denied by the hook layer.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============ INSTALL ============ -->
+<section id="install">
+  <div class="wrap">
+    <span class="kicker">install</span>
+    <h2 class="section-title">Set it, forget it, keep everything.</h2>
+    <p class="section-sub">Two minutes from install to your first protected worktree.</p>
+
+    <div class="install-grid">
+      <div>
+        <div class="code-block">
+          <button class="copy-btn" id="copy-quickstart" type="button">copy</button>
+          <div class="cl"><span class="prompt">$</span> npm install -g holt</div>
+          <div class="cl"><span class="prompt">$</span> cd your-repo</div>
+          <div class="cl"><span class="prompt">$</span> holt status<span class="cmt">        # the decision surface — 1–2 s</span></div>
+          <div class="cl"><span class="prompt">$</span> holt protect<span class="cmt">       # lock what would be lost</span></div>
+          <div class="cl"><span class="prompt">$</span> holt integrate<span class="cmt">     # wire your agents</span></div>
+          <div class="cl"><span class="prompt">$</span> holt clean --apply<span class="cmt"> # reclaim what provably holds nothing</span></div>
+        </div>
+      </div>
+
+      <div class="license-card">
+        <span class="license-tag">FSL-1.1-MIT</span>
+        <h4>Free for every developer, forever.</h4>
+        <ul>
+          <li>Free for everyone — individuals and companies alike, including production use inside any codebase, commercial or not.</li>
+          <li>The one thing you can't do: ship a commercial product whose selling point <em>is</em> holt — a substitute for it, or something offering substantially the same functionality. Use it; don't be it.</li>
+          <li>Every release automatically becomes plain MIT two years after it ships. No rug to pull.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap footer-inner">
+    <span class="brand"><span class="brand-mark">h</span>holt</span>
+    <span class="footer-oss">universal-ctags · enry · jscpd · git merge-tree · jj</span>
+    <span>© 2026 holt contributors</span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  function flashCopied(btn, original) {
+    var prev = btn.innerHTML;
+    btn.textContent = 'copied';
+    setTimeout(function () { btn.innerHTML = original; }, 1400);
+  }
+  function copy(text, btn) {
+    var original = btn.innerHTML;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { flashCopied(btn, original); }, function () {});
+    }
+  }
+  var installBtn = document.getElementById('copy-install');
+  if (installBtn) installBtn.addEventListener('click', function () { copy('npm install -g holt', installBtn); });
+
+  var qsBtn = document.getElementById('copy-quickstart');
+  if (qsBtn) qsBtn.addEventListener('click', function () {
+    copy('npm install -g holt\ncd your-repo\nholt status\nholt protect\nholt integrate\nholt clean --apply', qsBtn);
+  });
+})();
+</script>
+
+</body>
+</html>

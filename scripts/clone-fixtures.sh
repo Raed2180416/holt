@@ -6,13 +6,13 @@
 # with real history, real file layouts, and real hot files.
 #
 #   usage:  scripts/clone-fixtures.sh [target-dir]
-#   default target: $HOME/.agentic-os-tmp/holt-real   (override with HOLT_REAL_REPOS)
+#   default target: $HOME/.holt-work/holt-real   (override with HOLT_REAL_REPOS)
 #
 # Shallow clones: holt only needs HEAD plus enough history to make worktrees.
 
 set -euo pipefail
 
-TARGET="${1:-${HOLT_REAL_REPOS:-$HOME/.agentic-os-tmp/holt-real}}"
+TARGET="${1:-${HOLT_REAL_REPOS:-$HOME/.holt-work/holt-real}}"
 mkdir -p "$TARGET"
 
 clone_one() {

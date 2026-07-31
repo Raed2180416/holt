@@ -30,9 +30,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // like and what a classifier will accept. The eval must test the product as shipped.
 const HOLT_BIN = 'holt';
 const SRC = process.env.HOLT_EVAL_SRC
-  ?? path.join(os.homedir(), '.agentic-os-tmp', 'holt-real', 'py-click');
+  ?? path.join(os.homedir(), '.holt-work', 'holt-real', 'py-click');
 const WORK = process.env.HOLT_EVAL_WORK
-  ?? path.join(os.homedir(), '.agentic-os-tmp', 'holt-eval');
+  ?? path.join(os.homedir(), '.holt-work', 'holt-eval');
 
 /**
  * THE ANSWER KEY LIVES OUTSIDE THE TRIAL TREE. This is not tidiness — it is the difference
@@ -50,7 +50,7 @@ const WORK = process.env.HOLT_EVAL_WORK
  * arm's repos is itself a hint), and the manifest goes to a directory the agent has no path to.
  */
 const META = process.env.HOLT_EVAL_META
-  ?? path.join(os.homedir(), '.agentic-os-tmp', 'holt-eval-meta');
+  ?? path.join(os.homedir(), '.holt-work', 'holt-eval-meta');
 
 const BUILDERS = { cleanup: buildCleanupMess, gauntlet: buildGauntletMess };
 

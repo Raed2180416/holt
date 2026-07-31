@@ -29,7 +29,7 @@ import { analyze } from '../../src/analyze.mjs';
 import { impact } from '../../src/impact.mjs';
 
 const REAL_ROOT = process.env.HOLT_REAL_REPOS
-  ?? path.join(process.env.HOME ?? '/tmp', '.agentic-os-tmp', 'holt-real');
+  ?? path.join(process.env.HOME ?? '/tmp', '.holt-work', 'holt-real');
 
 /**
  * Per-repo scenario definitions. `ext` picks the language; `hot` is a file that genuinely

@@ -50,8 +50,8 @@ const TRIALS = Number(opt('trials', 6));
 const MODEL = opt('model', 'opencode/ling-3.0-flash-free');
 const SCENARIO = opt('scenario', 'all');
 const OUT = opt('out', path.join(HERE, 'results.json'));
-const SRC = opt('src', path.join(os.homedir(), '.agentic-os-tmp', 'holt-real', 'py-click'));
-const WORK = opt('work', path.join(os.homedir(), '.agentic-os-tmp', 'holt-eval'));
+const SRC = opt('src', path.join(os.homedir(), '.holt-work', 'holt-real', 'py-click'));
+const WORK = opt('work', path.join(os.homedir(), '.holt-work', 'holt-eval'));
 
 /* ------------------------------------------------------------------ scenarios ---- */
 

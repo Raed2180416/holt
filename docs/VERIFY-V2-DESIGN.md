@@ -1,9 +1,9 @@
-# verify v2 — the verdict ladder (P4 design, synthesized 2026-07-31)
+# verify v2 — the verdict ladder (design)
 
-Source: 7-angle SOTA sweep + completeness critic (8 agents, ~1M tokens; full findings in the
-session workflow journal). Every design decision below cites its evidence.
+Source: a review of the current semantic-conflict-detection literature (internal research
+sweep, sources cited inline). Every design decision below cites its evidence.
 
-## What the field taught us
+## What prior work shows
 
 1. **Nobody has shipped it.** Multi-language, high-precision AND high-recall semantic-conflict
    detection does not exist anywhere — every measured technique is Java-only (Soot/EvoSuite
@@ -12,7 +12,7 @@ session workflow journal). Every design decision below cites its evidence.
 2. **The precision/recall split is structural.** Dynamic/test-based = high-P/low-R (ICSE'24:
    P .80/R .14; SAM best-combo R 32% — arXiv:2310.02395). Static reachability = the recall
    side (P .65/R .88 vs reference subsample — arXiv:2310.04269; 62% recall at 30M-SLOC C++
-   scale, SAP HANA call-graph "dangerous dependencies"). You need BOTH, layered.
+   scale, SAP HANA call-graph "dangerous dependencies"). Effective detection needs both, layered.
 3. **More machinery can make it WORSE.** Adding pointer/alias analysis collapsed recall 28%→7%
    (arXiv:2507.20081). holt's ctags-grade conservative graph is not a compromise — it is the
    published right regime for fail-closed detection. NEVER build alias analysis for this.
@@ -55,8 +55,8 @@ Cross-cutting:
 4. R3 targeted/batched scheduling of the existing suite runner.
 5. Adjudication memory; watch mode.
 
-Critic's flags worth holding: SVF/LLVM-IR as a future non-JVM static substrate; Daikon-style
-invariant mining and Diffy-style record-replay as future R4 variants; SymDiff/POPL'88
-non-interference as the formal lineage if we ever want proofs on a subset. The hardest
+Additional directions worth tracking: SVF/LLVM-IR as a future non-JVM static substrate;
+Daikon-style invariant mining and Diffy-style record-replay as future R4 variants;
+SymDiff/POPL'88 non-interference as the formal lineage for eventual proofs on a subset. The hardest
 unsolved remains verdict TRUST across a 50-language matrix with no assumed build infra — the
 ladder answers it by degrading loudly per rung per language, never by pretending coverage.

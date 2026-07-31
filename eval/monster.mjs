@@ -36,7 +36,7 @@ import { protect, clean, rescue } from '../src/actions.mjs';
 
 const COUNT = Math.max(20, Number(process.argv[2] ?? 80));
 const WORK = process.env.HOLT_MONSTER_WORK
-  ?? path.join(os.homedir(), '.agentic-os-tmp', 'holt-monster');
+  ?? path.join(os.homedir(), '.holt-work', 'holt-monster');
 
 function sh(cmd, args, cwd) {
   return new Promise((resolve) => {

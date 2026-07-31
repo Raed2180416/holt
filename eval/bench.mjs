@@ -32,7 +32,7 @@ import { analyze } from '../src/analyze.mjs';
 
 const COUNT = Number(process.argv[2] ?? 100);
 const WORK = process.env.HOLT_BENCH_WORK
-  ?? path.join(os.homedir(), '.agentic-os-tmp', 'holt-bench');
+  ?? path.join(os.homedir(), '.holt-work', 'holt-bench');
 
 function sh(cmd, args, cwd) {
   return new Promise((resolve, reject) => {

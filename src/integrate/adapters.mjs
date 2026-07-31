@@ -465,7 +465,7 @@ export async function detectHosts(repoRoot, home = os.homedir()) {
 /**
  * Resolve the command every integration should reference.
  *
- * MEASURED: with integrations written as `node /home/raed/holt/bin/holt.mjs`, agents read
+ * MEASURED: with integrations written as `node /Users/dev/projects/holt/bin/holt.mjs`, agents read
  * AGENTS.md, chose the correct action, and were then STOPPED by the host's permission classifier
  * — "the permission classifier is blocking the execution". An absolute path to a script under a
  * developer's home directory is exactly the shape a Bash allowlist refuses, and the agent froze

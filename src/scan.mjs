@@ -16,7 +16,7 @@
  *                 THIS IS THE LAYER GIT CANNOT RELATE. No git command compares uncommitted
  *                 state across worktrees; merge-tree sees only commits. In the repo holt
  *                 was built against, the committed layer flagged 4 interesting worktrees
- *                 while the uncommitted layer held 52 registry keys absent from base.
+ *                 while the uncommitted layer held configuration keys absent from base.
  *                 A tool that scanned only the committed layer would have been confidently,
  *                 quietly wrong.
  *

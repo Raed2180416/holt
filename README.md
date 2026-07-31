@@ -6,10 +6,11 @@
 
 **You ran N agents. Holt answers: what did they produce, what's redundant, what collides,<br>what's safe to delete — and what you're about to lose.**
 
-[![tests](https://img.shields.io/badge/tests-199%20passing-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-199%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
 [![mutation score](https://img.shields.io/badge/mutation%20score-13%2F13%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
+[![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
 
 `npm install -g holt`
 
@@ -21,9 +22,9 @@
 
 Agents fan out into git worktrees. Worktrees pile up. Someone — a human or an agent — eventually cleans up. And git cannot help them, because **git has no primitive that relates *uncommitted* work across worktrees.** `merge-tree` sees only commits.
 
-On the repository holt was built against, git's committed layer flagged **4** interesting worktrees. The uncommitted layer held **52 registry keys that existed nowhere else.** A tool that only reads commits would have been confidently, quietly wrong — and this is measured, not hypothetical:
+In one measured case, a 39-worktree repository's committed layer flagged **4** interesting worktrees — its uncommitted layer held content that existed nowhere else. A tool that only reads commits would have been confidently, quietly wrong there. The A/B trials below reproduce the same failure mode:
 
-> In our A/B trials, an unaided agent deleted **13 of 16 worktrees including all five irreplaceable ones** — *"wip-1, wip-2: only contained untracked files"* — and kept two empty decoys because they were named `IMPORTANT-do-not-delete` and `KEEP-release-candidate`. Names in both directions, content in neither.
+> An unaided agent deleted **13 of 16 worktrees including all five irreplaceable ones** — *"wip-1, wip-2: only contained untracked files"* — and kept two empty decoys because they were named `IMPORTANT-do-not-delete` and `KEEP-release-candidate`. Names in both directions, content in neither.
 
 Holt prevented that loss in **every** protected trial.
 
@@ -59,7 +60,7 @@ Five of the seven documented parallel-agent problems reduce to one query — *wh
 | P1 | Hotspot collisions (routes, configs, registries) | `holt collisions` |
 | P2 | Agents blind to their siblings | `holt context <id>` |
 | P3 | N agents building the same thing | `holt duplicates` |
-| P5 | Review load | `holt plan` — measured **58% of symbol-reviews redundant** on a real 39-worktree repo |
+| P5 | Review load | `holt plan` — measured **58% of symbol-reviews redundant** on one 39-worktree case |
 | P6 | What's provably safe to delete | `holt gate <id>` — exit `0/1/2`, fail-closed |
 
 And the v0.2 stack that turns the analysis into motion:
@@ -73,7 +74,7 @@ And the v0.2 stack that turns the analysis into motion:
 
 Plus the two layers nobody else has:
 
-**`holt impact`** — *A defines symbol X; B references X; they share no file.* Invisible to collision detection by construction. On a real repo: 694 producer/consumer pairs, **307 not reported by any collision check**.
+**`holt impact`** — *A defines symbol X; B references X; they share no file.* Invisible to collision detection by construction. In one measured case: 694 producer/consumer pairs, **307 not reported by any collision check**.
 
 **`holt verify A B`** — the tractable core of semantic-conflict detection. Runs **your** test suite three times — A alone, B alone, A+B speculatively merged — and reports only what the *combination* breaks. Proven against a manufactured textbook case: both sides green alone, merge textually clean, combination red, correctly attributed. A clean result says *"the existing tests did not catch anything"* — never "compatible," because recall is bounded by your suite.
 
@@ -81,7 +82,7 @@ Plus the two layers nobody else has:
 
 ## Protection that needs no cooperation
 
-The 2026 guardrails consensus, which our trials reproduced from scratch: *probabilistic instruction-following is not a control.* Agents ignored AGENTS.md, summarised holt's output incorrectly, and overrode verdicts based on directory names.
+The 2026 guardrails consensus, reproduced from scratch in these trials: *probabilistic instruction-following is not a control.* Agents ignored AGENTS.md, summarised holt's output incorrectly, and overrode verdicts based on directory names.
 
 So the primary mechanism is git's own lock, applied by content:
 
@@ -114,7 +115,7 @@ $ holt clean --apply                      # remove what provably holds nothing, 
 $ holt integrate
 ```
 
-- **AGENTS.md** — the cross-tool standard read by 30+ agents. Routes to the *permitted* action first, because we measured what warnings-only does (row two of the table).
+- **AGENTS.md** — the cross-tool standard read by 30+ agents. Routes to the *permitted* action first: warnings-only measured as ineffective (row two of the table).
 - **MCP** — 14 tools in the schema each host actually reads (three hosts, three different config shapes, all verified live). Diagnostic tools annotated read-only; `holt_clean` honestly `destructiveHint: true`, because a host that auto-approves read-only tools must never auto-approve a deletion.
 - **Hooks** — Claude Code PreToolUse deny + OpenCode plugin (throws to block, fails open *loudly* if holt is broken) + a git pre-commit warning as the floor.
 - Project-scoped by default. Your `~/.config` is never touched, never created.

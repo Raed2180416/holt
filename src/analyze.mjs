@@ -113,9 +113,10 @@ export function overlappingPairs(workstreams) {
  * A symbol is unique to W when no other workstream added it and base does not have it.
  * (Base-absence is already guaranteed: `added` is computed as head-minus-base.)
  *
- * This is the finding that justified the tool. In the reference repo the committed layer
- * flagged 4 worktrees; the uncommitted layer held 52 registry keys absent from base. Both
- * layers feed this function, which is the entire point.
+ * This is the finding that justified the tool. In one measured 39-worktree repository the
+ * committed layer flagged 4 workstreams as interesting, while the uncommitted layer held
+ * configuration keys that existed in no other tree. Both layers feed this function, which is
+ * the entire point.
  */
 export function uniqueWork(scanResult) {
   const live = scanResult.workstreams.filter((w) => w.ok);
@@ -251,7 +252,7 @@ export async function collisions(scanResult, opts = {}) {
       // Measured on a real 39-worktree repository: treating "shares a file and someone has
       // uncommitted changes" as a medium collision produced 616 findings, 313 of them with no
       // evidence beyond both sides having touched the same hot file. In a repo where 491 pairs
-      // all touch scripts/armed-config.mjs, that is a near-complete graph. 616 findings with 6
+      // all touch one large shared config module, that is a near-complete graph. 616 findings with 6
       // real ones is strictly worse than 6, because the real ones become unreachable.
       //
       // Evidence is: git proved a conflict, OR both sides added the same discriminative symbol.

@@ -34,7 +34,7 @@
  * holt reports the relationship and the evidence. It does not tell you the interaction is a
  * problem, because it cannot know that.
  *
- * MEASURED on a real 37-workstream repository: 694 interaction pairs, of which 307 were NOT
+ * MEASURED on one 37-workstream repository: 694 interaction pairs, of which 307 were NOT
  * already reported as collisions — genuinely new information. The unfiltered version produced
  * 1215 pairs whose evidence was `summary`, `verdict`, `reasons`; the discriminative filter is
  * what makes the difference between a signal and a wall of noise.

@@ -31,6 +31,9 @@ import { branchAudit } from '../src/branches.mjs';
 import { partitionPlan } from '../src/partition.mjs';
 import { readJournal } from '../src/journal.mjs';
 import { git } from '../src/git.mjs';
+import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
+import { loadPolicy, evaluatePolicy } from '../src/team/policy.mjs';
+import { fleetScan } from '../src/team/fleet.mjs';
 
 const USAGE = `
 holt — the landing layer for parallel agent work
@@ -50,6 +53,8 @@ COMMANDS
   partition           pre-flight split for N agents  [--agents <n>]   (collision-free start map)
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
   journal             audit trail of every protect / rescue / clean / branch-delete
+  fleet <dir>...      every repository under <dir>: where work sits unlanded   [team]
+  license             activate | status | deactivate  (team/enterprise features)
   ci                  team gate for CI: fail a merge that abandons work
                       [--fail-on-unlanded] [--max-age-days <n>] [--ignore <branch>]...
                       (needs full refs: actions/checkout fetch-depth: 0)
@@ -81,6 +86,8 @@ AGENT INTEGRATION
 
 OPTIONS
   --json              machine-readable output
+  --export <fmt>      journal: json | csv                                       [team]
+  --max-depth <n>     fleet: directory depth to search for repositories (default 3)
   --base <ref>        compare against <ref>            (default: origin/HEAD, then main/master…)
   --cwd <path>        repository to inspect            (default: cwd)
   --no-symbols        skip symbol extraction (faster, file-level only)
@@ -117,6 +124,8 @@ function parseArgs(argv) {
       case '--run': opts.run = argv[++i]; break;
       case '--agents': opts.agents = Number(argv[++i]) || 2; break;
       case '--autoprotect': opts.autoprotect = true; break;
+      case '--export': opts.exportFmt = argv[++i]; break;
+      case '--max-depth': opts.maxDepth = Number(argv[++i]) || 3; break;
       case '--fail-on-unlanded': opts.failOnUnlanded = true; break;
       case '--max-age-days': opts.maxAgeDays = Number(argv[++i]) || null; break;
       case '--ignore': (opts.ignore ??= []).push(argv[++i]); break;
@@ -440,12 +449,121 @@ async function main() {
     out(`\n  ${paint('grey', audit.note)}\n`);
     return;
   }
+  if (cmd === 'license') {
+    const sub = opts._[1] ?? 'status';
+    if (sub === 'activate') {
+      const key = opts._[2];
+      if (!key) { process.stderr.write(paint('red', 'holt license activate <key>\n')); process.exit(2); }
+      try {
+        const r = activateLicense(key);
+        if (opts.json) return emitJson({ ok: true, ...r });
+        out(paint('green', `holt ${r.tier} license activated`) + paint('grey', `  ${r.org ?? ''} · expires ${r.expires.slice(0, 10)}`));
+        out(paint('grey', `  stored ${r.stored} (mode 0600)`));
+        return;
+      } catch (e) {
+        if (opts.json) { emitJson({ ok: false, code: e.code ?? 'error', reason: e.message }); process.exit(1); }
+        process.stderr.write(paint('red', `holt license: ${e.message}\n`));
+        process.exit(1);
+      }
+    }
+    if (sub === 'deactivate') {
+      const r = deactivateLicense();
+      if (opts.json) return emitJson({ ok: true, ...r });
+      out(r.removed.length ? paint('green', `removed ${r.removed.join(', ')}`) : paint('grey', 'no license file to remove'));
+      return;
+    }
+    const st = licenseStatus();
+    if (opts.json) return emitJson(st);
+    out(paint('bold', 'holt license'));
+    if (!st.licensed) {
+      out(`\n  ${paint('yellow', 'no active license')}  ${paint('grey', st.reason ?? '')}`);
+      out(paint('grey', '  holt free is fully functional — a license unlocks team/enterprise features only.'));
+    } else {
+      out(`\n  tier      ${paint('green', st.tier)}${st.org ? paint('grey', `  (${st.org})`) : ''}`);
+      out(`  expires   ${st.expires.slice(0, 10)}  ${paint(st.daysLeft <= 14 ? 'yellow' : 'grey', `${st.daysLeft} day(s) left`)}${st.inGrace ? paint('red', '  IN GRACE PERIOD') : ''}`);
+      if (st.seats) out(`  seats     ${st.seats}`);
+      out(`  source    ${paint('grey', st.source ?? '')}`);
+    }
+    out('\n  FEATURES');
+    for (const f of st.features) {
+      out(`    ${f.entitled ? paint('green', '✓') : paint('grey', '·')} ${(f.feature + '                ').slice(0, 16)} ${paint('grey', f.need)}`);
+    }
+    out('');
+    return;
+  }
+  if (cmd === 'fleet') {
+    const ent = checkEntitlement('fleet');
+    if (!ent.entitled) {
+      if (opts.json) { emitJson({ ok: false, entitlement: ent }); process.exit(3); }
+      process.stderr.write(paint('yellow', `holt fleet: ${ent.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
+      process.exit(3);
+    }
+    const roots = opts._.slice(1);
+    if (!roots.length) roots.push(opts.cwd);
+    const f = await fleetScan(roots, opts);
+    if (opts.json) return emitJson(f);
+    out(paint('bold', `holt fleet — ${f.repositories} repositories`) + paint('grey', `  ${f.roots.join(' ')}`));
+    out(`\n  ${paint('bold', 'TOTALS')}  ${f.totals.workstreams} workstreams · ${paint(f.totals.atRisk ? 'yellow' : 'green', `${f.totals.atRisk} at risk`)} · ${f.totals.disposable} disposable · ${f.totals.unlandedBranches} unlanded branches`);
+    out('');
+    for (const r of f.repos) {
+      const flag = r.atRisk ? paint('yellow', `${r.atRisk} at risk`) : paint('grey', 'clear');
+      out(`    ${(r.name + '                        ').slice(0, 24)} ${flag}  ${paint('grey', `${r.workstreams} ws · ${r.disposable} disposable · ${r.unlandedBranches ?? '?'} unlanded`)}`);
+      if (r.atRiskIds.length) out(paint('grey', `      ${r.atRiskIds.slice(0, 6).join(', ')}`));
+    }
+    if (f.failures.length) {
+      out(`\n  ${paint('red', 'FAILED TO SCAN')} ${paint('grey', '(not clean — unknown)')}`);
+      for (const x of f.failures) out(`    ${x.repo}  ${paint('grey', x.error)}`);
+    }
+    out(`\n  ${paint('grey', f.note)}\n`);
+    return;
+  }
   if (cmd === 'ci') {
     // The team gate. Report-only by default; policy is explicit flags, and an instrument
     // failure (unknown bucket) is NEVER a green result when policy is on.
     const audit = await branchAudit(opts.cwd, opts);
     if (!audit.ok) { process.stderr.write(paint('red', `holt ci: ${audit.reason}\n`)); process.exit(2); }
     const ignore = new Set([...(opts.ignore ?? []), process.env.GITHUB_HEAD_REF].filter(Boolean));
+
+    // Policy as code, when the repository declares one. A declared policy that cannot be
+    // enforced is a hard failure in BOTH directions: unreadable policy exits 2, and an
+    // unlicensed policy exits 3 — never a silent pass, which would tell a team they are
+    // covered when nothing ran.
+    let loaded;
+    try {
+      loaded = await loadPolicy(audit.base ? (await discover(opts.cwd, opts)).root : opts.cwd);
+    } catch (e) {
+      if (opts.json) { emitJson({ ok: false, code: e.code, reason: e.message }); process.exit(2); }
+      process.stderr.write(paint('red', `holt ci: ${e.message}\n`));
+      process.exit(2);
+    }
+    if (loaded.found) {
+      const ent = checkEntitlement('policy-file');
+      if (!ent.entitled) {
+        const payload = { ok: false, code: 'unlicensed-policy', policy: loaded.path, entitlement: ent,
+          reason: `${loaded.path} declares a policy but ${ent.reason}. Refusing to pass a build against a policy that did not run.` };
+        if (opts.json) { emitJson(payload); process.exit(3); }
+        process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
+        process.exit(3);
+      }
+      const { report } = await buildReport(opts).catch(() => ({ report: null }));
+      const res = evaluatePolicy(loaded.policy, { audit, report, ignore: [...ignore] });
+      const payload = {
+        ok: res.ok, mode: 'policy', policy: loaded.path, entitlement: { tier: ent.tier, org: ent.org ?? null },
+        rulesEvaluated: res.rulesEvaluated, errors: res.errors, warnings: res.warnings,
+        violations: res.violations, exempted: res.exempted,
+        note: 'requires full refs (actions/checkout with fetch-depth: 0)',
+      };
+      if (opts.json) { emitJson(payload); process.exit(res.ok ? 0 : 1); }
+      out(paint('bold', `holt ci — policy ${loaded.path}`) + paint('grey', `  ${res.rulesEvaluated.length} rule(s) · ${ent.tier} license`));
+      for (const v of res.violations) {
+        const c = v.severity === 'error' ? 'red' : 'yellow';
+        out(`  ${paint(c, v.severity.toUpperCase())} ${paint('bold', v.rule)}  ${v.message}`);
+        for (const e of v.evidence ?? []) out(paint('grey', `      ${e}`));
+      }
+      if (res.ok) out(paint('green', `\n  PASS — ${res.warnings} warning(s), 0 errors\n`));
+      else out(paint('red', `\n  FAIL — ${res.errors} error(s), ${res.warnings} warning(s)\n`));
+      process.exit(res.ok ? 0 : 1);
+    }
     const unlanded = audit.unlanded.filter((b) => !ignore.has(b.name));
     const overAge = opts.maxAgeDays
       ? unlanded.filter((b) => b.ageDays != null && b.ageDays > opts.maxAgeDays) : [];
@@ -473,6 +591,29 @@ async function main() {
   }
   if (cmd === 'journal') {
     const events = await readJournal(opts.cwd);
+    if (opts.exportFmt) {
+      const ent = checkEntitlement('journal-export');
+      if (!ent.entitled) {
+        if (opts.json) { emitJson({ ok: false, entitlement: ent }); process.exit(3); }
+        process.stderr.write(paint('yellow', `holt journal --export: ${ent.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
+        process.exit(3);
+      }
+      const fmt = String(opts.exportFmt).toLowerCase();
+      if (fmt === 'json') return emitJson({ exportedAt: new Date().toISOString(), repo: opts.cwd, count: events.length, events });
+      if (fmt === 'csv') {
+        const cols = ['at', 'action', 'id', 'name', 'path', 'branch', 'ref', 'commit', 'reason', 'evidence'];
+        const esc = (v) => {
+          if (v == null) return '';
+          const s2 = Array.isArray(v) ? v.join('; ') : String(typeof v === 'object' ? JSON.stringify(v) : v);
+          return /[",\n]/.test(s2) ? `"${s2.replace(/"/g, '""')}"` : s2;
+        };
+        out(cols.join(','));
+        for (const e of events) out(cols.map((c) => esc(e[c])).join(','));
+        return;
+      }
+      process.stderr.write(paint('red', `holt journal: unknown export format '${opts.exportFmt}' (json | csv)\n`));
+      process.exit(2);
+    }
     if (opts.json) return emitJson({ events });
     if (!events.length) { out(paint('grey', 'holt journal: no recorded actions in this repository yet')); return; }
     out(paint('bold', `holt journal — ${events.length} recorded action(s)`));
