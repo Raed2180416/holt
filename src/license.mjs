@@ -68,6 +68,22 @@ export const FEATURE_TIER = {
   // What a TEAM pays for is managing this centrally, across repos, with policy and a paper trail.
   'policy-file': 'team',      // .holt/policy.json — policy as code, richer rules than flags
   fleet: 'team',              // multi-repo aggregation
+};
+
+/**
+ * Sold, but not built. NOT in FEATURE_TIER, and that distinction is the whole point.
+ *
+ * `audit-sink`, `sso` and `air-gap` were listed as purchasable entitlements while having ZERO
+ * call sites anywhere in the product — `holt license` printed them to a customer as things their
+ * key unlocks, and the README priced them with no caveat. A paid tier that lists a feature the
+ * binary cannot perform is not a roadmap, it is a false statement to someone holding a receipt.
+ *
+ * They stay named here so the roadmap is honest and `holt license` can SAY they are coming, but
+ * checkEntitlement() must never report them as granted: an unbuilt feature is not entitled at any
+ * tier, including enterprise. A test asserts every FEATURE_TIER key has a real call site, so this
+ * cannot silently drift back.
+ */
+export const FEATURE_ROADMAP = {
   'audit-sink': 'team',       // continuous export of the journal to an external system (webhook)
   sso: 'enterprise',
   'air-gap': 'enterprise',
@@ -177,8 +193,12 @@ export function verifyToken(token, { now = Date.now(), publicKeyB64 = null, publ
 
 /** Does `tier` entitle `feature`? */
 export function tierEntitles(tier, feature) {
+  // An UNBUILT feature is not entitled at any tier, including enterprise. Falling through to
+  // "unpriced features are free" would have granted sso/air-gap to everyone the moment they left
+  // the priced table — turning a false promise into a false grant, which is strictly worse.
+  if (FEATURE_ROADMAP[feature]) return false;
   const need = FEATURE_TIER[feature];
-  if (!need) return true; // unpriced features are free by default
+  if (!need) return true; // genuinely unpriced features are free by default
   return TIERS.indexOf(tier) >= TIERS.indexOf(need);
 }
 
@@ -187,6 +207,18 @@ export function tierEntitles(tier, feature) {
  * and the refusal always states exactly what is missing and how to fix it.
  */
 export function checkEntitlement(feature, { env = process.env, now = Date.now(), publicKeyB64 = null } = {}) {
+  // An UNBUILT feature is not entitled at ANY tier, including enterprise. Without this it would
+  // fall through to "unpriced features are free" and be GRANTED to everyone the moment it left the
+  // priced table — turning a false promise into a false grant, which is strictly worse than the
+  // problem being fixed.
+  const planned = FEATURE_ROADMAP[feature];
+  if (planned) {
+    return {
+      entitled: false, tier: 'free', feature, need: planned, source: null, code: 'not-built',
+      reason: `'${feature}' is on the roadmap for the ${planned} tier and is not built yet`,
+      fix: 'Nothing to buy — it does not exist to unlock. Follow the repository for release notes.',
+    };
+  }
   const need = FEATURE_TIER[feature];
   if (!need) return { entitled: true, tier: 'free', feature, reason: 'this feature is free' };
 
@@ -199,7 +231,7 @@ export function checkEntitlement(feature, { env = process.env, now = Date.now(),
         ? `'${feature}' requires a holt ${need} license`
         : `holt ${need} license rejected: ${v.reason}`,
       fix: v.code === 'absent'
-        ? 'Get one at https://holt.dev/pricing, then run: holt license activate <key>  (or set HOLT_LICENSE in CI)'
+        ? 'Get one at https://raed2180416.github.io/holt/#pricing, then run: holt license activate <key>  (or set HOLT_LICENSE in CI)'
         : 'Run `holt license status` for details, or re-activate the key from your receipt.',
     };
   }
@@ -207,7 +239,7 @@ export function checkEntitlement(feature, { env = process.env, now = Date.now(),
     return {
       entitled: false, tier: v.claims.tier, feature, need, source, code: 'tier-too-low',
       reason: `'${feature}' requires the ${need} tier; this license is ${v.claims.tier}`,
-      fix: 'Upgrade at https://holt.dev/pricing',
+      fix: 'Upgrade at https://raed2180416.github.io/holt/#pricing',
     };
   }
   return {

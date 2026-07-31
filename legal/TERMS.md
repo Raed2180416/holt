@@ -65,4 +65,4 @@ that term. Material changes will be announced at least 30 days in advance to the
 
 ## 10. Contact
 
-legal@holt.dev
+https://github.com/Raed2180416/holt/issues/new

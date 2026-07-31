@@ -214,7 +214,19 @@ async function ignoredContent(wtPath, { timeout }) {
     if (!entry || entry.length < 4) continue;
     if (entry.slice(0, 2) !== '!!') continue;      // '!!' marks an ignored path
     const p = entry.slice(3);
-    if (!p || looksGenerated(p) || p.endsWith('/')) continue;
+    if (!p || looksGenerated(p)) continue;
+    // A TRAILING SLASH IS A DIRECTORY, AND SKIPPING IT DESTROYED REAL DATA.
+    //
+    // When .gitignore names a directory (`secrets/`), git's --ignored=matching collapses the whole
+    // subtree to the ONE entry `secrets/` and never lists the files inside it. Dropping that entry
+    // therefore erased the entire subtree from the verdict, and a worktree whose only unique
+    // content was `secrets/prod.env` was reported as holding nothing base lacks — so
+    // `holt clean --apply` deleted the only copy of live credentials. Reproduced 40/40.
+    //
+    // The directory IS the evidence. It is kept, with its slash, so the verdict downgrades to
+    // "holt cannot verify this" exactly as it does for an ignored file. looksGenerated() above
+    // still discards node_modules/, dist/, .cache/ and friends, so ordinary build output stays
+    // disposable — verified, not assumed.
     files.push(p);
   }
   return { files: files.sort(), how: 'status --ignored' };

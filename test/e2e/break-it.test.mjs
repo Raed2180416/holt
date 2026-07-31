@@ -254,11 +254,24 @@ test('ATTACK: work hidden ONLY inside a .gitignore-d path', async (t) => {
   const report = await inspect(fx.root);
   const v = verdict(report, 'hidden');
 
-  // Honest position: git ignores it, so holt does too, and the worktree IS disposable by
-  // holt's definition. This test PINS that behaviour so it is a documented limitation rather
-  // than a surprise — an agent storing work in an ignored path is outside what git can protect.
-  assert.equal(v.safe, true,
-    'gitignored content is invisible to git and therefore to holt — pinned as a known limit');
+  // THIS TEST USED TO ASSERT `safe === true`, AND THAT ASSERTION DESTROYED REAL DATA.
+  //
+  // It pinned "gitignored content is invisible to holt" as an accepted limit, while
+  // detection.test.mjs asserted the OPPOSITE for a gitignored FILE — semantically the same
+  // situation, opposite assertions, both green. The gap between them is where the defect lived:
+  // when .gitignore names a DIRECTORY, git's --ignored=matching collapses the subtree to one
+  // entry `secret-notes/`, holt skipped anything ending in `/`, and the worktree came back
+  // "holds nothing base lacks". `clean --apply` then deleted the only copy. Reproduced 40/40 on
+  // a 2,440-worktree corpus, with live credentials as the payload.
+  //
+  // The corrected position, and the one the product already takes for ignored files: holt cannot
+  // VERIFY ignored content, so it must refuse to call the worktree disposable. Refusing costs a
+  // user one manual deletion; the old behaviour cost them the file.
+  assert.equal(v.safe, false,
+    'a worktree whose only unique content is gitignored must NOT be called disposable — ' +
+    'holt cannot verify that content exists anywhere else, and unverifiable is not safe');
+  assert.match(JSON.stringify(v), /ignored|unverifiable|cannot verify/i,
+    'and the refusal must say WHY, so the user can act on it');
 });
 
 test('ATTACK: a huge fan-out where the needle is a single deleted line', async (t) => {
@@ -357,4 +370,46 @@ test('ATTACK: the gate must not block a command that merely MENTIONS a worktree'
   }
   assert.deepEqual(overblocked, [],
     `the gate blocked harmless commands; it will be disabled and protect nothing:\n${overblocked.join('\n')}`);
+});
+
+test('ATTACK: a gitignored DIRECTORY hides the only copy of a credentials file', async (t) => {
+  // THE EXACT SHAPE THAT DESTROYED DATA, kept as its own test because the directory case and the
+  // file case took different code paths and only the file case was covered.
+  //
+  // `git status --ignored=matching` collapses an ignored subtree to a single entry with a trailing
+  // slash — `secrets/`, never `secrets/prod.env`. holt skipped anything ending in `/`, so the
+  // subtree vanished from the verdict, the worktree was reported as holding nothing base lacks,
+  // and `clean --apply` removed it along with the only copy of the file inside.
+  const fx = await newRepo('ignored-dir');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', 'secrets/\n');
+  await fx.commit('add gitignore');
+
+  const wt = await fx.worktree('creds');
+  await fs.mkdir(path.join(wt, 'secrets'), { recursive: true });
+  await fs.writeFile(path.join(wt, 'secrets/prod.env'), 'PROD_DB_PASSWORD=hunter2\n');
+
+  const report = await inspect(fx.root);
+  assert.equal(verdict(report, 'creds').safe, false,
+    'a worktree whose only unique content sits under a gitignored DIRECTORY must not be disposable');
+});
+
+test('NEVER-WORSE: ordinary build output under a gitignored directory stays disposable', async (t) => {
+  // The other half, and the one that keeps the fix usable. If every ignored directory blocked
+  // deletion, `clean` would refuse on every repository that has ever run `npm install` — a tool
+  // that never cleans anything is not safer, it is uninstalled.
+  const fx = await newRepo('ignored-generated');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', 'node_modules/\ndist/\n');
+  await fx.commit('add gitignore');
+
+  const wt = await fx.worktree('build');
+  await fs.mkdir(path.join(wt, 'node_modules/pkg'), { recursive: true });
+  await fs.writeFile(path.join(wt, 'node_modules/pkg/index.js'), 'module.exports = 1;\n');
+  await fs.mkdir(path.join(wt, 'dist'), { recursive: true });
+  await fs.writeFile(path.join(wt, 'dist/bundle.js'), 'console.log(1);\n');
+
+  const report = await inspect(fx.root);
+  assert.equal(verdict(report, 'build').safe, true,
+    'node_modules/ and dist/ are recognised as generated and must not block cleanup');
 });

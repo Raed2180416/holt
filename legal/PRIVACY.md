@@ -45,7 +45,8 @@ collected, so there is nothing to retain.
 ## Your rights
 
 Where GDPR, UK GDPR or CCPA apply you may request access to, correction of, or deletion of your
-personal data, and may object to processing. Email **privacy@holt.dev**; we respond within 30
+personal data, and may object to processing. Open a request at **[https://github.com/Raed2180416/holt/issues/new](https://github.com/Raed2180416/holt/issues/new)** (or use the private security
+advisory channel if the request itself contains personal data); we respond within 30
 days. Note that we cannot delete records we are legally required to retain for tax purposes.
 
 ## International transfers
@@ -59,4 +60,4 @@ holt is a developer tool and is not directed at anyone under 16.
 
 ## Contact
 
-privacy@holt.dev
+https://github.com/Raed2180416/holt/issues/new

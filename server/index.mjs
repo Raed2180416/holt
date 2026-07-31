@@ -24,7 +24,7 @@
  *   STRIPE_SECRET_KEY       sk_live_... (only used for the billing-portal endpoint)
  * OPTIONAL
  *   RESEND_API_KEY          if absent, issued licenses are written to the log and stdout only
- *   HOLT_LICENSE_FROM       sender address for delivery mail (default: licenses@holt.dev)
+ *   HOLT_LICENSE_FROM       sender address for delivery mail — MUST be set to a domain you own
  *   HOLT_DATA               path to the JSONL ledger (default: ./data/licenses.jsonl)
  *   PORT                    default 8080
  */
@@ -36,7 +36,7 @@ import { createPrivateKey, sign as edSign, createHmac, timingSafeEqual, randomUU
 
 const PORT = Number(process.env.PORT) || 8080;
 const DATA = process.env.HOLT_DATA || path.join(process.cwd(), 'data', 'licenses.jsonl');
-const FROM = process.env.HOLT_LICENSE_FROM || 'licenses@holt.dev';
+const FROM = process.env.HOLT_LICENSE_FROM || 'licenses@localhost';
 
 /* -------------------------------------------------------------- configuration ---- */
 
@@ -312,7 +312,7 @@ export async function deliverLicense({ email, token, tier, claims }, { fetchImpl
         `Valid until ${new Date(claims.exp).toISOString().slice(0, 10)}.`,
         `Licenses verify offline — holt never contacts a server, on any tier.`,
         ``,
-        `Questions: support@holt.dev`,
+        `Questions: https://github.com/Raed2180416/holt/issues/new`,
       ].join('\n'),
     }),
   });
@@ -525,14 +525,14 @@ export function createServer({ env = process.env, dataFile = DATA } = {}) {
         const rl = checkoutLimiter.take(clientIp(req));
         if (!rl.allowed) return send(429, { ok: false, reason: 'slow down' }, { 'Retry-After': String(rl.retryAfterSec) });
         if (!env.STRIPE_SECRET_KEY) {
-          return send(503, { ok: false, reason: 'checkout is not configured yet — email sales@holt.dev and a human will sort you out' });
+          return send(503, { ok: false, reason: 'checkout is not configured yet — open an issue and a human will sort you out' });
         }
         const parsed = parseCheckoutRequest(req.url, TIER_BY_PRICE());
         if (!parsed.ok) return send(400, { ok: false, reason: parsed.reason });
         const session = await createCheckoutSession(parsed, { env });
         if (!session.ok) {
           appendRecord({ action: 'checkout-error', reason: session.reason }, dataFile);
-          return send(502, { ok: false, reason: 'could not start checkout — try again or email sales@holt.dev' });
+          return send(502, { ok: false, reason: 'could not start checkout — try again, or open an issue' });
         }
         appendRecord({ action: 'checkout-start', plan: parsed.plan, seats: parsed.seats, sessionId: session.id }, dataFile);
         // 303: a bookmarked/replayed URL just creates a fresh session; nothing is mutated by GET.

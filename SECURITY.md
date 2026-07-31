@@ -2,7 +2,9 @@
 
 ## Reporting a vulnerability
 
-Email **security@holt.dev**. Please do not open a public issue for a security report.
+Report privately through **[GitHub Security Advisories](https://github.com/Raed2180416/holt/security/advisories/new)** — it is private to the
+maintainers, gives you a coordinated-disclosure thread, and needs no email address to be
+trusted. Please do not open a public issue for a security report.
 
 Include what you did, what happened, and what you expected. A proof of concept is welcome but
 never required. You will get an acknowledgement within 72 hours and a substantive reply within

@@ -59,7 +59,10 @@ test('E2E: /checkout without Stripe configured degrades to a helpful 503, never 
   const { base } = await startServer(t); // no STRIPE_SECRET_KEY
   const r = await fetch(`${base}/checkout?plan=team&seats=10`, { redirect: 'manual' });
   assert.equal(r.status, 503);
-  assert.match((await r.json()).reason, /sales@holt\.dev/);
+  // The fallback must name a channel the OWNER controls. It used to point at sales@holt.dev —
+  // a domain that resolves to an unrelated third party, so every enterprise enquiry, and the
+  // details inside it, went to a stranger.
+  assert.match((await r.json()).reason, /open an issue/i);
 });
 
 test('E2E: /checkout redirects to the Stripe session URL when configured', async (t) => {

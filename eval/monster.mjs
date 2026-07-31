@@ -175,7 +175,7 @@ async function main() {
     eitherNotBoth: [],        // [idA, idB, marker]
     unknownExpected: new Set(),
     foreignLocked: new Set(),
-    gitignoredOnly: new Set(), // documented limit: expected DISPOSABLE
+    gitignoredOnly: new Set(), // holt cannot VERIFY ignored content -> must REFUSE, never disposable
     gold50: new Map(),         // id -> symbol that the SYMBOL layer must itself flag
     gold50Lang: new Map(),     // id -> ctags language name, so an older ctags is reported not failed
   };
@@ -275,10 +275,17 @@ async function main() {
         truth.mustSurvive.set(id, [`src/${L.ext}/b_${n}.${L.ext}`, marker]);
         break;
       }
-      case 8: { // gitignored-only content — DOCUMENTED LIMIT: holt must call it disposable
+      case 8: { // gitignored-only content — holt must REFUSE, because it cannot verify it
+        // This fixture used to assert the opposite ("documented limit: holt must call it
+        // disposable"), and that ground truth is what let the defect ship. `git status
+        // --ignored=matching` collapses an ignored subtree to one entry with a trailing slash,
+        // holt skipped those, and a worktree whose only unique content was `secret-cache/…` came
+        // back provably disposable — `clean --apply` then deleted the only copy. Measured 40/40
+        // on a 2,440-worktree corpus, with live credentials as the payload.
+        //
+        // Unverifiable is not safe. Refusing costs one manual deletion; the old truth cost the file.
         await write(wt, 'secret-cache/only-here.txt', `IGNORED_${n}\n`);
         truth.gitignoredOnly.add(id);
-        truth.disposable.add(id);
         break;
       }
       case 9: { // foreign lock on a junk tree — clean must skip it, unprotect must not touch it

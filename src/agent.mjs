@@ -139,8 +139,22 @@ const DESTRUCTIVE = [
   // allow and a developer never notices the rule exists.
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}reset\\s+(?:[^\\s;|&]+\\s+)*--hard\\b`), kind: 'git reset --hard (discards uncommitted work)', cwdTarget: true },
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}clean\\s+-[a-zA-Z]*[fd][a-zA-Z]*\\b`), kind: 'git clean -fd (deletes untracked files)', cwdTarget: true },
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}checkout\\s+(?:--\\s+|\\.$|--\\s*\\.)`), kind: 'git checkout -- . (discards changes)', cwdTarget: true },
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}restore\\s+(?:[^\\s;|&]+\\s+)*(?:--worktree|--staged|\\.)`), kind: 'git restore (discards changes)', cwdTarget: true },
+  // A TREEISH IS ALLOWED TO SIT BETWEEN THE VERB AND THE PATHSPEC, and the old pattern demanded
+  // they be adjacent — so `git checkout other -- .`, `git checkout HEAD -- .` and
+  // `git checkout main -- src/` all walked straight through a guard that caught `git checkout -- .`.
+  // That is not a hypothetical spelling: it is the command reported in claude-code#55024 as having
+  // overwritten fourteen unstaged files.
+  //
+  // Two shapes, and the discrimination matters as much as the catch: `--` FOLLOWED BY WHITESPACE is
+  // git's unambiguous pathspec separator, and a trailing bare `.` is the whole working tree. Neither
+  // matches `git checkout -b feature`, `git checkout main`, or `git restore --source=x` (where the
+  // dashes belong to a long option, not a separator) — branch work stays untouched.
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:[^\\s;|&]+\\s+)*--\\s`), kind: 'git checkout/restore of a pathspec (overwrites uncommitted changes)', cwdTarget: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:[^\\s;|&]+\\s+)*\\.\\s*$`), kind: 'git checkout/restore . (overwrites the whole working tree)', cwdTarget: true },
+  // `--staged` ALONE only unstages: the content stays in the working tree and nothing is lost, so
+  // denying it was a false positive on an operation people run all day. `--worktree` (with or
+  // without --staged) is the one that overwrites files, and a bare pathspec defaults to it.
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}restore\\s+(?:[^\\s;|&]+\\s+)*--worktree\\b`), kind: 'git restore --worktree (discards changes)', cwdTarget: true },
 ];
 
 export function classifyCommand(command) {
