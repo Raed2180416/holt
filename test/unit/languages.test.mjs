@@ -44,6 +44,26 @@ const CASES = [
   ['a.sql', 'CREATE TABLE sql_table (id INT);\n', ['sql_table']],
   ['a.tf', 'resource "aws_s3_bucket" "tf_bucket" {}\n', ['tf_bucket']],
 
+  // --- ctags native, wave 2: toward the 50-language corpus -------------------
+  ['a.ml', 'let ocaml_fn x = x + 1\n', ['ocaml_fn']],
+  ['a.clj', '(defn clj_fn [x] x)\n', ['clj_fn']],
+  ['a.scm', '(define (scheme_fn x) x)\n', ['scheme_fn']],
+  ['a.pas', 'program hello;\nprocedure PascalProc;\nbegin\nend;\nbegin\nend.\n', ['PascalProc']],
+  ['a.f90', 'subroutine fort_sub(x)\nend subroutine\n', ['fort_sub']],
+  ['a.adb', 'procedure Ada_Proc is\nbegin\n  null;\nend Ada_Proc;\n', ['Ada_Proc']],
+  ['a.vim', 'function! VimFunc()\nendfunction\n', ['VimFunc']],
+  ['a.tcl', 'proc tcl_proc {x} { return $x }\n', ['tcl_proc']],
+  ['a.sv', 'module sv_mod;\nendmodule\n', ['sv_mod']],
+  ['a.vhd', 'entity vhdl_ent is\nend entity;\n', ['vhdl_ent']],
+  ['a.proto', 'syntax = "proto3";\nmessage ProtoMsg { int32 xf = 1; }\n', ['ProtoMsg']],
+  ['a.elm', 'elmFn : Int -> Int\nelmFn x = x\n', ['elmFn']],
+  ['a.ps1', 'function PsFunc { return 1 }\n', ['PsFunc']],
+  ['a.awk', 'function awk_fn(y) { return y }\n', ['awk_fn']],
+  // Ambiguous extensions resolved by CONTENT (enry): .d and .m route through the classifier.
+  ['a.d', 'int dlang_fn(int x) { return x; }\n', ['dlang_fn']],
+  ['objc.m', '#import <Foundation/Foundation.h>\n@interface ObjcClass : NSObject\n@end\n', ['ObjcClass']],
+  ['matlab.m', 'function y = matlab_fn(x)\n  y = x;\nend\n', ['matlab_fn']],
+
   // --- grove optlib gap pack ------------------------------------------------
   ['a.swift', 'public class SwiftClass {\n    func swiftMethod() -> Int { return 1 }\n}\n', ['SwiftClass', 'swiftMethod']],
   ['a.scala', 'class ScalaClass {\n  def scalaMethod(): Int = 1\n}\nobject ScalaObj\n', ['ScalaClass', 'scalaMethod', 'ScalaObj']],
