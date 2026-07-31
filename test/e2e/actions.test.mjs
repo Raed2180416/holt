@@ -369,6 +369,64 @@ test('CLEAN: unknown workstreams are reported and never removed', async (t) => {
     'a workstream grove could not assess must never be queued for deletion');
 });
 
+/* ================================================== injection attacks ==== */
+
+test('ATTACK: hostile worktree ids cannot produce invalid rescue refs', async () => {
+  const { refSafeId } = await import('../../src/actions.mjs');
+
+  // Found by attacking it: `..` passed the old character-class sanitizer and
+  // `update-ref refs/grove/rescue/..` failed — git refuses .., leading dots, and .lock
+  // suffixes (verified with check-ref-format).
+  const hostile = ['..', '../..', '.hidden', 'x.lock', 'a/../b', 'a//b', '...', '.', ''];
+  for (const id of hostile) {
+    const ref = `refs/grove/rescue/${refSafeId(id)}`;
+    const ok = await sh('git', ['check-ref-format', ref], process.cwd());
+    assert.equal(ok.code, 0, `refSafeId(${JSON.stringify(id)}) -> ${ref} must be a VALID refname`);
+  }
+  assert.equal(refSafeId('task-scratch-03'), 'task-scratch-03');
+  assert.equal(refSafeId('A-memory-core/stage'), 'A-memory-core/stage');
+});
+
+test('ATTACK: rescue works end-to-end on a hostile worktree NAME', async (t) => {
+  const fx = await newRepo('hostile-name');
+  t.after(() => fx.cleanup());
+
+  // A worktree literally named `x.lock` — legal on disk, illegal in a refname. Must be DETACHED:
+  // git refuses `.lock` in branch names too, so in the wild such a worktree exists exactly the
+  // way agent fan-out tools create theirs.
+  const wt = path.join(fx.root, '..', 'wt', 'x.lock');
+  await fs.mkdir(path.dirname(wt), { recursive: true });
+  await sh('git', ['worktree', 'add', '--detach', wt, 'main'], fx.root);
+  fx.worktrees.set('x.lock', wt);
+  await fx.write('src/only.js', 'export function HOSTILE_NAME_WORK() {}\n', wt);
+
+  const r = await rescue(fx.root, 'x.lock', {});
+  assert.equal(r.ok, true, `rescue must survive a refname-hostile id: ${r.error}`);
+  assert.equal(r.verified, true);
+  const show = await sh('git', ['show', `${r.commit}:src/only.js`], fx.root);
+  assert.match(show.stdout, /HOSTILE_NAME_WORK/);
+});
+
+test('ATTACK: a C-quoted lock reason is still recognised as grove own lock', async (t) => {
+  const fx = await newRepo('quoted-lock');
+  t.after(() => fx.cleanup());
+
+  const wt = await fx.worktree('unicode-held');
+  // Non-ASCII file -> non-ASCII symbol name -> non-ASCII lock reason -> git C-QUOTES it in
+  // porcelain. The old parser read `"grove: …"` with quotes, startsWith failed, and unprotect
+  // refused to release grove's OWN lock as "foreign" — stranding rescue --release.
+  await fx.write('src/unicodé.js', 'export function unicodé_wörk() { return 1; }\n', wt);
+
+  const p = await protect(fx.root, {});
+  assert.ok(p.protected >= 1, `should have locked: ${JSON.stringify(p.actions)}`);
+
+  const u = await unprotect(fx.root, { id: 'unicode-held' });
+  assert.equal(u.unlocked, 1,
+    `grove must recognise and release its own quoted lock: ${JSON.stringify(u.actions)}`);
+  assert.ok(!u.actions.some((a) => a.action === 'skipped-foreign-lock'),
+    'grove own lock must never be classified foreign');
+});
+
 /* ============================================ the guarantee still holds ==== */
 
 test('GUARANTEE: a plain scan still modifies nothing, even now that grove can mutate', async (t) => {

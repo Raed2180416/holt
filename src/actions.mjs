@@ -130,6 +130,38 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
   return { actions, unlocked: actions.filter((a) => a.action === 'unlocked').length };
 }
 
+/**
+ * Un-C-quote a porcelain value.
+ *
+ * MEASURED: when a lock reason contains a character git treats as special (newline, quote,
+ * non-ASCII — and grove's own reasons embed symbol names, which can be non-ASCII), porcelain
+ * emits it C-QUOTED: `locked "grove: …"`. Read naively, the quotes arrive in the string,
+ * startsWith('grove:') fails, and unprotect classifies grove's OWN lock as foreign — leaving
+ * `rescue --release` unable to release it. The quoting is also what keeps a reason containing
+ * `\nworktree /etc/passwd` from corrupting the porcelain stream (verified live) — a feature to
+ * decode, not a quirk.
+ */
+function unquotePorcelain(s) {
+  if (!s.startsWith('"') || !s.endsWith('"') || s.length < 2) return s;
+  const body = s.slice(1, -1);
+  let out = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch !== '\\') { out += ch; continue; }
+    const next = body[++i];
+    if (next === 'n') out += '\n';
+    else if (next === 't') out += '\t';
+    else if (next === '\\') out += '\\';
+    else if (next === '"') out += '"';
+    else if (/[0-7]/.test(next)) {
+      let oct = next;
+      while (oct.length < 3 && /[0-7]/.test(body[i + 1] ?? '')) oct += body[++i];
+      out += String.fromCharCode(parseInt(oct, 8));
+    } else out += next;
+  }
+  return out;
+}
+
 /** Read a worktree's lock state from the porcelain listing. */
 async function lockState(wtPath, cwd) {
   const r = await git(['worktree', 'list', '--porcelain'], { cwd });
@@ -139,13 +171,32 @@ async function lockState(wtPath, cwd) {
   for (const line of r.stdout.split('\n')) {
     if (line.startsWith('worktree ')) current = path.resolve(line.slice(9));
     else if (line.startsWith('locked') && current === target) {
-      return { locked: true, reason: line.length > 6 ? line.slice(7) : '' };
+      const raw = line.length > 6 ? line.slice(7) : '';
+      return { locked: true, reason: unquotePorcelain(raw) };
     }
   }
   return { locked: false, reason: '' };
 }
 
 /* =============================================================== RESCUE ==== */
+
+/**
+ * Map a workstream id to a component git will accept in a refname.
+ *
+ * FOUND BY ATTACKING IT: the old sanitizer only stripped characters, so an id of `..` passed
+ * straight through and `update-ref refs/grove/rescue/..` failed — git refuses `..`, leading
+ * dots, and `.lock` suffixes in refnames (verified with `git check-ref-format`). A worktree
+ * genuinely can be named `..something` or `x.lock` (detached — git refuses .lock in branch
+ * names too), and a rescue that dies at update-ref AFTER building its capture is a confusing
+ * failure in the one flow that must not confuse.
+ */
+export function refSafeId(id) {
+  const cleaned = String(id).replace(/[^A-Za-z0-9._/-]/g, '_').replace(/\.\.+/g, '.');
+  const parts = cleaned.split('/')
+    .map((p2) => p2.replace(/^\.+/, '').replace(/\.lock$/i, '_lock'))
+    .filter((p2) => p2.length > 0);
+  return parts.length ? parts.join('/') : 'unnamed';
+}
 
 /**
  * Capture a worktree's full state so the worktree itself becomes disposable.
@@ -180,7 +231,7 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     return { ok: true, nothingToRescue: true, id, note: 'this worktree holds nothing base lacks' };
   }
 
-  const ref = `refs/grove/rescue/${id.replace(/[^A-Za-z0-9._/-]/g, '_')}`;
+  const ref = `refs/grove/rescue/${refSafeId(id)}`;
   if (dryRun) {
     return { ok: true, dryRun: true, id, ref, wouldCapture: { files, committedDelta } };
   }
