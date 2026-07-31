@@ -1,0 +1,128 @@
+/**
+ * holt — the branch janitor: worktree-grade honesty for the OTHER graveyard.
+ *
+ * Every repository accumulates local branches nobody dares delete. `git branch -d` refuses
+ * anything not ANCESTRY-merged — but ancestry is the wrong question in a squash-merge or
+ * cherry-pick world: a branch whose every line already landed still looks "unmerged" to git,
+ * and a branch git happily fast-forwarded past may be the only home of nothing at all.
+ * holt asks the content question instead, with the same instrument the worktree layer uses
+ * (`merge-tree --write-tree` against the base) and the same fail-closed rules:
+ *
+ *   landed          — content delta vs base is EMPTY and the tip is an ancestor of base.
+ *                     `git branch -d` is safe; --apply runs exactly that (never -D).
+ *   content-landed  — content delta is EMPTY but the tip is NOT an ancestor (squash/cherry-
+ *                     pick). git's own -d will refuse. holt reports the evidence and prints
+ *                     the -D command for a HUMAN to run; --apply never force-deletes.
+ *   unlanded        — the branch holds content base does not have. Named file by file.
+ *   unknown         — the instrument failed (missing objects, merge-tree error). REFUSED,
+ *                     never bucketed as safe. Absence of evidence is not evidence of absence.
+ *
+ * Branches checked out in ANY worktree are excluded here — they belong to the worktree layer,
+ * where the uncommitted dimension exists.
+ */
+
+import { git, gitOk } from './git.mjs';
+import { discover } from './discover.mjs';
+import { resolveBase, committedDelta } from './scan.mjs';
+import { appendEvent } from './journal.mjs';
+
+const FILE_CAP = 25;
+
+export async function branchAudit(cwd, { apply = false, base: baseRef = null, ...opts } = {}) {
+  const disc = await discover(cwd, opts);
+  if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+  const root = disc.root;
+
+  const base = await resolveBase(root, baseRef);
+  if (!base?.oid) {
+    return { ok: false, reason: 'no usable base to compare against — pass --base <ref>', branches: [] };
+  }
+
+  const checkedOut = new Set(disc.workstreams.map((w) => w.branch).filter(Boolean));
+  const baseShort = base.ref?.replace(/^refs\/heads\//, '');
+
+  const refs = await git(['for-each-ref', 'refs/heads', '--format=%(refname:short)%00%(objectname)'],
+    { cwd: root });
+  const lines = refs.stdout.split('\n').filter(Boolean);
+
+  const branches = [];
+  for (const line of lines) {
+    const [name, tip] = line.split('\0');
+    if (!name || !tip) continue;
+    if (name === baseShort || checkedOut.has(name)) continue;
+
+    const delta = await committedDelta(root, base.oid, tip, {
+      strictReadOnly: opts.strictReadOnly === true, timeout: opts.timeout ?? 30_000,
+    });
+
+    const failed = typeof delta.how === 'string' && delta.how.endsWith('-failed');
+    if (failed || delta.how === 'merge-tree-no-tree') {
+      branches.push({
+        name, tip, status: 'unknown', safe: false,
+        reason: `instrument failed (${delta.how}) — refusing to classify; nothing here licenses a deletion`,
+      });
+      continue;
+    }
+
+    if (delta.files.length === 0) {
+      const anc = await git(['merge-base', '--is-ancestor', tip, base.oid], { cwd: root });
+      if (anc.code === 0) {
+        branches.push({
+          name, tip, status: 'landed', safe: true,
+          reason: `content delta vs ${baseShort ?? base.oid.slice(0, 12)} is empty and the tip is an ancestor`,
+          command: `git branch -d ${name}`,
+        });
+      } else {
+        branches.push({
+          name, tip, status: 'content-landed', safe: false,
+          reason: 'every line of content already exists in base, but the tip is NOT an ancestor '
+            + '(squash-merge or cherry-pick) — git branch -d will refuse; deleting needs -D, which '
+            + 'holt never runs for you',
+          command: `git branch -D ${name}  # evidence: merge-tree delta vs base is empty`,
+        });
+      }
+      continue;
+    }
+
+    branches.push({
+      name, tip, status: 'unlanded', safe: false,
+      reason: `holds ${delta.files.length} file(s) of content base does not have`,
+      files: delta.files.slice(0, FILE_CAP),
+      fileCount: delta.files.length,
+      how: delta.how,
+    });
+  }
+
+  const applied = [];
+  if (apply) {
+    for (const b of branches.filter((x) => x.status === 'landed')) {
+      // Re-derive safety at deletion time from git's OWN check: -d refuses non-ancestors, so
+      // even a stale verdict cannot force-delete anything (-D never appears here).
+      const del = await gitOk(['branch', '-d', b.name], { cwd: root, allowMutation: true })
+        .then(() => ({ ok: true }))
+        .catch((e) => ({ ok: false, error: e.message }));
+      applied.push({ name: b.name, ...del });
+      if (del.ok) {
+        await appendEvent(root, {
+          action: 'branch-delete', name: b.name, tip: b.tip, evidence: b.reason,
+        });
+      }
+    }
+  }
+
+  const by = (s) => branches.filter((b) => b.status === s);
+  return {
+    ok: true,
+    base: { ref: base.ref, oid: base.oid, how: base.how },
+    audited: branches.length,
+    excludedCheckedOut: [...checkedOut].sort(),
+    landed: by('landed'),
+    contentLanded: by('content-landed'),
+    unlanded: by('unlanded'),
+    unknown: by('unknown'),
+    applied,
+    note: apply
+      ? 'applied deletes use git branch -d only; git itself re-verifies ancestry at deletion time'
+      : 'dry run — nothing was deleted. --apply deletes the landed bucket only (-d, never -D)',
+  };
+}

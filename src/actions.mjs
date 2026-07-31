@@ -21,6 +21,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, gitOk, pmap } from './git.mjs';
 import { discover } from './discover.mjs';
+import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete } from './analyze.mjs';
 
@@ -93,6 +94,7 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
       }
     }
     actions.push({ id: s.id, path: ws.path, action: dryRun ? 'would-lock' : 'locked', reason });
+    if (!dryRun) await appendEvent(cwd, { action: 'protect', id: s.id, path: ws.path, reason });
   }
 
   return {
@@ -303,6 +305,7 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       released = un.unlocked > 0;
     }
 
+    await appendEvent(cwd, { action: 'rescue', id, ref, commit, capturedFiles: files.length, released: release });
     return {
       ok: true, id, ref, commit,
       capturedFiles: files.length,
@@ -408,6 +411,10 @@ export async function clean(cwd, { apply = false, branches = true, onBeforeRemov
       branchRemoved = br.code === 0;
     }
     done.push({ ...p, action: 'removed', branchRemoved });
+    await appendEvent(cwd, {
+      action: 'clean-remove', id: p.id, path: p.path, branch: p.branch ?? null, branchRemoved,
+      evidence: still.reasons?.length ? still.reasons : ['re-verified disposable at removal time'],
+    });
   }
 
   return {

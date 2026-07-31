@@ -103,7 +103,7 @@ async function pathUsable(p) {
 }
 
 /** COMMITTED delta: what does base lack from head? */
-async function committedDelta(root, baseOid, headOid, { strictReadOnly, timeout }) {
+export async function committedDelta(root, baseOid, headOid, { strictReadOnly, timeout }) {
   if (!headOid || headOid === baseOid) {
     return { files: [], how: 'identical-to-base', conflicted: false };
   }

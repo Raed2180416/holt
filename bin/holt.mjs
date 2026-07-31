@@ -26,6 +26,11 @@ import { integrate, detectHosts, formatVerdict, formatContext } from '../src/int
 import { protect, unprotect, rescue, rescues, clean } from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
+import { landingOrder } from '../src/order.mjs';
+import { branchAudit } from '../src/branches.mjs';
+import { partitionPlan } from '../src/partition.mjs';
+import { readJournal } from '../src/journal.mjs';
+import { git } from '../src/git.mjs';
 
 const USAGE = `
 holt — the landing layer for parallel agent work
@@ -41,6 +46,10 @@ COMMANDS
   context <id>        what an agent in <id> needs to know about its siblings   (P2)
   plan                drop / collapse / land-in-this-order                     (P5)
   impact              who DEPENDS on what another workstream changed  (not a conflict check)
+  order               landing order: parallel lanes + min-entanglement sequence
+  partition           pre-flight split for N agents  [--agents <n>]   (collision-free start map)
+  branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
+  journal             audit trail of every protect / rescue / clean / branch-delete
   graph               the relationship graph  [--html <file>]
   gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
   tui                 interactive risk-sorted dashboard  [--snapshot]
@@ -101,6 +110,7 @@ function parseArgs(argv) {
       case '--apply': opts.apply = true; break;
       case '--release': opts.release = true; break;
       case '--run': opts.run = argv[++i]; break;
+      case '--agents': opts.agents = Number(argv[++i]) || 2; break;
       case '--snapshot': opts.snapshot = true; break;
       case '--columns': opts.columns = Number(argv[++i]) || 120; break;
       case '--rows': opts.rowsOpt = Number(argv[++i]) || 34; break;
@@ -341,6 +351,84 @@ async function main() {
   // The MUTATING commands, dispatched before buildReport() because each runs its own assessment.
   // These were once implemented, exported and covered by 19 passing tests while `holt protect`
   // printed "unknown command" — nothing exercised the CLI. test/e2e/cli.test.mjs now does.
+  if (cmd === 'order') {
+    const { report } = await buildReport(opts);
+    const plan = landingOrder(report);
+    if (opts.json) return emitJson(plan);
+    out(paint('bold', 'holt order') + paint('grey', '  (heuristic — conflictsWithLater names the merges to watch)'));
+    if (plan.parallel.length) {
+      out(`\n  PARALLEL-SAFE  ${paint('grey', 'no observed interaction — land in any order, concurrently')}`);
+      for (const id of plan.parallel) out(`    ${paint('green', id)}`);
+    }
+    for (const lane of plan.lanes) {
+      out(`\n  LANE (${lane.members.length} entangled)`);
+      lane.order.forEach((step, i) => {
+        const later = step.conflictsWithLater.map((c) => `${c.id} (${c.why.join('; ')})`).join(', ');
+        out(`    ${i + 1}. ${step.id}${later ? paint('yellow', `  → watch: ${later}`) : paint('green', '  → clears the lane')}`);
+      });
+    }
+    out('');
+    return;
+  }
+  if (cmd === 'partition') {
+    const { report, scanned } = await buildReport(opts);
+    const ls = await git(['ls-files'], { cwd: scanned.root });
+    const plan = partitionPlan(report, ls.stdout.split('\n').filter(Boolean), { agents: opts.agents ?? 2 });
+    if (opts.json) return emitJson(plan);
+    out(paint('bold', `holt partition — ${plan.agents} agents`) + paint('grey', '  (advisory: a collision-free starting map, not a work plan)'));
+    for (const b of plan.buckets) {
+      out(`\n  AGENT ${b.agent}  ${paint('grey', `${b.weight} tracked file(s)`)}`);
+      out(`    ${b.dirs.join('  ')}`);
+    }
+    if (plan.avoid.length) {
+      out(`\n  ${paint('yellow', 'ALREADY CONTESTED')}  ${paint('grey', 'one owner each — currently touched by multiple live workstreams')}`);
+      for (const a of plan.avoid.slice(0, 15)) {
+        out(`    ${a.file}  ${paint('grey', `held by ${a.currentlyHeldBy.join(', ')}`)}  → agent ${a.assignTo ?? '?'}`);
+      }
+    }
+    out('');
+    return;
+  }
+  if (cmd === 'branches') {
+    const audit = await branchAudit(opts.cwd, opts);
+    if (opts.json) { emitJson(audit); if (!audit.ok) process.exit(2); return; }
+    if (!audit.ok) {
+      process.stderr.write(paint('red', `holt branches: ${audit.reason}\n`));
+      process.exit(2);
+    }
+    out(paint('bold', 'holt branches') + paint('grey', `  vs ${audit.base.ref ?? audit.base.oid.slice(0, 12)} · ${audit.audited} audited · checked-out excluded: ${audit.excludedCheckedOut.join(', ') || 'none'}`));
+    const section = (label, items, color) => {
+      if (!items.length) return;
+      out(`\n  ${paint(color, label)}`);
+      for (const b of items) {
+        out(`    ${b.name}  ${paint('grey', b.reason)}`);
+        if (b.command) out(`      ${paint('grey', '$')} ${b.command}`);
+        if (b.files) out(`      ${paint('grey', b.files.slice(0, 5).join(', ') + (b.fileCount > 5 ? ` … +${b.fileCount - 5}` : ''))}`);
+      }
+    };
+    section(`LANDED — safe to delete (${audit.landed.length})`, audit.landed, 'green');
+    section(`CONTENT-LANDED — evidence says landed, git ancestry says no (${audit.contentLanded.length})`, audit.contentLanded, 'yellow');
+    section(`UNLANDED — holds work (${audit.unlanded.length})`, audit.unlanded, 'red');
+    section(`UNKNOWN — instrument failed, refusing to classify (${audit.unknown.length})`, audit.unknown, 'red');
+    if (audit.applied.length) {
+      out(`\n  APPLIED`);
+      for (const a of audit.applied) out(`    ${a.name}  ${a.ok ? paint('green', 'deleted (-d)') : paint('red', `refused: ${a.error}`)}`);
+    }
+    out(`\n  ${paint('grey', audit.note)}\n`);
+    return;
+  }
+  if (cmd === 'journal') {
+    const events = await readJournal(opts.cwd);
+    if (opts.json) return emitJson({ events });
+    if (!events.length) { out(paint('grey', 'holt journal: no recorded actions in this repository yet')); return; }
+    out(paint('bold', `holt journal — ${events.length} recorded action(s)`));
+    for (const e of events) {
+      if (e.corrupt) { out(`  ${paint('red', 'corrupt line:')} ${e.corrupt.slice(0, 80)}`); continue; }
+      const what = [e.id ?? e.name, e.ref, e.evidence ?? e.reason].filter(Boolean).join('  ');
+      out(`  ${paint('grey', e.at)}  ${paint('bold', e.action)}  ${what}`);
+    }
+    return;
+  }
   if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));
   if (cmd === 'unprotect') return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
   if (cmd === 'rescued') return void cmdAction(await rescues(opts.cwd));
