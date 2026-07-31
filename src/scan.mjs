@@ -229,6 +229,22 @@ async function scanFiles(ws, ctx) {
         : uncommittedDelta(ws.path, { timeout }),
     ]);
 
+    // FAIL-CLOSED ON INSTRUMENT FAILURE. Found by probing partial (blobless) clones: when
+    // merge-tree cannot run — offline promisor remote, pruned objects, corrupt odb — it returns
+    // an EMPTY file list, which is indistinguishable downstream from "no committed delta". A
+    // worktree with committed-ahead work and a clean working tree would then be reported SAFE,
+    // and clean --apply would delete it. An empty answer from a broken instrument is not an
+    // answer (Law: prove the instrument can detect presence before trusting its silence).
+    const committedFailed = ['merge-tree-failed', 'merge-tree-no-tree', 'three-dot-failed']
+      .includes(committed.how);
+    const statusFailed = uncommitted.how === 'status-failed';
+    if (committedFailed || statusFailed) {
+      result.reason = committedFailed
+        ? `committed-delta instrument failed (${committed.how}: ${committed.error ?? 'unknown'}) — refusing to classify`
+        : `status instrument failed (${uncommitted.error ?? 'unknown'}) — refusing to classify`;
+      return result; // ok stays false -> UNKNOWN -> never safe, never cleaned
+    }
+
     const cFiles = committed.files.filter((f) => !looksGenerated(f));
     const uFiles = uncommitted.files.filter((f) => !looksGenerated(f));
     const uUntracked = (uncommitted.untracked ?? []).filter((f) => !looksGenerated(f));
