@@ -8,6 +8,7 @@
  */
 
 import process from 'node:process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { discover } from '../src/discover.mjs';
@@ -65,7 +66,7 @@ COMMANDS
   graph               the relationship graph  [--html <file>]
   gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
   tui                 interactive risk-sorted dashboard  [--snapshot]
-  doctor              environment and backend check
+  doctor              environment and backend check  [--install [--yes]]
 
 ACTING  (these MUTATE the repo; everything above is read-only)
   protect             git-lock every workstream holding unique work   [--dry-run]
@@ -134,6 +135,8 @@ function parseArgs(argv) {
       case '--export': opts.exportFmt = argv[++i]; break;
       case '--summary': opts.summary = true; break;
       case '--all': opts.includeCoLocated = true; break;
+      case '--install': opts.install = true; break;
+      case '--yes': case '-y': opts.yes = true; break;
       case '--max-depth': opts.maxDepth = Number(argv[++i]) || 3; break;
       case '--fail-on-unlanded': opts.failOnUnlanded = true; break;
       case '--max-age-days': opts.maxAgeDays = Number(argv[++i]) || null; break;
@@ -254,11 +257,12 @@ async function cmdDoctor(opts) {
   const missing = [];
   if (!ctags.available) missing.push('ctags');
   if (!enry.available) missing.push('enry');
+  // Package names live outside the block so `--install` can reach them too.
+  const pkgs = {
+    ctags: { pacman: 'ctags', apt: 'universal-ctags', dnf: 'ctags', brew: 'universal-ctags', winget: 'UniversalCtags.Ctags' },
+    enry: { pacman: null, apt: null, dnf: null, brew: 'enry', winget: null }, // most distros: go install
+  };
   if (missing.length) {
-    const pkgs = {
-      ctags: { pacman: 'ctags', apt: 'universal-ctags', dnf: 'ctags', brew: 'universal-ctags', winget: 'UniversalCtags.Ctags' },
-      enry: { pacman: null, apt: null, dnf: null, brew: 'enry', winget: null }, // most distros: go install
-    };
     const managers = [
       ['pacman', (names) => `sudo pacman -S ${names.join(' ')}`],
       ['apt', (names) => `sudo apt install ${names.join(' ')}`],
@@ -273,6 +277,84 @@ async function cmdDoctor(opts) {
     }
     if (missing.includes('enry')) out(paint('grey', '    enry elsewhere: go install github.com/go-enry/enry@latest (only needed for ambiguous extensions like .fs/.m/.pl)'));
     out('');
+    if (!opts.install) {
+      out(paint('grey', '    or let holt do it:  ') + paint('bold', 'holt doctor --install') + paint('grey', '   (asks before running anything)'));
+      out('');
+    }
+  }
+
+  if (opts.install) await runInstall(missing, pkgs, opts);
+}
+
+/**
+ * Install the optional backends for the user.
+ *
+ * DELIBERATELY NOT SILENT AND NOT AUTOMATIC. holt's entire value is that it does not do surprising
+ * things to your machine, so this: runs only when explicitly asked (`--install`), PRINTS the exact
+ * command first, requires confirmation unless `--yes`, never uses sudo without saying so, and
+ * reports honestly when it cannot help rather than guessing. An installer that silently runs
+ * package managers is a bigger footgun than the missing dependency it fixes.
+ */
+async function runInstall(missing, pkgs, opts) {
+  if (!missing.length) { out(paint('green', '  nothing to install — every optional backend is present')); return; }
+
+  const detect = async (bin) => new Promise((r) => {
+    execFile('sh', ['-c', `command -v ${bin}`], { timeout: 4000 }, (e) => r(!e));
+  });
+  const order = process.platform === 'darwin' ? ['brew'] : process.platform === 'win32' ? ['winget'] : ['apt', 'dnf', 'pacman', 'brew'];
+  let mgr = null;
+  for (const m of order) {
+    const probe = { apt: 'apt-get', dnf: 'dnf', pacman: 'pacman', brew: 'brew', winget: 'winget' }[m];
+    if (await detect(probe)) { mgr = m; break; }
+  }
+  if (!mgr) {
+    out(paint('yellow', '  no supported package manager found on PATH.'));
+    out(paint('grey', '  Install universal-ctags manually — holt keeps working without it, with reduced language coverage.'));
+    return;
+  }
+
+  const names = missing.map((m) => pkgs[m][mgr]).filter(Boolean);
+  const unavailable = missing.filter((m) => !pkgs[m][mgr]);
+  if (!names.length) {
+    out(paint('yellow', `  ${mgr} has no package for: ${unavailable.join(', ')}`));
+    if (unavailable.includes('enry')) out(paint('grey', '  enry: go install github.com/go-enry/enry@latest'));
+    return;
+  }
+
+  const needsSudo = ['apt', 'dnf', 'pacman'].includes(mgr);
+  const cmd = ({ apt: `apt-get install -y ${names.join(' ')}`, dnf: `dnf install -y ${names.join(' ')}`,
+    pacman: `pacman -S --noconfirm ${names.join(' ')}`, brew: `brew install ${names.join(' ')}`,
+    winget: names.map((n) => `winget install ${n}`).join(' && ') })[mgr];
+  const full = needsSudo ? `sudo ${cmd}` : cmd;
+
+  out(paint('bold', '  holt will run:'));
+  out(`    ${full}`);
+  if (needsSudo) out(paint('yellow', '    (this needs sudo — you will be prompted for your password)'));
+  out('');
+
+  if (!opts.yes) {
+    if (!process.stdin.isTTY) {
+      out(paint('yellow', '  not a terminal — re-run with --yes to confirm non-interactively.'));
+      return;
+    }
+    process.stdout.write('  proceed? [y/N] ');
+    const answer = await new Promise((r) => {
+      process.stdin.setEncoding('utf8');
+      process.stdin.once('data', (d) => r(String(d).trim().toLowerCase()));
+    });
+    if (answer !== 'y' && answer !== 'yes') { out(paint('grey', '  cancelled — nothing was run.')); return; }
+  }
+
+  out(paint('grey', '  installing…'));
+  const code = await new Promise((r) => {
+    const child = spawn('sh', ['-c', full], { stdio: 'inherit' });
+    child.on('close', r);
+    child.on('error', () => r(1));
+  });
+  if (code === 0) {
+    out(paint('green', '\n  done — re-run `holt doctor` to confirm the new coverage.'));
+  } else {
+    out(paint('red', `\n  the installer exited ${code}. holt still works without these; run the command above manually to see why.`));
   }
 }
 

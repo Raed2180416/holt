@@ -245,3 +245,35 @@ test('SCRIPTABILITY: context exits non-zero for an unknown id, zero for a real o
   const good = await holt(['context', 'realwt'], fx.root);
   assert.equal(good.code, 0, `a real id must succeed: ${good.stderr}`);
 });
+
+test('INSTALLER: --install never runs anything without explicit consent', async (t) => {
+  // An installer that silently runs package managers is a bigger footgun than the missing
+  // dependency it fixes — especially for a tool whose whole pitch is "no surprises on your
+  // machine". Without a TTY and without --yes it must PRINT the command and stop.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-install-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await new Promise((res) => execFile('git', ['init', '-q', '-b', 'main'], { cwd: dir }, res));
+  await new Promise((res) => execFile('git', ['-c', 'user.email=a@b', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'x'], { cwd: dir }, res));
+
+  // Strip the optional backends from PATH so doctor sees them as missing.
+  const fake = path.join(dir, 'bin');
+  await fs.mkdir(fake, { recursive: true });
+  for (const b of ['node', 'git', 'sh']) {
+    const which = await new Promise((r) => execFile('sh', ['-c', `command -v ${b}`], (e, o) => r(String(o).trim())));
+    if (which) await fs.symlink(which, path.join(fake, b)).catch(() => {});
+  }
+
+  const r = await new Promise((resolve) => {
+    const child = execFile(process.execPath, [BIN, 'doctor', '--install', '--cwd', dir], {
+      cwd: dir, timeout: 60_000, env: { ...process.env, PATH: fake, NO_COLOR: '1' },
+    }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr) }));
+    child.stdin?.end(); // no TTY, no input
+  });
+
+  // It may either find no package manager, or print the command and stop for confirmation.
+  // What it must NEVER do is claim to have installed anything.
+  assert.ok(!/installing…[\s\S]*done —/.test(r.stdout),
+    `must not run an installer without consent: ${r.stdout.slice(0, 300)}`);
+  assert.match(r.stdout, /no supported package manager|re-run with --yes|holt will run/,
+    'and must explain what it would do or why it cannot');
+});
