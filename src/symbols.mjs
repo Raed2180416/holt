@@ -121,50 +121,122 @@ export async function ctagsLanguages() {
  * not a claim about presence.
  */
 const PROBE_SOURCES = {
-  Terraform: ['holt-probe.tf', 'resource "aws_s3_bucket" "holt_probe" {\n  bucket = "b"\n}\n'],
-  Elm: ['holt-probe.elm', 'module HoltProbe exposing (add)\n\nadd : Int -> Int\nadd x =\n    x + 1\n'],
-  Julia: ['holt-probe.jl', 'function holt_probe(x)\n    x + 1\nend\n'],
-  Zig: ['holt-probe.zig', 'pub fn holtProbe() void {}\n'],
-  Nim: ['holt-probe.nim', 'proc holtProbe(): int =\n  1\n'],
-  Crystal: ['holt-probe.cr', 'def holt_probe\n  1\nend\n'],
-  Solidity: ['holt-probe.sol', 'contract HoltProbe {\n  function f() public {}\n}\n'],
-  Dart: ['holt-probe.dart', 'void holtProbe() {}\n'],
-  Swift: ['holt-probe.swift', 'func holtProbe() {}\n'],
-  Scala: ['holt-probe.scala', 'object HoltProbe {\n  def f = 1\n}\n'],
+  // [file, source, THE SYMBOL THAT MUST COME BACK BY NAME]
+  //
+  // The third element is not decoration. An earlier version of this probe accepted ANY symbol,
+  // and the Elm sample carried a `module … exposing` header: ctags 5.9.0 extracted the MODULE,
+  // returned one symbol, and the probe declared Elm supported — while the thing holt actually
+  // needs from Elm, a top-level function, extracted nothing. The probe was easier than the
+  // question it was asked. Each sample is now the plainest form of the construct holt depends
+  // on, and the named symbol must come back or the language does not count.
+  Terraform: ['holt-probe.tf', 'resource "aws_s3_bucket" "holtProbe" {}\n', 'holtProbe'],
+  Elm: ['holt-probe.elm', 'holtProbe : Int -> Int\nholtProbe x = x\n', 'holtProbe'],
+  Julia: ['holt-probe.jl', 'function holtProbe(x)\n    x + 1\nend\n', 'holtProbe'],
+  Zig: ['holt-probe.zig', 'pub fn holtProbe() void {}\n', 'holtProbe'],
+  Nim: ['holt-probe.nim', 'proc holtProbe(): int =\n  1\n', 'holtProbe'],
+  Crystal: ['holt-probe.cr', 'def holtProbe\n  1\nend\n', 'holtProbe'],
+  Solidity: ['holt-probe.sol', 'contract HoltProbe {\n  function holtProbe() public {}\n}\n', 'holtProbe'],
+  Dart: ['holt-probe.dart', 'void holtProbe() {}\n', 'holtProbe'],
+  Swift: ['holt-probe.swift', 'func holtProbe() {}\n', 'holtProbe'],
+  Scala: ['holt-probe.scala', 'object HoltProbeObj {\n  def holtProbe = 1\n}\n', 'holtProbe'],
 };
 
 let _demoProbe = null;
+let _compat = null;
+let _inProbe = false;   // guards the probe's own extraction from re-entering ensureCompat()
+
+/** Run the probe corpus through the CURRENT flags; return the languages that truly extract. */
+async function runProbe() {
+  const backend = await resolveBackend();
+  if (backend.kind !== 'ctags') return null;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-langprobe-'));
+  _inProbe = true;
+  try {
+    const files = [];
+    const byFile = new Map();
+    for (const [lang, [file, src]] of Object.entries(PROBE_SOURCES)) {
+      await fs.writeFile(path.join(dir, file), src, 'utf8');
+      files.push(file);
+      byFile.set(file, lang);
+    }
+    const found = await symbolsOnDisk(dir, files, backend);
+    const ok = new Set();
+    for (const [file, lang] of byFile) {
+      const want = PROBE_SOURCES[lang][2];
+      const names = (found.get(file) ?? []).map((x) => x.name ?? String(x.key ?? '').split(':').pop());
+      if (names.includes(want)) ok.add(lang);
+    }
+    return ok;
+  } catch {
+    return null; // the probe itself broke — callers fall back to the declaration, never to silence
+  } finally {
+    _inProbe = false;
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
 
 /**
- * Which of PROBE_SOURCES this toolchain can actually extract symbols from.
- * Memoized: one temp dir and one ctags invocation for the whole process.
+ * Measure this toolchain, then close the gaps it actually has.
+ *
+ * NEVER CONCEDE A LANGUAGE TO THE TOOLCHAIN. The earlier behaviour here was to detect that a
+ * ctags could not parse Terraform or Elm and simply report reduced coverage — which on Ubuntu
+ * 24.04 LTS (universal-ctags 5.9.0) means every .tf and .elm file in the repository silently
+ * yields no symbols. Silence reads as "these two agents share nothing", so the coverage gap
+ * becomes a wrong ANSWER, not just a smaller number.
+ *
+ * So: probe, load a compat definition for each language that failed, then probe AGAIN and keep
+ * only what the second probe proves. A compat pack that does not actually work is reported as a
+ * remaining gap rather than assumed to have helped.
+ *
+ * Measured on universal-ctags 5.9.0: Terraform and Elm go from 0 symbols to full extraction.
+ * On 6.2.1 nothing is missing, no compat file is loaded, and this costs one probe.
  */
+async function ensureCompat() {
+  if (_compat) return _compat;
+  _compat = (async () => {
+    const before = await runProbe();
+    if (!before) return { loaded: [], fixed: [], stillMissing: [], supported: null };
+
+    const missing = Object.keys(PROBE_SOURCES).filter((l) => !before.has(l));
+    if (!missing.length) return { loaded: [], fixed: [], stillMissing: [], supported: before };
+
+    const loaded = [];
+    for (const lang of missing) {
+      const file = path.join(COMPAT_DIR, `${lang}.ctags`);
+      try { await fs.access(file); loaded.push(`--options=${file}`); } catch { /* no pack for it */ }
+    }
+    if (!loaded.length) return { loaded: [], fixed: [], stillMissing: missing, supported: before };
+
+    _extraFlags = loaded;
+    const after = await runProbe();
+    if (!after) { _extraFlags = []; return { loaded: [], fixed: [], stillMissing: missing, supported: before }; }
+
+    // A compat pack must never cost a language that already worked.
+    const regressed = [...before].filter((l) => !after.has(l));
+    if (regressed.length) {
+      _extraFlags = [];
+      return { loaded: [], fixed: [], stillMissing: missing, regressed, supported: before };
+    }
+    return {
+      loaded,
+      fixed: missing.filter((l) => after.has(l)),
+      stillMissing: missing.filter((l) => !after.has(l)),
+      supported: after,
+    };
+  })();
+  return _compat;
+}
+
+/** Which languages this toolchain can extract, AFTER holt has closed what it can. */
 async function demonstratedLanguages() {
   if (_demoProbe) return _demoProbe;
-  _demoProbe = (async () => {
-    const backend = await resolveBackend();
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-langprobe-'));
-    try {
-      const files = [];
-      const byFile = new Map();
-      for (const [lang, [file, src]] of Object.entries(PROBE_SOURCES)) {
-        await fs.writeFile(path.join(dir, file), src, 'utf8');
-        files.push(file);
-        byFile.set(file, lang);
-      }
-      const found = await symbolsOnDisk(dir, files, backend);
-      const ok = new Set();
-      for (const [file, lang] of byFile) {
-        if ((found.get(file) ?? []).length > 0) ok.add(lang);
-      }
-      return ok;
-    } catch {
-      return null; // probe itself broke — callers fall back to the declaration, never to silence
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
-  })();
+  _demoProbe = ensureCompat().then((c) => c.supported);
   return _demoProbe;
+}
+
+/** Diagnostic for `holt doctor`: what was missing, what holt fixed, what is genuinely left. */
+export async function compatReport() {
+  return ensureCompat();
 }
 
 export async function languageCoverage(expected = []) {
@@ -257,11 +329,25 @@ const CTAGS_EXCLUDES = [
  * flow through the SAME pipeline as the 164 it does. See src/optlib/holt.ctags.
  */
 const OPTLIB = path.join(path.dirname(fileURLToPath(import.meta.url)), 'optlib', 'holt.ctags');
+const COMPAT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'optlib', 'compat');
+
+/**
+ * Compat packs for gaps THIS toolchain has — decided by measurement, never by version number.
+ *
+ * A version check would be a guess: distros patch, users build their own, and a language can be
+ * present-but-broken (ctags 5.9.0 lists Elm and extracts no functions from it). So holt runs its
+ * probe, sees which languages actually fail, and loads a definition for exactly those. On a
+ * toolchain with no gaps this array stays empty and nothing changes.
+ *
+ * Set by ensureCompat(); read by optionFlags(). Never loaded on a ctags that already has the
+ * parser, because --langdef would collide with it.
+ */
+let _extraFlags = [];
 
 function optionFlags() {
-  const flags = [`--options=${OPTLIB}`];
+  const flags = [`--options=${OPTLIB}`, ..._extraFlags];
   const user = process.env.HOLT_CTAGS_OPTIONS;
-  if (user) flags.push(`--options=${user}`); // loaded second, so user definitions win
+  if (user) flags.push(`--options=${user}`); // loaded last, so user definitions win
   return flags;
 }
 
@@ -273,6 +359,7 @@ export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400,
   const result = new Map();
   if (relPaths.length === 0) return result;
 
+  if (!_inProbe) await ensureCompat(); // close this toolchain's gaps before extracting anything
   const usable = await tagWorthy(cwd, relPaths);
   for (const p of relPaths) result.set(p, []); // unusable paths are "no symbols", never "unscanned"
   if (usable.length === 0) return result;

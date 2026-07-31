@@ -1,0 +1,15 @@
+#
+# holt — Elm top-level functions for a ctags whose Elm parser omits them.
+#
+# universal-ctags 5.9.0 HAS an Elm parser and lists Elm, so asking `--list-languages` says
+# "supported" — but it extracts the module declaration and not the top-level functions, which
+# are the only thing holt actually needs. Measured on Ubuntu 24.04 LTS: `elmFn : Int -> Int`
+# followed by `elmFn x = x` yields zero tags.
+#
+# This ADDS a rule to the existing parser rather than defining a language, so it composes with
+# whatever that ctags already does instead of colliding with it.
+#
+# The anchor is the TYPE ANNOTATION (`name : type`), which is idiomatic Elm and unambiguous at
+# column 0 — a definition line (`name x = ...`) would also match record updates and let-bindings.
+--kinddef-Elm=h,holtfunc,functions (holt compat)
+--regex-Elm=/^([a-z][A-Za-z0-9_']*)[ \t]*:[^:=]/\1/h/

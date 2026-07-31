@@ -16,7 +16,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { symbolsOnDisk, resolveBackend, detectCtags, ctagsLanguages, languageCoverage } from '../../src/symbols.mjs';
+import { fileURLToPath } from 'node:url';
+import { symbolsOnDisk, resolveBackend, detectCtags, ctagsLanguages, languageCoverage, compatReport } from '../../src/symbols.mjs';
 
 /**
  * Filename -> the ctags LANGUAGE NAME that parses it, for the cases where a stock/older ctags may
@@ -224,4 +225,48 @@ test('binary and oversized files are skipped, not misparsed', async (t) => {
   await fs.writeFile(path.join(dir, 'blob.bin'), Buffer.from([0, 1, 2, 0, 255, 0]));
   const found = await symbolsOnDisk(dir, ['blob.bin'], backend);
   assert.deepEqual(found.get('blob.bin'), []);
+});
+
+test('COMPAT: holt closes its toolchain\'s gaps instead of reporting them', async (t) => {
+  // NEVER CONCEDE A LANGUAGE TO THE TOOLCHAIN. The version before this test measured that a ctags
+  // could not parse Terraform or Elm and simply reported reduced coverage. On Ubuntu 24.04 LTS
+  // (universal-ctags 5.9.0 — the most common Linux install) that means every .tf and .elm file
+  // silently yields no symbols, and silence reads as "these two agents share nothing". A coverage
+  // gap becomes a wrong ANSWER, not a smaller number.
+  const backend = await resolveBackend();
+  if (backend.kind !== 'ctags') return; // regex-fallback path is covered elsewhere
+
+  const c = await compatReport();
+  t.diagnostic(`compat: loaded ${c.loaded.length} pack(s); fixed [${c.fixed.join(', ') || 'none'}]`);
+
+  assert.deepEqual(c.regressed ?? [], [],
+    `a compat pack cost a language that already worked: ${(c.regressed ?? []).join(', ')} — ` +
+    'never-worse is the floor, a pack that trades one language for another is refused');
+
+  assert.deepEqual(c.stillMissing, [],
+    `holt has no working definition for ${c.stillMissing.join(', ')} on this toolchain. ` +
+    'Reporting the gap is not the answer — add src/optlib/compat/<Language>.ctags so the ' +
+    'capability is restored rather than conceded.');
+});
+
+test('COMPAT: every pack is loadable by this ctags and defines what it claims', async () => {
+  // A compat pack that ctags rejects would silently do nothing, and the gap it exists to close
+  // would reappear as "coverage reduced" — the exact concession this mechanism removes.
+  const backend = await resolveBackend();
+  if (backend.kind !== 'ctags') return;
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../src/optlib/compat');
+  const packs = (await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.ctags'));
+  assert.ok(packs.length > 0, 'the compat directory must not be empty — it is the mechanism');
+
+  for (const pack of packs) {
+    const { execFile } = await import('node:child_process');
+    const r = await new Promise((res) => execFile('ctags',
+      [`--options=${path.join(dir, pack)}`, '--list-languages'], { timeout: 8000 },
+      (err, stdout, stderr) => res({ err, stdout, stderr })));
+    // On a ctags that ALREADY has the language, --langdef collides and is expected to be refused;
+    // that is exactly why holt loads a pack only after measuring the language to be missing.
+    const collided = /already|defined|exists/i.test(String(r.stderr));
+    assert.ok(!r.err || collided,
+      `${pack} is not loadable by this ctags and is not a benign collision: ${r.stderr}`);
+  }
 });

@@ -1,0 +1,26 @@
+#
+# holt — Terraform for a ctags that has no Terraform parser.
+#
+# Loaded ONLY when holt has measured that this toolchain cannot extract Terraform symbols.
+# universal-ctags gained a Terraform parser in 6.x; Ubuntu 24.04 LTS ships 5.9.0, so on the
+# most common Linux install holt would otherwise report "no symbols" for every .tf file and,
+# because silence reads as "nothing there", quietly claim two agents editing the same
+# infrastructure had nothing in common.
+#
+# Never loaded on a ctags that already has the parser — --langdef would collide with it.
+#
+--langdef=Terraform
+--map-Terraform=+.tf
+--map-Terraform=+.tfvars
+--kinddef-Terraform=r,resource,resources
+--kinddef-Terraform=d,data,data sources
+--kinddef-Terraform=v,variable,variables
+--kinddef-Terraform=o,output,outputs
+--kinddef-Terraform=m,module,modules
+--kinddef-Terraform=p,provider,providers
+--regex-Terraform=/^[ \t]*resource[ \t]+"[^"]+"[ \t]+"([^"]+)"/\1/r/
+--regex-Terraform=/^[ \t]*data[ \t]+"[^"]+"[ \t]+"([^"]+)"/\1/d/
+--regex-Terraform=/^[ \t]*variable[ \t]+"([^"]+)"/\1/v/
+--regex-Terraform=/^[ \t]*output[ \t]+"([^"]+)"/\1/o/
+--regex-Terraform=/^[ \t]*module[ \t]+"([^"]+)"/\1/m/
+--regex-Terraform=/^[ \t]*provider[ \t]+"([^"]+)"/\1/p/
