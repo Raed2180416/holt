@@ -97,7 +97,25 @@ do not build it twice. Add \`--json\` to any command for machine-readable output
 ${HOLT_END}`;
 }
 
-/** Idempotently insert/refresh holt's block in AGENTS.md. */
+/**
+ * Remove every holt-delimited block from a document, leaving the user's own content untouched.
+ * Global and tolerant: handles zero, one, or several blocks, and trims the blank lines a removal
+ * leaves behind so re-running integrate never grows the file.
+ */
+export function stripHoltBlock(text) {
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`\\n*${esc(HOLT_BEGIN)}[\\s\\S]*?${esc(HOLT_END)}\\n*`, 'g');
+  return text.replace(re, '\n').replace(/\n{3,}/g, '\n\n');
+}
+
+/**
+ * Insert/refresh holt's block in AGENTS.md WITHOUT ever destroying the user's existing content.
+ *
+ * A repo very often already has an AGENTS.md (it is the cross-tool standard). So: strip any prior
+ * holt block, keep everything else exactly, and append one fresh holt block at the end. Running
+ * integrate any number of times converges to the same file — the user's rules first, holt's block
+ * last, no duplication, no growth.
+ */
 export async function installAgentsMd(repoRoot, { bin = 'holt', filename = 'AGENTS.md' } = {}) {
   const file = path.join(repoRoot, filename);
   let existing = '';
@@ -107,19 +125,22 @@ export async function installAgentsMd(repoRoot, { bin = 'holt', filename = 'AGEN
     created = false;
   } catch { /* new file */ }
 
+  const userContent = stripHoltBlock(existing).replace(/\s+$/, '');
   const block = agentsMdBlock(bin);
-  let next;
-  if (existing.includes(HOLT_BEGIN) && existing.includes(HOLT_END)) {
-    const before = existing.slice(0, existing.indexOf(HOLT_BEGIN));
-    const after = existing.slice(existing.indexOf(HOLT_END) + HOLT_END.length);
-    next = `${before}${block}${after}`;
-  } else {
-    const header = created ? '# AGENTS.md\n\nInstructions for AI coding agents working in this repository.\n\n' : '';
-    next = `${header}${existing}${existing && !existing.endsWith('\n') ? '\n' : ''}${existing ? '\n' : ''}${block}\n`;
-  }
+  const header = (created && !userContent)
+    ? '# AGENTS.md\n\nInstructions for AI coding agents working in this repository.\n\n'
+    : '';
+  const next = userContent
+    ? `${header}${userContent}\n\n${block}\n`
+    : `${header}${block}\n`;
 
   await fs.writeFile(file, next, 'utf8');
-  return { adapter: 'agents-md', path: file, created, action: created ? 'created' : 'updated' };
+  const hadBlock = existing.includes(HOLT_BEGIN);
+  return {
+    adapter: 'agents-md', path: file, created,
+    action: created ? 'created' : hadBlock ? 'refreshed holt block' : 'appended holt block (kept your content)',
+    preservedUserContent: !created && !!userContent,
+  };
 }
 
 /* --------------------------------------------------------------- MCP (universal) ---- */
@@ -419,16 +440,26 @@ export async function installGitHooks(repoRoot, { bin = 'holt' } = {}) {
  * @returns {Promise<{all: string[], project: string[], user: string[]}>}
  */
 export async function detectHosts(repoRoot, home = os.homedir()) {
+  // Each host is detected by a marker UNIQUE to it. AGENTS.md is deliberately NOT a marker for
+  // any host: it is the cross-tool standard many agents now read, so its presence says nothing
+  // about which host is installed — treating it as a codex marker made every repo with an
+  // AGENTS.md report "codex present", which was wrong.
   const probes = [
-    { host: 'claude-code', project: ['.claude'], user: ['.claude'] },
+    { host: 'claude-code', project: ['.claude', 'CLAUDE.md'], user: ['.claude'] },
     { host: 'opencode', project: ['.opencode'], user: ['.config/opencode'] },
-    { host: 'cursor', project: ['.cursor'], user: ['.cursor'] },
-    { host: 'windsurf', project: [], user: ['.codeium/windsurf'] },
-    { host: 'gemini-cli', project: ['.gemini'], user: ['.gemini'] },
-    { host: 'codex', project: ['.codex', 'AGENTS.md'], user: ['.codex'] },
+    { host: 'cursor', project: ['.cursor', '.cursorrules'], user: ['.cursor'] },
+    { host: 'windsurf', project: ['.windsurf', '.windsurfrules'], user: ['.codeium/windsurf'] },
+    { host: 'gemini-cli', project: ['.gemini', 'GEMINI.md'], user: ['.gemini'] },
+    { host: 'codex', project: ['.codex'], user: ['.codex'] },
+    { host: 'copilot', project: ['.github/copilot-instructions.md'], user: [] },
     { host: 'zed', project: ['.zed'], user: ['.config/zed'] },
-    { host: 'continue', project: [], user: ['.continue'] },
-    { host: 'aider', project: ['.aider.conf.yml'], user: ['.aider.conf.yml'] },
+    { host: 'continue', project: ['.continuerc.json'], user: ['.continue'] },
+    { host: 'aider', project: ['.aider.conf.yml'], user: ['.aider.conf.yml', '.config/aider'] },
+    { host: 'cline', project: ['.clinerules'], user: [] },
+    { host: 'roo', project: ['.roo', '.roorules'], user: [] },
+    { host: 'goose', project: ['.goosehints'], user: ['.config/goose'] },
+    { host: 'crush', project: ['.crush'], user: ['.config/crush'] },
+    { host: 'amp', project: ['.amp'], user: ['.config/amp'] },
     { host: 'vscode', project: ['.vscode'], user: [] },
   ];
 

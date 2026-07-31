@@ -205,16 +205,58 @@ test('INSTALL: AGENTS.md block is created, then updated idempotently', async (t)
   assert.equal(text.split('BEGIN holt').length - 1, 1, 'block must appear exactly once');
 });
 
-test('INSTALL: existing AGENTS.md content is preserved', async (t) => {
+test('INSTALL: an existing AGENTS.md is preserved verbatim, holt appended after it', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-agentsmd2-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
-  await fs.writeFile(path.join(dir, 'AGENTS.md'), '# My Project\n\nRun `make test`.\n');
-  await installAgentsMd(dir);
+  const user = '# My Project\n\n## Build\nRun `make test`.\n\n## Style\nTabs, not spaces.\n';
+  await fs.writeFile(path.join(dir, 'AGENTS.md'), user);
+  const r = await installAgentsMd(dir);
 
   const text = await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8');
   assert.match(text, /Run `make test`/, 'pre-existing instructions must survive');
-  assert.match(text, /BEGIN holt/);
+  assert.match(text, /Tabs, not spaces/);
+  assert.equal(r.preservedUserContent, true, 'the result must report that user content was kept');
+  // Order: the user content comes BEFORE holt's block, and holt never inserts its own H1.
+  assert.ok(text.indexOf('make test') < text.indexOf('BEGIN holt'), 'user content stays first');
+  assert.equal((text.match(/^# /gm) || []).length, 1, 'holt must not add a second top-level title');
+});
+
+test('INSTALL: re-running converges — duplicate/corrupted holt blocks collapse to one, content kept', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-agentsmd3-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  // A file that already has TWO holt blocks (a prior bug) plus real user content between them.
+  const messy = 'user top\n\n<!-- BEGIN holt -->\nold one\n<!-- END holt -->\n\nuser middle\n\n<!-- BEGIN holt -->\nold two\n<!-- END holt -->\n\nuser bottom\n';
+  await fs.writeFile(path.join(dir, 'AGENTS.md'), messy);
+  await installAgentsMd(dir);
+
+  const text = await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8');
+  assert.equal(text.split('BEGIN holt').length - 1, 1, 'exactly one holt block after cleanup');
+  assert.ok(!text.includes('old one') && !text.includes('old two'), 'stale holt content is gone');
+  for (const kept of ['user top', 'user middle', 'user bottom']) {
+    assert.match(text, new RegExp(kept), `user content "${kept}" must survive the collapse`);
+  }
+  // And a further run is a no-op on length (idempotent, no growth).
+  const len1 = text.length;
+  await installAgentsMd(dir);
+  const len2 = (await fs.readFile(path.join(dir, 'AGENTS.md'), 'utf8')).length;
+  assert.equal(len1, len2, 'a second run must not grow the file');
+});
+
+test('DETECT: a bare AGENTS.md does NOT falsely report codex (it is a universal standard now)', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-detect-'));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-home2-'));
+  t.after(() => Promise.all([fs.rm(dir, { recursive: true, force: true }), fs.rm(home, { recursive: true, force: true })]));
+
+  await fs.writeFile(path.join(dir, 'AGENTS.md'), '# rules\n');
+  const bare = await detectHosts(dir, home);
+  assert.ok(!bare.all.includes('codex'), 'AGENTS.md alone must not imply codex is installed');
+
+  // But a real .codex marker IS detected.
+  await fs.mkdir(path.join(dir, '.codex'), { recursive: true });
+  const withCodex = await detectHosts(dir, home);
+  assert.ok(withCodex.all.includes('codex'), '.codex marker must be detected');
 });
 
 test('INSTALL: MCP targets cover the major hosts, split by scope', async (t) => {
