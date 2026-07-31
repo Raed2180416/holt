@@ -68,12 +68,15 @@ jobs:
       - uses: actions/setup-go@v5
         with: { go-version: 'stable' }
 
-      - name: install universal-ctags (snap = current; apt ships 5.9.0 which lacks Terraform/Elm)
+      - name: install universal-ctags
+        # apt, deliberately, even though it ships an older parser set (5.9.0 on Ubuntu 24.04, no
+        # Terraform/Elm). The snap build is newer but CONFINED: it cannot read files outside the
+        # user's home, so every test that tags a fixture in a temp directory fails with an empty
+        # result — a sandbox artefact masquerading as a parser regression. holt's language suite
+        # is capability-aware (it asks `ctags --list-languages` and reports what this build cannot
+        # parse), so the older apt package produces an honest, passing run rather than a false one.
         run: |
-          sudo snap install universal-ctags 2>/dev/null && sudo snap alias universal-ctags.ctags ctags || {
-            echo "snap unavailable — falling back to apt (older parser set; holt reports the gap honestly)"
-            sudo apt-get update && sudo apt-get install -y universal-ctags
-          }
+          sudo apt-get update && sudo apt-get install -y universal-ctags
           ctags --version | head -1
 
       - name: install enry (content-based language detection)

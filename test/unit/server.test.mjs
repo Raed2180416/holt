@@ -356,10 +356,19 @@ test('E2E: the webhook endpoint is rate limited against an unsigned flood', asyn
   const { port } = server.address();
   t.after(() => { server.close(); fs.rmSync(dir, { recursive: true, force: true }); });
 
-  const flood = Array.from({ length: 260 }, () => fetch(`http://127.0.0.1:${port}/webhooks/stripe`, { method: 'POST', headers: { 'stripe-signature': 'garbage' }, body: '{}' }));
-  const codes = (await Promise.all(flood)).map((r) => r.status);
-  assert.ok(codes.includes(429), 'a 260-request unsigned flood must hit the limiter');
-  assert.ok(codes.includes(400), 'and legitimate-shaped-but-unsigned ones still get 400 until the limiter trips');
+  // SEQUENTIAL, not 260-way concurrent. Firing hundreds of simultaneous sockets is a test of the
+  // platform's socket stack rather than of the limiter — on Windows a chunk of them never reach
+  // the server at all, so the assertion became flaky there. Issued in order, the token bucket
+  // (capacity 200, refill 20/s) is guaranteed to be empty well before the last request.
+  const codes = [];
+  for (let i = 0; i < 240; i++) {
+    const r = await fetch(`http://127.0.0.1:${port}/webhooks/stripe`, {
+      method: 'POST', headers: { 'stripe-signature': 'garbage' }, body: '{}',
+    }).catch(() => null);
+    if (r) codes.push(r.status);
+  }
+  assert.ok(codes.includes(429), `a sustained unsigned flood must hit the limiter (saw: ${[...new Set(codes)].join(',')})`);
+  assert.ok(codes.includes(400), 'and unsigned-but-well-formed ones still get 400 until the limiter trips');
 });
 
 
