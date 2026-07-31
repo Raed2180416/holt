@@ -92,6 +92,8 @@ AGENT INTEGRATION
 OPTIONS
   --json              machine-readable output
   --export <fmt>      journal: json | csv  (your own repo log — free)
+  --all               collisions: also show bare file overlap (hidden by default: it is
+                      high-volume and low-evidence; landing order always uses it)
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
   --base <ref>        compare against <ref>            (default: origin/HEAD, then main/master…)
   --cwd <path>        repository to inspect            (default: cwd)
@@ -131,6 +133,7 @@ function parseArgs(argv) {
       case '--autoprotect': opts.autoprotect = true; break;
       case '--export': opts.exportFmt = argv[++i]; break;
       case '--summary': opts.summary = true; break;
+      case '--all': opts.includeCoLocated = true; break;
       case '--max-depth': opts.maxDepth = Number(argv[++i]) || 3; break;
       case '--fail-on-unlanded': opts.failOnUnlanded = true; break;
       case '--max-age-days': opts.maxAgeDays = Number(argv[++i]) || null; break;

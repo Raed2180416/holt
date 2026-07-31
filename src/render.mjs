@@ -201,10 +201,24 @@ export function renderRisk(report) {
   return out.join('\n');
 }
 
+/** One line per contested FILE, instead of one per pair — N pairs collapse to one finding. */
+function hotspotLines(report) {
+  const hs = report.hotspots ?? [];
+  if (!hs.length) return [];
+  const out = ['', c('bold', 'SHARED FILES  —  no symbol overlap, but the same file'), ''];
+  for (const h of hs.slice(0, 12)) {
+    out.push(`  ${c('yellow', '▪')} ${h.file}  ${c('grey', `${h.count} workstreams: ${h.workstreams.slice(0, 4).join(', ')}${h.workstreams.length > 4 ? '…' : ''}`)}`);
+  }
+  out.push(c('grey', '  these are sequenced serially by `holt order`; use --all to list every pair'));
+  return out;
+}
+
 export function renderCollisions(report) {
   const out = [renderHeader(report), ''];
   if (!report.collisions.length) {
-    out.push(c('green', 'No collisions. No two workstreams contest the same content.'), '');
+    out.push(c('green', 'No collisions. No two workstreams contest the same content.'));
+    out.push(...hotspotLines(report));
+    out.push('');
     return out.join('\n');
   }
   out.push(c('bold', `COLLISIONS (${report.collisions.length})`), '');

@@ -81,3 +81,32 @@ test('order: deterministic across runs on identical input', () => {
   });
   assert.deepEqual(landingOrder(input), landingOrder(input));
 });
+
+test('SEQUENCING: co-located pairs entangle the ORDER even though triage hides them', async (t) => {
+  // The defect this prevents, and why one array cannot serve both consumers:
+  // two agents append different keys to the same registry file. They share no SYMBOL, so the
+  // human triage view correctly stays quiet (admitting bare file overlap produced 616 findings
+  // with 6 real ones on a real repo). But sequencing them in PARALLEL means the second one fails
+  // to apply — the flagship "landing layer" claim breaking on the exact case it exists for.
+  const report = {
+    safe: [{ id: 'a' }, { id: 'b' }],
+    unique: [{ id: 'a' }, { id: 'b' }],
+    collisions: [],                                   // what a human reads: nothing
+    collisionsAll: [{ a: 'a', b: 'b', kind: 'co-located', sharedFiles: ['registry.mjs'] }],
+    duplicates: [],
+  };
+  const plan = landingOrder(report);
+  assert.equal(plan.parallel.length, 0, 'co-located workstreams must NOT be called parallel-safe');
+  assert.equal(plan.lanes.length, 1, 'they belong in one lane');
+  assert.deepEqual(plan.lanes[0].members, ['a', 'b']);
+  const why = plan.lanes[0].order[0].conflictsWithLater.flatMap((c) => c.why).join(' ');
+  assert.match(why, /registry\.mjs/, 'and the reason must name the shared file');
+});
+
+test('SEQUENCING: with no evidence at all, workstreams stay parallel — the fix is not trigger-happy', () => {
+  const plan = landingOrder({
+    safe: [{ id: 'x' }, { id: 'y' }], unique: [{ id: 'x' }, { id: 'y' }],
+    collisions: [], collisionsAll: [], duplicates: [],
+  });
+  assert.deepEqual(plan.parallel, ['x', 'y']);
+});

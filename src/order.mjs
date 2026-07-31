@@ -37,8 +37,14 @@ export function landingOrder(report) {
     edges.get(a).get(b).push(why);
     edges.get(b).get(a).push(why);
   };
-  for (const c of report.collisions ?? []) {
+  // Use the FULL collision evidence, not the human-filtered view. Bare file overlap
+  // ("co-located") is deliberately hidden from triage surfaces because it drowns them — but for
+  // SEQUENCING it is exactly the signal that matters: two workstreams editing the same file are
+  // not independent, and sequencing them in parallel means the second one fails to apply. A
+  // false positive here costs a little serialisation; a false negative costs a broken landing.
+  for (const c of report.collisionsAll ?? report.collisions ?? []) {
     if (CONFLICT_KINDS.has(c.kind)) addEdge(c.a, c.b, `${c.kind} collision`);
+    else if (c.kind === 'co-located') addEdge(c.a, c.b, `both edit ${(c.sharedFiles ?? [])[0] ?? 'a shared file'}`);
   }
   for (const d of report.duplicates ?? []) {
     addEdge(d.a, d.b, `duplicate work (${d.sharedCount} shared symbol${d.sharedCount === 1 ? '' : 's'})`);

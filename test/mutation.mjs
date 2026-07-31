@@ -238,6 +238,14 @@ const MUTATIONS = [
     tests: ['test/unit/roi.test.mjs'],
   },
   {
+    id: 'order-loses-colocated',
+    defect: 'landing order reverts to the human-filtered collisions, so co-located workstreams sequence in parallel and break on apply',
+    file: 'src/order.mjs',
+    find: '  for (const c of report.collisionsAll ?? report.collisions ?? []) {',
+    replace: '  for (const c of report.collisions ?? []) {',
+    tests: ['test/unit/order.test.mjs'],
+  },
+  {
     id: 'rescue-ref-clobber',
     defect: 'a reused worktree id silently overwrites an earlier rescue ref — destroying a capture',
     file: 'src/actions.mjs',

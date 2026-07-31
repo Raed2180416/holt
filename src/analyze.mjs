@@ -319,10 +319,45 @@ export async function collisions(scanResult, opts = {}) {
 
   const order = { high: 0, medium: 1, low: 2, none: 3 };
   const keepLow = opts.includeCoLocated === true;
-  return results
+  const ranked = results
     .filter((r) => r.severity !== 'none')
-    .filter((r) => keepLow || r.severity !== 'low')
     .sort((x, y) => order[x.severity] - order[y.severity] || y.sharedSymbols.length - x.sharedSymbols.length);
+
+  // TWO CONSUMERS, OPPOSITE ERROR COSTS — so one array cannot serve both.
+  //
+  // A HUMAN reading a triage surface has a hard attention budget: on a real 39-worktree repo,
+  // admitting bare file overlap produced 616 findings with 6 real ones, which is strictly worse
+  // than 6 because the real ones become unreachable. Precision wins; co-located pairs are hidden.
+  //
+  // A MACHINE sequencing a landing order has the inverse cost. A false positive costs a human
+  // three seconds of "not really"; a false NEGATIVE tells `order` that two workstreams editing
+  // the same file are independent, they get sequenced in parallel, and the second one fails to
+  // apply. That is the flagship "landing layer" claim breaking on the exact case it exists for.
+  //
+  // So: `visible` is what humans read, `all` is what order/plan/gate consume, and `hotspots`
+  // aggregates the hidden bucket BY FILE — "5 workstreams edit config/registry.mjs" is one
+  // finding carrying the same information as ten pairwise rows, without the explosion.
+  const visible = keepLow ? ranked : ranked.filter((r) => r.severity !== 'low');
+  visible.all = ranked;
+  visible.hidden = ranked.filter((r) => r.severity === 'low');
+  visible.hotspots = hotspotsFrom(visible.hidden);
+  return visible;
+}
+
+/** Aggregate co-located pairs by the file they share, so N pairs become one readable finding. */
+function hotspotsFrom(pairs) {
+  const byFile = new Map();
+  for (const p of pairs) {
+    for (const f of p.sharedFiles ?? []) {
+      if (!byFile.has(f)) byFile.set(f, new Set());
+      byFile.get(f).add(p.a);
+      byFile.get(f).add(p.b);
+    }
+  }
+  return [...byFile.entries()]
+    .map(([file, ids]) => ({ file, workstreams: [...ids].sort(), count: ids.size }))
+    .filter((h) => h.count > 1)
+    .sort((a, b) => b.count - a.count || a.file.localeCompare(b.file));
 }
 
 /* -------------------------------------------------------- P3: duplicates ---- */
@@ -679,8 +714,11 @@ export async function analyze(scanResult, opts = {}) {
   const dups = duplicates(scanResult, opts);
   const uniq = uniqueWork(scanResult);
   const safe = safeToDelete(scanResult, uniq);
-  const plan = landingPlan(scanResult, { collisions: cols, duplicates: dups });
-  const graph = buildGraph(scanResult, { collisions: cols, duplicates: dups });
+  // Machine consumers get the FULL evidence (co-located included): sequencing conservatively
+  // costs a little parallelism, sequencing wrongly costs a failed apply.
+  const colsAll = cols.all ?? cols;
+  const plan = landingPlan(scanResult, { collisions: colsAll, duplicates: dups });
+  const graph = buildGraph(scanResult, { collisions: colsAll, duplicates: dups });
 
   // Filtering is never silent. A bounded result that does not say what it bounded reads as
   // full coverage, which is how a tool quietly starts lying about what it looked at.
@@ -705,6 +743,8 @@ export async function analyze(scanResult, opts = {}) {
     unique: uniq,
     safe,
     collisions: cols,
+    collisionsAll: colsAll,
+    hotspots: cols.hotspots ?? [],
     duplicates: dups,
     plan,
     graph,

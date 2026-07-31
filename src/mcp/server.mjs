@@ -11,8 +11,19 @@
  * thousands of tokens delivering 69 objects so the model could rediscover that 4 matter.
  * So every tool here returns a DECISION with its evidence, and every list takes a `limit`.
  *
- * All tools are read-only (annotated as such). holt cannot modify a repository — see
- * src/git.mjs and test/unit/safety.test.mjs.
+ * TOOL SAFETY — read this before writing an auto-approval policy.
+ *
+ * MOST tools here are read-only and are annotated `readOnlyHint: true`. THREE ARE NOT:
+ *   holt_clean    REMOVES worktrees and merged branches   (destructiveHint: true)
+ *   holt_rescue   writes a ref capturing a worktree's work
+ *   holt_protect  places git worktree locks
+ * Each carries honest annotations, because a host that auto-approves read-only tools must never
+ * auto-approve a deletion. Do not grant blanket approval on the basis of this file shipping
+ * "diagnostics" — check the per-tool annotations, which are the contract.
+ *
+ * The ANALYSIS path cannot modify a repository: mutating git verbs are unreachable without an
+ * explicit opt-in that only the three tools above pass — see src/git.mjs and
+ * test/unit/safety.test.mjs, which proves a full scan changes nothing byte-for-byte.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
