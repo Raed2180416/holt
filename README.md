@@ -103,6 +103,68 @@ grove doctor      # what's available, and the live safety contract
 
 ---
 
+## Protection that needs no cooperation
+
+grove's A/B eval found that an agent with `AGENTS.md` and the MCP tools sitting in its own
+repository **ignored both** and reasoned from `git log` instead. Availability is not adoption.
+
+So the primary protection is not instructions — it is git's own lock:
+
+```bash
+grove protect
+```
+
+Every workstream holding unique work is locked, with a reason that explains itself. Then:
+
+```
+$ git worktree remove --force wt/feature-x
+fatal: cannot remove a locked working tree, lock reason: grove: holds work found nowhere else
+(e.g. callable:validate_oauth_state). Run 'grove rescue feature-x' to preserve it.
+use 'remove -f -f' to override or unlock first
+```
+
+No plugin. No MCP. No AGENTS.md. No cooperation from the model. It works identically for Claude
+Code, Codex, Cursor, crush, a shell script and a human — and **git prints grove's reason**, so
+whoever hit it learns what is at stake and what to do.
+
+This defeats exactly the failure the eval measured: **both** naked-arm losses were a single
+`--force`. It does **not** stop `rm -rf` — that is filesystem-level, and only the PreToolUse hook
+catches it. Stated, not papered over.
+
+## Resolution, not just refusal
+
+A gate that only says no gets switched off. Grove's eval agents kept trying to rescue the file by
+hand before deleting — inventing three different ad-hoc schemes, all of which lost the git
+context and left no record. So that is a first-class operation:
+
+```bash
+grove rescue feature-x --release
+```
+
+Captures the worktree's full state — tracked modifications *and* untracked files — as a commit on
+`refs/grove/rescue/feature-x`, **verifies** it, then unlocks. The worktree is now genuinely
+disposable and the work outlives it:
+
+```bash
+git checkout refs/grove/rescue/feature-x -- .     # restore, months later
+grove rescued                                      # every rescue ever taken
+```
+
+If the capture cannot be verified, `rescue` **refuses and exits non-zero** — because
+`grove rescue X && git worktree remove X` must stop there. An incomplete capture that reports
+success is worse than no rescue at all: it licenses a deletion.
+
+And the everyday one — removing a worktree takes two commands and nobody runs both across ten
+merged PRs:
+
+```bash
+grove clean            # dry run: what holds nothing base lacks
+grove clean --apply    # remove those worktrees AND their branches
+```
+
+Re-verified immediately before each removal, so a verdict computed seconds ago cannot authorise
+a deletion now.
+
 ## Agent integration
 
 ```bash
@@ -246,7 +308,8 @@ Methodology, scenarios and honest limits: [`eval/README.md`](eval/README.md).
 ## Testing
 
 ```bash
-npm test                          # 131 tests
+npm test                          # 169 tests
+npm run test:mutation             # 12 deliberate defects — all must be caught
 scripts/clone-fixtures.sh         # 4 real upstream repos
 npm run test:e2e
 ```
@@ -257,7 +320,19 @@ Two rules govern the suite:
 asserted first on a case that must be found, then on a negative control. A suite that only
 checked "no false positives" would pass with every detector returning `[]`.
 
-**2. Attack it.** `test/e2e/break-it.test.mjs` is not written to confirm grove works — it is
+**2. Prove the tests can FAIL.** A green suite proves the tests RAN, not that they would catch a
+real defect. `npm run test:mutation` breaks 12 high-stakes behaviours on purpose — safeToDelete
+calling everything disposable, the git allowlist permitting everything, rescue skipping its
+verification, clean deleting on a stale verdict — and asserts the suite goes red for each. It
+runs in CI; a survivor fails the build.
+
+Its first run scored **10/12**, and both survivors were real holes: a test proved rescue *works*
+but never that it *refuses* an incomplete capture, and the TOCTOU test wrote its file before
+calling `clean`, so the re-verification never ran. Both are now killed by tests built on real
+mechanisms — a nested git repository makes `git add` genuinely partial, and `clean` gained an
+`onBeforeRemove` callback so the race is deterministic rather than a flaky timer.
+
+**3. Attack it.** `test/e2e/break-it.test.mjs` is not written to confirm grove works — it is
 written to force the one catastrophic failure: *grove says safe to delete, and it is not.*
 14 attacks, each from a real thing agents do: commit-only-deletions, uncommitted deletions,
 symbol renames, file moves, reverts, mutation *during* a scan, stale-cache authorisation,
