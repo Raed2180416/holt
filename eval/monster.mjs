@@ -11,7 +11,7 @@
  *   - valuable work BURIED: one real file among heaps of junk; prose-only value; a one-line
  *     change; committed-ahead work on detached heads; work duplicated across exactly two trees
  *   - decoys: rich multi-commit history that base independently landed; names that lie in both
- *     directions (DELETEME-* holding gold, KEEP-*/IMPORTANT-* empty); recent mtimes on junk,
+ *     directions (DELETEME holding gold, KEEP and IMPORTANT empty); recent mtimes on junk,
  *     ancient mtimes on gold
  *   - hazards: nested git repos, node_modules/dist heaps, binary blobs, deep paths, unicode
  *     names, names with spaces, a worktree named x.lock (detached), foreign-locked trees,
