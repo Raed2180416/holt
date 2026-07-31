@@ -84,11 +84,11 @@ turns Stripe payments into signed licenses.
 
 ## 5. Connect the website to checkout
 
-- [ ] After the service is live, set its URL in the site so the "Start a Team plan" button drives
-      real checkout instead of the mailto fallback. In `site/index.html` the placeholder is
-      `__HOLT_API__`; replace it with your service origin (a one-line `sed` in the Pages workflow,
-      or edit and commit). Until you do, the button opens an email to `sales@holt.dev`, which is a
-      safe fallback, not a broken link.
+- [ ] After the service is live, set a **repository variable** `HOLT_API_URL` (Settings →
+      Secrets and variables → Actions → Variables) to your service origin, e.g.
+      `https://holt-licenses.fly.dev`. The Pages deploy injects it into the "Start a Team plan"
+      button automatically on the next build — no file edit. Until it is set, the button opens an
+      email to `sales@holt.dev`, which is a safe fallback, not a broken link.
 
 ## 6. Test the whole path with Stripe test mode
 

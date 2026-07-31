@@ -35,6 +35,23 @@ jobs:
           done
           [ "$fail" = 0 ] && echo "self-contained: no external assets in any site/*.html"
           exit $fail
+      - name: Wire the checkout endpoint if configured
+        # The "Start a Team plan" button ships with a __HOLT_API__ placeholder and a mailto:
+        # fallback. If the repo variable HOLT_API_URL is set (to the deployed license service),
+        # inject it here so checkout goes live automatically; otherwise the safe fallback stays.
+        env:
+          HOLT_API_URL: ${{ vars.HOLT_API_URL }}
+        run: |
+          if [ -n "$HOLT_API_URL" ]; then
+            # Only http(s) origins, nothing that could inject markup.
+            case "$HOLT_API_URL" in
+              https://*|http://*)
+                node -e 'const fs=require("fs");const u=process.env.HOLT_API_URL;const p="site/index.html";fs.writeFileSync(p,fs.readFileSync(p,"utf8").split("__HOLT_API__").join(u));console.log("checkout wired to",u)' ;;
+              *) echo "HOLT_API_URL is not an http(s) URL; leaving the mailto fallback"; ;;
+            esac
+          else
+            echo "HOLT_API_URL not set — the Team button keeps its mailto: fallback"
+          fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
