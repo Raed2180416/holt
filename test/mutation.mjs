@@ -230,6 +230,14 @@ const MUTATIONS = [
     tests: ['test/unit/server.test.mjs'],
   },
   {
+    id: 'roi-inflates',
+    defect: 'the ROI summary counts protects as prevented losses, inflating the safety number',
+    file: 'src/roi.mjs',
+    find: '  const preventedLosses = blocked + rescued;',
+    replace: '  const preventedLosses = blocked + rescued + protectedWt;',
+    tests: ['test/unit/roi.test.mjs'],
+  },
+  {
     id: 'idempotency-race',
     defect: 'the event lock is bypassed, so concurrent deliveries of one payment can mint two licenses',
     file: 'server/index.mjs',

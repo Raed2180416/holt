@@ -29,7 +29,8 @@ import { runTui } from '../src/tui.mjs';
 import { landingOrder } from '../src/order.mjs';
 import { branchAudit } from '../src/branches.mjs';
 import { partitionPlan } from '../src/partition.mjs';
-import { readJournal } from '../src/journal.mjs';
+import { readJournal, appendEvent } from '../src/journal.mjs';
+import { summarizeJournal } from '../src/roi.mjs';
 import { git } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
 import { loadPolicy, evaluatePolicy } from '../src/team/policy.mjs';
@@ -53,6 +54,7 @@ COMMANDS
   partition           pre-flight split for N agents  [--agents <n>]   (collision-free start map)
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
   journal             audit trail of every protect / rescue / clean / branch-delete
+                      --summary: the ROI view — losses prevented, hours saved
   fleet <dir>...      every repository under <dir>: where work sits unlanded   [team]
   license             activate | status | deactivate  (team/enterprise features)
   ci                  team gate for CI: fail a merge that abandons work
@@ -125,6 +127,7 @@ function parseArgs(argv) {
       case '--agents': opts.agents = Number(argv[++i]) || 2; break;
       case '--autoprotect': opts.autoprotect = true; break;
       case '--export': opts.exportFmt = argv[++i]; break;
+      case '--summary': opts.summary = true; break;
       case '--max-depth': opts.maxDepth = Number(argv[++i]) || 3; break;
       case '--fail-on-unlanded': opts.failOnUnlanded = true; break;
       case '--max-age-days': opts.maxAgeDays = Number(argv[++i]) || null; break;
@@ -292,6 +295,14 @@ async function cmdHook(opts) {
     }
 
     const verdict = await assessCommand(command, cwd);
+    // Record a prevented loss, so `holt journal --summary` can show the champion a real number:
+    // "N destructive commands refused." Best-effort — logging must never delay or alter the hook.
+    if (verdict.decision === 'deny') {
+      await appendEvent(cwd, {
+        action: 'blocked', command: String(command).slice(0, 200),
+        reason: verdict.reason ?? null, kind: verdict.kind ?? null,
+      }).catch(() => {});
+    }
     out(JSON.stringify(formatVerdict(verdict, { host: opts.host, eventName: 'PreToolUse' })));
     process.exit(verdict.decision === 'deny' ? 1 : verdict.decision === 'ask' ? 2 : 0);
   }
@@ -591,6 +602,22 @@ async function main() {
   }
   if (cmd === 'journal') {
     const events = await readJournal(opts.cwd);
+    if (opts.summary) {
+      const s = summarizeJournal(events);
+      if (opts.json) return emitJson(s);
+      out(paint('bold', 'holt — what it has prevented here'));
+      out(`\n  ${paint(s.preventedLosses ? 'green' : 'grey', s.headline)}`);
+      const b = s.breakdown;
+      out('');
+      out(`    ${paint('bold', String(b.destructiveCommandsBlocked).padStart(4))}  destructive command(s) refused`);
+      out(`    ${paint('bold', String(b.workstreamsRescued).padStart(4))}  workstream(s) rescued to a verifiable ref`);
+      out(`    ${paint('bold', String(b.workstreamsProtected).padStart(4))}  workstream(s) protected (holding work found nowhere else)`);
+      out(`    ${paint('bold', String(b.worktreesReclaimed).padStart(4))}  disposable worktree(s) reclaimed`);
+      out(`    ${paint('bold', String(b.branchesDeleted).padStart(4))}  landed branch(es) cleaned up`);
+      out(`\n  ${paint('grey', `~${s.estimatedHoursSaved}h saved (conservative planning estimate) · ${s.events} events since ${s.since ? s.since.slice(0,10) : '—'}`)}`);
+      out(`  ${paint('grey', s.note)}\n`);
+      return;
+    }
     if (opts.exportFmt) {
       // A single repository's audit log is the USER'S OWN DATA, and `holt journal --json`
       // already prints all of it for free — gating a CSV of the same rows would be a gate in
