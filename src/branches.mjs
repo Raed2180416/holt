@@ -41,14 +41,15 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
   const checkedOut = new Set(disc.workstreams.map((w) => w.branch).filter(Boolean));
   const baseShort = base.ref?.replace(/^refs\/heads\//, '');
 
-  const refs = await git(['for-each-ref', 'refs/heads', '--format=%(refname:short)%00%(objectname)'],
+  const refs = await git(['for-each-ref', 'refs/heads', '--format=%(refname:short)%00%(objectname)%00%(committerdate:unix)'],
     { cwd: root });
   const lines = refs.stdout.split('\n').filter(Boolean);
 
   const branches = [];
   for (const line of lines) {
-    const [name, tip] = line.split('\0');
+    const [name, tip, cdate] = line.split('\0');
     if (!name || !tip) continue;
+    const ageDays = cdate ? Math.floor((Date.now() / 1000 - Number(cdate)) / 86400) : null;
     if (name === baseShort || checkedOut.has(name)) continue;
 
     const delta = await committedDelta(root, base.oid, tip, {
@@ -58,7 +59,7 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     const failed = typeof delta.how === 'string' && delta.how.endsWith('-failed');
     if (failed || delta.how === 'merge-tree-no-tree') {
       branches.push({
-        name, tip, status: 'unknown', safe: false,
+        name, tip, ageDays, status: 'unknown', safe: false,
         reason: `instrument failed (${delta.how}) — refusing to classify; nothing here licenses a deletion`,
       });
       continue;
@@ -68,13 +69,13 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
       const anc = await git(['merge-base', '--is-ancestor', tip, base.oid], { cwd: root });
       if (anc.code === 0) {
         branches.push({
-          name, tip, status: 'landed', safe: true,
+          name, tip, ageDays, status: 'landed', safe: true,
           reason: `content delta vs ${baseShort ?? base.oid.slice(0, 12)} is empty and the tip is an ancestor`,
           command: `git branch -d ${name}`,
         });
       } else {
         branches.push({
-          name, tip, status: 'content-landed', safe: false,
+          name, tip, ageDays, status: 'content-landed', safe: false,
           reason: 'every line of content already exists in base, but the tip is NOT an ancestor '
             + '(squash-merge or cherry-pick) — git branch -d will refuse; deleting needs -D, which '
             + 'holt never runs for you',
@@ -85,7 +86,7 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     }
 
     branches.push({
-      name, tip, status: 'unlanded', safe: false,
+      name, tip, ageDays, status: 'unlanded', safe: false,
       reason: `holds ${delta.files.length} file(s) of content base does not have`,
       files: delta.files.slice(0, FILE_CAP),
       fileCount: delta.files.length,

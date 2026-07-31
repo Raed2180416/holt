@@ -1,0 +1,33 @@
+name: 'holt ci'
+description: 'Fail a merge that would abandon work: audits every branch by CONTENT (merge-tree), not ancestry. Requires fetch-depth: 0.'
+branding: { icon: 'shield', color: 'green' }
+inputs:
+  base:
+    description: 'Base ref to compare against (default: auto-resolved)'
+    required: false
+    default: ''
+  fail-on-unlanded:
+    description: 'Fail when any branch (other than the PR head) still holds unlanded content'
+    required: false
+    default: 'true'
+  max-age-days:
+    description: 'Only fail on unlanded branches older than this many days'
+    required: false
+    default: ''
+  ignore:
+    description: 'Comma-separated branch names to exempt'
+    required: false
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    - shell: bash
+      run: |
+        npm install -g github:Raed2180416/holt >/dev/null 2>&1 || npm install -g holt >/dev/null 2>&1
+        ARGS=""
+        [ "${{ inputs['fail-on-unlanded'] }}" = "true" ] && ARGS="$ARGS --fail-on-unlanded"
+        [ -n "${{ inputs['max-age-days'] }}" ] && ARGS="$ARGS --max-age-days ${{ inputs['max-age-days'] }}"
+        [ -n "${{ inputs.base }}" ] && ARGS="$ARGS --base ${{ inputs.base }}"
+        IFS=',' read -ra IG <<< "${{ inputs.ignore }}"
+        for b in "${IG[@]}"; do [ -n "$b" ] && ARGS="$ARGS --ignore $b"; done
+        holt ci $ARGS

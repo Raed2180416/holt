@@ -50,6 +50,9 @@ COMMANDS
   partition           pre-flight split for N agents  [--agents <n>]   (collision-free start map)
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
   journal             audit trail of every protect / rescue / clean / branch-delete
+  ci                  team gate for CI: fail a merge that abandons work
+                      [--fail-on-unlanded] [--max-age-days <n>] [--ignore <branch>]...
+                      (needs full refs: actions/checkout fetch-depth: 0)
   graph               the relationship graph  [--html <file>]
   gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
   tui                 interactive risk-sorted dashboard  [--snapshot]
@@ -114,6 +117,9 @@ function parseArgs(argv) {
       case '--run': opts.run = argv[++i]; break;
       case '--agents': opts.agents = Number(argv[++i]) || 2; break;
       case '--autoprotect': opts.autoprotect = true; break;
+      case '--fail-on-unlanded': opts.failOnUnlanded = true; break;
+      case '--max-age-days': opts.maxAgeDays = Number(argv[++i]) || null; break;
+      case '--ignore': (opts.ignore ??= []).push(argv[++i]); break;
       case '--snapshot': opts.snapshot = true; break;
       case '--columns': opts.columns = Number(argv[++i]) || 120; break;
       case '--rows': opts.rowsOpt = Number(argv[++i]) || 34; break;
@@ -433,6 +439,37 @@ async function main() {
     }
     out(`\n  ${paint('grey', audit.note)}\n`);
     return;
+  }
+  if (cmd === 'ci') {
+    // The team gate. Report-only by default; policy is explicit flags, and an instrument
+    // failure (unknown bucket) is NEVER a green result when policy is on.
+    const audit = await branchAudit(opts.cwd, opts);
+    if (!audit.ok) { process.stderr.write(paint('red', `holt ci: ${audit.reason}\n`)); process.exit(2); }
+    const ignore = new Set([...(opts.ignore ?? []), process.env.GITHUB_HEAD_REF].filter(Boolean));
+    const unlanded = audit.unlanded.filter((b) => !ignore.has(b.name));
+    const overAge = opts.maxAgeDays
+      ? unlanded.filter((b) => b.ageDays != null && b.ageDays > opts.maxAgeDays) : [];
+    const failures = [];
+    if (opts.failOnUnlanded && unlanded.length) {
+      failures.push(`${unlanded.length} branch(es) hold unlanded work: ${unlanded.map((b) => `${b.name} (${b.fileCount} file(s)${b.ageDays != null ? `, ${b.ageDays}d old` : ''})`).join(', ')}`);
+    }
+    if (opts.maxAgeDays && overAge.length && !opts.failOnUnlanded) {
+      failures.push(`${overAge.length} unlanded branch(es) older than ${opts.maxAgeDays}d: ${overAge.map((b) => b.name).join(', ')}`);
+    }
+    if ((opts.failOnUnlanded || opts.maxAgeDays) && audit.unknown.length) {
+      failures.push(`${audit.unknown.length} branch(es) could not be classified (instrument failure) — refusing to pass policy on missing evidence`);
+    }
+    const result = {
+      ok: failures.length === 0,
+      policy: { failOnUnlanded: !!opts.failOnUnlanded, maxAgeDays: opts.maxAgeDays ?? null, ignored: [...ignore] },
+      failures,
+      unlanded: unlanded.map((b) => ({ name: b.name, files: b.fileCount, ageDays: b.ageDays })),
+      contentLanded: audit.contentLanded.map((b) => b.name),
+      unknown: audit.unknown.map((b) => b.name),
+      note: 'requires full refs (actions/checkout with fetch-depth: 0)',
+    };
+    emitJson(result);
+    process.exit(result.ok ? 0 : 1);
   }
   if (cmd === 'journal') {
     const events = await readJournal(opts.cwd);

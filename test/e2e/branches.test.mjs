@@ -152,3 +152,20 @@ test('JOURNAL: a journal failure is loud but never breaks the action', async (t)
   await fs.rm(path.join(fx.root, '.git', 'holt'));
   assert.deepEqual(await readJournal(fx.root), []);
 });
+
+test('CI GATE: report-only by default; policy flags fail honestly; ignore exempts the PR head', async (t) => {
+  const fx = await graveyardFixture();
+  t.after(() => fx.cleanup());
+
+  const plain = await sh(process.execPath, [BIN, 'ci', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(plain.code, 0, `report-only must exit 0: ${plain.stderr}`);
+  assert.equal(JSON.parse(plain.stdout).ok, true);
+
+  const strict = await sh(process.execPath, [BIN, 'ci', '--fail-on-unlanded', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(strict.code, 1, 'unlanded work must fail the gate');
+  const body = JSON.parse(strict.stdout);
+  assert.ok(body.failures.some((f) => f.includes('wip')), `the failure must NAME the branch: ${JSON.stringify(body.failures)}`);
+
+  const exempt = await sh(process.execPath, [BIN, 'ci', '--fail-on-unlanded', '--ignore', 'wip', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(exempt.code, 0, `an exempted branch must not fail the gate: ${exempt.stdout}`);
+});
