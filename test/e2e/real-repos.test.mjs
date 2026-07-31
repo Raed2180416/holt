@@ -88,6 +88,12 @@ async function exists(p) {
 async function plantScenario(repo, root) {
   const wtRoot = path.join(root, '..', `${repo.dir}-wt`);
   await fs.rm(wtRoot, { recursive: true, force: true });
+  // Removing the DIRECTORIES does not remove the REGISTRATIONS. The clone is cached between runs,
+  // so `.git/worktrees/<name>` survives and the next `worktree add` fails with "missing but
+  // already registered" — the suite passed on a clean CI runner and failed for anyone who ran it
+  // twice. Pruning is the actual counterpart to deleting the directory, and it is the same stale
+  // registration hazard holt exists to detect (the monster fixture plants it deliberately).
+  await sh('git', ['worktree', 'prune'], root);
   await fs.mkdir(wtRoot, { recursive: true });
 
   const base = (await sh('git', ['rev-parse', 'HEAD'], root)).stdout.trim();
