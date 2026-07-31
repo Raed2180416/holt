@@ -43,6 +43,21 @@ This repository uses multiple git worktrees / jj workspaces at once. Work can ex
 worktree that is invisible to ordinary git commands — \`git diff\` and \`merge-tree\` cannot
 relate UNCOMMITTED changes across worktrees, so a worktree can hold the only copy of something.
 
+### If you were asked to clean up worktrees, this is the whole task
+
+\`\`\`bash
+${bin} clean            # shows exactly what holds nothing base lacks — changes nothing
+${bin} clean --apply    # removes those worktrees and their merged branches
+\`\`\`
+
+That is the safe, complete action. \`clean\` re-verifies each worktree immediately before removing
+it, never touches one that holds work found nowhere else, and never touches one it could not
+assess. **You do not need to decide which worktrees are disposable — that is what this computes.**
+
+Do not hand-inspect worktrees and reason about them yourself. Measured across real trials, that
+approach deleted a worktree holding the only copy of a security fix and kept two empty ones, in
+the same run.
+
 **Worktree names are not evidence.** Measured in real trials: agents deleted a worktree holding
 the only copy of a security fix because it was called \`DELETEME-old-experiment\`, and kept two
 empty ones because they were called \`IMPORTANT-do-not-delete\` and \`KEEP-release-candidate\` —
