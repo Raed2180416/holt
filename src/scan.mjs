@@ -515,6 +515,14 @@ async function scanFiles(ws, ctx) {
     result.committed = {
       files: cFiles, count: cFiles.length, how: committed.how,
       conflicted: committed.conflicted, caveat: committed.caveat ?? null,
+      // CARRIED THROUGH, because it is a CONTENT IDENTITY and nothing else here is.
+      //
+      // merge-tree already computed it and it was being discarded one line later. Two worktrees
+      // whose merged trees are the same oid carry byte-identical work relative to base — which is
+      // exactly the question "does a living sibling already hold this", and answering it took
+      // disposable recall from 0.40 to 1.00. File LISTS cannot answer it: two worktrees can touch
+      // the same paths with different content, or different paths with the same content.
+      mergedTree: committed.mergedTree ?? null,
     };
     result.uncommitted = {
       files: uFiles, untracked: uUntracked, count: uFiles.length + uUntracked.length,

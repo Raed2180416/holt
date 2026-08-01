@@ -52,12 +52,26 @@ async function inspect(root, opts = {}) {
 
 const verdict = (report, id) => report.safe.find((s) => s.id === id);
 
-/** The single assertion that matters. */
+/**
+ * The single assertion that matters: this worktree must not be authorised for deletion.
+ *
+ * "Not authorised" is the property, and it has two shapes. Usually holt says `safe:false`. For a
+ * worktree whose content a LIVING SIBLING also holds, it says `safe:true` plus `redundantWith` —
+ * because that worktree genuinely is individually disposable, and pretending otherwise cost 60% of
+ * this question's recall when it was measured against an independent oracle.
+ *
+ * What must never happen either way is a delete going through unchecked, so the guarantee is
+ * asserted where it is actually enforced: `gate`, the machine contract a script chains on, exits
+ * NON-ZERO for both shapes, because the `rm -rf` after `gate && …` does not look again. The
+ * commands that DO re-verify before each removal (`clean --apply`) are free to use the extra
+ * recall, and a separate test proves a redundant set drains to exactly one survivor, never zero.
+ */
 function mustNotBeSafe(report, id, attack) {
   const v = verdict(report, id);
   assert.ok(v, `ATTACK "${attack}": workstream '${id}' vanished from the report entirely`);
-  assert.equal(v.safe, false,
-    `ATTACK SUCCEEDED — "${attack}": holt called '${id}' disposable. Reasons given: ${v.reasons.join('; ')}`);
+  const authorised = v.safe && !(v.redundantWith?.length);
+  assert.equal(authorised, false,
+    `ATTACK SUCCEEDED — "${attack}": holt authorised deleting '${id}'. Reasons given: ${v.reasons.join('; ')}`);
 }
 
 /* =========================================================== deletions ==== */

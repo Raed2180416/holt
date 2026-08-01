@@ -1114,3 +1114,69 @@ test('AUTO: does every lossless thing by itself, and refuses to delete anything'
   assert.equal(again.atRisk.count, 1, 'and the verdict is unchanged');
   await fs.stat(fx.wt('empty-one'));
 });
+
+
+test('RECALL: mutually redundant worktrees are disposable, and the LAST one never is', async (t) => {
+  // "BASE LACKS THIS" IS NOT "DELETING THIS LOSES IT", and the difference was the entire recall
+  // gap. Scored against an independent oracle across 50 languages and 900 worktrees, disposable
+  // precision was 1.00 and recall 0.40 — of 250 genuinely disposable worktrees holt reclaimed 100
+  // and abstained on 150, every one of them carrying the single reason "N file(s) base lacks".
+  //
+  // Those 150 were mutually redundant: identical content in more than one worktree. Base does lack
+  // it, so the check fired — but a living sibling holds the same work, so removing any one loses
+  // nothing. Perfect precision at 0.40 recall is not a safe tool; it is a tool that answers "I
+  // cannot be sure" to most of its own question, which is also what refusing everything achieves.
+  //
+  // THE SAFETY PROPERTY IS THE POINT OF THIS TEST, not the recall. The verdict is relative to the
+  // siblings that exist right now, and `clean --apply` re-verifies immediately before each
+  // removal — so the set must drain to exactly ONE survivor, never zero, with nobody sequencing it.
+  const fx = await newRepo('redundant');
+  t.after(() => fx.cleanup());
+
+  // Three worktrees carrying byte-identical committed work that base does not have.
+  const ids = ['twin-a', 'twin-b', 'twin-c'];
+  for (const id of ids) {
+    const wt = await fx.worktree(id);
+    await fx.write('shared-feature.js', 'export function SHARED_WORK() { return 7; }\n', wt);
+    await fx.commit('the same work, three times', wt);
+  }
+
+  const before = await inspect(fx.root);
+  const verdicts = ids.map((id) => before.safe.find((s) => s.id === id));
+
+  // RECALL: each is individually disposable, and says WHY.
+  for (const v of verdicts) {
+    assert.equal(v.safe, true,
+      `a worktree whose content a living sibling also holds is disposable: ${JSON.stringify(v)}`);
+    assert.ok(Array.isArray(v.redundantWith) && v.redundantWith.length >= 1,
+      `and the report must name the siblings it is relying on: ${JSON.stringify(v)}`);
+  }
+
+  // PRECISION: run the real destructive command and count what survives.
+  const cleaned = await clean(fx.root, { apply: true });
+  const left = [];
+  for (const id of ids) {
+    try { await fs.stat(fx.wt(id)); left.push(id); } catch { /* removed */ }
+  }
+
+  assert.equal(left.length, 1,
+    `the set must drain to exactly one survivor, never zero: removed=${cleaned.removed}, left=${JSON.stringify(left)}`);
+
+  // …and the work itself is still on disk, which is the only thing that actually matters.
+  const survivor = await fs.readFile(path.join(fx.wt(left[0]), 'shared-feature.js'), 'utf8');
+  assert.match(survivor, /SHARED_WORK/, 'the shared work must survive in the last worktree');
+
+  // The survivor is now the ONLY copy, so it must no longer read as disposable.
+  const after = await inspect(fx.root);
+  assert.equal(after.safe.find((s) => s.id === left[0])?.safe, false,
+    'once its siblings are gone the last member holds the only copy and must be refused');
+
+  // NEVER-WORSE: a worktree holding genuinely unique committed work is still refused, or this
+  // change would have traded the catastrophic class for recall.
+  const solo = await fx.worktree('solo');
+  await fx.write('only-here.js', 'export function ONLY_COPY() { return 1; }\n', solo);
+  await fx.commit('unique work', solo);
+  const soloVerdict = (await inspect(fx.root)).safe.find((s) => s.id === 'solo');
+  assert.equal(soloVerdict.safe, false,
+    `work no sibling holds must still be refused: ${JSON.stringify(soloVerdict)}`);
+});

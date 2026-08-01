@@ -1082,17 +1082,37 @@ async function main() {
         process.stderr.write(paint('red', `holt gate: no workstream '${id}'\n`));
         process.exit(2);
       }
+      // REDUNDANT IS DISPOSABLE FOR A COMMAND THAT RE-VERIFIES, AND NOT FOR ONE THAT DOES NOT.
+      //
+      // A worktree whose content a living sibling also holds IS individually disposable, and
+      // saying otherwise cost 60% of this question's recall. But `gate` is the machine contract a
+      // script chains on — `holt gate $id && rm -rf $id` — and that `rm -rf` performs no second
+      // check. Run over a redundant SET, an exit 0 for every member authorises deleting all of
+      // them, and the work is gone.
+      //
+      // `clean --apply` is different in exactly the way that matters: it re-verifies each worktree
+      // against a fresh scan immediately before removing it, so the set drains to one survivor by
+      // construction. So the split is not a fudge — it is which consumer looks again.
+      //
+      // gate therefore refuses a redundant worktree and says why, naming the siblings, so the
+      // human can pick which one goes instead of the tool guessing.
+      const redundantOnly = verdict.safe && verdict.redundantWith?.length;
       if (opts.json) emitJson(verdict);
       else if (verdict.confidence === 'unknown') {
         out(paint('yellow', `? ${id}: UNKNOWN — holt could not scan it. Refusing to call it safe.`));
         for (const r of verdict.reasons) out(paint('grey', `    ${r}`));
+      } else if (redundantOnly) {
+        out(paint('yellow', `? ${id}: DUPLICATE — the same work is also in ${verdict.redundantWith.join(', ')}`));
+        out(paint('grey', '    Any ONE of them may go, but not all. `holt clean --apply` removes'));
+        out(paint('grey', '    the extras safely (it re-checks before each removal); this gate will'));
+        out(paint('grey', '    not authorise a delete it cannot re-verify.'));
       } else if (verdict.safe) {
         out(paint('green', `✓ ${id}: disposable — ${verdict.reasons[0]}`));
       } else {
         out(paint('red', `✗ ${id}: HOLDS UNIQUE WORK`));
         for (const r of verdict.reasons) out(paint('grey', `    ${r}`));
       }
-      process.exit(verdict.confidence === 'unknown' ? 2 : verdict.safe ? 0 : 1);
+      process.exit(verdict.confidence === 'unknown' ? 2 : redundantOnly ? 1 : verdict.safe ? 0 : 1);
       return;
     }
 
