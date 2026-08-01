@@ -28,7 +28,7 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { renderHtml } from '../../src/graph-html.mjs';
 import { inspect } from '../../src/index.mjs';
-import { newRepo } from '../fixtures.mjs';
+import { newRepo, standardFixture } from '../fixtures.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -349,4 +349,110 @@ test('NEVER WORSE: ordinary names render byte-for-byte faithfully, unescaped and
             html.includes(`/${report.counts.workstreams} workstreams`),
     'the header counts stopped rendering once they were routed through the escaper');
   assertScriptBlockIntact(html);
+});
+
+
+test('GRAPH LEGIBILITY: no label is drawn on top of another', async (t) => {
+  // THE DEFECT THIS PINS, measured on holt's own repository: 29 nodes, and 4 of the labels were
+  // drawn into each other so the dense centre could not be read at all.
+  //
+  // The first attempt widened the collision force to push nodes apart. That measured the wrong
+  // quantity - circle separation was already 22px while the labels are 100-200px WIDE - and the
+  // text kept overlapping. Separating nodes far enough for every name to fit would turn any real
+  // graph into a sparse sprawl, so the layout stays tight and a label that does not fit is
+  // DROPPED instead of drawn into its neighbour. Dropped labels keep their tooltip and return on
+  // hover or zoom, so nothing is lost.
+  //
+  // This runs the emitted page's OWN script, because the property is a product of the layout at
+  // runtime and cannot be read off the source.
+  // A DENSE fixture, deliberately. The first version of this test used the standard 7-worktree
+  // fixture and PASSED WITH THE DEFECT DELIBERATELY REINSTATED - at that density every label fits
+  // however it is placed, so the test asserted nothing. The real complaint came from a 29-node
+  // graph with long worktree names, so the fixture reproduces that: enough nodes, and names long
+  // enough, that a placer which draws everything unconditionally MUST collide.
+  const fx = await newRepo('graph-dense');
+  t.after(() => fx.cleanup());
+  const NAMES = [
+    'feat-audit-chain-receipts', 'feat-forensics-attribution', 'feat-policy-base-authority',
+    'feat-supply-chain-evidence', 'fix-ci-base-policy-shallow', 'fix-file-granular-guard',
+    'fix-html-escape-release', 'fix-rescue-gate-parity', 'fix-team-layer-defects',
+    'fix-verify-verdict-booleans', 'rev-supply-chain-review', 'reviewer-audit-pass',
+    'reviewer-forensics-pass', 'rvw-buyer-policy-check', 'vfy-cigate-baseline',
+    'vfy-fileguard-revert', 'vfy-fleet-counting', 'wf-team-layer-run',
+    'wt-buyer-review-policy', 'wt-policy-authority-x', 'wt-rescue-gate-fix',
+    'wt-supply-chain-evidence', 'wt-verify-verdict-run', 'wt-htmlescape-check',
+  ];
+  for (const name of NAMES) {
+    await fx.worktree(name);
+    await fx.write('src/' + name.replace(/-/g, '_') + '.js',
+      'export function ' + name.replace(/-/g, '_') + '() { return 1; }\n', fx.wt(name));
+  }
+  const html = renderHtml(await inspect(fx.root, {}));
+  const expectedNodes = NAMES.length;
+
+  const W = 1400, H = 850;
+  const created = [];
+  const makeEl = (name) => {
+    const el = {
+      tagName: name, attrs: {}, children: [], text: '',
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      appendChild(c) { this.children.push(c); return c; },
+      replaceChildren(...c) { this.children = c; },
+      addEventListener() {}, removeEventListener() {}, setPointerCapture() {},
+      getBoundingClientRect() { return { left: 0, top: 0, width: W, height: H }; },
+      classList: { add() {}, remove() {} },
+      set textContent(v) { this.text = String(v); },
+      get textContent() { return this.text; },
+      get dataset() { return {}; },
+      get clientWidth() { return W; },
+      get clientHeight() { return H; },
+      querySelectorAll() { return []; },
+    };
+    created.push(el);
+    return el;
+  };
+  const stage = makeEl('div');
+  const document = {
+    createElementNS: (_n, name) => makeEl(name),
+    getElementById: (id) => (id === 'stage' ? stage : makeEl('div')),
+    querySelectorAll: () => [],
+    get activeElement() { return null; },
+  };
+  let frames = 0;
+  const raf = (fn) => { if (frames++ < 600) fn(); return frames; };
+  const body = scriptBody(html);
+  const src = body.slice(0, body.lastIndexOf('</script>'));
+  new Function('document', 'addEventListener', 'setTimeout', 'clearTimeout',
+    'requestAnimationFrame', 'Math', src)(document, () => {}, () => 0, () => {}, raf, Math);
+
+  const svg = stage.children[stage.children.length - 2] ?? stage.children[0];
+  const g = svg.children.find((c) => c.tagName === 'g') ?? svg;
+  const circles = g.children.filter((c) => c.tagName === 'circle');
+  const labels = g.children.filter((c) => c.tagName === 'text');
+
+  // ANTI-VACUITY. Drawing NO labels would satisfy "nothing overlaps" perfectly, so the graph must
+  // be shown to have rendered and to still be naming most of what it drew.
+  assert.ok(circles.length >= expectedNodes,
+    `the page rendered ${circles.length} nodes - nothing below is being tested`);
+  assert.ok(labels.length >= Math.ceil(circles.length * 0.6),
+    `only ${labels.length} of ${circles.length} nodes kept a label - the placer is dropping too much`);
+
+  const boxes = labels.map((t2) => {
+    const fs = +(t2.attrs['font-size'] || 10);
+    const w = String(t2.text).length * fs * 0.58, h = fs * 1.25;
+    const x = +t2.attrs.x, y = +t2.attrs.y;
+    return { x0: x - w / 2, x1: x + w / 2, y0: y - h, y1: y, label: t2.text };
+  });
+
+  const clashes = [];
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i], b = boxes[j];
+      if (a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1) {
+        clashes.push(`${a.label} <-> ${b.label}`);
+      }
+    }
+  }
+  assert.deepEqual(clashes, [],
+    `these labels are drawn on top of each other, which is what made the graph unreadable:\n  ${clashes.join('\n  ')}`);
 });

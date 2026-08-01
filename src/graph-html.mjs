@@ -484,6 +484,7 @@ function draw() {
     g.appendChild(svgEl('line', attrs));
   }
 
+  // PASS 1 - circles. Drawn first so every label sits on top of every node.
   nodes.forEach((n, i) => {
     const on = lit(i);
     const circle = svgEl('circle', {
@@ -495,23 +496,51 @@ function draw() {
     tip.textContent = n.id;
     circle.appendChild(tip);
     g.appendChild(circle);
-
-    // LABELS ARE THE THING THAT WAS BROKEN. Drawing all of them unconditionally is what made
-    // the dense centre illegible, so a label is drawn when it can be READ: when the node is in
-    // focus, when the view is zoomed in enough, or when the graph is small enough to be sparse.
-    // Everything else keeps its tooltip and reveals on hover.
-    const roomy = nodes.length <= 40 || scale >= 1.35 || i === focus || (near && near.has(i));
-    if (on && roomy) {
-      const label = svgEl('text', {
-        x: n.x.toFixed(1), y: (n.y + n.r + 11).toFixed(1), 'text-anchor': 'middle',
-        'font-size': (10 / Math.max(0.7, Math.min(2, scale))).toFixed(2),
-        fill: i === focus ? 'var(--fg)' : 'var(--muted)',
-        'paint-order': 'stroke', stroke: 'var(--bg)', 'stroke-width': 3, 'stroke-linejoin': 'round',
-      });
-      label.textContent = n.id.length > 28 ? n.id.slice(0, 27) + '…' : n.id;
-      g.appendChild(label);
-    }
   });
+
+  // PASS 2 - LABELS, PLACED GREEDILY. This is the fix for the thing that was actually wrong.
+  //
+  // The first attempt at this widened the collision force so nodes would sit further apart. That
+  // was measuring the wrong quantity: circle separation was already 22px and the labels are
+  // 100-200px WIDE, so the text kept overlapping no matter how far the circles were pushed. On
+  // holt's own repository, 4 of 29 labels were illegible in the rendered output.
+  //
+  // Separating nodes far enough for every name to fit would turn any real graph into a sparse
+  // sprawl, so the answer is the cartographic one: keep the layout tight and DROP a label that
+  // does not fit, rather than drawing it into another. Importance decides who keeps theirs —
+  // at-risk first, then the focused node and its neighbours, then size — so the labels that
+  // survive a crowded view are the ones a reader needs. Everything dropped keeps its tooltip and
+  // reappears on hover or on zoom, which is why nothing is lost by dropping it.
+  const order = nodes.map((n, i) => i)
+    .filter(i => lit(i) && (nodes[i].uncommittedOnly > 0 || i === focus || (near && near.has(i))
+      || scale >= 1.2 || true))
+    .sort((a, b) => {
+      const rank = j => (j === focus ? 0 : (near && near.has(j)) ? 1 : nodes[j].uncommittedOnly > 0 ? 2 : 3);
+      return rank(a) - rank(b) || nodes[b].r - nodes[a].r;
+    });
+
+  const placed = [];
+  const FONT = 10 / Math.max(0.7, Math.min(2, scale));
+  for (const i of order) {
+    const n = nodes[i];
+    const text = n.id.length > 28 ? n.id.slice(0, 27) + '…' : n.id;
+    const w = text.length * FONT * 0.58, h = FONT * 1.25;
+    const x = n.x, y = n.y + n.r + FONT + 1;
+    const box = { x0: x - w / 2, x1: x + w / 2, y0: y - h, y1: y };
+    // A label the reader has explicitly asked for is never dropped; anything else yields.
+    const mustShow = i === focus || (near && near.has(i));
+    const clash = placed.some(b => box.x0 < b.x1 && b.x0 < box.x1 && box.y0 < b.y1 && b.y0 < box.y1);
+    if (clash && !mustShow) continue;
+    placed.push(box);
+    const label = svgEl('text', {
+      x: x.toFixed(1), y: y.toFixed(1), 'text-anchor': 'middle',
+      'font-size': FONT.toFixed(2),
+      fill: i === focus ? 'var(--fg)' : 'var(--muted)',
+      'paint-order': 'stroke', stroke: 'var(--bg)', 'stroke-width': 3, 'stroke-linejoin': 'round',
+    });
+    label.textContent = text;
+    g.appendChild(label);
+  }
 
   svg.appendChild(g);
   stage.replaceChildren(svg);
