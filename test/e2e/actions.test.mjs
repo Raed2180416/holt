@@ -1180,3 +1180,220 @@ test('RECALL: mutually redundant worktrees are disposable, and the LAST one neve
   assert.equal(soloVerdict.safe, false,
     `work no sibling holds must still be refused: ${JSON.stringify(soloVerdict)}`);
 });
+
+/* ================================================== CONCURRENT CAPTURES ==== */
+
+// holt is invoked from agent hooks, and running MULTIPLE holt processes at once in the SAME
+// worktree is the normal case, not an edge case: several agents (or several rapid-fire hook
+// invocations from one agent) can each trigger a capture before the previous one finishes.
+//
+// rescue() and discard() build their tree in a scratch git index (GIT_INDEX_FILE), so that the
+// worktree's own index is never touched. That scratch index used to live at a FIXED path scoped
+// only by the worktree directory (`.git-holt-rescue-index`, `.git-holt-discard-index`) — the
+// same file for every concurrent call on that worktree. Two processes racing read-tree/add/
+// write-tree against ONE index file can each observe the OTHER's staged content: a write-tree
+// can capture a mix of both calls' files, or capture neither because a concurrent read-tree
+// reset the index between this call's add and its own write-tree. A wrong tree in a capture path
+// means captured work that is not the work — the exact failure these commands exist to prevent.
+
+test('DISCARD: concurrent discards of DIFFERENT files in the SAME worktree never cross-contaminate', async (t) => {
+  const fx = await newRepo('discard-concurrent');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('shared');
+
+  const N = 16;
+  const names = [];
+  for (let i = 0; i < N; i++) {
+    const name = `mine-${i}.txt`;
+    await fx.write(name, `content of file ${i}\n`, wt);
+    names.push(name);
+  }
+
+  // Fire all N concurrently — this is the reproduction. Before the fix, this reliably produced
+  // refs holding several OTHER calls' files apiece, plus spurious "capture is INCOMPLETE"
+  // failures for calls whose own staged file got wiped by a concurrent read-tree.
+  const results = await Promise.all(names.map((name) => discard(fx.root, [path.join(wt, name)])));
+
+  for (let i = 0; i < N; i++) {
+    const name = names[i];
+    const r = results[i];
+    assert.equal(r.ok, true, `discard(${name}) must succeed under concurrency: ${JSON.stringify(r)}`);
+
+    // THE ASSERTION THAT MATTERS: the tree this call produced contains EXACTLY the one file it
+    // asked to discard — nothing borrowed from a sibling call, nothing missing.
+    const ls = await sh('git', ['ls-tree', '-r', '--name-only', r.ref], fx.root);
+    const captured = ls.stdout.split('\n').filter(Boolean).sort();
+    assert.deepEqual(captured, [name],
+      `discard(${name})'s ref must contain exactly its own file, got ${JSON.stringify(captured)} `
+      + `(a shared scratch-index path would leak other calls' files in here)`);
+  }
+
+  // And the filesystem agrees: every named file is gone, nothing else was touched.
+  for (const name of names) {
+    await assert.rejects(() => fs.stat(path.join(wt, name)), `${name} must have been removed`);
+  }
+});
+
+test('RESCUE: concurrent rescues of the SAME worktree never report a spurious incomplete capture',
+  async (t) => {
+    // Unlike discard, rescue captures the worktree's WHOLE state, so every concurrent call here
+    // is asking for the same content. The bug this guards is not cross-contamination between
+    // callers (there is only one true answer) but a concurrent `read-tree` wiping THIS call's
+    // staged `add` out from under it before its own `write-tree` runs — which surfaces as a false
+    // "rescue is INCOMPLETE" refusal for a worktree that was never actually incomplete.
+    const fx = await newRepo('rescue-concurrent');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('busy');
+    await fx.write('unique.js', 'export function RESCUE_RACE_SYMBOL() { return 1; }\n', wt);
+
+    const N = 12;
+    const results = await Promise.all(Array.from({ length: N }, () => rescue(fx.root, 'busy', {})));
+
+    for (const r of results) {
+      assert.equal(r.ok, true, `every concurrent rescue must succeed: ${JSON.stringify(r)}`);
+      assert.equal(r.verified, true, `every concurrent rescue must verify: ${JSON.stringify(r)}`);
+      const ls = await sh('git', ['ls-tree', '-r', '--name-only', r.commit], fx.root);
+      const captured = ls.stdout.split('\n').filter(Boolean);
+      assert.ok(captured.includes('unique.js'),
+        `every ref must contain the worktree's actual content, got ${JSON.stringify(captured)}`);
+    }
+  });
+
+/* ============================================ JOURNAL FAILURE SURFACING ==== */
+
+/**
+ * appendEvent() has always refused to throw and always written a loud stderr line on failure —
+ * but protect/rescue/discard/clean all did `await appendEvent(...)` and threw the {ok, error} it
+ * returned straight in the bin. That is invisible to exactly the callers who most need it: an
+ * MCP client and a `--json` script never see this process's stderr, only the RESULT OBJECT. So a
+ * disk-full or read-only journal directory produced a response indistinguishable from "captured
+ * AND recorded" for every caller that matters — the mutation happened, the audit line describing
+ * it did not, and nothing in the response said so.
+ *
+ * Each test below breaks the journal path the same way test/e2e/branches.test.mjs's journal test
+ * does — occupying `.git/holt` with a FILE where the journal's directory must go, which makes
+ * every appendEvent() in that repo fail with EEXIST deterministically, on any platform, without
+ * relying on chmod (which does not deny root, and this suite must not assume it never runs as
+ * root). Every test asserts BOTH halves: the caller is told (journalWarning/journalFailures on
+ * the result), AND the underlying mutation still fully happened — a journal failure must never
+ * become a reason to pretend the action didn't work, and must never block it either.
+ */
+function breakJournal(root) {
+  return fs.writeFile(path.join(root, '.git', 'holt'), 'not a directory', 'utf8');
+}
+
+test('JOURNAL FAILURE: protect() tells the caller AND still locks the worktree', async (t) => {
+  const fx = await newRepo('journal-protect');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('valuable');
+  await fx.write('only.js', 'export function ONLY_COPY() { return 1; }\n', wt);
+
+  await breakJournal(fx.root);
+
+  const p = await protect(fx.root, {});
+
+  // THE MUTATION MUST STILL HAVE HAPPENED — a journal failure must never become a reason to
+  // hold back the protection this command exists to provide.
+  assert.equal(p.protected, 1, `the lock must still be placed: ${JSON.stringify(p)}`);
+  const list = await sh('git', ['worktree', 'list', '--porcelain'], fx.root);
+  assert.match(list.stdout, /locked/, 'git itself must show the worktree as locked');
+
+  // THE CALLER MUST BE TOLD — in the result object itself, not only on stderr, because an MCP
+  // client or a `--json` consumer never reads this process's stderr.
+  assert.ok(p.journalWarning, `a journal failure must be reported in the result: ${JSON.stringify(p)}`);
+  assert.ok(Array.isArray(p.journalFailures) && p.journalFailures.length >= 1,
+    `the failure(s) must be itemised: ${JSON.stringify(p)}`);
+  assert.equal(p.journalFailures[0].action, 'protect');
+  assert.equal(p.journalFailures[0].id, 'valuable', 'the failure must name WHICH workstream, so it can be recovered manually');
+
+  // And the journal genuinely has no record of it — this is not a false alarm.
+  await fs.rm(path.join(fx.root, '.git', 'holt'));
+  const { readJournal } = await import('../../src/journal.mjs');
+  const events = await readJournal(fx.root);
+  assert.ok(!events.some((e) => e.action === 'protect'), 'the protect event must genuinely be absent from the journal');
+});
+
+test('JOURNAL FAILURE: rescue() tells the caller AND the capture is still real and verified', async (t) => {
+  const fx = await newRepo('journal-rescue');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('holder');
+  await fx.write('src/only.js', 'export function ONLY_COPY_RESCUE() { return 1; }\n', wt);
+
+  await breakJournal(fx.root);
+
+  const r = await rescue(fx.root, 'holder', {});
+
+  // THE CAPTURE MUST STILL BE REAL — read it back out of the ref, not the worktree, exactly as
+  // the non-failure rescue tests do.
+  assert.equal(r.ok, true, `the rescue must still succeed: ${JSON.stringify(r)}`);
+  assert.equal(r.verified, true);
+  const show = await sh('git', ['show', `${r.commit}:src/only.js`], fx.root);
+  assert.equal(show.code, 0, 'the ref must actually contain the captured file');
+  assert.match(show.stdout, /ONLY_COPY_RESCUE/);
+
+  // THE CALLER MUST BE TOLD, with enough to recover manually: the ref that WAS created.
+  assert.ok(r.journalWarning, `a journal failure must be reported: ${JSON.stringify(r)}`);
+  assert.ok(r.journalFailures?.length >= 1);
+  assert.equal(r.journalFailures[0].action, 'rescue');
+  assert.equal(r.journalFailures[0].ref, r.ref, 'the failure must name the ref, so the untracked rescue can still be found');
+});
+
+test('JOURNAL FAILURE: discard() tells the caller AND the content is still captured and removed', async (t) => {
+  const fx = await newRepo('journal-discard');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('scratch');
+  await fx.write('notes.md', 'the only copy of this\n', wt);
+
+  await breakJournal(fx.root);
+
+  const r = await discard(fx.root, [path.join(wt, 'notes.md')]);
+
+  assert.equal(r.ok, true, `discard must still succeed: ${JSON.stringify(r)}`);
+  assert.equal(r.verified, true);
+  await assert.rejects(() => fs.stat(path.join(wt, 'notes.md')), 'the path must actually be removed');
+  const show = await sh('git', ['show', `${r.commit}:notes.md`], fx.root);
+  assert.equal(show.stdout, 'the only copy of this\n', 'the discarded content must be recoverable from the ref');
+
+  assert.ok(r.journalWarning, `a journal failure must be reported: ${JSON.stringify(r)}`);
+  assert.ok(r.journalFailures?.length >= 1);
+  assert.equal(r.journalFailures[0].action, 'discard');
+  assert.equal(r.journalFailures[0].ref, r.ref);
+});
+
+test('JOURNAL FAILURE: clean --apply tells the caller AND still removes the disposable worktree', async (t) => {
+  const fx = await newRepo('journal-clean');
+  t.after(() => fx.cleanup());
+  await fx.worktree('spent');
+
+  await breakJournal(fx.root);
+
+  const c = await clean(fx.root, { apply: true });
+
+  assert.equal(c.removed, 1, `the disposable worktree must still be removed: ${JSON.stringify(c)}`);
+  await assert.rejects(() => fs.stat(fx.wt('spent')), 'the worktree must actually be gone from disk');
+
+  assert.ok(c.journalWarning, `a journal failure must be reported: ${JSON.stringify(c)}`);
+  assert.ok(c.journalFailures?.length >= 1);
+  assert.equal(c.journalFailures[0].action, 'clean-remove');
+  assert.equal(c.journalFailures[0].id, 'spent');
+});
+
+test('JOURNAL FAILURE: never a reason to refuse — protect/rescue/discard/clean all still ACT', async (t) => {
+  // NEVER-WORSE, stated as its own test: a broken journal must not make holt MORE conservative.
+  // "Refuses more" is not automatically an improvement — a tool that stops protecting or
+  // capturing work because its OWN audit trail is unwritable would trade a metrics gap for the
+  // exact data loss it exists to prevent, which is a strictly worse failure mode.
+  const fx = await newRepo('journal-never-worse');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('important');
+  await fx.write('vital.js', 'export function VITAL() { return 1; }\n', wt);
+
+  await breakJournal(fx.root);
+
+  const p = await protect(fx.root, {});
+  assert.equal(p.failed, 0, 'a journal failure must not be reported as a protect failure');
+  assert.equal(p.protected, 1);
+
+  const r = await rescue(fx.root, 'important', {});
+  assert.equal(r.ok, true, 'a journal failure must not turn a good rescue into a refusal');
+});

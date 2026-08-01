@@ -228,6 +228,94 @@ test('P2: an unknown workstream id is an explicit error, not an empty digest', a
   assert.ok(Array.isArray(digest.known) && digest.known.length > 0, 'should list what IS known');
 });
 
+/* ---------------------------------------------- P2/family: names can lie ---- */
+
+/**
+ * FAMILY IS A NAME MATCH, NOT CONTENT EVIDENCE. `inferFamily` (src/discover.mjs) groups
+ * workstreams by directory/branch NAMING PATTERN alone — the doc comment on it says as much
+ * ("the single most likely thing to be wrong"). Two fixtures prove the two ways that lies:
+ *
+ *   auth-1 / auth-2   names look like a fan-out (numeric-suffix pattern -> family "auth"),
+ *                     but touch ENTIRELY DISJOINT files and symbols. Zero content in common.
+ *   alpha  / zebra    names share no pattern at all (two singleton families), but touch the
+ *                     SAME file with the IDENTICAL added symbol — real content evidence of a
+ *                     relationship the naming heuristic cannot see.
+ *
+ * Content must dominate when it disagrees with the name: a same-family pair with no shared file
+ * or symbol must NOT be reported as a confirmed "sibling", and a cross-family pair that really
+ * does duplicate content must still be found by the (name-blind) symbol-overlap detector.
+ */
+async function lyingNamesFixture() {
+  const fx = await newRepo('lying-names');
+
+  await fx.worktree('auth-1');
+  await fx.write('src/auth1_only.js', 'export function AUTH1_ONLY_SYMBOL() { return "one"; }\n', fx.wt('auth-1'));
+  await fx.commit('auth-1 adds its own thing', fx.wt('auth-1'));
+
+  await fx.worktree('auth-2');
+  await fx.write('src/auth2_only.js', 'export function AUTH2_ONLY_SYMBOL() { return "two"; }\n', fx.wt('auth-2'));
+  await fx.commit('auth-2 adds a totally different thing', fx.wt('auth-2'));
+
+  await fx.worktree('alpha');
+  await fx.write('src/shared_logic.js', 'export function SHARED_TASK_SYMBOL() { return 42; }\n', fx.wt('alpha'));
+  await fx.commit('alpha implements the task', fx.wt('alpha'));
+
+  await fx.worktree('zebra');
+  await fx.write('src/shared_logic.js', 'export function SHARED_TASK_SYMBOL() { return 42; }\n', fx.wt('zebra'));
+  await fx.commit('zebra implements the identical task', fx.wt('zebra'));
+
+  return fx;
+}
+
+test('FAMILY PRESENCE: a fan-out-shaped name pattern IS grouped into one family', async (t) => {
+  const fx = await lyingNamesFixture();
+  t.after(() => fx.cleanup());
+
+  const { scanned } = await inspectFixture(fx);
+  const auth1 = scanned.workstreams.find((w) => w.id === 'auth-1');
+  const auth2 = scanned.workstreams.find((w) => w.id === 'auth-2');
+  assert.equal(auth1.family, 'auth');
+  assert.equal(auth2.family, 'auth');
+  assert.equal(auth1.familyRule, 'numeric-suffix');
+});
+
+test('FAMILY LIE #1: same-name-pattern workstreams with disjoint content are NOT a confirmed sibling', async (t) => {
+  const fx = await lyingNamesFixture();
+  t.after(() => fx.cleanup());
+
+  const { scanned, report } = await inspectFixture(fx);
+  const digest = contextDigest(scanned, 'auth-1');
+
+  assert.equal(digest.ok, true);
+  assert.deepEqual(digest.siblings, [], 'auth-2 shares nothing with auth-1: not a confirmed sibling');
+  assert.deepEqual(digest.unconfirmedSiblings, ['auth-2'],
+    'the name match must still be reported, but labelled as unconfirmed rather than fact');
+
+  // The graph's sibling edge exists (the names DO match) but must say so is unproven.
+  const edge = report.graph.edges.find((e) => e.type === 'sibling'
+    && ((e.source === 'auth-1' && e.target === 'auth-2') || (e.source === 'auth-2' && e.target === 'auth-1')));
+  assert.ok(edge, 'a sibling edge is still drawn for the name match');
+  assert.equal(edge.corroborated, false, 'zero shared content: the edge must be marked unconfirmed');
+});
+
+test('FAMILY LIE #2: content-identical workstreams are still found as duplicates despite unrelated names', async (t) => {
+  const fx = await lyingNamesFixture();
+  t.after(() => fx.cleanup());
+
+  const { scanned, report } = await inspectFixture(fx);
+  const alpha = scanned.workstreams.find((w) => w.id === 'alpha');
+  const zebra = scanned.workstreams.find((w) => w.id === 'zebra');
+  assert.notEqual(alpha.family, zebra.family, 'alpha and zebra do not match any naming pattern');
+
+  const dup = report.duplicates.find((d) => pairMatches(d, 'alpha', 'zebra'));
+  assert.ok(dup, 'alpha/zebra must be found as duplicates by CONTENT even though their names disagree');
+  assert.equal(dup.similarity, 1, 'they added the identical symbol set');
+
+  const digest = contextDigest(scanned, 'alpha');
+  const built = digest.duplicatedSymbols.find((d) => d.workstream === 'zebra');
+  assert.ok(built, 'the context digest must name zebra as already having built the same symbol');
+});
+
 /* ------------------------------------------------------- P5: landing plan ---- */
 
 test('P5: the plan drops disposables, collapses duplicates, and orders the rest', async (t) => {

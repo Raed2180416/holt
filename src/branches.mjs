@@ -29,6 +29,18 @@ import { appendEvent } from './journal.mjs';
 
 const FILE_CAP = 25;
 
+/**
+ * Same rule as actions.mjs: appendEvent() already refuses to throw and already writes a loud
+ * line to stderr, but a caller that discards its {ok, error} return value hides that failure
+ * from everyone who only reads the result object (a `--json` script, an MCP client). Recorded
+ * here so a branch actually deleted, but not journalled, still says so in the response.
+ */
+async function journal(cwd, event, failures) {
+  const r = await appendEvent(cwd, event);
+  if (!r.ok) failures.push({ action: event.action, name: event.name ?? null, error: r.error });
+  return r;
+}
+
 export async function branchAudit(cwd, { apply = false, base: baseRef = null, ...opts } = {}) {
   const disc = await discover(cwd, opts);
   if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
@@ -95,6 +107,7 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     });
   }
 
+  const journalFailures = [];
   const applied = [];
   if (apply) {
     for (const b of branches.filter((x) => x.status === 'landed')) {
@@ -105,15 +118,15 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
         .catch((e) => ({ ok: false, error: e.message }));
       applied.push({ name: b.name, ...del });
       if (del.ok) {
-        await appendEvent(root, {
+        await journal(root, {
           action: 'branch-delete', name: b.name, tip: b.tip, evidence: b.reason,
-        });
+        }, journalFailures);
       }
     }
   }
 
   const by = (s) => branches.filter((b) => b.status === s);
-  return {
+  const result = {
     ok: true,
     base: { ref: base.ref, oid: base.oid, how: base.how },
     audited: branches.length,
@@ -126,5 +139,13 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     note: apply
       ? 'applied deletes use git branch -d only; git itself re-verifies ancestry at deletion time'
       : 'dry run — nothing was deleted. --apply deletes the landed bucket only (-d, never -D)',
+  };
+  if (!journalFailures.length) return result;
+  return {
+    ...result,
+    journalFailures,
+    journalWarning: `${journalFailures.length} journal write(s) FAILED — the branch delete(s) `
+      + 'above still happened; only the audit-trail record of them did not. Recover manually '
+      + 'using the branch name(s) in journalFailures.',
   };
 }

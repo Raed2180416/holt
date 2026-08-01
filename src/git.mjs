@@ -235,6 +235,14 @@ const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
  * Run git. Rejects on refusal; resolves {stdout, stderr, code} otherwise.
  * Non-zero exit is NOT automatically an error — many git reads use exit codes as answers
  * (merge-tree returns 1 on conflict, diff --quiet returns 1 on difference). Callers decide.
+ *
+ * The options are typed explicitly because `cwd` and `env` carry no defaults: without this,
+ * inference builds the option type from the destructuring alone, omits both, and every caller
+ * that passes `{ cwd }` — which is nearly all of them — reports "'cwd' does not exist in type".
+ *
+ * @param {string[]} argv
+ * @param {{ cwd?: string, timeout?: number, allowObjectWrite?: boolean,
+ *           allowMutation?: boolean, env?: Record<string, string|undefined> }} [opts]
  */
 export function git(argv, {
   cwd, timeout = DEFAULT_TIMEOUT_MS, allowObjectWrite = true, allowMutation = false, env,

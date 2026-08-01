@@ -31,6 +31,68 @@ import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs'
 
 const LOCK_PREFIX = 'holt:';
 
+// Counter for scratch-index filenames. holt is invoked from agent hooks, and running multiple
+// agents at once in the SAME worktree is the normal case, not an edge case — so a scratch index
+// name must be unique PER INVOCATION, not just per worktree. A name of the form
+// `.git-holt-rescue-index` (no pid, no per-call component) is shared by every concurrent
+// `holt rescue`/`holt discard` on that worktree: two processes then read-tree/add/write-tree
+// against the SAME file, and one process's write-tree can capture a mix of both processes'
+// staged content, or capture NEITHER because a concurrent `read-tree` reset the index between
+// this call's `add` and its own `write-tree`. Reproduced live: 16-20 concurrent `discard()` calls
+// against one worktree, each discarding a distinct file, produced refs holding up to 10 other
+// calls' files apiece plus several outright "capture is INCOMPLETE" failures — proven with
+// `git ls-tree` on the resulting refs (see test/e2e/actions.test.mjs, "CONCURRENT CAPTURES").
+// `process.pid` alone is not enough either: a single process can run more than one capture
+// concurrently (e.g. `auto()` over several workstreams), so a same-process, same-pid counter is
+// added on top, mirroring the pattern `worktreeSnapshot` in git.mjs already uses for exactly
+// this reason.
+let scratchCounter = 0;
+function scratchIndexPath(wsPath, label) {
+  return path.join(wsPath, `.git-holt-${label}-index-${process.pid}-${scratchCounter++}`);
+}
+
+/**
+ * A journal write failing must not look like SILENCE to whoever called this.
+ *
+ * appendEvent() already refuses to throw and already writes a loud line to stderr on failure —
+ * but every call site here used to do `await appendEvent(...)` and discard the {ok, error} it
+ * returned. That is invisible to exactly the callers who most need it: an MCP client and a
+ * `--json` script never see this process's stderr, only the result object. So a disk-full or
+ * read-only journal directory produced a JSON response indistinguishable from "captured AND
+ * recorded" — the action succeeded, the audit line describing it did not, and nothing in the
+ * response said so. This collects what stderr already said INTO the result, which is the one
+ * channel every caller (human terminal, `--json`, MCP) actually reads.
+ *
+ * The action itself is never affected: this only ever runs after the mutation it is recording,
+ * and a failure here never becomes a reason to undo, retry, or refuse the mutation.
+ */
+async function journal(cwd, event, failures) {
+  const r = await appendEvent(cwd, event);
+  if (!r.ok) {
+    failures.push({
+      action: event.action, id: event.id ?? null, path: event.path ?? null, ref: event.ref ?? null,
+      error: r.error,
+    });
+  }
+  return r;
+}
+
+/**
+ * Attach journal-write failures to a result, loudly and by name, without touching anything else
+ * the result already says. Empty when nothing failed, so the common case is byte-identical to
+ * before this existed.
+ */
+function withJournalWarning(result, failures) {
+  if (!failures.length) return result;
+  return {
+    ...result,
+    journalFailures: failures,
+    journalWarning: `${failures.length} journal write(s) FAILED — the action(s) above still `
+      + 'happened; only the audit-trail record of them did not. holt roi/journal will NOT show '
+      + 'these. Recover manually using the id/path/ref named in journalFailures.',
+  };
+}
+
 /** One scan shared by every action, so protect/rescue/clean cannot disagree with each other. */
 async function assess(cwd, opts = {}) {
   const disc = await discover(cwd, opts);
@@ -67,6 +129,7 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
   const shouldProtect = report.safe.filter((s) => !s.safe && s.confidence !== 'unknown');
   const unknown = report.safe.filter((s) => s.confidence === 'unknown');
 
+  const journalFailures = [];
   const actions = [];
   for (const s of shouldProtect) {
     const ws = report.graph.nodes.find((n) => n.id === s.id);
@@ -98,7 +161,7 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
       }
     }
     actions.push({ id: s.id, path: ws.path, action: dryRun ? 'would-lock' : 'locked', reason });
-    if (!dryRun) await appendEvent(cwd, { action: 'protect', id: s.id, path: ws.path, reason });
+    if (!dryRun) await journal(cwd, { action: 'protect', id: s.id, path: ws.path, reason }, journalFailures);
   }
 
   // RECONCILE — protect is the one command that makes the lock set EQUAL the risk set, in both
@@ -130,16 +193,16 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
       }
       // Journalled as an unprotect, flagged `stale` so an audit can tell an automatic
       // reconciliation apart from a human deliberately dropping a guard.
-      await appendEvent(cwd, {
+      await journal(cwd, {
         action: 'unprotect', id: s.id, path: ws.path,
         reason: st.reason, stale: true, forced: false, foreignLock: false,
-      });
+      }, journalFailures);
     }
     released.push({ id: s.id, path: ws.path, was: st.reason });
     actions.push({ id: s.id, path: ws.path, action: dryRun ? 'would-release' : 'released', reason: st.reason });
   }
 
-  return {
+  return withJournalWarning({
     dryRun,
     protected: actions.filter((a) => a.action === 'locked' || a.action === 'would-lock').length,
     alreadyProtected: actions.filter((a) => a.action === 'already-locked').length,
@@ -151,7 +214,7 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
     actions,
     note: 'A locked worktree refuses `git worktree remove --force`. It does NOT stop `rm -rf`; '
       + 'the PreToolUse hook covers that.',
-  };
+  }, journalFailures);
 }
 
 /**
@@ -165,10 +228,11 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
  * asserts a safer state than the repository is in. Same shape as the others (action, id, path,
  * reason, actor), so one reader parses all of them.
  */
-export async function unprotect(cwd, { id = null, force = false, ...opts } = {}) {
+export async function unprotect(cwd, { id = null, force = false, dryRun = false, reason: overrideReason = null, ...opts } = {}) {
   const { report } = await assess(cwd, opts);
   const targets = report.graph.nodes.filter((n) => (id ? n.id === id : true));
 
+  const journalFailures = [];
   const actions = [];
   for (const ws of targets) {
     if (!ws.path) continue;
@@ -178,7 +242,23 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
     // a human or another tool put there deliberately.
     const foreign = !isHoltLock(st.reason);
     if (foreign && !force) {
-      actions.push({ id: ws.id, action: 'skipped-foreign-lock', reason: st.reason });
+      // The refusal NAMES the escape hatch. A guard with no documented way through it is not
+      // conservative, it is unused — the whole reason `--force` exists is so this line never
+      // leaves someone stuck holding a worktree they legitimately want to release.
+      actions.push({
+        id: ws.id, action: 'skipped-foreign-lock', reason: st.reason,
+        hint: `this lock was not placed by holt; run 'holt unprotect ${ws.id} --force --reason "<why>"' `
+          + `(or add --yes to confirm without a written reason) to override it`,
+      });
+      continue;
+    }
+    // A dry run answers "what would this release, and is any of it somebody else's lock" without
+    // releasing anything. The CLI needs that answer BEFORE it can decide whether `--force` is a
+    // real override that must be justified or a no-op flag on holt's own locks — demanding
+    // justification for the second case refuses a legitimate release for a reason that is not
+    // true of it, which is how a guard stops being used at all.
+    if (dryRun) {
+      actions.push({ id: ws.id, action: 'would-unlock', reason: st.reason, foreignLock: foreign });
       continue;
     }
     const r = await git(['worktree', 'unlock', ws.path], { cwd, allowMutation: true });
@@ -186,14 +266,25 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
     if (r.code === 0) {
       // `forced` and `foreignLock` are recorded because overriding a protection somebody else
       // placed is a materially different act from releasing holt's own, and a compliance review
-      // that cannot tell them apart is not a review.
-      await appendEvent(cwd, {
+      // that cannot tell them apart is not a review. `overrideReason` carries the human's own
+      // words for WHY, when the CLI collected one — the fact of an override is not the same
+      // record as the justification for it.
+      await journal(cwd, {
         action: 'unprotect', id: ws.id, path: ws.path,
         reason: st.reason, forced: !!force, foreignLock: foreign,
-      });
+        overrideReason: (foreign && overrideReason) ? String(overrideReason).trim() : null,
+      }, journalFailures);
     }
   }
-  return { actions, unlocked: actions.filter((a) => a.action === 'unlocked').length };
+  return withJournalWarning(
+    {
+      actions,
+      dryRun,
+      unlocked: actions.filter((a) => a.action === 'unlocked').length,
+      foreignLocks: actions.filter((a) => a.foreignLock || a.action === 'skipped-foreign-lock').length,
+    },
+    journalFailures,
+  );
 }
 
 /** Read a worktree's lock state from the porcelain listing. */
@@ -300,8 +391,10 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     return { ok: true, dryRun: true, id, ref, wouldCapture: { files, committedDelta } };
   }
 
-  // Build a tree from the worktree's CURRENT state in a scratch index.
-  const tmpIndex = path.join(ws.path, '.git-holt-rescue-index');
+  // Build a tree from the worktree's CURRENT state in a scratch index. UNIQUE per invocation —
+  // see the comment on scratchIndexPath() above for why a fixed name here is a data-loss bug,
+  // not a style nit.
+  const tmpIndex = scratchIndexPath(ws.path, 'rescue');
   // holt authors this capture; a repo with no configured identity must still be rescuable.
   const env = { GIT_INDEX_FILE: tmpIndex, ...(await authorEnv(ws.path)) };
   try {
@@ -413,21 +506,25 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       };
     }
 
+    const journalFailures = [];
     let released = null;
     if (release) {
       const un = await unprotect(cwd, { id, ...opts });
       released = un.unlocked > 0;
+      // unprotect() surfaces its OWN journal failures on its own result; fold them into this
+      // call's report too, or a --release rescue could swallow a released-but-unrecorded lock.
+      if (un.journalFailures?.length) journalFailures.push(...un.journalFailures);
     }
 
     // Record WHICH worktree this was, not just its (reusable) basename: path, branch and head
     // make two rescues under a recycled id distinguishable in the audit trail. Without them the
     // journal printed two identical lines for two different captures — live-reproduced.
-    await appendEvent(cwd, {
+    await journal(cwd, {
       action: 'rescue', id, ref, commit,
       path: ws.path, branch: ws.branch ?? null, head: ws.head ?? null,
       capturedFiles: files.length, released: release,
-    });
-    return {
+    }, journalFailures);
+    return withJournalWarning({
       ok: true, id, ref, commit,
       capturedFiles: files.length,
       verified: true,
@@ -437,7 +534,7 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       note: released
         ? 'work is captured and verified; protection released, the worktree is now disposable'
         : 'work is captured and verified. Pass --release to also unlock the worktree.',
-    };
+    }, journalFailures);
   } finally {
     await fs.rm(tmpIndex, { force: true }).catch(() => {});
   }
@@ -572,7 +669,8 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const baseRef = `refs/holt/discard/${refSafeId(ws.id)}-${stamp}`;
-  const tmpIndex = path.join(ws.path, '.git-holt-discard-index');
+  // UNIQUE per invocation — see the comment on scratchIndexPath() above.
+  const tmpIndex = scratchIndexPath(ws.path, 'discard');
   const env = { GIT_INDEX_FILE: tmpIndex, ...(await authorEnv(ws.path)) };
 
   try {
@@ -658,12 +756,13 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
       }
     }
 
-    await appendEvent(cwd, {
+    const journalFailures = [];
+    await journal(cwd, {
       action: 'discard', id: ws.id, path: ws.path,
       ref: baseRef, commit, paths: rel, count: rel.length,
-    });
+    }, journalFailures);
 
-    return {
+    return withJournalWarning({
       ok: true,
       worktree: ws.id,
       ref: baseRef,
@@ -677,7 +776,7 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
         ? 'tracked path(s) were RESTORED from HEAD rather than deleted — the edits you threw away '
           + 'are captured in the ref above and recoverable. Untracked path(s), if any, were removed.'
         : 'content captured and verified before removal; it is recoverable from the ref above.',
-    };
+    }, journalFailures);
   } finally {
     await fs.rm(tmpIndex, { force: true }).catch(() => {});
   }
@@ -757,6 +856,7 @@ export async function clean(cwd, { apply = false, branches = true, onBeforeRemov
     };
   }
 
+  const journalFailures = [];
   const done = [];
   for (const p of plan) {
     if (onBeforeRemove) await onBeforeRemove(p);
@@ -790,10 +890,10 @@ export async function clean(cwd, { apply = false, branches = true, onBeforeRemov
         done.push({ ...p, action: 'failed', why: `could not release holt's own lock: ${ul.stderr.trim()}` });
         continue;
       }
-      await appendEvent(cwd, {
+      await journal(cwd, {
         action: 'unprotect', id: p.id, path: p.path,
         reason: lock.reason, stale: true, forced: false, foreignLock: false,
-      });
+      }, journalFailures);
     }
 
     const rm = await git(['worktree', 'remove', p.path], { cwd, allowMutation: true });
@@ -809,13 +909,13 @@ export async function clean(cwd, { apply = false, branches = true, onBeforeRemov
       branchRemoved = br.code === 0;
     }
     done.push({ ...p, action: 'removed', branchRemoved });
-    await appendEvent(cwd, {
+    await journal(cwd, {
       action: 'clean-remove', id: p.id, path: p.path, branch: p.branch ?? null, branchRemoved,
       evidence: still.reasons?.length ? still.reasons : ['re-verified disposable at removal time'],
-    });
+    }, journalFailures);
   }
 
-  return {
+  return withJournalWarning({
     dryRun: false,
     removed: done.filter((d) => d.action === 'removed').length,
     branchesRemoved: done.filter((d) => d.branchRemoved).length,
@@ -823,5 +923,5 @@ export async function clean(cwd, { apply = false, branches = true, onBeforeRemov
     failed: done.filter((d) => d.action === 'failed'),
     actions: done,
     unknown: unknown.map((u) => ({ id: u.id, why: u.reasons[0] })),
-  };
+  }, journalFailures);
 }

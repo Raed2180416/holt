@@ -472,8 +472,11 @@ test('HOSTS: hostsReport marks what is detected and never claims cloud blocking'
   // test above for why the two grades are kept apart.
   assert.ok(rep.counts.blocking >= 2, `at least the two verified adapters block: ${rep.counts.blocking}`);
   assert.ok(rep.detectedHere.includes('Claude Code'), 'a real marker is detected');
+  // Was >= 3 (Jules, Replit, Amazon Q). Amazon Q Developer was reclassified: its detection markers
+  // (.amazonq / .aws/amazonq) belong to the Q Developer CLI, a LOCAL terminal agent with a real,
+  // confirmed MCP config — not the cloud-only surface the row previously assumed. See hosts.mjs.
   const cloud = rep.hosts.filter((h) => h.env === 'cloud');
-  assert.ok(cloud.length >= 3, 'the cloud segment is enumerated');
+  assert.ok(cloud.length >= 2, 'the cloud segment is enumerated');
   for (const c of cloud) assert.match(c.label, /cloud/i, 'cloud hosts are labelled as such');
 });
 

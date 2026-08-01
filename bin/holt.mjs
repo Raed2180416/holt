@@ -77,6 +77,8 @@ ACTING  (these MUTATE the repo; everything above is read-only)
   protect             git-lock every workstream holding unique work   [--dry-run]
                       a locked worktree REFUSES 'git worktree remove --force'
   unprotect [<id>]    release holt's locks (never touches locks it did not place)
+                      a lock holt did not place needs  --force  plus  --reason "<why>"
+                      (or --yes to confirm without writing one) — the override is journalled
   rescue <id>         capture unique work to a verifiable ref  [--release] [--dry-run]
                       exits non-zero if the capture cannot be verified
   rescued             list every rescue taken in this repo
@@ -114,6 +116,10 @@ OPTIONS
   --html <file>       graph: write an interactive HTML graph
   --global            integrate: ALSO add holt to user-level editor configs.
                       Default is project scope — nothing outside the repo is touched.
+  --force             unprotect: also release a lock holt did not place
+                      (needs --reason or --yes; without one, refused before anything changes)
+  --reason <text>     unprotect --force: why the override is happening — journalled verbatim
+  --yes, -y           confirm an action non-interactively (unprotect --force; doctor --install)
   -h, --help          this
   -v, --version       print the version and exit
 `;
@@ -124,7 +130,7 @@ function parseArgs(argv) {
     strictReadOnly: false, concurrency: 8, includePrimary: false,
     deep: false, html: null, help: false,
     host: 'generic', command: null, bin: 'holt', global: false,
-    dryRun: false, apply: false, release: false,
+    dryRun: false, apply: false, release: false, force: false, reason: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -138,6 +144,8 @@ function parseArgs(argv) {
       case '--dry-run': opts.dryRun = true; break;
       case '--apply': opts.apply = true; break;
       case '--release': opts.release = true; break;
+      case '--force': opts.force = true; break;
+      case '--reason': opts.reason = argv[++i]; break;
       case '--run': opts.run = argv[++i]; break;
       case '--agents': opts.agents = Number(argv[++i]) || 2; break;
       case '--autoprotect': opts.autoprotect = true; break;
@@ -454,7 +462,18 @@ async function cmdHook(opts) {
         protectLine = `holt auto-protect FAILED (${e.message}) — protection is NOT in place; run 'holt protect'.\n`;
       }
     }
-    const text = protectLine + await buildBrief(cwd);
+    // UserPromptSubmit fires on EVERY message. Re-injecting a byte-identical paragraph on every
+    // turn is not a reminder — it is the thing that teaches an agent to skip holt's output, and
+    // it burns context on every prompt of a long session. So the per-prompt brief speaks only
+    // when what it would say has CHANGED (with a periodic refresh so a compacted session is not
+    // left permanently unaware). SessionStart always speaks: a new session has seen nothing.
+    const brief = await buildBrief(cwd, { onlyIfChanged: event === 'user-prompt-submit' });
+
+    // `'' + null` is the string "null", and this line used to hand exactly that to the agent as
+    // its workstream briefing whenever there was nothing to report.
+    const text = [protectLine.trimEnd(), brief].filter(Boolean).join('\n');
+    if (!text) return; // nothing to say: say nothing, rather than an empty context block
+
     const eventName = event === 'session-start' ? 'SessionStart' : 'UserPromptSubmit';
     out(JSON.stringify(formatContext(text, { host: opts.host, eventName })));
     return;
@@ -947,7 +966,31 @@ async function main() {
   }
   if (cmd === 'auto') return void cmdAction(await auto(opts.cwd, opts));
   if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));
-  if (cmd === 'unprotect') return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
+  if (cmd === 'unprotect') {
+    // `--force` overrides a lock holt did NOT place — a materially different act from releasing
+    // holt's own, and the one that most needs a human to have deliberately meant it. Refused
+    // before anything is touched (no partial override) unless the invocation carries an explicit
+    // reason or an explicit --yes; a bare `--force` typed out of habit must not silently disarm
+    // someone else's guard.
+    //
+    // The demand is made only when there is actually something to override. Gating on the mere
+    // PRESENCE of `--force` refused `holt unprotect --force` against holt's own locks — where the
+    // flag changes nothing at all — with a message asserting something untrue of that invocation.
+    // A guard that refuses a legitimate action for a false reason is how people learn to stop
+    // running the tool, so the foreign locks are counted first, without touching any of them.
+    if (opts.force && !(opts.reason && opts.reason.trim()) && !opts.yes) {
+      const probe = await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts, dryRun: true });
+      if (probe.foreignLocks > 0) {
+        process.stderr.write(paint('red',
+          `holt unprotect --force: ${probe.foreignLocks} lock(s) here were not placed by holt; `
+          + 'overriding them needs justification.\n')
+          + paint('grey',
+            '  re-run with --reason "<why>" to record why, or add --yes to confirm without one.\n'));
+        process.exit(2);
+      }
+    }
+    return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
+  }
   if (cmd === 'rescued') return void cmdAction(await rescues(opts.cwd));
   if (cmd === 'discard') {
     const targets = opts._.slice(1);

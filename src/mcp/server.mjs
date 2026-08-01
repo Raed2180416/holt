@@ -85,6 +85,19 @@ async function getReport(cwd, opts = {}, { fresh = false } = {}) {
   return { ...value, _ageMs: 0 };
 }
 
+/**
+ * Fold a journal-write warning into a curated tool response, WITHOUT it the caller only sees a
+ * hand-picked subset of protect()/rescue()/clean()'s result — and journalWarning/journalFailures
+ * were exactly the fields missing from that subset. A journal failure never blocks a mutating
+ * tool's own success (the worktree lock/capture/removal already happened); it only adds a field
+ * an agent reading the response can act on — e.g. tell the human the audit trail has a gap.
+ */
+function withJournal(payload, r) {
+  return r?.journalFailures?.length
+    ? { ...payload, journalWarning: r.journalWarning, journalFailures: r.journalFailures }
+    : payload;
+}
+
 /* ----------------------------------------------------------------- tools ---- */
 
 const REPO_ARG = {
@@ -400,6 +413,11 @@ async function handle(name, args) {
         workstream: d.workstream,
         family: d.family,
         siblings: d.siblings,
+        // Family is a NAME match (branch/directory naming pattern), not content evidence. These
+        // share the pattern but shared no file or symbol anywhere in the scan — a naming guess,
+        // not a confirmed relationship. Kept separate from `siblings` so a caller cannot mistake
+        // one for the other.
+        unconfirmedSiblings: d.unconfirmedSiblings,
         advice: d.advice,
         alreadyBuiltElsewhere: d.duplicatedSymbols.map((x) => ({
           workstream: x.workstream, symbols: x.symbols.slice(0, 5), count: x.count,
@@ -444,14 +462,14 @@ async function handle(name, args) {
             unknown: r.unknown,
             next: 'call again with apply:true to remove them',
           }
-        : {
+        : withJournal({
             removed: r.removed,
             branchesRemoved: r.branchesRemoved,
             skipped: r.skipped.map((s) => ({ id: s.id, why: s.why })),
             failed: r.failed.map((f) => ({ id: f.id, why: f.why })),
             unknown: r.unknown,
             note: 'each removal was re-verified immediately beforehand; anything that gained work in the meantime was skipped',
-          };
+          }, r);
     }
 
     case 'holt_rescue': {
@@ -465,24 +483,24 @@ async function handle(name, args) {
           important: 'The capture did NOT verify. Do not delete this worktree.',
         };
       }
-      return {
+      return withJournal({
         ok: true, id: r.id, ref: r.ref, capturedFiles: r.capturedFiles,
         verified: r.verified, released: r.released, restore: r.restore, note: r.note,
-      };
+      }, r);
     }
 
     case 'holt_protect': {
       const { protect } = await import('../actions.mjs');
       cache.clear();
       const r = await protect(cwd, { dryRun: args?.dryRun === true });
-      return {
+      return withJournal({
         dryRun: r.dryRun,
         protected: r.protected,
         alreadyProtected: r.alreadyProtected,
         failed: r.failed,
         unknown: r.unknown,
         note: r.note,
-      };
+      }, r);
     }
 
     case 'holt_landing_plan': {

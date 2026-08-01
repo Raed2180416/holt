@@ -79,7 +79,7 @@ export async function cachedReport(cwd, opts = {}) {
   try {
     const cached = JSON.parse(await fs.readFile(file, 'utf8'));
     if (cached.fingerprint === fp && cached.version === 1) {
-      return { report: cached.report, scanned: cached.scanned, fromCache: true };
+      return { report: cached.report, scanned: cached.scanned, fingerprint: fp, root: disc.root, fromCache: true };
     }
   } catch { /* no usable cache */ }
 
@@ -88,7 +88,7 @@ export async function cachedReport(cwd, opts = {}) {
   await fs.writeFile(file, JSON.stringify({ version: 1, fingerprint: fp, report, scanned }), 'utf8')
     .catch(() => { /* an unwritable cache must never fail the scan */ });
 
-  return { report, scanned, fromCache: false };
+  return { report, scanned, fingerprint: fp, root: disc.root, fromCache: false };
 }
 
 /* -------------------------------------------------- destructive-command match ---- */
@@ -1402,11 +1402,40 @@ async function assessWorktreeCommand(command, cwd, ctx) {
  * What does an agent working here need to know about its siblings?
  * @returns {Promise<string|null>} plain text, or null when there is nothing worth saying
  */
-export async function buildBrief(cwd = process.cwd()) {
+/**
+ * How many consecutive suppressions before an unchanged brief is repeated anyway.
+ *
+ * Pure change-triggering has one failure mode, and it is not hypothetical: a long agent session
+ * gets its context compacted, the brief scrolls out, and because the repository state never
+ * changed, holt stays silent forever about work it is actively protecting. The agent then
+ * believes there is nothing to know. A periodic refresh costs one short paragraph and removes
+ * that hole; the state has to be genuinely static for twenty prompts to earn one repeat.
+ */
+export const BRIEF_REFRESH_AFTER = 20;
+
+/** Sibling of the report cache: what was last SAID, as opposed to what was last computed. */
+function briefStatePath(root) {
+  const key = createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 16);
+  return path.join(scratchDir(), `holt-brief-${key}.json`);
+}
+
+/**
+ * Build the agent-facing brief.
+ *
+ * @param {string} cwd
+ * @param {{ onlyIfChanged?: boolean }} [opts]
+ *   onlyIfChanged — return null when this exact brief was already emitted for this exact
+ *   repository state. Wired to UserPromptSubmit, which fires on EVERY message: without it holt
+ *   re-injected a byte-identical paragraph into the agent's context on every single turn, which
+ *   is not a reminder, it is noise that teaches the reader to skip holt's output. SessionStart
+ *   never passes it — a new session has seen nothing.
+ */
+export async function buildBrief(cwd = process.cwd(), opts = {}) {
   let report;
   let scanned;
+  let root = null;
   try {
-    ({ report, scanned } = await cachedReport(cwd));
+    ({ report, scanned, root } = await cachedReport(cwd));
   } catch {
     return null; // no repo, or unscannable: contribute nothing rather than noise
   }
@@ -1427,6 +1456,14 @@ export async function buildBrief(cwd = process.cwd()) {
     if (d.ok) {
       lines.push(`You are working in workstream '${d.workstream}' (family ${d.family}).`);
       if (d.siblings.length) lines.push(`Siblings from the same dispatch: ${d.siblings.join(', ')}.`);
+      // Same-name-pattern workstreams with NO shared file or symbol are not asserted as
+      // siblings — family is inferred from directory/branch naming, not from content, so a
+      // naming coincidence must never read to the agent as "these are from my dispatch".
+      if (d.unconfirmedSiblings?.length) {
+        lines.push(
+          `Same naming pattern as '${d.workstream}' but nothing shared (unconfirmed, likely unrelated): ${d.unconfirmedSiblings.join(', ')}.`,
+        );
+      }
       for (const a of d.advice) lines.push(`- ${a}`);
       if (d.duplicatedSymbols.length) {
         lines.push('Symbols you added that ALSO exist elsewhere (check before building further):');
@@ -1480,8 +1517,28 @@ export async function buildBrief(cwd = process.cwd()) {
 
   if (lines.length === 0) return null;
 
-  return `[holt — parallel workstream state]\n${lines.join('\n')}\n` +
+  const text = `[holt — parallel workstream state]\n${lines.join('\n')}\n` +
     '(Before deleting ANY worktree run: holt gate <id> — exit 0 disposable, 1 holds unique work, 2 unknown.)';
+
+  if (!opts.onlyIfChanged || !root) return text;
+
+  // Suppression is keyed on the BRIEF TEXT, not on the repository fingerprint. The fingerprint
+  // moves on every file save; the brief moves only when something a reader would act on moves.
+  // Keying on the fingerprint would have suppressed almost nothing, which is the bug wearing the
+  // fix's clothes.
+  const digest = createHash('sha256').update(text).digest('hex').slice(0, 32);
+  const statePath = briefStatePath(root);
+  let prev = null;
+  try { prev = JSON.parse(await fs.readFile(statePath, 'utf8')); } catch { /* first time */ }
+
+  const repeats = prev?.digest === digest ? (prev.suppressed ?? 0) + 1 : 0;
+  const suppress = repeats > 0 && repeats < BRIEF_REFRESH_AFTER;
+
+  await fs.writeFile(statePath, JSON.stringify({
+    version: 1, digest, suppressed: suppress ? repeats : 0,
+  }), 'utf8').catch(() => { /* an unwritable state file must never break a hook */ });
+
+  return suppress ? null : text;
 }
 
 /**

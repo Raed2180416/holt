@@ -28,10 +28,12 @@ import { mcpTargets } from '../../src/integrate/adapters.mjs';
 const targets = () => mcpTargets(path.join(os.tmpdir(), 'repo'), path.join(os.tmpdir(), 'home'), { scope: 'all' });
 
 /**
- * mcpTargets keys its rows by a display string ('vscode / copilot'), while the manifest keys by
- * id ('copilot'). Matching is therefore on either, and deliberately loose in the direction that
- * makes the test HARDER to satisfy vacuously: a host counts as covered only if some target row
- * plausibly names it.
+ * mcpTargets keys most rows by a plain host id, but some rows historically used a combined
+ * display string (e.g. the old 'vscode / copilot' row, split apart once it turned out Copilot CLI
+ * does not read VS Code's mcp.json at all — see hosts.mjs). Matching stays loose enough to accept
+ * either shape so a legitimately shared row would still be found, but deliberately in the
+ * direction that makes the test HARDER to satisfy vacuously: a host counts as covered only if some
+ * target row plausibly names it.
  */
 function coveredBy(rows, host) {
   return rows.some((r) => {
@@ -149,4 +151,135 @@ test('devin: the block signal is Devin\'s, not Claude Code\'s', async () => {
   assert.match(deny.reason, /holt/);
   assert.deepEqual(formatVerdict({ decision: 'allow' }, { host: 'devin' }), {},
     'an allow must be an empty object — anything else reads as a decision');
+});
+
+/* -------------------------------------------- per-host config-shape fixtures ---- */
+
+/**
+ * Every row below is asserted against the host's OWN current documentation (paths and keys quoted
+ * in the comments next to each fixture, and in the corresponding hosts.mjs / adapters.mjs
+ * comments) rather than against whatever mcpTargets happens to emit today — otherwise a
+ * regression that changes the writer and the assertion together would sail through.
+ *
+ * `file` is a suffix match against the repo/home root `targets()` uses, so it is independent of
+ * the tmpdir path this test runs under.
+ */
+const FIXTURES = [
+  // GitHub Copilot CLI: docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers.
+  // .github/mcp.json (mcpServers) — walked from cwd to repo root. NOT .vscode/mcp.json: a
+  // Microsoft migration notice tells users to move OFF that file for the CLI, which uses the
+  // unsupported key `servers`.
+  { host: 'copilot', scope: 'project', file: path.join('.github', 'mcp.json'), key: 'mcpServers' },
+  { host: 'copilot', scope: 'user', file: path.join('.copilot', 'mcp-config.json'), key: 'mcpServers' },
+  // VS Code's OWN mcp.json: code.visualstudio.com/docs/agent-customization/mcp-servers — key
+  // `servers`, and it is VS-Code-only (see above).
+  { host: 'vscode', scope: 'project', file: path.join('.vscode', 'mcp.json'), key: 'servers' },
+  // Cline: cline/cline#11671 — the CLI has NO project file, and the real global path is nested
+  // under data/settings/, not the ~/.cline/mcp.json its own docs (wrongly) advertise.
+  { host: 'cline', scope: 'user', file: path.join('.cline', 'data', 'settings', 'cline_mcp_settings.json'), key: 'mcpServers' },
+  // Amazon Q Developer CLI: docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/mcp-ide.html — legacy
+  // but enabled-by-default mcp.json, both scopes.
+  { host: 'amazon-q', scope: 'project', file: path.join('.amazonq', 'mcp.json'), key: 'mcpServers' },
+  { host: 'amazon-q', scope: 'user', file: path.join('.aws', 'amazonq', 'mcp.json'), key: 'mcpServers' },
+  // Warp: docs.warp.dev/agent-platform/capabilities/mcp — .warp/.mcp.json, both scopes.
+  { host: 'warp', scope: 'project', file: path.join('.warp', '.mcp.json'), key: 'mcpServers' },
+  // Amp: ampcode.com/manual — DOTTED key, workspace file .amp/settings.json.
+  { host: 'amp', scope: 'project', file: path.join('.amp', 'settings.json'), key: 'amp.mcpServers' },
+  // Factory Droid: docs.factory.ai/cli/configuration/mcp.
+  { host: 'factory', scope: 'project', file: path.join('.factory', 'mcp.json'), key: 'mcpServers' },
+  // Junie: junie.jetbrains.com/docs/junie-cli-mcp-configuration.html — note the /mcp/ segment is
+  // present in BOTH scopes, which is easy to drop by mistake when generalising from "~/.foo.json".
+  { host: 'junie', scope: 'project', file: path.join('.junie', 'mcp', 'mcp.json'), key: 'mcpServers' },
+  { host: 'junie', scope: 'user', file: path.join('.junie', 'mcp', 'mcp.json'), key: 'mcpServers' },
+  // Zed: zed.dev/docs/ai/agent-settings — context_servers, not mcpServers.
+  { host: 'zed', scope: 'project', file: path.join('.zed', 'settings.json'), key: 'context_servers' },
+  // Gemini CLI: geminicli.com/docs/tools/mcp-server.
+  { host: 'gemini-cli', scope: 'project', file: path.join('.gemini', 'settings.json'), key: 'mcpServers' },
+];
+
+test('host config fixtures: file path + top-level key match each host\'s own current docs', () => {
+  const rows = targets();
+  for (const f of FIXTURES) {
+    const row = rows.find((r) => r.host === f.host && r.scope === f.scope);
+    assert.ok(row, `no mcpTargets row for ${f.host} (${f.scope})`);
+    assert.ok(row.file.endsWith(f.file),
+      `${f.host} (${f.scope}): expected file ending in ${f.file}, got ${row.file}`);
+    assert.equal(row.key, f.key, `${f.host} (${f.scope}): wrong top-level key`);
+  }
+});
+
+test('cline: no project-scope MCP file is fabricated, and the user-scope path is the REAL one', () => {
+  // cline/cline#11671: Cline's own maintainers confirm the CLI has exactly one MCP config file,
+  // global, and that their docs (and a prior revision of holt's code) pointed at the wrong path.
+  const rows = targets();
+  const project = rows.filter((r) => r.host === 'cline' && r.scope === 'project');
+  assert.deepEqual(project, [], 'Cline CLI has no project-scope MCP file — writing one would be dead config');
+
+  const user = rows.find((r) => r.host === 'cline' && r.scope === 'user');
+  assert.ok(user, 'Cline needs its (only) global config row');
+  assert.ok(user.file.endsWith(path.join('.cline', 'data', 'settings', 'cline_mcp_settings.json')),
+    `wrong Cline path: ${user.file} — must be data/settings/cline_mcp_settings.json, not the bare .cline/mcp.json Cline's own docs wrongly advertise`);
+});
+
+test('copilot vs vscode: two hosts, two files, two keys — never conflated', () => {
+  // Copilot CLI does not read .vscode/mcp.json (unsupported key `servers`); VS Code's own mcp.json
+  // is not read by the CLI either. Confusing the two previously let 'copilot' claim project-scope
+  // coverage through a file the CLI never opens.
+  const rows = targets();
+  const copilotProject = rows.find((r) => r.host === 'copilot' && r.scope === 'project');
+  const vscodeProject = rows.find((r) => r.host === 'vscode' && r.scope === 'project');
+  assert.ok(copilotProject && vscodeProject, 'both rows must exist independently');
+  assert.notEqual(copilotProject.file, vscodeProject.file, 'must be two different files');
+  assert.equal(copilotProject.key, 'mcpServers');
+  assert.equal(vscodeProject.key, 'servers');
+  // No row may still carry the old combined label — that was the mechanism of the bug.
+  assert.ok(!rows.some((r) => /vscode.*copilot|copilot.*vscode/i.test(r.host)),
+    'no row may claim both hosts at once via a combined label');
+});
+
+test('amazon-q: reclassified local+mcp, and the manifest agrees with the writer', async () => {
+  const { HOSTS } = await import('../../src/integrate/hosts.mjs');
+  const h = HOSTS.find((x) => x.id === 'amazon-q');
+  assert.ok(h, 'amazon-q must still be in the manifest');
+  assert.equal(h.env, 'local', 'the Q Developer CLI is local (real files, real git) — verified against AWS\'s own docs');
+  assert.equal(h.mcp, true);
+  assert.notEqual(h.strength, 'advisory', 'a confirmed, real MCP config is more than advisory-only');
+
+  const rows = targets();
+  for (const scope of ['project', 'user']) {
+    assert.ok(rows.some((r) => r.host === 'amazon-q' && r.scope === scope),
+      `amazon-q must have a ${scope}-scope MCP row now that it is verified`);
+  }
+});
+
+test('strengthLabel: verified-live blocking and docs-only blocking read as different claims', async () => {
+  // Cursor is strength:'block' with verifiedLive:false — a real host, a real deny signal, taken
+  // from Cursor's own published hook docs, but never actually driven against a live Cursor
+  // process. Claude Code and OpenCode HAVE been driven live. The e2e manifest test already asserts
+  // this distinction exists in the DATA (`verifiedLive` boolean); this asserts the human-facing
+  // LABEL — what `holt hosts` and HOSTS.md actually print — does not paper back over it by
+  // printing the identical string for both grades, which is what it did before this fix.
+  const { HOSTS, strengthLabel } = await import('../../src/integrate/hosts.mjs');
+  const live = HOSTS.find((h) => h.strength === 'block' && h.verifiedLive === true);
+  const docsOnly = HOSTS.find((h) => h.strength === 'block' && h.verifiedLive === false);
+  assert.ok(live, 'need at least one verified-live blocking host to compare against');
+  assert.ok(docsOnly, 'need at least one docs-only (not yet driven live) blocking host to compare against');
+  assert.notEqual(strengthLabel(live), strengthLabel(docsOnly),
+    'a verified-live deny hook and a docs-derived-but-unfired one must not read as the same claim');
+  assert.match(strengthLabel(live), /verified live/i);
+  assert.match(strengthLabel(docsOnly), /not yet driven live|not.*verified live/i);
+});
+
+test('goose: the honest "add by hand" instructions use Goose\'s REAL field names', async () => {
+  // goose-docs.ai/docs/guides/config-files: the command field is `cmd`, not `command`, and a
+  // working entry needs `type: stdio` and `enabled: true`. A prior revision of this exact note
+  // told a user to write `command: holt` — copying it verbatim would produce an extension Goose
+  // silently ignores, which is worse than the honest "we don't write this" the note is FOR.
+  const { HOSTS } = await import('../../src/integrate/hosts.mjs');
+  const h = HOSTS.find((x) => x.id === 'goose');
+  assert.equal(h.mcp, false, 'holt still does not write YAML for Goose');
+  assert.match(h.note, /cmd:\s*holt/, 'must use the real field name `cmd`');
+  assert.doesNotMatch(h.note, /\bcommand:\s*holt\b/, 'must NOT use the wrong field name `command`');
+  assert.match(h.note, /type:\s*stdio/, 'stdio extensions need an explicit type');
+  assert.match(h.note, /enabled:\s*true/, 'an extension with no enabled field defaults differently across versions');
 });

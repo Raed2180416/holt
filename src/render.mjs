@@ -345,6 +345,11 @@ export function renderContext(digest) {
   out.push(c('bold', `CONTEXT for ${digest.workstream}`) + c('grey', `  (family ${digest.family})`));
   out.push('');
   if (digest.siblings.length) out.push(c('grey', `  siblings: ${digest.siblings.join(', ')}`), '');
+  // Same name pattern, but nothing shared — a naming guess, not a confirmed relationship. Never
+  // fold this into `siblings` above: that line is read as fact.
+  if (digest.unconfirmedSiblings?.length) {
+    out.push(c('grey', `  same name pattern, unconfirmed (no shared file or symbol): ${digest.unconfirmedSiblings.join(', ')}`), '');
+  }
   for (const a of digest.advice) out.push(`  ${c('yellow', '!')} ${a}`);
   out.push('');
   if (digest.duplicatedSymbols.length) {

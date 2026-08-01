@@ -720,11 +720,35 @@ export function contextDigest(scanResult, workstreamId, { maxItems = 12 } = {}) 
   contested.sort((a, b) => b.fileCount - a.fileCount);
   alreadyBuilt.sort((a, b) => b.count - a.count);
 
+  // "Sibling" is a NAME-DERIVED claim (see inferFamily in discover.mjs): two directories/branches
+  // whose names match the same pattern, nothing more. It is not evidence the two workstreams are
+  // actually related — a fan-out that names its children `auth-1`/`auth-2` looks identical, by
+  // name alone, to two unrelated tasks that happened to be numbered.
+  //
+  // CONTENT MUST DOMINATE WHEN IT DISAGREES WITH THE NAME. `contested`/`alreadyBuilt` above are
+  // real content evidence (an actual shared touched file or an actual shared symbol) already
+  // computed against EVERY other workstream, family or not — so corroborating a same-family
+  // guess costs nothing extra: a family-mate is only reported as a trusted sibling if it also
+  // shows up in one of those two lists, OR the grouping came from an explicit user override
+  // (a human asserted the relationship, so there is nothing left to corroborate). Family-mates
+  // that clear neither bar are real name matches with ZERO shared content — reported separately,
+  // labelled as an unconfirmed name guess, so nothing downstream (including an agent's own
+  // context) states a naming coincidence as if it were a proven relationship.
+  const evidenceIds = new Set([...contested.map((c) => c.workstream), ...alreadyBuilt.map((a) => a.workstream)]);
+  const familyMates = live.filter((w) => w.family === me.family && w.id !== me.id);
+  const trustFamily = me.familyRule === 'user-override';
+  const siblings = familyMates.filter((w) => trustFamily || evidenceIds.has(w.id)).map((w) => w.id);
+  const unconfirmedSiblings = familyMates.filter((w) => !trustFamily && !evidenceIds.has(w.id)).map((w) => w.id);
+
   return {
     ok: true,
     workstream: me.id,
     family: me.family,
-    siblings: live.filter((w) => w.family === me.family && w.id !== me.id).map((w) => w.id),
+    familyRule: me.familyRule,
+    siblings,
+    // Same name pattern as `me`, but no shared file and no shared symbol found anywhere in the
+    // scan: the grouping is a naming guess only, unconfirmed by any content evidence.
+    unconfirmedSiblings,
     contestedFiles: contested.slice(0, maxItems),
     duplicatedSymbols: alreadyBuilt.slice(0, maxItems),
     advice: buildAdvice(contested, alreadyBuilt),
@@ -922,10 +946,33 @@ export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups
     if (!families.has(n.family)) families.set(n.family, []);
     families.get(n.family).push(n.id);
   }
+
+  // A sibling edge is a NAME match (see inferFamily in discover.mjs), not proof of relatedness.
+  // `corroborated` says whether the two ALSO share real content (a touched file or an added
+  // symbol) — the graph legend and tooltip use this to draw a name-only guess differently from
+  // a confirmed relationship, so a fan-out-shaped name pair with disjoint content is not drawn
+  // identically to two workstreams that actually share work.
+  const byId = new Map(live.map((w) => [w.id, w]));
+  const { keep } = discriminativeSymbols(live);
+  const trustedFamily = new Set(
+    live.filter((w) => w.familyRule === 'user-override').map((w) => w.family),
+  );
+  const corroborates = (aId, bId, family) => {
+    if (trustedFamily.has(family)) return true; // a human asserted this grouping directly
+    const a = byId.get(aId);
+    const b = byId.get(bId);
+    if (!a || !b) return false;
+    if (intersect(setOf(a.touched ?? []), b.touched ?? []).length) return true;
+    return intersect(setOf(discriminativeKeys(a, keep)), discriminativeKeys(b, keep)).length > 0;
+  };
+
   for (const [family, ids] of families) {
     if (ids.length < 2) continue;
     for (let i = 1; i < ids.length; i++) {
-      edges.push({ type: 'sibling', source: ids[0], target: ids[i], family, weight: 1 });
+      edges.push({
+        type: 'sibling', source: ids[0], target: ids[i], family, weight: 1,
+        corroborated: corroborates(ids[0], ids[i], family),
+      });
     }
   }
   for (const c of cols) {

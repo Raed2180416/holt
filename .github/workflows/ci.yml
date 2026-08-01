@@ -167,6 +167,17 @@ jobs:
           fi
           ACTUAL_MUT=$(npm run test:mutation 2>&1 | grep -oE '[0-9]+/[0-9]+ mutations killed' | grep -oE '^[0-9]+/[0-9]+')
           echo "suite reports: $ACTUAL_TESTS tests, $ACTUAL_MUT mutations"
+          # A GATE THAT CANNOT FAIL IS NOT A GATE. If either parse comes back empty — the
+          # reporter changed its wording, the suite died before printing a summary — then every
+          # `grep -q "$ACTUAL_TESTS"` below becomes `grep -q ""`, which matches every file ever
+          # written, and this step reports "published numbers match the suite" having compared
+          # nothing at all. Refuse to proceed on an unmeasured number.
+          for pair in "ACTUAL_TESTS:$ACTUAL_TESTS" "ACTUAL_MUT:$ACTUAL_MUT"; do
+            if [ -z "${pair#*:}" ]; then
+              echo "::error::${pair%%:*} could not be parsed from the suite output — refusing to compare against an empty string"
+              exit 1
+            fi
+          done
           fail=0
           for f in README.md BENCHMARKS.md site/index.html; do
             if ! grep -q "$ACTUAL_TESTS" "$f"; then

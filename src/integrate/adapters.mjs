@@ -177,7 +177,18 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
   const project = [
     { host: 'claude-code', scope: 'project', file: path.join(repoRoot, '.mcp.json'), key: 'mcpServers' },
     { host: 'cursor', scope: 'project', file: path.join(repoRoot, '.cursor', 'mcp.json'), key: 'mcpServers' },
-    { host: 'vscode / copilot', scope: 'project', file: path.join(repoRoot, '.vscode', 'mcp.json'), key: 'servers' },
+    // VS Code's OWN mcp.json — key `servers`, not `mcpServers`. This is NOT also Copilot CLI's
+    // config: Copilot CLI does not read .vscode/mcp.json at all (it uses the unsupported key
+    // `servers`; confirmed against a Microsoft migration notice telling users to move OFF this
+    // file for the CLI). Labelled 'vscode' alone on purpose — see the 'copilot' row below for the
+    // file the CLI actually reads.
+    { host: 'vscode', scope: 'project', file: path.join(repoRoot, '.vscode', 'mcp.json'), key: 'servers' },
+    // Copilot CLI's real project config: .mcp.json or .github/mcp.json, both `mcpServers` (also
+    // accepts the bare Claude-style shape). Confirmed against GitHub's own docs
+    // (docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers). Uses
+    // .github/mcp.json rather than piggybacking on claude-code's .mcp.json row so this host's
+    // coverage is explicit and independently testable, not an accident of file-sharing.
+    { host: 'copilot', scope: 'project', file: path.join(repoRoot, '.github', 'mcp.json'), key: 'mcpServers' },
     { host: 'gemini-cli', scope: 'project', file: path.join(repoRoot, '.gemini', 'settings.json'), key: 'mcpServers' },
     // OpenCode uses a DIFFERENT key AND a different entry shape. Verified against a live
     // `opencode debug config`: mcp: { name: { type: "local", command: [bin, ...args] } }.
@@ -195,9 +206,11 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     // Codex CLI is TOML, not JSON — the one major host that is, and the reason holt now has a
     // TOML writer at all.
     { host: 'codex', scope: 'project', file: path.join(repoRoot, '.codex', 'config.toml'), key: 'mcp_servers', format: 'toml' },
-    // Cline CLI 2.0. The VS Code extension keeps its servers in UI-managed global storage under
-    // a per-platform path holt deliberately does not write into.
-    { host: 'cline', scope: 'project', file: path.join(repoRoot, '.cline', 'mcp.json'), key: 'mcpServers' },
+    // Cline CLI has NO project-scope MCP file — deliberately absent, not an oversight. Verified
+    // against cline/cline#11671 (Cline's own maintainers): there is exactly one MCP config file,
+    // global, at ~/.cline/data/settings/cline_mcp_settings.json — see the user-scope row below.
+    // The VS Code extension keeps its own copy in UI-managed global storage under a per-platform
+    // path holt deliberately does not write into.
     // Amp's map hangs off a DOTTED top-level key, not a bare `mcpServers`.
     { host: 'amp', scope: 'project', file: path.join(repoRoot, '.amp', 'settings.json'), key: 'amp.mcpServers' },
     { host: 'factory', scope: 'project', file: path.join(repoRoot, '.factory', 'mcp.json'), key: 'mcpServers' },
@@ -209,6 +222,10 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     // OpenCode's rather than the `mcpServers` its Roo ancestry would suggest.
     { host: 'kilo', scope: 'project', file: path.join(repoRoot, '.kilo', 'kilo.jsonc'), key: 'mcp', shape: 'kilo' },
     { host: 'roo', scope: 'project', file: path.join(repoRoot, '.roo', 'mcp.json'), key: 'mcpServers' },
+    // Amazon Q Developer CLI is local (real files, real git) despite the manifest previously
+    // classifying the whole "amazon-q" row as cloud-only. Confirmed against docs.aws.amazon.com:
+    // legacy-but-enabled-by-default mcpServers file, both scopes — see the user-scope row below.
+    { host: 'amazon-q', scope: 'project', file: path.join(repoRoot, '.amazonq', 'mcp.json'), key: 'mcpServers' },
   ];
   const user = [
     { host: 'cursor', scope: 'user', file: path.join(home, '.cursor', 'mcp.json'), key: 'mcpServers' },
@@ -221,12 +238,17 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     // GitHub Copilot CLI. Its cloud coding agent is a different product with no repository file
     // at all — configured in repo settings — which is why only the CLI appears here.
     { host: 'copilot', scope: 'user', file: path.join(home, '.copilot', 'mcp-config.json'), key: 'mcpServers' },
-    { host: 'cline', scope: 'user', file: path.join(home, '.cline', 'mcp.json'), key: 'mcpServers' },
+    // NOT ~/.cline/mcp.json — that path is what Cline's OWN docs say (wrongly; see cline/cline#11671).
+    // The code reads ~/.cline/data/settings/cline_mcp_settings.json. holt was shipping the same
+    // wrong path the docs had, which means it had never actually written a Cline config anywhere
+    // Cline would load it.
+    { host: 'cline', scope: 'user', file: path.join(home, '.cline', 'data', 'settings', 'cline_mcp_settings.json'), key: 'mcpServers' },
     { host: 'amp', scope: 'user', file: path.join(home, '.config', 'amp', 'settings.json'), key: 'amp.mcpServers' },
     { host: 'factory', scope: 'user', file: path.join(home, '.factory', 'mcp.json'), key: 'mcpServers' },
     { host: 'junie', scope: 'user', file: path.join(home, '.junie', 'mcp', 'mcp.json'), key: 'mcpServers' },
     { host: 'warp', scope: 'user', file: path.join(home, '.warp', '.mcp.json'), key: 'mcpServers' },
     { host: 'kilo', scope: 'user', file: path.join(home, '.config', 'kilo', 'kilo.jsonc'), key: 'mcp', shape: 'kilo' },
+    { host: 'amazon-q', scope: 'user', file: path.join(home, '.aws', 'amazonq', 'mcp.json'), key: 'mcpServers' },
   ];
   return scope === 'user' ? user : scope === 'all' ? [...project, ...user] : project;
 }

@@ -178,7 +178,7 @@ export function renderHtml(report) {
       <label><input type="checkbox" data-edge="semantic-overlap" checked><span class="swatch" style="border-color:var(--overlap)"></span>same symbol, merges clean</label>
       <label><input type="checkbox" data-edge="predicted" checked><span class="swatch" style="border-color:var(--hold)"></span>predicted conflict</label>
       <label><input type="checkbox" data-edge="duplicate"><span class="swatch" style="border-color:var(--dup);border-top-style:dashed"></span>duplicate work</label>
-      <label><input type="checkbox" data-edge="sibling"><span class="swatch" style="border-color:var(--sibling)"></span>same family</label>
+      <label><input type="checkbox" data-edge="sibling"><span class="swatch" style="border-color:var(--sibling)"></span>same family (name guess — dashed means no shared content found)</label>
     </div>
     <h2>Legend</h2>
     <div class="legend">
@@ -480,7 +480,11 @@ function draw() {
       stroke: st.stroke, 'stroke-width': st.w / Math.max(1, scale * 0.6),
       opacity: on ? st.o : st.o * 0.08,
     };
-    if (st.dash) attrs['stroke-dasharray'] = st.dash;
+    // A sibling edge is a NAME match, not proof. Uncorroborated ones (no shared file or symbol
+    // found anywhere in the scan) are drawn dashed so a naming guess never looks identical to a
+    // relationship backed by actual content.
+    const dash = e.type === 'sibling' && e.corroborated === false ? '2 4' : st.dash;
+    if (dash) attrs['stroke-dasharray'] = dash;
     g.appendChild(svgEl('line', attrs));
   }
 
@@ -566,6 +570,7 @@ function describe(i) {
     'edges (' + rel.length + ')\\n' +
     rel.slice(0, 14).map(e =>
       '  ' + String(e.kind || e.type).padEnd(18) + (e.source === n.id ? e.target : e.source) +
+      (e.type === 'sibling' && e.corroborated === false ? '  [name guess — no shared content]' : '') +
       (e.why ? '\\n     ' + e.why : '')).join('\\n');
 }
 

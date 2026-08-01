@@ -266,7 +266,7 @@ because a claim you cannot back is worse than a gap you name.
 | Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
 | OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |
 | MCP protocol | Live over real stdio: initialize → 14 tools → `tools/call` returning correct data |
-| Crush, Cursor, Gemini CLI, VS Code/Copilot MCP config | Written by `holt integrate` and validated as correct JSON in the shape each host reads |
+| Crush, Cursor, Gemini CLI, VS Code, Copilot CLI MCP config | Written by `holt integrate` and validated as correct JSON in the shape each host reads — VS Code's `.vscode/mcp.json` and Copilot CLI's `.github/mcp.json` are confirmed as two DIFFERENT files (Copilot CLI does not read VS Code's) |
 | Language extraction | 50 languages asserted by symbol name; the count is now derived from the *installed* ctags, never claimed blind |
 | Purchase path | 12 tests over a real socket: signed webhook → license → the CLI accepts it; forged webhook mints nothing |
 
@@ -274,7 +274,7 @@ because a claim you cannot back is worse than a gap you name.
 
 | Surface | Why it should work | What is unproven |
 |---|---|---|
-| Codex, Copilot CLI, Cline, Amp, Goose, Factory, Junie | They read AGENTS.md and/or speak MCP, both of which holt writes correctly | We have not driven each host live; their *deny hooks* are not wired (see [HOSTS.md](HOSTS.md)) |
+| Codex, Cline, Amp, Factory, Junie, Amazon Q Developer CLI | They read AGENTS.md and/or speak MCP, both of which holt writes correctly | We have not driven each host live; their *deny hooks* are not wired (see [HOSTS.md](HOSTS.md)) |
 | jj (Jujutsu) backend | Implemented and unit-tested against a real jj repo | Not exercised across a long multi-workspace session |
 | Windows *end-to-end* agent flows | The core suite passes on Windows in CI | Hooks + MCP under Windows agent hosts are untested by us |
 | Very large repos (10k+ files, 200+ worktrees) | **Now measured on real repositories**: 800/800 verdicts correct on redis at 800 worktrees | Timings are **super-linear**, not linear — 16x worktrees costs 37x time, and Linux (94k files) takes 16 min with symbols vs 886 ms with `--no-symbols`. See BENCHMARKS §1. |

@@ -153,6 +153,33 @@ test('JOURNAL: a journal failure is loud but never breaks the action', async (t)
   assert.deepEqual(await readJournal(fx.root), []);
 });
 
+test('JOURNAL FAILURE: branchAudit --apply tells the caller AND still deletes the landed branch', async (t) => {
+  // appendEvent() itself was already proven loud on stderr above — this is the gap that mattered:
+  // branchAudit() did `await appendEvent(...)` and threw its {ok, error} away, so a caller reading
+  // only the RESULT (an MCP client, a `--json` script) saw a clean success with no way to know the
+  // branch-delete it just performed has no audit record. Both halves matter: the branch really
+  // went (never-worse: a broken journal must not make holt refuse to clean up), and the response
+  // says so (the whole point of this fix).
+  const fx = await graveyardFixture();
+  t.after(() => fx.cleanup());
+
+  await fs.writeFile(path.join(fx.root, '.git', 'holt'), 'not a directory', 'utf8');
+
+  const audit = await branchAudit(fx.root, { base: 'main', apply: true });
+
+  // THE DELETE STILL HAPPENED.
+  assert.deepEqual(audit.applied.map((a) => a.name), ['landed-ancestor']);
+  assert.equal(audit.applied[0].ok, true);
+  const refs = (await sh('git', ['for-each-ref', 'refs/heads', '--format=%(refname:short)'], fx.root)).stdout;
+  assert.ok(!refs.includes('landed-ancestor'), 'the branch must actually be gone, journal or no journal');
+
+  // AND THE CALLER IS TOLD, by name, in the result itself.
+  assert.ok(audit.journalWarning, `a journal failure must be reported in the result: ${JSON.stringify(audit)}`);
+  assert.ok(Array.isArray(audit.journalFailures) && audit.journalFailures.length >= 1);
+  assert.equal(audit.journalFailures[0].action, 'branch-delete');
+  assert.equal(audit.journalFailures[0].name, 'landed-ancestor', 'the failure must name WHICH branch');
+});
+
 test('CI GATE: report-only by default; policy flags fail honestly; ignore exempts the PR head', async (t) => {
   const fx = await graveyardFixture();
   t.after(() => fx.cleanup());
