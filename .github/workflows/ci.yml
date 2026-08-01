@@ -230,9 +230,11 @@ jobs:
       # Stripe purchase path over a real socket.
       - run: node --test test/unit/license.test.mjs test/unit/policy.test.mjs test/unit/server.test.mjs test/unit/milestone.test.mjs test/e2e/purchase-path.test.mjs test/e2e/branches.test.mjs test/e2e/autoprotect.test.mjs
       - name: no src/ file may make a network call (the no-telemetry promise)
-        if: runner.os != 'Windows'
-        run: |
-          if grep -rnE "https?://[^\"' )]+|fetch\(|http\.request|net\.connect|dgram" src/ | grep -vE "^\s*//|\* |example\.|localhost|127\.0\.0\.1|holt\.dev/pricing|github\.com" ; then
-            echo "a network call appeared in src/ — the free tool must make none"; exit 1
-          fi
-          echo "src/ makes no network calls"
+        # The property is asserted by test/unit/no-network.test.mjs, which checks CAPABILITY —
+        # src/ imports no network-capable module and contains no call site — instead of grepping
+        # for URLs against a domain allowlist. The old grep failed the build the moment the
+        # product's own pricing URL moved to a domain the allowlist did not name, because a URL in
+        # help text is not a network call; and an allowlist is the wrong guarantee anyway, since it
+        # says "we only talk to approved hosts" when the promise is "we do not talk".
+        # The test also PROVES it fires, against seven planted exfiltration shapes.
+        run: node --test test/unit/no-network.test.mjs
