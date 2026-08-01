@@ -31,7 +31,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   underOrEqualAsync, canonicalPath, foldCase, CASE_INSENSITIVE_FS,
-  samePathSync, underOrEqualSync,
+  samePathSync, underOrEqualSync, relativeWithinAsync,
 } from './paths.mjs';
 import { discover } from './discover.mjs';
 import { scan, atRiskFiles, atRiskFromStatus } from './scan.mjs';
@@ -291,6 +291,65 @@ export function maskedRegions(command) {
 }
 
 const insideMasked = (regions, idx) => regions.some(([a, b]) => idx >= a && idx <= b);
+
+
+/**
+ * SHELL INDIRECTION: the command holt was handed is not the command that will run.
+ *
+ * Every rule in the table above matches literal text, and an adversarial sweep confirmed 19 ways
+ * to defeat that by supplying the VERB indirectly — each re-executed, each destroying the target:
+ *
+ *     $(echo rm) -rf ../feature        command substitution supplies the verb
+ *     `echo rm` -rf ../feature         the same, in backticks
+ *     x=rm; $x -rf ../feature          a variable supplies the verb
+ *     eval "rm -rf ../feature"         the argument is code, evaluated later
+ *     echo <base64> | base64 -d | sh   the pipeline's input is code
+ *
+ * holt cannot resolve any of these without EXECUTING them, which is the one thing a pre-execution
+ * guard must never do. So it does not pretend: a command whose verb it cannot see is UNKNOWN, and
+ * unknown resolves to ASK — the same verdict holt already gives when a probe fails. Absence of
+ * evidence is not evidence of absence, and that rule does not stop applying because the ambiguity
+ * came from a shell rather than from a broken ctags.
+ *
+ * DELIBERATELY NARROW, because breadth here would be intolerable. Substitution in an ARGUMENT is
+ * completely ordinary — `git commit -m "$(cat msg)"`, `ls $(pwd)`, `echo "$(date)" >> build.log`
+ * — and none of those are flagged. Only the VERB position counts.
+ *
+ * `sh -c '<code>'` is RECURSED INTO rather than flagged: the code is right there as a string, so
+ * holt reads it and gives a real answer instead of a shrug. That is strictly better than asking,
+ * and it is why wrapping a command in a shell is not a way to soften the verdict.
+ */
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'pwsh', 'powershell']);
+const SUBSTITUTION = /[$`]/;
+
+export function indirectVerb(command) {
+  for (const seg of lexSegments(String(command ?? ''))) {
+    let w = seg.words;
+    // Drop leading VAR=value assignments and transparent wrappers, as the file layer does.
+    let cut = 0;
+    while (cut < w.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[cut]) || WRAPPERS.has(w[cut]))) cut++;
+    w = w.slice(cut);
+    if (!w.length) continue;
+
+    const verb = w[0];
+    if (verb === 'eval') return { kind: 'eval (holt cannot see what this will run)' };
+    if (SUBSTITUTION.test(verb)) return { kind: 'the command name comes from a substitution or variable' };
+
+    // A shell invoked with -c carries its program as a literal string: read it.
+    if (SHELLS.has(path.basename(verb))) {
+      const i = w.indexOf('-c');
+      if (i !== -1 && w[i + 1]) {
+        const inner = classifyCommand(w[i + 1]);
+        if (inner) return { kind: `${inner.kind} (inside ${verb} -c)`, inner, innerCommand: w[i + 1] };
+        if (indirectVerb(w[i + 1])) return { kind: `nested indirection inside ${verb} -c` };
+        continue;
+      }
+      // A shell reading from a pipe or stdin runs code holt never saw.
+      return { kind: `${verb} executing input holt cannot see` };
+    }
+  }
+  return null;
+}
 
 export function classifyCommand(command) {
   if (typeof command !== 'string' || !command.trim()) return null;
@@ -928,7 +987,11 @@ async function assessFileTargets(targets, cwd, ctx) {
       if (destRoot && samePath(destRoot, root)) continue;
     }
 
-    const relPrefix = path.relative(root, abs).split(path.sep).join('/');
+    // Through paths.mjs even though both sides ARE already canonical here (abs comes from
+    // canonicalPath, root from deepestRoot over canonical roots). The guard cannot see that from
+    // one line, and "it happens to be safe at this call site" is exactly the reasoning that let
+    // the /var-vs-/private/var class survive three separate fixes. One helper, no exceptions.
+    const relPrefix = await relativeWithinAsync(root, abs);
 
     // THE SUFFIX IS SLICED BY THE PREFIX'S REAL LENGTH, NOT BY ITS SUBSTITUTE'S.
     //
@@ -1073,7 +1136,29 @@ export async function assessCommand(command, cwd = process.cwd()) {
 /** The worktree-granularity half: unchanged behaviour, returns null when no rule matches. */
 async function assessWorktreeCommand(command, cwd, ctx) {
   const hit = classifyCommand(command);
-  if (!hit) return null;
+  if (!hit) {
+    // Nothing matched — but did holt actually get to READ the command? If the verb is supplied by
+    // a substitution, a variable or an eval, "no rule matched" means "no rule could match", and
+    // reporting that as allow is the fail-open shape this guard exists to prevent.
+    const blind = indirectVerb(command);
+    // A shell's `-c` argument is CODE HOLT CAN READ. Where the inner command is definitively
+    // destructive there is no ambiguity left to report, and softening deny to ask would make the
+    // wrapper itself the bypass. Re-assess the inner string exactly as if it had been typed, so
+    // the verdict carries the same per-file evidence.
+    if (blind?.innerCommand) return assessWorktreeCommand(blind.innerCommand, cwd, ctx);
+    if (blind) {
+      return {
+        decision: 'ask',
+        kind: blind.kind,
+        targets: [],
+        reason: `holt cannot determine what this command will run: ${blind.kind}.\n`
+          + 'The verb is produced at runtime, so no pre-execution check can see it. If it is '
+          + 'harmless, run it directly so holt can read it; if it deletes a worktree, run '
+          + '`holt gate <id>` first.',
+      };
+    }
+    return null;
+  }
 
   // CHEAP PRE-CHECK before the expensive scan. The rm rule matches any target so that
   // `rm -rf ../my-feature` is caught, but that would otherwise make every `rm -rf node_modules`

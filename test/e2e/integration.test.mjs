@@ -1199,3 +1199,60 @@ test('GATE: a dry run and an unstage are not destruction (the annoyance half of 
     assert.ok(v, `this really does destroy work and must still be refused: ${cmd}`);
   }
 });
+
+
+test('GATE: a command holt cannot READ is never a silent allow', async (t) => {
+  // NINETEEN CONFIRMED BYPASSES, found by an adversarial sweep and each one re-executed until it
+  // actually destroyed the target. Every rule in the destructive table matches literal text, so
+  // supplying the VERB indirectly defeated all of them:
+  //
+  //     $(echo rm) -rf ../feature      command substitution supplies the verb
+  //     x=rm; $x -rf ../feature        a variable supplies the verb
+  //     eval "rm -rf ../feature"       the argument is code, evaluated later
+  //     echo <base64> | base64 -d | sh the pipeline's input is code
+  //
+  // holt cannot resolve any of these without EXECUTING them, which is the one thing a
+  // pre-execution guard must never do. So it stops pretending: a command whose verb it cannot see
+  // is UNKNOWN, and unknown is ASK — the same verdict holt already gives when a probe fails.
+  // Absence of evidence is not evidence of absence, and that rule does not stop applying because
+  // the ambiguity came from a shell instead of from a broken ctags.
+  const fx = await newRepo('indirection');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('feature');
+  await fx.write('precious.txt', 'ONLY_COPY\n', wt);
+
+  for (const cmd of [
+    `$(echo rm) -rf ${wt}`,
+    '`echo rm` -rf ' + wt,
+    `x=rm; $x -rf ${wt}`,
+    `eval "rm -rf ${wt}"`,
+    'echo cm0gLXJm | base64 -d | sh',
+  ]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.notEqual(v.decision, 'allow',
+      `holt cannot see what this runs, so it must not bless it: ${cmd} -> ${JSON.stringify(v)}`);
+  }
+
+  // A SHELL'S -c ARGUMENT IS CODE HOLT CAN READ, so wrapping is not a way to soften the verdict.
+  // If this returned 'ask' rather than 'deny', `sh -c` would itself be the bypass.
+  for (const cmd of [`sh -c "rm -rf ${wt}"`, `bash -c 'rm -rf ${wt}'`]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'deny',
+      `the inner command is fully visible and destroys work: ${cmd} -> ${JSON.stringify(v)}`);
+  }
+
+  // ANTI-VACUITY, and the half that decides whether this is tolerable. Substitution in an
+  // ARGUMENT is completely ordinary. If these tripped, every developer would be interrupted for
+  // `git commit -m "$(cat msg)"` and the guard would be uninstalled within a day.
+  for (const cmd of [
+    'git commit -m "$(cat msg.txt)"',
+    'echo "$(date)" >> build.log',
+    'ls $(pwd)',
+    'npm run build',
+    'git status',
+  ]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow',
+      `an ordinary command must not be interrupted: ${cmd} -> ${JSON.stringify(v)}`);
+  }
+});
