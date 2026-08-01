@@ -31,3 +31,5 @@ LAUNCH-RUNBOOK.md
 # Private session handoff — names unmerged branches, buyer verdicts and pricing decisions.
 # Mirrored to ~/.holt-work/. Must not be published.
 HANDOFF.md
+
+# the type-check ceiling is tracked, node_modules is not

@@ -1,0 +1,32 @@
+{
+  "// why this exists": [
+    "20,749 lines of JavaScript shipped with no static checking of any kind — no linter, no type",
+    "checker, no gate. For a tool whose failure mode is permanent, unrecoverable data loss that is",
+    "below standard, and it is the kind of gap that is invisible until it costs someone their work.",
+    "",
+    "checkJs with JSDoc rather than a TypeScript migration, deliberately: holt has no build step,",
+    "and that is load-bearing. `npm install -g <tarball>` runs the exact bytes in this repository,",
+    "the published artifact is the source, and there is no compile stage between what is reviewed",
+    "and what executes. A .ts migration would trade that for type safety; JSDoc + checkJs gets the",
+    "type safety and keeps it.",
+    "",
+    "The gate RATCHETS rather than blocking on day one — see scripts/typecheck.mjs. 1,220",
+    "diagnostics on first run is a debt to pay down, not a reason to leave the door open, and a",
+    "gate that can never go green is a gate people delete."
+  ],
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "noEmit": true,
+    "target": "es2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "skipLibCheck": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "strictNullChecks": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.mjs", "bin/**/*.mjs"],
+  "exclude": ["node_modules", "test", "eval", "scripts"]
+}

@@ -233,6 +233,22 @@ jobs:
         run: node bin/holt.mjs doctor
       - run: npm test
 
+  static:
+    name: static analysis (ratchet)
+    # 20,749 lines of JavaScript shipped with no linter, no type checker and no gate of any kind.
+    # For a tool whose failure mode is permanent, unrecoverable data loss that is below standard.
+    #
+    # The gate RATCHETS: the diagnostic count may go down and may never go up. A gate that fails
+    # from the day it is added gets deleted within a week; this one is green today, blocks the
+    # next regression, and lowers its own ceiling whenever debt is paid down.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+      - run: npm run typecheck
+
   package:
     name: packaging
     runs-on: ubuntu-latest

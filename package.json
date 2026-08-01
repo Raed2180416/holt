@@ -24,13 +24,17 @@
   "optionalDependencies": {
     "jscpd": "^5.0.14"
   },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  },
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
     "test:unit": "node --test \"test/unit/*.test.mjs\"",
     "test:e2e": "node --test \"test/e2e/*.test.mjs\"",
     "selfcheck": "node bin/holt.mjs doctor",
     "test:mutation": "node test/mutation.mjs",
-    "test:all": "npm test && npm run test:mutation"
+    "test:all": "npm test && npm run test:mutation && npm run typecheck",
+    "typecheck": "node scripts/typecheck.mjs"
   },
   "keywords": [
     "git",
