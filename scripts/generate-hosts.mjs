@@ -83,7 +83,13 @@ async function main() {
   const existing = await fs.readFile(HOSTS_MD_PATH, 'utf8');
   const next = regenerate(existing, HOSTS);
 
-  if (next === existing) {
+  // Compared after CRLF->LF folding: the gate's claim is that the CONTENT matches the manifest,
+  // and a Windows checkout with core.autocrlf=true hands this process the same content in a
+  // different encoding. Failing on that reported the file as stale on windows-latest while the
+  // repository was correct. (.gitattributes now pins eol=lf as well; this keeps existing clones
+  // honest.) The regenerated file itself is still written byte-exact.
+  const lf = (s) => s.replace(/\r\n/g, '\n');
+  if (lf(next) === lf(existing)) {
     console.log(check ? 'HOSTS.md matches the manifest.' : 'HOSTS.md already matches the manifest — nothing to do.');
     return;
   }

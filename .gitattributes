@@ -1,0 +1,17 @@
+# Every text file checks out with LF on every platform.
+#
+# WHY THIS EXISTS: Git for Windows defaults core.autocrlf=true, so a Windows checkout rewrote
+# HOSTS.md (and every other text file) to CRLF — and the generator gate, which asserts the
+# checked-in file is byte-identical to what scripts/generate-hosts.mjs produces, failed on
+# windows-latest against a file that was correct in the repository. The transcoding happened in
+# the checkout, not in the content. holt is a git tool whose own tests reason about bytes; its
+# repository does not invite the host's line-ending policy to edit it.
+#
+# Binary-ish assets are excluded from the text rule by their own patterns below.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.tgz binary
+*.zip binary

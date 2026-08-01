@@ -26,10 +26,15 @@
 
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 /** git subcommands that touch nothing. */
 const SAFE = new Set([
+  // `version` reads nothing but the binary's own build string — it does not even open a repository.
+  // It is on the list because catFileBatch() must know whether this git accepts NUL-delimited batch
+  // input (`--batch -z`, git >= 2.32) before it can frame a spec containing a newline safely.
+  'version',
   'rev-parse', 'rev-list', 'log', 'show', 'cat-file', 'ls-files', 'ls-tree',
   'status', 'diff', 'diff-tree', 'diff-index', 'merge-base', 'name-rev',
   'worktree', 'branch', 'for-each-ref', 'config', 'var', 'symbolic-ref',
@@ -293,6 +298,56 @@ export function git(argv, {
 }
 
 /**
+ * `git cat-file --batch -z` — NUL-delimited batch INPUT — landed in git 2.32 (2021-06).
+ * Below that, holt cannot frame a spec containing a newline at all and says so (see catFileBatch).
+ */
+const BATCH_NUL_MIN = { major: 2, minor: 32 };
+
+/**
+ * Parse the first `<major>.<minor>` out of a `git version …` line and answer whether that git
+ * accepts NUL-delimited batch input.
+ *
+ * Exported because it is the whole load-bearing decision behind whether a repository containing a
+ * newline-named file is read correctly or refused, and a decision that important gets asserted
+ * directly rather than only through a live git. Every real-world shape is covered by the leading
+ * `<num>.<num>`: `git version 2.55.0`, `git version 2.45.1.windows.1`,
+ * `git version 2.39.5 (Apple Git-154)`. Anything unparseable answers NO — holt then refuses the
+ * newline case loudly instead of guessing, which is the one direction that cannot corrupt.
+ */
+export function batchNulInputSupported(versionLine) {
+  const m = /(?:^|\s)(\d+)\.(\d+)/.exec(String(versionLine ?? ''));
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  if (major > BATCH_NUL_MIN.major) return true;
+  return major === BATCH_NUL_MIN.major && minor >= BATCH_NUL_MIN.minor;
+}
+
+/** @type {Promise<boolean>|null} — one probe per process; `git version` does not vary by repo. */
+let _batchNulProbe = null;
+
+function probeBatchNulSupport(cwd) {
+  if (_batchNulProbe === null) {
+    _batchNulProbe = (async () => {
+      try {
+        const r = await git(['version'], { cwd, timeout: 10_000 });
+        return batchNulInputSupported(r.stdout);
+      } catch {
+        // A probe that could not RUN is not evidence that the feature is absent, so it is not
+        // cached as a verdict — the next call asks again. This call answers "no", which only ever
+        // costs a loud refusal on the newline case, never a silent mis-framing.
+        _batchNulProbe = null;
+        return false;
+      }
+    })();
+  }
+  return _batchNulProbe;
+}
+
+/** Test seam: forget the cached `git version` probe. */
+export function _resetBatchNulProbe() { _batchNulProbe = null; }
+
+/**
  * Batched, STREAMING object reads: ONE `git cat-file --batch` process answers every spec,
  * instead of one `git cat-file -p <spec>` PROCESS PER FILE.
  *
@@ -313,6 +368,29 @@ export function git(argv, {
  * currently in flight — which is the fix for the "something is held whole" RSS growth this
  * apparatus was built to chase down.
  *
+ * FRAMING IS THE CORRECTNESS PROPERTY HERE, AND IT USED TO BE WRONG IN BOTH DIRECTIONS.
+ * A git path may contain any byte except `/` and NUL — a raw NEWLINE in a filename is legal and
+ * real. Records are matched back to specs BY POSITION, so any framing that lets one spec occupy
+ * two positions silently re-attributes every record after it: a valid Buffer or a null lands on
+ * the wrong `onRecord(spec, content, idx)` call, `symbolsAtBase()` then materialises one file's
+ * bytes under another file's name, and `diffSymbols()` omits a symbol the workstream genuinely
+ * introduced because the corrupted read made it look pre-existing. `uniqueSymbolCount` is one of
+ * the few reasons `safeToDelete` refuses, so an undercount authorises deleting real work.
+ * Reproduced end to end; pinned by test/unit/cat-file-batch-newline-paths.test.mjs.
+ *
+ *   INPUT  — `specs.join('\n') + '\n'` turned one newline-bearing spec into two requests. Fixed by
+ *            `--batch -z`, which reads NUL-delimited specs (git >= 2.32; see BATCH_NUL_MIN).
+ *   OUTPUT — `-z` alone fixes only half of it. git answers a miss with `<spec> missing\n`, echoing
+ *            the spec VERBATIM, so an ABSENT newline-named path still spans two physical lines on
+ *            the way back. Reading "up to the next \n" splits that reply in two exactly as before.
+ *            Fixed by parsing the reply AGAINST THE SPEC HOLT ASKED FOR: records come back in the
+ *            order the specs went out, so the miss form for `specs[specIdx]` is known byte-for-byte
+ *            and is tested for first, instead of guessing where the record ends.
+ *
+ * On a git older than 2.32 there is no safe input framing for a newline-bearing spec, so the batch
+ * is REFUSED with the offending spec named. That is deliberately loud: the alternative is the
+ * silent mis-attribution above. Every other spec shape works unchanged on every git.
+ *
  * @param {string[]} specs   git object specs, e.g. `${oid}:${relPath}`, one per requested object
  * @param {{cwd?: string, timeout?: number}} opts
  * @param {(spec: string, content: Buffer|null, index: number) => any} onRecord
@@ -322,17 +400,43 @@ export function git(argv, {
  *        have settled by the time the caller proceeds.
  * @returns {Promise<void>}
  */
-export function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } = {}, onRecord) {
-  return new Promise((resolve, reject) => {
-    if (specs.length === 0) { resolve(); return; }
+export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } = {}, onRecord) {
+  if (specs.length === 0) return;
 
-    const verdict = classify(['cat-file', '--batch']);
+  // NUL is the one byte no git spec can carry — paths cannot contain it and oids are hex — so a
+  // spec holding one is unframable on ANY protocol here, `-z` included. Refuse rather than mis-frame.
+  const nulAt = specs.findIndex((s) => String(s).includes('\0'));
+  if (nulAt !== -1) {
+    throw new GitRefused(
+      'holt refused `git cat-file --batch`: spec ' + nulAt + ' contains a NUL byte, which no batch '
+      + 'framing can carry unambiguously',
+    );
+  }
+
+  const useNul = await probeBatchNulSupport(cwd);
+  if (!useNul) {
+    const nlAt = specs.findIndex((s) => String(s).includes('\n'));
+    if (nlAt !== -1) {
+      throw new GitRefused(
+        'holt refused `git cat-file --batch`: spec ' + nlAt + ' (' + JSON.stringify(specs[nlAt])
+        + ') contains a newline, and this git is older than 2.32 so it has no NUL-delimited batch '
+        + 'input (`--batch -z`). Reading it on the newline-delimited protocol would silently '
+        + 'attribute every later file\'s content to the wrong file. Upgrade git to 2.32 or newer.',
+      );
+    }
+  }
+
+  const argv = useNul ? ['cat-file', '--batch', '-z'] : ['cat-file', '--batch'];
+  const label = `git ${argv.join(' ')}`;
+
+  return new Promise((resolve, reject) => {
+    const verdict = classify(argv);
     if (!verdict.allowed) {
-      reject(new GitRefused(`holt refused \`git cat-file --batch\`: ${verdict.reason}`));
+      reject(new GitRefused(`holt refused \`${label}\`: ${verdict.reason}`));
       return;
     }
 
-    const child = spawn('git', ['cat-file', '--batch'], {
+    const child = spawn('git', argv, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
@@ -352,7 +456,7 @@ export function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } = {}, 
       if (settled) return;
       settled = true;
       child.kill('SIGKILL');
-      reject(new GitFailed(`git cat-file --batch timed out after ${timeout}ms`, { argv: ['cat-file', '--batch'], stderr: stderrText }));
+      reject(new GitFailed(`${label} timed out after ${timeout}ms`, { argv, stderr: stderrText }));
     }, timeout);
 
     // A record header is "<sha> <type> <size>" — sha and type never contain a space, so this
@@ -360,20 +464,38 @@ export function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } = {}, 
     // look like a valid header, which is no weaker than the equivalent per-file design.
     const HEADER_RE = /^([0-9a-f]{4,64}) (\S+) (\d+)$/;
 
+    // The exact bytes git emits when `spec` has no object: the spec echoed verbatim, then
+    // " missing\n". Knowing this per-spec is what makes a newline INSIDE a spec harmless on the
+    // reply side — see the framing note in the doc comment above.
+    const missReply = (spec) => Buffer.from(`${spec} missing\n`, 'utf8');
+
     function drain() {
       for (;;) {
         if (specIdx >= specs.length) return;
         if (awaitingSize === null) {
-          const nl = pending.indexOf(0x0a);
-          if (nl === -1) return; // header not fully arrived yet
-          const header = pending.toString('utf8', 0, nl);
-          pending = pending.subarray(nl + 1);
-          const m = header.match(HEADER_RE);
-          if (!m) {
+          const miss = missReply(specs[specIdx]);
+          if (pending.length >= miss.length && pending.subarray(0, miss.length).equals(miss)) {
+            pending = pending.subarray(miss.length);
             inFlight.push(Promise.resolve(onRecord(specs[specIdx], null, specIdx)));
             specIdx++;
             continue;
           }
+          const nl = pending.indexOf(0x0a);
+          if (nl === -1) return; // header not fully arrived yet
+          const header = pending.toString('utf8', 0, nl);
+          const m = header.match(HEADER_RE);
+          if (!m) {
+            // Not a hit header. If everything received so far is still a viable PREFIX of THIS
+            // spec's own miss reply, the rest of that reply is merely still in flight — wait for
+            // it, instead of mistaking the first physical line of a newline-bearing spec for a
+            // whole record and shifting every record after it by one.
+            if (pending.length < miss.length && miss.subarray(0, pending.length).equals(pending)) return;
+            pending = pending.subarray(nl + 1);
+            inFlight.push(Promise.resolve(onRecord(specs[specIdx], null, specIdx)));
+            specIdx++;
+            continue;
+          }
+          pending = pending.subarray(nl + 1);
           awaitingSize = Number(m[3]);
         }
         if (pending.length < awaitingSize + 1) return; // payload + its trailing \n not fully here
@@ -394,7 +516,7 @@ export function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } = {}, 
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      reject(new GitFailed(`git cat-file --batch failed to spawn: ${err.message}`, { argv: ['cat-file', '--batch'] }));
+      reject(new GitFailed(`${label} failed to spawn: ${err.message}`, { argv }));
     });
     child.on('close', () => {
       if (settled) return;
@@ -407,7 +529,10 @@ export function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } = {}, 
       Promise.all(inFlight).then(() => resolve(), reject);
     });
 
-    child.stdin.write(specs.join('\n') + '\n');
+    // NUL-terminated (not NUL-separated) when `-z` is in play: git wants a delimiter after the last
+    // spec too, exactly as the newline form did.
+    const sep = useNul ? '\0' : '\n';
+    child.stdin.write(specs.join(sep) + sep);
     child.stdin.end();
   });
 }
@@ -488,8 +613,15 @@ export async function authorEnv(cwd) {
  */
 export async function worktreeSnapshot(wsPath, head, { timeout = 60_000, includeIgnored = true } = {}) {
   // Unique per call: collisions() snapshots worktrees concurrently, and a shared index file
-  // would have them overwrite each other's staging area.
-  const idx = path.join(wsPath, `.git-holt-snap-${process.pid}-${snapCounter++}`);
+  // would have them overwrite each other's staging area. And OUTSIDE the worktree, for the same
+  // two reasons scratchIndexPath() in actions.mjs moved out: `git add --all` in a concurrent
+  // capture enumerates a sibling's transient `.lock` and dies on the stat when it vanishes
+  // mid-walk ("unable to stat ... No such file or directory", reproduced ~1 in 12 locally and on
+  // every CI OS), and even raceless runs photograph the siblings' scratch bytes into the tree
+  // being captured. A worktree snapshot must contain the worktree, not the instruments.
+  const dir = process.env.HOLT_TMPDIR || process.env.TMPDIR || os.tmpdir();
+  const wsKey = Buffer.from(wsPath).toString('hex').slice(-16);
+  const idx = path.join(dir, `holt-snap-${wsKey}-${process.pid}-${snapCounter++}`);
   const env = { GIT_INDEX_FILE: idx, ...(await authorEnv(wsPath)) };
   try {
     if (head) {
@@ -519,14 +651,22 @@ let snapCounter = 0;
 
 /**
  * The text of one worktree file, read directly off disk (working tree state, uncommitted
- * changes included), or null if it cannot be read as text — missing, a directory, oversized, or
- * binary. Deliberately narrow: callers that need this treat "cannot read" as UNKNOWN, never as a
- * mismatch, so this fails toward silence rather than toward a wrong answer.
+ * changes included), or null if it cannot be read as text — missing, a directory, a SYMLINK,
+ * oversized, or binary. Deliberately narrow: callers that need this treat "cannot read" as
+ * UNKNOWN, never as a mismatch, so this fails toward silence rather than toward a wrong answer.
+ *
+ * lstat, NOT stat, and for the same reason actions.mjs discard() lstats and content-identity.mjs
+ * `pathContentKey` lstats: stat() follows the link and answers about its TARGET, so a symlink
+ * passes `isFile()` and this hands back the target's text as if it were this path's. What git
+ * tracks at a symlink path is the target STRING, not the bytes at the other end, so the target's
+ * text is somebody else's content — and the one caller (analyze.mjs readDeclaredBody) is
+ * COMPARING content across worktrees, where borrowed bytes are exactly how two unrelated paths
+ * come to look like the same work.
  */
 export async function readWorktreeFile(root, relPath) {
   try {
     const abs = path.join(root, relPath);
-    const st = await fs.stat(abs);
+    const st = await fs.lstat(abs);
     if (!st.isFile() || st.size > 2 * 1024 * 1024) return null;
     const buf = await fs.readFile(abs);
     if (buf.includes(0)) return null;
@@ -556,6 +696,35 @@ export function splitNul(s) {
 /** Split on newlines, dropping empties. */
 export function splitLines(s) {
   return s.split('\n').map((l) => l.replace(/\r$/, '')).filter((l) => l.length > 0);
+}
+
+/**
+ * Every tracked path in the repository, as the REAL bytes on disk.
+ *
+ * WHY THIS IS A FUNCTION AND NOT `git(['ls-files'])` AT EACH CALL SITE. `git ls-files` without
+ * `-z` protects its own line framing by C-QUOTING any path holding a non-ASCII byte or a control
+ * character — the WHOLE path, slashes included: `"src/caf\303\251.js"`. Split on `\n`, the caller
+ * gets a string that is not the path. Two call sites did exactly that (`holt partition`, on the
+ * CLI and over MCP), and `partitionPlan()` reads a path's top-level directory by slicing to the
+ * first `/` — so `"src/caf\303\251.js"` has directory `"src`, a PHANTOM distinct from `src`:
+ *
+ *   AGENT 1  weight=4  dirs=["\"src","<root>","lib"]
+ *   AGENT 2  weight=3  dirs=["config","src"]
+ *
+ * Two agents sent into the same real directory by one accented filename — the precise collision
+ * the command exists to prevent. `core.quotePath=false` does not rescue it either: that only stops
+ * the non-ASCII quoting, control characters stay quoted, so the answer changed with repo config.
+ *
+ * `-z` removes the question: NUL-terminated records, paths verbatim, no quoting under any config.
+ * Unlike `cat-file --batch -z` this needs no version gate — `ls-files -z` is as old as the command.
+ * Same defect class as the batched object reader; pinned by test/unit/git-path-framing.test.mjs.
+ *
+ * @param {string} cwd  anywhere inside the repository
+ * @returns {Promise<string[]>} repo-relative paths, exactly as the filesystem holds them
+ */
+export async function listTrackedFiles(cwd, { timeout = DEFAULT_TIMEOUT_MS } = {}) {
+  const r = await git(['ls-files', '-z'], { cwd, timeout });
+  return splitNul(r.stdout);
 }
 
 /**

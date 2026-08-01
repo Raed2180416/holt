@@ -19,6 +19,7 @@
  */
 
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { git, gitOk, pmap, authorEnv } from './git.mjs';
 import { discover, isHoltLock, unquotePorcelain, repoAbsenceError } from './discover.mjs';
@@ -46,9 +47,26 @@ const LOCK_PREFIX = 'holt:';
 // concurrently (e.g. `auto()` over several workstreams), so a same-process, same-pid counter is
 // added on top, mirroring the pattern `worktreeSnapshot` in git.mjs already uses for exactly
 // this reason.
+// AND THE SCRATCH INDEX MUST LIVE OUTSIDE THE WORKTREE IT PHOTOGRAPHS. Per-invocation names
+// fixed the index-sharing corruption; placing them inside the worktree left two failure modes,
+// both caught by CI's cross-platform matrix running the concurrent-rescue test:
+//   1. THE ENUMERATION RACE. rescue A's `git add --all` walks the worktree and lstats rescue B's
+//      live `.lock` file; B finishes and removes it between readdir and lstat; A's add dies with
+//      "fatal: unable to stat '.git-holt-rescue-index-<pid>-<n>.lock': No such file or directory"
+//      and the capture reports INCOMPLETE for files it never reached. Intermittent by nature —
+//      reproduced locally at roughly 1 in 12 runs, and on every CI OS.
+//   2. SELF-POLLUTION. Even when the race does not fire, each capture photographs its SIBLINGS'
+//      scratch indices as if they were the worktree's content, so a rescue ref could contain
+//      other rescues' temp bytes.
+// A scratch index has no reason to be under the tree at all — GIT_INDEX_FILE accepts any path,
+// and git writes its transient `.lock` beside it. HOLT_TMPDIR is honoured the same way every
+// other holt scratch file honours it.
 let scratchCounter = 0;
 function scratchIndexPath(wsPath, label) {
-  return path.join(wsPath, `.git-holt-${label}-index-${process.pid}-${scratchCounter++}`);
+  const dir = process.env.HOLT_TMPDIR || process.env.TMPDIR || os.tmpdir();
+  // The worktree path is hashed into the name only to keep names collision-free across repos.
+  const wsKey = Buffer.from(wsPath).toString('hex').slice(-16);
+  return path.join(dir, `holt-${label}-index-${wsKey}-${process.pid}-${scratchCounter++}`);
 }
 
 /**

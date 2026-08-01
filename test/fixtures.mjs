@@ -111,6 +111,14 @@ export async function newRepo(label = 'repo') {
   await run('git', ['config', 'user.name', 'holt test'], root);
   await run('git', ['config', 'user.email', 'test@holt.invalid'], root);
   await run('git', ['config', 'commit.gpgsign', 'false'], root);
+  // Byte determinism across platforms. Git for Windows ships core.autocrlf=true, which rewrites
+  // every fixture's bytes twice: CRLF content written to model line-ending scenarios is
+  // normalised to LF AT COMMIT (so the committed delta the test built its premise on becomes
+  // empty), and LF content is converted to CRLF AT CHECKOUT (so byte-level assertions about
+  // working-tree files drift). Caught by CI: the line-ending-only RECALL test failed on
+  // windows-latest because its CRLF worktree committed byte-identical to base. A fixture's bytes
+  // are the fixture; the host's transcoding policy is not invited.
+  await run('git', ['config', 'core.autocrlf', 'false'], root);
 
   const fx = new Fixture(root);
   await fx.write('README.md', '# fixture\n');

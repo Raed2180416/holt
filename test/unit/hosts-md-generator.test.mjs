@@ -37,7 +37,11 @@ test('HOSTS.md: the checked-in file is byte-identical to what the generator prod
     await fs.writeFile(tmpFile, regenerated, 'utf8');
     const roundTripped = await fs.readFile(tmpFile, 'utf8');
 
-    assert.equal(roundTripped, committed,
+    // CRLF->LF folded before comparing: the claim under test is content identity with the
+    // manifest, and a core.autocrlf=true checkout hands us the identical content re-encoded —
+    // this assertion failed on windows-latest against a repository that was correct.
+    const lf = (s) => s.replace(/\r\n/g, '\n');
+    assert.equal(lf(roundTripped), lf(committed),
       'HOSTS.md is stale — it does not match what `npm run hosts:generate` produces from '
       + 'src/integrate/hosts.mjs. Run `npm run hosts:generate` and commit the result.');
   } finally {

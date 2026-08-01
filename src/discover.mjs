@@ -373,26 +373,70 @@ export async function assignFamilies(root, workstreams, {
 }
 
 /**
+ * The complete attribute vocabulary of a `git worktree list --porcelain` record. Closed on
+ * purpose: it is what lets a raw newline inside the WORKTREE PATH be told apart from the start of
+ * the next attribute — see the framing note in parseWorktreePorcelain().
+ */
+const WORKTREE_ATTR_KEYS = new Set(['HEAD', 'branch', 'detached', 'bare', 'locked', 'prunable']);
+
+/**
  * Parse `git worktree list --porcelain`.
  * Records are blank-line separated; each is a set of "key value" lines, with bare
  * keys (bare, detached, locked, prunable) having no value.
+ *
+ * THE PATH IS NOT QUOTED, AND THAT USED TO TRUNCATE IT. Unlike a LOCK REASON — which git C-quotes,
+ * and which unquotePorcelain() above exists to decode — this command emits the worktree path as
+ * RAW BYTES. A directory name may legally contain a newline on POSIX, so one record then spans two
+ * physical lines, and reading line-by-line kept only the first. REPRODUCED against production:
+ *
+ *   created:    ".../wt/weird\nwt"
+ *   discovered: ".../wt/weird"
+ *
+ * That is worse than dropping the worktree. holt reported the workstream as PRESENT at a path
+ * nothing is at, so every scan, rescue and at-risk check aimed at a directory that does not exist
+ * while the real one — which may hold uncommitted work existing nowhere else — was never read.
+ *
+ * FIXED HERE, IN THE PARSER, not at the five call sites that run this command: a continuation line
+ * is one that arrives while the record has seen `worktree` and NO attribute yet, and is not itself
+ * an attribute key. Since the vocabulary above is closed and git always emits `HEAD` (or `bare`)
+ * immediately after the path, that boundary is exact rather than heuristic — and it needs no
+ * `git version` gate, unlike `worktree list -z` which only landed in git 2.36.
+ *
+ * Same defect class as the batched object reader (`catFileBatch`, src/git.mjs) and as
+ * `listTrackedFiles()`: a legal-but-unusual byte in a path silently re-frames a git protocol.
+ * Pinned by test/unit/git-path-framing.test.mjs.
  */
 export function parseWorktreePorcelain(stdout) {
   const out = [];
+  /** @type {Record<string, any>|null} */
   let cur = null;
+  // True between a `worktree` line and the first attribute of that record — the only window in
+  // which a physical line can be a continuation of the path rather than a new field.
+  let inPath = false;
   for (const raw of stdout.split('\n')) {
     const line = raw.replace(/\r$/, '');
-    if (line === '') {
-      if (cur) { out.push(cur); cur = null; }
-      continue;
-    }
     const sp = line.indexOf(' ');
     const key = sp === -1 ? line : line.slice(0, sp);
     const val = sp === -1 ? true : line.slice(sp + 1);
+
+    if (inPath && cur && !WORKTREE_ATTR_KEYS.has(key)) {
+      // Still inside the path — including an EMPTY line, which for a path containing "\n\n" is a
+      // path byte and not the end of the record. The record can only end once an attribute has
+      // been seen, which every real record emits.
+      cur.path += `\n${line}`;
+      continue;
+    }
+    if (line === '') {
+      if (cur) { out.push(cur); cur = null; }
+      inPath = false;
+      continue;
+    }
     if (key === 'worktree') {
       if (cur) out.push(cur);
-      cur = { path: val, detached: false, bare: false, locked: false, prunable: false };
+      cur = { path: val === true ? '' : val, detached: false, bare: false, locked: false, prunable: false };
+      inPath = true;
     } else if (cur) {
+      inPath = false;
       if (key === 'HEAD') cur.head = val;
       else if (key === 'branch') cur.branch = val;
       else if (key === 'detached') cur.detached = true;

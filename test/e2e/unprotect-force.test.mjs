@@ -42,18 +42,28 @@ function holt(args, cwd) {
   });
 }
 
-/** Whether git itself still reports `wtPath` as locked (ground truth, independent of holt). */
+/**
+ * Whether git itself still reports `wtPath` as locked (ground truth, independent of holt).
+ *
+ * Paths are compared segment-wise after separator and case folding, never by raw indexOf:
+ * porcelain prints forward slashes while a Windows caller's path carries backslashes, so the
+ * substring search found nothing, returned "not locked", and three of this file's tests failed
+ * on windows-latest asserting a lock had been released that was in fact firmly in place — the
+ * exact path-comparison class this repo has now hit seven times, this time in its own helper.
+ */
 async function isLocked(root, wtPath) {
   const { execFile: ef } = await import('node:child_process');
   const out = await new Promise((resolve) => {
     ef('git', ['worktree', 'list', '--porcelain'], { cwd: root }, (_e, stdout) => resolve(String(stdout ?? '')));
   });
-  const idx = out.indexOf(wtPath);
-  if (idx === -1) return false;
-  const rest = out.slice(idx);
-  const nextWorktree = rest.indexOf('\nworktree ', 1);
-  const block = nextWorktree === -1 ? rest : rest.slice(0, nextWorktree);
-  return /\nlocked/.test(`\n${block}`);
+  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const want = norm(wtPath);
+  let inBlock = false;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) inBlock = norm(line.slice(9)) === want;
+    else if (inBlock && /^locked/.test(line)) return true;
+  }
+  return false;
 }
 
 test('UNPROTECT --force CLI: refuses a foreign lock with no flag, and NAMES the way out', async (t) => {

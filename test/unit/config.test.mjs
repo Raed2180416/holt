@@ -18,6 +18,20 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { newRepo } from '../fixtures.mjs';
 import { loadConfig, ConfigError, CONFIG_FILENAME } from '../../src/config.mjs';
+import { samePathAsync } from '../../src/paths.mjs';
+
+/**
+ * Path assertions go through samePathAsync, never strict string equality: loadConfig resolves the
+ * main worktree root through git, which returns the CANONICAL path, while the fixture holds the
+ * path it was created with. On macOS those differ for every tmpdir fixture (/var/... is a symlink
+ * to /private/var/...), and on Windows case and 8.3 short names differ the same way. Raw
+ * comparison failed on both CI OSes while testing a loader that was working perfectly — the
+ * path-comparison class this repo has now hit on five different surfaces.
+ */
+const assertSamePath = async (actual, expected, msg) => {
+  assert.ok(await samePathAsync(actual, expected),
+    `${msg ?? 'paths differ'}: ${actual} vs ${expected}`);
+};
 
 test('config: no file present -> found:false, empty config, does not throw', async (t) => {
   const fx = await newRepo('config-absent');
@@ -44,7 +58,7 @@ test('config: valid file -> familyOverrides parsed and returned', async (t) => {
 
   const r = await loadConfig(fx.root);
   assert.equal(r.found, true);
-  assert.equal(r.path, path.join(fx.root, CONFIG_FILENAME));
+  await assertSamePath(r.path, path.join(fx.root, CONFIG_FILENAME), 'config path');
   assert.deepEqual(r.config.familyOverrides, ['^(shard-\\d+)-.*$']);
 });
 
@@ -67,7 +81,7 @@ test('config: read from the MAIN worktree root even when invoked from a linked w
 
   const r = await loadConfig(wt);
   assert.equal(r.found, true);
-  assert.equal(r.path, path.join(fx.root, CONFIG_FILENAME));
+  await assertSamePath(r.path, path.join(fx.root, CONFIG_FILENAME), 'config path from linked worktree');
   assert.equal(r.config.maintenanceFloor, 3);
 });
 
