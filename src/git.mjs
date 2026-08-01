@@ -340,7 +340,25 @@ export async function authorEnv(cwd) {
  * @returns {Promise<string|null>} commit OID, or null if the worktree cannot be snapshotted —
  *   callers must fall back rather than treat null as "no conflict".
  */
-export async function worktreeSnapshot(wsPath, head, { timeout = 60_000 } = {}) {
+/**
+ * `includeIgnored` — and why the two callers want opposite answers.
+ *
+ * RESCUE wants gitignored content: an agent's uncommitted work is no less real for being ignored,
+ * and a `.env` somebody spent an hour on is exactly what a capture must not drop.
+ *
+ * COLLISIONS must not have it. A gitignored file is overwhelmingly MACHINE-LOCAL — `.env.local`,
+ * a per-developer config, a local cache — and every developer has their own. Sweeping it into the
+ * snapshot made merge-tree conflict on content that is not shared work at all. Reproduced: two
+ * worktrees editing one file at far-apart lines, which git merges cleanly, reported
+ * `HIGH ... proven by merge-tree ... a real conflict` — and the file it NAMED was the one that
+ * merges fine, because the actual conflict was in a `.env.local` the user was never told about.
+ *
+ * A manufactured HIGH is not a small error here. This file's own history records the finding:
+ * "616 findings with 6 real ones is strictly worse than 6, because the real ones become
+ * unreachable." A proof that proves the wrong thing is worse still, because it cannot be argued
+ * with — it says git said so.
+ */
+export async function worktreeSnapshot(wsPath, head, { timeout = 60_000, includeIgnored = true } = {}) {
   // Unique per call: collisions() snapshots worktrees concurrently, and a shared index file
   // would have them overwrite each other's staging area.
   const idx = path.join(wsPath, `.git-holt-snap-${process.pid}-${snapCounter++}`);
@@ -350,11 +368,12 @@ export async function worktreeSnapshot(wsPath, head, { timeout = 60_000 } = {}) 
       const seed = await git(['read-tree', head], { cwd: wsPath, env, allowMutation: true, timeout });
       if (seed.code !== 0) return null;
     }
-    // --force so ignored files count too: an agent's uncommitted work is no less real for being
-    // gitignored, and a collision it causes is no less real either.
     // Deliberately not gitOk — a PARTIAL add (a nested git repo inside the worktree makes `add`
     // exit non-zero while still indexing everything else) should still yield a usable tree.
-    await git(['add', '--all', '--force', '--', '.'], { cwd: wsPath, env, allowMutation: true, timeout });
+    const addArgs = includeIgnored
+      ? ['add', '--all', '--force', '--', '.']
+      : ['add', '--all', '--', '.'];
+    await git(addArgs, { cwd: wsPath, env, allowMutation: true, timeout });
     const tree = await git(['write-tree'], { cwd: wsPath, env, allowMutation: true, timeout });
     if (tree.code !== 0) return null;
     const args = ['commit-tree', tree.stdout.trim(), '-m', 'holt snapshot'];

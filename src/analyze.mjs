@@ -373,7 +373,11 @@ export async function collisions(scanResult, opts = {}) {
     const dirty = w.uncommitted.count > 0 || (w.untracked?.count ?? 0) > 0;
     if (!dirty || scanResult.strictReadOnly) return w.head ?? null;
     if (!snapCache.has(w.id)) {
-      snapCache.set(w.id, worktreeSnapshot(w.path, w.head, { timeout }).then((c) => c ?? w.head ?? null));
+      // includeIgnored:false — a gitignored file is machine-local, not contested work. With it on,
+      // two developers' own `.env.local` files made merge-tree "prove" a conflict between
+      // worktrees whose actual shared file merges cleanly. See worktreeSnapshot's header.
+      snapCache.set(w.id, worktreeSnapshot(w.path, w.head, { timeout, includeIgnored: false })
+        .then((c) => c ?? w.head ?? null));
     }
     return snapCache.get(w.id);
   };

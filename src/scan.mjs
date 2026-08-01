@@ -130,9 +130,40 @@ export async function committedDelta(root, baseOid, headOid, { strictReadOnly, t
     return { files: [], how: 'merge-tree-no-tree', conflicted: mt.code === 1, error: 'unparseable merge-tree output' };
   }
 
-  const names = await git(['diff', '--name-only', '-z', baseOid, tree], { cwd: root, timeout });
+  // A RENAME TOUCHES TWO PATHS, AND THE OLD ONE IS THE ONE THAT COLLIDES.
+  //
+  // `--name-only` reports only the destination when git detects a rename, so a worktree that
+  // renamed shared.js -> alpha.js reported touching ONLY alpha.js. The collision prefilter pairs
+  // workstreams by shared touched path, so against a sibling that renamed the same file to
+  // beta.js there was no intersection, no pair, and merge-tree — which proves conflicts — was
+  // never run on them. git says `CONFLICT (rename/rename)` and holt printed "No collisions. No two
+  // workstreams contest the same content."
+  //
+  // That is the worst shape of wrong: not noise, but an active all-clear on a proven conflict.
+  //
+  // `--name-status -M` gives both sides of a rename, so the ORIGINAL path is recorded too. The
+  // prefilter's job is "which pairs might conflict", where a false positive costs one merge-tree
+  // run and a false negative costs a broken landing — so it should be generous, and now is.
+  const names = await git(['diff', '--name-status', '-M', '-z', baseOid, tree], { cwd: root, timeout });
+  const files = [];
+  if (names.code === 0) {
+    const parts = splitNul(names.stdout);
+    for (let i = 0; i < parts.length; i++) {
+      const status = parts[i];
+      if (!status) continue;
+      // R and C carry TWO paths: source then destination. Everything else carries one.
+      if (/^[RC]\d*$/.test(status)) {
+        if (parts[i + 1]) files.push(parts[i + 1]);
+        if (parts[i + 2]) files.push(parts[i + 2]);
+        i += 2;
+      } else {
+        if (parts[i + 1]) files.push(parts[i + 1]);
+        i += 1;
+      }
+    }
+  }
   return {
-    files: names.code === 0 ? splitNul(names.stdout) : [],
+    files: [...new Set(files)],
     how: 'merge-tree',
     conflicted: mt.code === 1,
     mergedTree: tree,

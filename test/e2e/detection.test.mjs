@@ -541,3 +541,97 @@ test('P0 PRECISION: a bare generated entry is not "work found nowhere else"', as
       `an empty worktree carrying only dependencies is disposable (${id}): ${JSON.stringify(safe)}`);
   }
 });
+
+
+test('P1 CORRECTNESS: a rename/rename conflict is FOUND, not reported as no collision', async (t) => {
+  // THE WORST SHAPE OF WRONG: not noise, an active all-clear on a conflict git had already proven.
+  //
+  // `git diff --name-only` reports ONLY the destination when it detects a rename, so a worktree
+  // that renamed shared.js -> alpha.js recorded touching only alpha.js. The collision prefilter
+  // pairs workstreams by shared touched path, so against a sibling that renamed the same file to
+  // beta.js there was no intersection, no pair, and merge-tree — the thing that proves conflicts —
+  // was never run on them. git says `CONFLICT (rename/rename)`; holt printed "No collisions. No
+  // two workstreams contest the same content."
+  const fx = await newRepo('rename-rename');
+  t.after(() => fx.cleanup());
+  await fx.write('shared.js', 'export function shared() { return 1; }\n');
+  await fx.commit('base');
+
+  const a = await fx.worktree('ren-a');
+  const b = await fx.worktree('ren-b');
+  await fx.git(['mv', 'shared.js', 'alpha.js'], a);
+  await fx.commit('rename to alpha', a);
+  await fx.git(['mv', 'shared.js', 'beta.js'], b);
+  await fx.commit('rename to beta', b);
+
+  // FIXTURE VALIDITY: git itself must consider this a conflict, or the test proves nothing.
+  const aHead = (await fx.git(['rev-parse', 'HEAD'], a)).trim();
+  const bHead = (await fx.git(['rev-parse', 'HEAD'], b)).trim();
+  // merge-tree exits 1 on conflict, which the fixture helper surfaces as a rejection.
+  let gitSaysConflict = false;
+  try {
+    await fx.git(['merge-tree', '--write-tree', aHead, bHead]);
+  } catch {
+    gitSaysConflict = true;
+  }
+  assert.ok(gitSaysConflict, 'the fixture is void unless git itself proves a rename/rename conflict');
+
+  const { report } = await inspectFixture(fx);
+  const hit = (report.collisionsAll ?? report.collisions).find((c) => pairMatches(c, 'ren-a', 'ren-b'));
+  assert.ok(hit, 'a proven rename/rename conflict must not be reported as no collision');
+  assert.equal(hit.mergeTreeConflict, true, `and git must be what says so: ${JSON.stringify(hit)}`);
+  // The ORIGINAL path is what the two sides contest, so it must be the evidence shown.
+  assert.ok((hit.sharedFiles ?? []).includes('shared.js'),
+    `the contested path is the original name: ${JSON.stringify(hit.sharedFiles)}`);
+});
+
+test('P1 PRECISION: a machine-local gitignored file cannot manufacture a proven conflict', async (t) => {
+  // A PROOF THAT PROVES THE WRONG THING IS WORSE THAN NOISE, because it cannot be argued with —
+  // it says git said so.
+  //
+  // worktreeSnapshot used `git add --all --force`, sweeping gitignored files into the commit that
+  // merge-tree compares. Two developers each have their own `.env.local`; those are not shared
+  // work and can never be reconciled. Reproduced: two worktrees editing ONE file at far-apart
+  // lines — which git merges cleanly — reported `HIGH ... proven by merge-tree ... a real
+  // conflict`, and the file it NAMED was the one that merges fine.
+  //
+  // Rescue still captures ignored content, deliberately: a capture that dropped someone's .env
+  // would be the very loss this product exists to prevent. The two callers want opposite answers,
+  // which is why the snapshot takes a flag rather than picking one globally.
+  const fx = await newRepo('ignored-no-conflict');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', '.env.local\n');
+  await fx.write('app.js', Array.from({ length: 40 }, (_, i) => `const pad${i} = ${i};`).join('\n') + '\n');
+  await fx.commit('base');
+
+  const a = await fx.worktree('env-a');
+  const b = await fx.worktree('env-b');
+  const pad = Array.from({ length: 40 }, (_, i) => `const pad${i} = ${i};`);
+  await fx.write('app.js', ['const TOP = 1;', ...pad.slice(1)].join('\n') + '\n', a);
+  await fx.write('app.js', [...pad.slice(0, 39), 'const BOTTOM = 1;'].join('\n') + '\n', b);
+  await fx.write('.env.local', 'API_KEY=alice\n', a);
+  await fx.write('.env.local', 'API_KEY=bob\n', b);
+
+  const { report } = await inspectFixture(fx);
+  const hit = (report.collisionsAll ?? report.collisions).find((c) => pairMatches(c, 'env-a', 'env-b'));
+  if (hit) {
+    assert.notEqual(hit.mergeTreeConflict, true,
+      `far-apart edits merge cleanly; only each developer's own .env.local differs: ${JSON.stringify(hit)}`);
+    assert.notEqual(hit.severity, 'high', `and it must not be HIGH: ${JSON.stringify(hit)}`);
+  }
+
+  // NEVER-WORSE: a REAL conflict in uncommitted work is still proven. Without this the fix above
+  // could have been "stop snapshotting", which would blind the flagship capability entirely.
+  const fx2 = await newRepo('ignored-real-conflict');
+  t.after(() => fx2.cleanup());
+  await fx2.write('s.txt', 'l1\nl2\nl3\nl4\nl5\n');
+  await fx2.commit('base');
+  const c = await fx2.worktree('con-a');
+  const d = await fx2.worktree('con-b');
+  await fx2.write('s.txt', 'l1\nl2\nAAA\nl4\nl5\n', c);
+  await fx2.write('s.txt', 'l1\nl2\nBBB\nl4\nl5\n', d);
+  const r2 = await inspectFixture(fx2);
+  const real = (r2.report.collisionsAll ?? r2.report.collisions).find((x) => pairMatches(x, 'con-a', 'con-b'));
+  assert.ok(real, 'two worktrees editing the same line must still collide');
+  assert.equal(real.mergeTreeConflict, true, 'and it must still be PROVEN by git');
+});
