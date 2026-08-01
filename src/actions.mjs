@@ -111,7 +111,17 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
   };
 }
 
-/** Release protection. Only ever unlocks locks holt placed. */
+/**
+ * Release protection. Only ever unlocks locks holt placed.
+ *
+ * JOURNALLED, and that is not symmetry for its own sake. Of everything holt does, this is the
+ * ONE action that removes protection from work proven to exist nowhere else — it is the step
+ * that has to happen before irreplaceable work can be destroyed. It was the only mutating action
+ * absent from the audit trail: a hole exactly where the risk is, and the shape a reviewer looks
+ * for first ("who disarmed the guard, when, and from which agent session"). `--force`, which
+ * releases a lock holt did NOT place, is recorded distinctly, because overriding another tool's
+ * or another human's protection is a different act from releasing your own.
+ */
 export async function unprotect(cwd, { id = null, force = false, ...opts } = {}) {
   const { report } = await assess(cwd, opts);
   const targets = report.graph.nodes.filter((n) => (id ? n.id === id : true));
@@ -123,12 +133,29 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
     if (!st.locked) continue;
     // Locks placed by something else are left alone: holt must not quietly disarm a protection
     // a human or another tool put there deliberately.
-    if (!st.reason.startsWith(LOCK_PREFIX) && !force) {
+    const foreign = !st.reason.startsWith(LOCK_PREFIX);
+    if (foreign && !force) {
       actions.push({ id: ws.id, action: 'skipped-foreign-lock', reason: st.reason });
       continue;
     }
     const r = await git(['worktree', 'unlock', ws.path], { cwd, allowMutation: true });
-    actions.push({ id: ws.id, action: r.code === 0 ? 'unlocked' : 'failed', reason: r.stderr.trim() || st.reason });
+    const ok = r.code === 0;
+    actions.push({ id: ws.id, action: ok ? 'unlocked' : 'failed', reason: r.stderr.trim() || st.reason });
+    if (ok) {
+      await appendEvent(cwd, {
+        action: 'unprotect',
+        id: ws.id,
+        path: ws.path,
+        branch: ws.branch ?? null,
+        head: ws.head ?? null,
+        // What was released, verbatim — the reason string states what the lock was protecting.
+        reason: st.reason,
+        forced: !!(foreign && force),
+        evidence: foreign
+          ? 'released a lock holt did NOT place (--force) — a protection set by another tool or person was overridden'
+          : 'released a lock holt placed to protect work found nowhere else',
+      });
+    }
   }
   return { actions, unlocked: actions.filter((a) => a.action === 'unlocked').length };
 }

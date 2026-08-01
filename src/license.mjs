@@ -62,12 +62,15 @@ export const TIERS = ['free', 'team', 'enterprise'];
 export const FEATURE_TIER = {
   // Deliberately NOT priced, because each is either the adoption wedge or the user's own data:
   //   - `holt ci` with inline flags: a single repo failing its own build on unlanded work.
-  //   - `holt journal` and its --export: one repo's audit log is the user's own data, and
-  //     `journal --json` already prints all of it. A gate there would be illusory, so there is
-  //     none. The PAID audit product is fleet-level aggregation and the streaming webhook sink.
+  //   - `holt journal`, `--verify`, `--prove` and one-shot `--export` in EVERY format (json, csv,
+  //     OCSF, ECS, CEF, in-toto): one repo's audit log is the user's own data, `journal --json`
+  //     already prints all of it, and a tamper-evident log the owner cannot check is a
+  //     contradiction. Gating integrity verification would be selling a lock and charging for
+  //     the key. The PAID audit product is fleet-level aggregation and the continuous sink.
   // What a TEAM pays for is managing this centrally, across repos, with policy and a paper trail.
   'policy-file': 'team',      // .holt/policy.json — policy as code, richer rules than flags
-  fleet: 'team',              // multi-repo aggregation
+  fleet: 'team',              // multi-repo aggregation, incl. fleet-wide audit-chain verification
+  'audit-sink': 'team',       // continuous cursor-tracked export of the journal into a SIEM
 };
 
 /**
@@ -82,9 +85,12 @@ export const FEATURE_TIER = {
  * checkEntitlement() must never report them as granted: an unbuilt feature is not entitled at any
  * tier, including enterprise. A test asserts every FEATURE_TIER key has a real call site, so this
  * cannot silently drift back.
+ *
+ * `audit-sink` LEFT this table for FEATURE_TIER once it had an implementation
+ * (src/team/audit-sink.mjs) and a gate — which is the only direction a feature may ever move
+ * between these two objects.
  */
 export const FEATURE_ROADMAP = {
-  'audit-sink': 'team',       // continuous export of the journal to an external system (webhook)
   sso: 'enterprise',
   'air-gap': 'enterprise',
 };

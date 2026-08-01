@@ -1004,7 +1004,7 @@ footer { padding: 44px 0 60px; }
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt journal</div>
         <h4>Who deleted what</h4>
-        <p>Append-only audit of every protect, rescue, clean, and branch-delete — with the evidence, months later.</p>
+        <p>Hash-chained audit of every protect, <strong>unprotect</strong>, rescue, clean and branch-delete — with the actor, the evidence, and <code>--verify</code> to prove nobody edited the record. Free.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt tui</div>
@@ -1329,7 +1329,7 @@ footer { padding: 44px 0 60px; }
       <div class="bench-cols">
         <div>
           <div class="tile-row tri">
-            <div class="tile"><div class="tile-num">369</div><div class="tile-label">tests passing (<code class="inline">npm test</code>)</div></div>
+            <div class="tile"><div class="tile-num">449</div><div class="tile-label">tests passing (<code class="inline">npm test</code>)</div></div>
             <div class="tile"><div class="tile-num">29/29</div><div class="tile-label">deliberate defects killed (<code class="inline">npm run test:mutation</code>)</div></div>
             <div class="tile"><div class="tile-num">50</div><div class="tile-label">languages asserted by symbol name</div></div>
           </div>
@@ -1404,7 +1404,8 @@ footer { padding: 44px 0 60px; }
           <li>Everything in Free, for your whole team</li>
           <li><strong>Policy as code</strong> — <code>.holt/policy.json</code>, reviewed like source, refuses rather than silently passing</li>
           <li><strong>Fleet view</strong> — every repository, one answer: where work sits unlanded</li>
-          <li><strong>Audit export</strong> — JSON/CSV + webhook sink of every protect, rescue, clean and branch deletion</li>
+          <li><strong>Fleet audit</strong> — every repository's chain verified at once; a repo whose trail was edited is named, never folded into a clean-looking total</li>
+          <li><strong>Continuous SIEM sink</strong> — cursor-tracked OCSF / ECS / CEF into Splunk, Elastic, QRadar or Sentinel; exactly-once, refuses to ship a log that does not verify, and detects a rewrite behind the cursor. (The single-repo trail, <code>--verify</code> and one-shot export in every format are <strong>free</strong>.)</li>
           <li>Runs entirely on your machines — no data leaves, on any tier</li>
           <li>Priority support</li>
         </ul>

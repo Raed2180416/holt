@@ -32,12 +32,15 @@ import { runTui } from '../src/tui.mjs';
 import { landingOrder } from '../src/order.mjs';
 import { branchAudit } from '../src/branches.mjs';
 import { partitionPlan } from '../src/partition.mjs';
-import { readJournal, appendEvent } from '../src/journal.mjs';
+import { readJournal, appendEvent, verifyJournal, proveEntry } from '../src/journal.mjs';
+import { formatActor } from '../src/actor.mjs';
+import { exportJournal, SIEM_FORMATS } from '../src/siem.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
 import { git } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
 import { loadPolicy, evaluatePolicy } from '../src/team/policy.mjs';
-import { fleetScan } from '../src/team/fleet.mjs';
+import { fleetScan, fleetAudit } from '../src/team/fleet.mjs';
+import { sinkExport } from '../src/team/audit-sink.mjs';
 
 const USAGE = `
 holt — know what your agents made, and don't lose any of it
@@ -56,8 +59,14 @@ COMMANDS
   order               landing order: parallel lanes + min-entanglement sequence
   partition           pre-flight split for N agents  [--agents <n>]   (collision-free start map)
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
-  journal             audit trail of every protect / rescue / clean / branch-delete
-                      --summary: the ROI view — losses prevented, hours saved
+  journal             hash-chained audit trail of every protect / UNPROTECT / rescue /
+                      clean / branch-delete / blocked, with WHO did it
+                      --verify        re-hash the chain; names the exact entry that broke
+                      --prove <seq>   offline RFC 6962 inclusion proof for one entry
+                      --export <fmt>  ocsf | ecs | cef | json | csv | intoto   (free)
+                      --summary       the ROI view — losses prevented, hours saved
+                      --sink <path>   CONTINUOUS cursor-tracked export into a SIEM  [team]
+                      --fleet <dir>   verify + aggregate every repo's trail        [team]
   fleet <dir>...      every repository under <dir>: where work sits unlanded   [team]
   license             activate | status | deactivate  (team/enterprise features)
   ci                  team gate for CI: fail a merge that abandons work
@@ -93,7 +102,10 @@ AGENT INTEGRATION
 
 OPTIONS
   --json              machine-readable output
-  --export <fmt>      journal: json | csv  (your own repo log — free)
+  --export <fmt>      journal: ocsf | ecs | cef | json | csv | intoto
+                      (your own repo's log, in the format your SIEM ingests — free)
+  --force             journal --export: emit even though the chain does not verify;
+                      every record is then stamped with the integrity failure
   --all               collisions: also show bare file overlap (hidden by default: it is
                       high-volume and low-evidence; landing order always uses it)
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
@@ -136,6 +148,12 @@ function parseArgs(argv) {
       case '--autoprotect': opts.autoprotect = true; break;
       case '--export': opts.exportFmt = argv[++i]; break;
       case '--summary': opts.summary = true; break;
+      case '--verify': opts.verify = true; break;
+      case '--prove': opts.prove = argv[++i]; break;
+      case '--sink': opts.sink = argv[++i]; break;
+      case '--fleet': (opts.fleetRoots ??= []).push(argv[++i]); break;
+      case '--since': opts.since = argv[++i]; break;
+      case '--force': opts.force = true; break;
       case '--all': opts.includeCoLocated = true; break;
       case '--install': opts.install = true; break;
       case '--yes': case '-y': opts.yes = true; break;
@@ -172,6 +190,16 @@ for (const stream of [process.stdout, process.stderr]) {
 
 function out(s) { process.stdout.write(s.endsWith('\n') ? s : `${s}\n`); }
 function emitJson(v) { out(JSON.stringify(v, null, 2)); }
+
+/** The shipped version, read once. Stamped into every SIEM record so a log names its producer. */
+let _version = null;
+async function holtVersion() {
+  if (_version) return _version;
+  try {
+    _version = JSON.parse(await fs.readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
+  } catch { _version = '0'; }
+  return _version;
+}
 
 /**
  * One scan per invocation. Commands that need the raw scan (context, deep duplicates) get it
@@ -611,10 +639,7 @@ async function main() {
   // Every packaged CLI is expected to answer this, and holt answered none of the four spellings
   // people try. A bug report that cannot say which version produced it is not actionable.
   if (opts.version || cmd === 'version') {
-    const { version } = JSON.parse(
-      await (await import('node:fs/promises')).readFile(new URL('../package.json', import.meta.url), 'utf8'),
-    );
-    out(`holt ${version}`);
+    out(`holt ${await holtVersion()}`);
     return;
   }
 
@@ -838,6 +863,95 @@ async function main() {
   }
   if (cmd === 'journal') {
     const events = await readJournal(opts.cwd);
+
+    // ---- integrity, FREE. A tamper-evident log its owner cannot check is a contradiction, so
+    //      verification is never gated. Exit 1 on a broken chain: this is the shape a CI job or
+    //      a nightly compliance check branches on.
+    if (opts.verify) {
+      const v = await verifyJournal(opts.cwd);
+      if (opts.json) { emitJson(v); process.exit(v.ok ? 0 : 1); }
+      out(paint('bold', 'holt journal — integrity'));
+      out(`\n  ${paint(v.ok ? 'green' : 'red', v.ok ? 'VERIFIED' : `BROKEN (${v.code})`)}  ${v.reason}`);
+      out(`  ${paint('grey', `${v.chained} chained · ${v.legacy} legacy (unverifiable) · root ${v.root ? v.root.slice(0, 16) : '—'}`)}`);
+      if (v.checkpoint) {
+        out(`  ${paint('grey', `checkpoint: ${v.checkpoint.origin} size=${v.checkpoint.size}`
+          + `${v.checkpoint.signed ? ` signed by ${v.checkpoint.signers.join(', ')} (${v.checkpoint.signatureValid ? 'valid' : 'UNVERIFIED'})` : ' unsigned'}`)}`);
+      }
+      if (v.broken) {
+        out(`\n  ${paint('red', 'first broken entry:')}`);
+        out(`    line ${v.broken.line} · seq ${v.broken.seq ?? '—'} · ${v.broken.at ?? 'no timestamp'} · ${paint('bold', v.broken.action ?? 'unknown action')}`);
+        if (v.broken.actor) out(`    ${paint('grey', `recorded actor: ${formatActor(v.broken.actor)}`)}`);
+        out(`    ${paint('grey', v.broken.reason)}`);
+      }
+      out('');
+      process.exit(v.ok ? 0 : 1);
+    }
+
+    // ---- an offline inclusion proof for ONE entry, FREE.
+    if (opts.prove != null) {
+      try {
+        const p = await proveEntry(opts.cwd, Number(opts.prove));
+        if (opts.json) return emitJson(p);
+        out(paint('bold', `holt journal — RFC 6962 inclusion proof for entry ${p.seq}`));
+        out(`  ${paint('grey', `${p.entry.at}  ${p.entry.action}  ${formatActor(p.entry.actor)}`)}`);
+        out(`  leaf   ${p.leaf}`);
+        out(`  root   ${p.root}  (tree size ${p.size})`);
+        out(`  path   ${p.proof.length ? p.proof.join('\n         ') : '(single-entry tree — the leaf IS the root)'}`);
+        out(`\n  ${paint(p.verifies ? 'green' : 'red', p.verifies ? 'proof verifies' : 'PROOF DOES NOT VERIFY')}\n`);
+        return;
+      } catch (e) {
+        process.stderr.write(paint('red', `holt journal --prove: ${e.message}\n`));
+        process.exit(2);
+      }
+    }
+
+    // ---- the continuous SIEM sink — TEAM. Everything above and below is free.
+    if (opts.sink) {
+      const ent = checkEntitlement('audit-sink');
+      if (!ent.entitled) {
+        if (opts.json) { emitJson({ ok: false, entitled: false, ...ent }); process.exit(3); }
+        process.stderr.write(paint('yellow', `holt journal --sink: ${ent.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
+        process.stderr.write(paint('grey', "  A one-shot export of this repo is free: holt journal --export ocsf\n"));
+        process.exit(3);
+      }
+      try {
+        const r = await sinkExport(opts.cwd, {
+          to: opts.sink, format: opts.exportFmt ?? 'ocsf', dryRun: opts.dryRun,
+        });
+        if (opts.json) return emitJson(r);
+        out(paint('bold', `holt audit sink — ${r.emitted} record(s) ${r.dryRun ? 'would be ' : ''}exported`));
+        out(`  ${paint('grey', `seq ${r.fromSeq} → ${r.toSeq} · ${r.format.toUpperCase()} → ${r.destination}`)}`);
+        out(`  ${paint('grey', r.note)}`);
+        out(`  ${paint(r.signed ? 'green' : 'yellow', r.signingNote)}\n`);
+        return;
+      } catch (e) {
+        process.stderr.write(paint('red', `holt journal --sink: ${e.message}\n`));
+        process.exit(e.code === 'EINTEGRITY' || e.code === 'EREWRITE' ? 1 : 2);
+      }
+    }
+
+    // ---- fleet-wide audit aggregation — TEAM.
+    if (opts.fleetRoots?.length) {
+      const ent = checkEntitlement('fleet');
+      if (!ent.entitled) {
+        if (opts.json) { emitJson({ ok: false, entitled: false, ...ent }); process.exit(3); }
+        process.stderr.write(paint('yellow', `holt journal --fleet: ${ent.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
+        process.exit(3);
+      }
+      const f = await fleetAudit(opts.fleetRoots, opts);
+      if (opts.json) return emitJson(f);
+      out(paint('bold', `holt fleet audit — ${f.verifiedRepositories}/${f.repositories} repositories verify`));
+      out('');
+      for (const r of f.repos) {
+        const mark = r.verified ? paint('green', ' ok ') : paint('red', 'FAIL');
+        out(`  ${mark}  ${r.name.padEnd(24)} ${String(r.entries).padStart(5)} events  ${String(r.unprotects).padStart(4)} unprotect  ${paint('grey', r.verified ? '' : r.code)}`);
+      }
+      out(`\n  ${paint('bold', String(f.totals.unprotects))} protection release(s) across the fleet · ${f.totals.blocked} destructive command(s) refused`);
+      if (f.totals.unattributed) out(`  ${paint('yellow', `${f.totals.unattributed} event(s) have no attributable user`)}`);
+      out(`  ${paint(f.unverifiedRepositories.length ? 'red' : 'grey', f.note)}\n`);
+      process.exit(f.unverifiedRepositories.length || f.failures.length ? 1 : 0);
+    }
+
     if (opts.summary) {
       const s = summarizeJournal(events);
       if (opts.json) return emitJson(s);
@@ -850,31 +964,35 @@ async function main() {
       out(`    ${paint('bold', String(b.workstreamsProtected).padStart(4))}  workstream(s) protected (holding work found nowhere else)`);
       out(`    ${paint('bold', String(b.worktreesReclaimed).padStart(4))}  disposable worktree(s) reclaimed`);
       out(`    ${paint('bold', String(b.branchesDeleted).padStart(4))}  landed branch(es) cleaned up`);
+      out(`    ${paint(b.protectionsReleased ? 'yellow' : 'grey', String(b.protectionsReleased).padStart(4))}  protection(s) RELEASED (work made destroyable again)`);
       out(`\n  ${paint('grey', `~${s.estimatedHoursSaved}h saved (conservative planning estimate) · ${s.events} events since ${s.since ? s.since.slice(0,10) : '—'}`)}`);
       out(`  ${paint('grey', s.note)}\n`);
       return;
     }
     if (opts.exportFmt) {
       // A single repository's audit log is the USER'S OWN DATA, and `holt journal --json`
-      // already prints all of it for free — gating a CSV of the same rows would be a gate in
-      // name only. So single-repo export is free. The paid audit product is the FLEET-level
-      // aggregation across many repositories and the continuous webhook sink, which is where
-      // the work and the value actually are.
-      const fmt = String(opts.exportFmt).toLowerCase();
-      if (fmt === 'json') return emitJson({ exportedAt: new Date().toISOString(), repo: opts.cwd, count: events.length, events });
-      if (fmt === 'csv') {
-        const cols = ['at', 'action', 'id', 'name', 'path', 'branch', 'ref', 'commit', 'reason', 'evidence'];
-        const esc = (v) => {
-          if (v == null) return '';
-          const s2 = Array.isArray(v) ? v.join('; ') : String(typeof v === 'object' ? JSON.stringify(v) : v);
-          return /[",\n]/.test(s2) ? `"${s2.replace(/"/g, '""')}"` : s2;
-        };
-        out(cols.join(','));
-        for (const e of events) out(cols.map((c) => esc(e[c])).join(','));
+      // already prints all of it for free — gating a re-encoding of the same rows would be a
+      // gate in name only, in EVERY format including the SIEM ones. So one-shot export is free.
+      // The paid audit product is fleet-level aggregation and the CONTINUOUS, cursor-tracked
+      // sink (--sink), which is where the work and the value actually are.
+      //
+      // The export is integrity-gated: a log that does not verify refuses to export without
+      // --force, because feeding a SIEM records from a possibly-rewritten log launders the
+      // tampering — downstream it is indistinguishable from a clean one.
+      const verification = await verifyJournal(opts.cwd);
+      try {
+        process.stdout.write(exportJournal(events, opts.exportFmt, {
+          verification, repo: opts.cwd, version: await holtVersion(), force: opts.force,
+        }));
         return;
+      } catch (e) {
+        process.stderr.write(paint('red', `holt journal --export: ${e.message}\n`));
+        if (e.code === 'EINTEGRITY') {
+          process.stderr.write(paint('grey', '  Run `holt journal --verify` for the exact entry, or --force to export anyway (every record is then stamped as unverified).\n'));
+          process.exit(1);
+        }
+        process.exit(2);
       }
-      process.stderr.write(paint('red', `holt journal: unknown export format '${opts.exportFmt}' (json | csv)\n`));
-      process.exit(2);
     }
     if (opts.json) return emitJson({ events });
     if (!events.length) { out(paint('grey', 'holt journal: no recorded actions in this repository yet')); return; }
@@ -882,8 +1000,11 @@ async function main() {
     for (const e of events) {
       if (e.corrupt) { out(`  ${paint('red', 'corrupt line:')} ${e.corrupt.slice(0, 80)}`); continue; }
       const what = [e.id ?? e.name, e.ref, e.evidence ?? e.reason].filter(Boolean).join('  ');
-      out(`  ${paint('grey', e.at)}  ${paint('bold', e.action)}  ${what}`);
+      const who = e.actor ? paint('grey', ` ${formatActor(e.actor)}`) : '';
+      const mark = e.action === 'unprotect' ? paint('yellow', e.action) : paint('bold', e.action);
+      out(`  ${paint('grey', e.at)}  ${mark}  ${what}${who}`);
     }
+    out(`\n  ${paint('grey', "integrity: holt journal --verify")}`);
     return;
   }
   if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));

@@ -25,6 +25,10 @@ export function summarizeJournal(events, { now = null } = {}) {
   const rescued = count('rescue');                  // unique work captured to a verifiable ref
   const cleaned = count('clean-remove') + count('removed'); // disposable worktrees reclaimed
   const branchesDeleted = count('branch-delete');
+  // Surfaced, never netted off. Releasing protection is the one action that makes irreplaceable
+  // work destroyable again; a summary that showed only the protections and hid the releases
+  // would overstate the safety posture, which is the failure mode this whole file guards against.
+  const released = count('unprotect');
 
   // "Prevented losses" = the events that stood between work and deletion: a refused destructive
   // command, or a verified rescue that let a locked tree be removed safely.
@@ -44,6 +48,7 @@ export function summarizeJournal(events, { now = null } = {}) {
       workstreamsRescued: rescued,
       worktreesReclaimed: cleaned,
       branchesDeleted,
+      protectionsReleased: released,
     },
     // A conservative, clearly-labelled estimate — never presented as measured fact.
     estimatedHoursSaved: Math.round((preventedLosses * HOURS_PER_PREVENTED_LOSS

@@ -6,7 +6,7 @@
 
 **You ran a dozen agents overnight. holt tells you what each one actually made, which ones<br>collide, and which are safe to delete — and it stops an agent deleting work that exists nowhere else.**
 
-[![tests](https://img.shields.io/badge/tests-369%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-449%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
 [![mutation score](https://img.shields.io/badge/mutation%20score-29%2F29%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
@@ -155,7 +155,7 @@ And the v0.2 stack that turns the analysis into motion:
 | order | which workstreams land in parallel, and the sequence for the entangled rest | `holt order` — exact lanes, heuristic peel, every watched merge named |
 | partition | how N agents should split the repo *before* they collide | `holt partition --agents 3` — disjoint buckets, each observed hotspot gets one owner |
 | branches | the other graveyard: branches nobody dares delete | `holt branches [--apply]` — content-landed squash merges detected; `--apply` uses `-d`, never `-D` |
-| journal | who deleted what, months later, with the evidence | `holt journal` — append-only audit of every protect / rescue / clean / branch-delete |
+| journal | **who** deleted what, months later, with the evidence — and proof nobody edited the record | `holt journal` — hash-chained (RFC 6962) audit of every protect / **unprotect** / rescue / clean / branch-delete / blocked, with actor attribution; `--verify` names the exact entry that broke; `--export ocsf\|ecs\|cef` for your SIEM |
 
 Plus the two layers nobody else has:
 
@@ -227,7 +227,7 @@ Every optional dependency degrades **loudly**: `holt doctor` shows exactly what'
 
 ## The test suite attacks itself
 
-369 tests, and the interesting ones are the hostile ones:
+449 tests, and the interesting ones are the hostile ones:
 
 - **29/29 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
@@ -248,7 +248,7 @@ because a claim you cannot back is worse than a gap you name.
 
 | Surface | How it was verified |
 |---|---|
-| Core scan, safety, actions, CLI | 369 tests + 29/29 deliberate-defect mutation kills, run on every commit |
+| Core scan, safety, actions, CLI | 449 tests + 29/29 deliberate-defect mutation kills, run on every commit |
 | Linux / macOS / Windows core | CI matrix runs the safety classifier, detection, CLI-as-binary, actions and the invariant fuzzer on all three |
 | Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
 | OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |
@@ -312,8 +312,10 @@ headcount:
 | Every command, every language, MCP, hooks, TUI | ✓ | ✓ | ✓ |
 | CI gate for a repository | ✓ | ✓ | ✓ |
 | Policy as code (`.holt/policy.json`) | | ✓ | ✓ |
+| Tamper-evident audit trail: hash chain, `--verify`, one-shot export in every format | ✓ | ✓ | ✓ |
 | Fleet view across every repository | | ✓ | ✓ |
-| Audit export (JSON/CSV + webhook sink) | | ✓ | ✓ |
+| Fleet audit: verify + aggregate every repository's chain at once | | ✓ | ✓ |
+| Continuous cursor-tracked SIEM sink (`journal --sink`) | | ✓ | ✓ |
 | SSO / SAML / SCIM, self-hosted & air-gapped licensing, SLA | | | ✓ |
 
 **Why per-repo, not per-seat:** your risk scales with how many repositories have agents fanning
@@ -322,8 +324,12 @@ far more collision risk than a 50-dev team on 5 quiet ones — per-seat would ch
 Unlimited developers, no seat minimum, annual prepay discounted.
 
 **Your data never leaves your machine — on *any* tier, including paid.** Fleet view scans *your*
-repositories on *your* machine; audit export writes a file *you* control (or POSTs to a webhook
-*you* configure). There is no hosted holt dashboard your code is sent to, no telemetry, and no
+repositories on *your* machine; the audit sink writes newline-delimited OCSF/ECS/CEF to a file
+*you* control, which your existing log shipper (Filebeat, Vector, Fluent Bit, Splunk UF) tails —
+holt itself makes no outbound connection, on any tier. That is not a limitation working around
+the no-network promise; it is how every serious log pipeline already handles retry, backpressure
+and TLS, and rebuilding it would be the mistake.
+There is no hosted holt dashboard your code is sent to, no telemetry, and no
 license check-in — a Team key is an Ed25519-signed token you activate once
 (`holt license activate <key>`) or set as `HOLT_LICENSE` in CI, verified entirely offline. If a
 subscription lapses, paid features keep working for a 14-day grace period rather than breaking
