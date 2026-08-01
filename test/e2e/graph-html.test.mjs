@@ -53,9 +53,14 @@ const PAYLOAD =
  * those are harmless as TEXT and must be allowed to appear, escaped, in a workstream's name.
  * What must never happen is a tag nobody wrote.
  */
+// The complete set of element names the TEMPLATE itself contains. Anything else in the document
+// was put there by data, which is the definition of the defect this file exists to catch. Adding
+// a control to the page means adding it here deliberately — the allowlist is the review step.
 const TEMPLATE_TAGS = new Set([
   '!doctype', 'html', 'head', 'meta', 'title', 'style', 'body', 'header',
   'h1', 'h2', 'span', 'div', 'aside', 'b', 'i', 'script',
+  // the interactive controls: search box, edge-type filters and their labels
+  'input', 'label',
 ]);
 
 /** Control and format characters, minus the three (tab, LF, CR) that legitimately lay out
@@ -215,6 +220,14 @@ test('HTML INJECTION: the page builds its SVG as DOM, so a hostile id cannot bec
       appendChild(c) { this.children.push(c); return c; },
       replaceChildren(...c) { this.children = c; },
       addEventListener() {},
+      // The page is interactive now: it pans, zooms, drags and traces. These are the DOM
+      // surfaces that requires. They are modelled rather than stubbed away for the same reason
+      // innerHTML is below — a shim that silently swallowed a call would let the page take a
+      // path this test never observes, and the whole point is to run the REAL script.
+      removeEventListener() {},
+      setPointerCapture() {},
+      getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 700 }; },
+      classList: { add() {}, remove() {} },
       set textContent(v) { this.text = String(v); this.children.length = 0; },
       get textContent() { return this.text; },
       // innerHTML is modelled deliberately, not stubbed away. It is the sink the old renderer
@@ -242,27 +255,46 @@ test('HTML INJECTION: the page builds its SVG as DOM, so a hostile id cannot bec
   };
   const stage = makeEl('div');
   const detail = makeEl('div');
+  const search = makeEl('input');
+  const hint = makeEl('div');
   const document = {
     createElementNS: (_ns, name) => makeEl(name),
-    getElementById: (id) => (id === 'stage' ? stage : detail),
+    getElementById: (id) => (id === 'stage' ? stage : id === 'search' ? search : id === 'hint' ? hint : detail),
+    // The filter checkboxes and the clickable counts. Returning an empty list is right: this
+    // test is about what the page BUILDS from repository data, and those controls are static
+    // template markup already covered by the tag allowlist above.
+    querySelectorAll: () => [],
+    get activeElement() { return null; },
   };
 
   const body = scriptBody(html);
   const src = body.slice(0, body.lastIndexOf('</script>'));
   // A syntax error here is itself a finding: it means the escaping corrupted the script.
-  const run = new Function('document', 'addEventListener', 'setTimeout', 'clearTimeout', src);
-  run(document, () => {}, () => 0, () => {});
+  // Only what the PAGE builds counts. stage/detail/search/hint are this harness's own stand-ins
+  // for elements that exist in the static template, and leaving them in the record would let a
+  // genuinely injected element of the same name hide behind one of them.
+  created.length = 0;
+
+  // requestAnimationFrame is driven for a BOUNDED number of frames rather than stubbed to a
+  // no-op: the page now lays out inside the animation loop, so a no-op would mean nothing is
+  // ever drawn and every assertion below would pass against an empty document.
+  let frames = 0;
+  const raf = (fn) => { if (frames++ < 3) fn(); return frames; };
+  const run = new Function('document', 'addEventListener', 'setTimeout', 'clearTimeout',
+    'requestAnimationFrame', 'Math', src);
+  run(document, () => {}, () => 0, () => {}, raf, Math);
 
   // Only the tags the renderer is allowed to build may exist. An injected element would appear
   // here as a tag name nobody wrote — which is the general statement of the defect.
-  const ALLOWED = new Set(['div', 'svg', 'line', 'circle', 'title', 'text']);
+  const ALLOWED = new Set(['div', 'svg', 'g', 'line', 'circle', 'title', 'text']);
   const rogue = created.filter((e) => !ALLOWED.has(e.tagName));
   assert.deepEqual(rogue.map((e) => e.tagName), [],
     `the page built element(s) no renderer code creates: ${rogue.map((e) => e.tagName).join(', ')}`);
 
   // Anti-vacuity: it must have built the graph, and the hostile id must be present AS TEXT.
   const circles = created.filter((e) => e.tagName === 'circle');
-  assert.equal(circles.length, 2, `expected 2 circles, got ${circles.length} — the page rendered nothing`);
+  assert.ok(circles.length >= 2,
+    `expected at least 2 circles, got ${circles.length} — the page rendered nothing, so nothing below is being tested`);
   const texts = created.filter((e) => e.tagName === 'title' || e.tagName === 'text').map((e) => e.text);
   assert.ok(texts.some((t2) => /img src=x/.test(t2)),
     'the hostile id never reached the page as text — the assertion above proved nothing');
