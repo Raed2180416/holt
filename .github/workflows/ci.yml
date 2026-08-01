@@ -34,16 +34,14 @@ jobs:
       # scan and the no-git-identity rescue path. Every one of those is platform-sensitive (path
       # separators, git's own behaviour, how a shell quotes), and they were being proven on Linux
       # only while shipping to macOS and Windows users.
-      # THE WHOLE SUITE, not a hand-picked list. The list this replaced named 15 files while the
-      # suite had 39, so 24 of them — including the MCP protocol, the TUI, the graph export, the
-      # journal, the team layer and the monster round — were proven on Linux only while shipping
-      # to macOS and Windows users. A hand-maintained list of "the portable ones" is a thing that
-      # goes stale silently: every file added since was excluded by default, which is the wrong
-      # default for the platform-sensitive half of a tool that manipulates paths for a living.
+      # This job's contract is the DEGRADED core: no ctags, no enry, no jscpd, no jj. So it runs
+      # the suites that are meaningful without them. Running everything here was tried and is
+      # wrong — the language suite asserts `ctags is available` rather than skipping, by design,
+      # because a language claim that silently degrades is the failure it exists to catch.
       #
-      # Tests needing an optional backend (jj, opencode) skip loudly and are counted as skips, so
-      # running everything here costs coverage nothing and gains the 24.
-      - run: npm test
+      # Full cross-platform coverage of the REST of the suite is the `full suite on <os>` job
+      # below, which installs the backends on all three operating systems.
+      - run: node --test test/unit/safety.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs test/e2e/integration.test.mjs
       - run: node bin/holt.mjs doctor --json
       - name: the tool must run against its own repository on this OS
         run: node bin/holt.mjs status --json
@@ -186,6 +184,41 @@ jobs:
         # defects that matter: a tool that authorises deleting work, or runs a command it
         # promised never to run. A survivor fails the build.
         run: npm run test:mutation
+
+  crossplat:
+    name: full suite on ${{ matrix.os }}
+    # 24 OF 39 TEST FILES RAN ON LINUX ONLY — the MCP protocol, the TUI, the graph export, the
+    # journal, the team layer, the monster round, the host manifest, the packaging guard. A tool
+    # that manipulates paths for a living was proving its most platform-sensitive half on the one
+    # platform where paths are simplest. Three defects in a single session were invisible on Linux
+    # and live on macOS and Windows, each found by CI rather than by the suite.
+    #
+    # So the whole suite runs on all three, with the backends installed. The degraded-core matrix
+    # above keeps its narrow list because its contract is the opposite one.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+
+      - name: install universal-ctags (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y universal-ctags
+      - name: install universal-ctags (macos)
+        if: runner.os == 'macOS'
+        run: brew install universal-ctags
+      - name: install universal-ctags (windows)
+        if: runner.os == 'Windows'
+        run: choco install universal-ctags -y --no-progress
+
+      - run: npm ci
+      - name: what this platform actually has
+        run: node bin/holt.mjs doctor
+      - run: npm test
 
   package:
     name: packaging
