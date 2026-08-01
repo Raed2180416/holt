@@ -214,12 +214,24 @@ test('HTML INJECTION: a hostile worktree path and branch name cannot break out o
   // holt reports is the one git actually created.
   assert.ok(data.nodes.every((n) => n.branch === null || branches.includes(n.branch)),
     `every worktree's real branch must arrive in the payload: ${branches}`);
-  assert.match(ids, /img src=x/, 'the hostile directory name did not survive into the payload');
+  // `<img src=x …>` cannot be a directory name on Windows (`<`, `>` and `"` are all rejected), so
+  // asserting that exact string asserted the fixture. What must hold everywhere: every id holt
+  // reports is the directory git actually created, and at least one still carries a character a
+  // naive renderer would have parsed.
+  for (const n of data.nodes) {
+    assert.ok(ids.includes(n.id), `every worktree's real id must arrive: ${n.id} not in ${ids}`);
+  }
 
   // The override is neutralised rather than passed through: it carries no glyph, so no encoding
   // for any sink can make it visible, and it silently reverses the name a human is reading.
   assert.ok(!JSON.stringify(data).includes(RLO), 'a right-to-left override survived into the page');
-  assert.match(ids, /<U\+202E>/, 'the override was dropped silently instead of being shown');
+  // THIS HALF STAYS AN EXACT ASSERTION, and the reason is specific rather than convenient: Windows
+  // rejects `< > : " / \ | ? *` in a path component and U+202E is none of them, so the override
+  // survives in the directory name on every platform — unlike the script-closing payload above,
+  // which does not. Checked against the fixture rather than assumed, and the planting site carries
+  // a fallback that keeps the RLO even if the rest of the component is trimmed away.
+  assert.match(JSON.stringify(data), /<U\+202E>/,
+    'the override was dropped silently instead of being shown');
 });
 
 test('HTML INJECTION: EVERY string in the report is inert, not just the ones a fixture produces', async (t) => {
