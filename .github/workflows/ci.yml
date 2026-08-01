@@ -276,6 +276,25 @@ jobs:
           git commit -q --allow-empty -m base
           holt doctor
           holt status
+      - name: the INSTALLED artifact must answer correctly, not merely start
+        # `holt doctor` and `holt status` above prove the binary runs. They do not prove it WORKS —
+        # a build missing src/paths.mjs exits 1 for an uncaught exception, which an exit-code check
+        # reads as a clean refusal. This drives the installed binary against a real repository with
+        # planted at-risk work and checks the ANSWERS: that risk finds the planted work, that it
+        # does not invent work in an empty worktree, and that gate's exit code AND its stated
+        # verdict agree.
+        #
+        # It ran only in release-artifact.yml, on tag push — so a commit that broke the shipped
+        # artifact stayed invisible until release day. That is exactly how the published v0.2.0
+        # came to be missing four runtime modules and 12 of 14 language packs.
+        run: node scripts/smoke-installed.mjs --bin holt
+      - name: an install without optional dependencies must still work
+        # A corporate mirror, `npm i --omit=optional`, and older `--production` installs all do
+        # this. `holt integrate` wires 29 MCP targets that every point at `holt mcp`, so a missing
+        # runtime dependency here means 29 agents wired to a server that cannot start.
+        run: |
+          npm install -g --omit=optional ./holt-*.tgz
+          node scripts/smoke-installed.mjs --bin holt
       - name: the published tarball must not ship anything operator-only
         run: |
           tar -tzf holt-*.tgz | tee /tmp/files.txt

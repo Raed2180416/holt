@@ -1295,3 +1295,40 @@ test('GATE: the INDIRECTION half also knows prose from a command', async () => {
     assert.ok(indirectVerb(cmd), `real indirection must still be flagged: ${cmd}`);
   }
 });
+
+
+test('GATE: a variable assigned a literal in the same command is not opaque', async (t) => {
+  // THIRD DOGFOODING INTERRUPTION. `BIN=/opt/holt/bin/holt; "$BIN" --version` is ordinary, the
+  // value is sitting right there in the same command, and holt refused it as "the command name
+  // comes from a substitution or variable" — saying it could not read something it demonstrably
+  // could. That is the friction that gets a guard uninstalled.
+  //
+  // The narrowing had to be done carefully, and the anti-vacuity half below caught it failing on
+  // the first attempt: resolving `$x` to `rm` made the indirection check clean, but classification
+  // still matched the RAW string, where `rm` never appears as a verb — so the verdict silently
+  // became ALLOW. A narrowing that turns "ask" into "allow" is the bypass, not a fix. A resolved
+  // verb is now handed back for re-assessment, exactly as an `sh -c` payload is.
+  const fx = await newRepo('var-verb');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('feature');
+  await fx.write('precious.txt', 'ONLY_COPY\n', wt);
+
+  // Resolved to something harmless: allowed, no interruption.
+  for (const cmd of ['BIN=/opt/holt/bin/holt; "$BIN" --version', 'B=./node_modules/.bin/tsc; $B --noEmit']) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow', `an ordinary literal-assigned command must not be interrupted: ${cmd}`);
+  }
+
+  // Resolved to something DESTRUCTIVE: denied with evidence — strictly better than the ask it
+  // replaced, and the assertion that stops the narrowing from being a hole.
+  const viaVar = await assessCommand(`x=rm; $x -rf ${wt}`, fx.root);
+  assert.equal(viaVar.decision, 'deny',
+    `a variable that resolves to rm must be judged as rm: ${JSON.stringify(viaVar)}`);
+
+  // Still genuinely unknowable: ask, never allow.
+  for (const cmd of [`X=$(which rm); $X -rf ${wt}`, '$UNSET_VAR --version', `$(echo rm) -rf ${wt}`]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'ask',
+      `holt cannot resolve this and must not bless it: ${cmd} -> ${JSON.stringify(v)}`);
+  }
+});

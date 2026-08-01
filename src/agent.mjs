@@ -344,6 +344,24 @@ export function indirectVerb(command) {
       (masked.some(([a, b]) => i >= a && i <= b) ? ' ' : ch)).join('')
     : String(command ?? '');
 
+  // A VARIABLE ASSIGNED A LITERAL IN THE SAME COMMAND IS NOT OPAQUE.
+  //
+  // `BIN=/opt/holt/bin/holt; "$BIN" --version` is ordinary and the value is sitting right there —
+  // refusing it says holt cannot read something it demonstrably can. Caught by dogfooding for the
+  // third time: the guard interrupted exactly this while verifying an artifact gate.
+  //
+  // Only LITERAL assignments are resolved, and only from earlier in the SAME command. A value that
+  // is itself a substitution (`X=$(…)`) resolves to nothing and the verb stays unknown, which is
+  // the honest answer — this narrows the check, it does not weaken it.
+  const literals = new Map();
+  for (const m of visible.matchAll(/(?:^|[;&|]\s*)([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|$`'"]+)/g)) {
+    literals.set(m[1], m[2]);
+  }
+  const resolve = (tok) => {
+    const m = /^["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?["']?$/.exec(tok);
+    return m && literals.has(m[1]) ? literals.get(m[1]) : tok;
+  };
+
   for (const seg of lexSegments(visible)) {
     let w = seg.words;
     // Drop leading VAR=value assignments and transparent wrappers, as the file layer does.
@@ -352,9 +370,26 @@ export function indirectVerb(command) {
     w = w.slice(cut);
     if (!w.length) continue;
 
-    const verb = w[0];
+    const verb = resolve(w[0]);
     if (verb === 'eval') return { kind: 'eval (holt cannot see what this will run)' };
     if (SUBSTITUTION.test(verb)) return { kind: 'the command name comes from a substitution or variable' };
+
+    // RESOLVING A VERB MUST FEED CLASSIFICATION, OR IT IS A HOLE.
+    //
+    // Caught immediately by the anti-vacuity half of the test: `x=rm; $x -rf ../feature` used to
+    // come back ASK, because the verb was unreadable. Resolving `$x` to `rm` made this check
+    // clean — but classifyCommand still matched against the RAW string, where the token `rm` never
+    // appears as a verb, so the verdict silently became ALLOW. A narrowing that turns "ask" into
+    // "allow" is not a narrowing, it is the bypass.
+    //
+    // So a resolved verb is handed back as a rewritten command and re-assessed exactly as a
+    // `sh -c` payload is: `x=rm; $x -rf ../feature` is judged as `rm -rf ../feature` and denied
+    // with per-file evidence, which is strictly better than the ask it replaced.
+    if (verb !== w[0]) {
+      const rewritten = [verb, ...w.slice(1)].join(' ');
+      const inner = classifyCommand(rewritten);
+      if (inner) return { kind: `${inner.kind} (via a variable)`, inner, innerCommand: rewritten };
+    }
 
     // A shell invoked with -c carries its program as a literal string: read it.
     if (SHELLS.has(path.basename(verb))) {
