@@ -28,19 +28,24 @@ export const HOSTS = [
   // --- dominant, local, holt can BLOCK (verified adapters) -------------------------------------
   { id: 'claude-code', name: 'Claude Code', env: 'local', strength: 'block',
     detect: { project: ['.claude', 'CLAUDE.md'], user: ['.claude'] },
-    rulesFile: 'CLAUDE.md', mcp: true,
-    note: 'PreToolUse deny hook — holt\'s reference integration; refuses before the tool runs.' },
+    rulesFile: 'CLAUDE.md', mcp: true, verifiedLive: true,
+    note: 'VERIFIED LIVE: the PreToolUse deny hook was driven against the real host and observed to '
+      + 'return deny with the at-risk symbol named. holt\'s reference integration.' },
   { id: 'opencode', name: 'OpenCode', env: 'local', strength: 'block',
     detect: { project: ['.opencode', 'opencode.json'], user: ['.config/opencode'] },
-    rulesFile: 'AGENTS.md', mcp: true,
-    note: 'plugin tool.execute.before throws to block. Caveat: subagent-spawned calls can bypass it (upstream bug) — the git lock is the floor.' },
+    rulesFile: 'AGENTS.md', mcp: true, verifiedLive: true,
+    note: 'VERIFIED LIVE: the plugin\'s tool.execute.before throws to block, confirmed against a real '
+      + '`opencode debug config`. Caveat: subagent-spawned calls can bypass it (upstream bug) — the '
+      + 'git lock is the floor.' },
 
   // --- block-CAPABLE hosts (host supports a deny hook; holt ships MCP+advisory until the
   //     bespoke adapter is verified, because a guessed hook format is worse than none) ----------
-  { id: 'cursor', name: 'Cursor', env: 'local', strength: 'mcp', blockCapable: true,
+  { id: 'cursor', name: 'Cursor', env: 'local', strength: 'block', blockCapable: true, verifiedLive: false,
     detect: { project: ['.cursor', '.cursorrules'], user: ['.cursor'] },
-    rulesFile: '.cursorrules / .cursor/rules', mcp: true,
-    note: 'Cursor has a deny hook (JSON permission:deny). holt ships MCP + rules today; a verified deny adapter is planned.' },
+    rulesFile: 'AGENTS.md · .cursor/rules/*.mdc', mcp: true,
+    note: 'DETERMINISTIC BLOCK: holt writes .cursor/hooks.json (beforeShellExecution) and denies '
+      + 'with Cursor\'s own {permission:"deny"} signal. Verified against Cursor\'s current hook '
+      + 'documentation, not guessed.' },
   { id: 'codex', name: 'OpenAI Codex CLI', env: 'local', strength: 'mcp', blockCapable: true,
     detect: { project: ['.codex'], user: ['.codex'] },
     rulesFile: 'AGENTS.md', mcp: true,
@@ -65,10 +70,15 @@ export const HOSTS = [
     detect: { project: ['.amp'], user: ['.config/amp'] },
     rulesFile: 'AGENTS.md', mcp: true,
     note: 'permissions reject + hooks; permissive-by-default. holt ships MCP + advisory today.' },
-  { id: 'goose', name: 'Goose (Block)', env: 'local', strength: 'mcp', blockCapable: true,
+  // Goose's only first-class MCP config is YAML (~/.config/goose/config.yaml, `extensions:`), and
+  // that same file holds the user's permissions and secrets. holt writes JSON and TOML; it will
+  // not hand-merge a YAML file it cannot parse safely, so this says so rather than claiming MCP.
+  { id: 'goose', name: 'Goose (Block)', env: 'local', strength: 'advisory', blockCapable: true,
     detect: { project: ['.goosehints'], user: ['.config/goose'] },
-    rulesFile: '.goosehints / AGENTS.md', mcp: true,
-    note: 'Open-Plugins hooks.json (AAIF cross-agent spec); holt ships MCP + advisory today.' },
+    rulesFile: '.goosehints / AGENTS.md', mcp: false,
+    note: 'MCP config is YAML at ~/.config/goose/config.yaml under `extensions:`, alongside the '
+      + 'user\'s permissions and secrets — holt does not write it. Add by hand: '
+      + 'extensions: { holt: { command: holt, args: [mcp] } }.' },
   { id: 'factory', name: 'Factory Droid', env: 'local', strength: 'mcp', blockCapable: true,
     detect: { project: ['.factory'], user: ['.factory'] },
     rulesFile: 'AGENTS.md', mcp: true,
@@ -82,16 +92,32 @@ export const HOSTS = [
   { id: 'zed', name: 'Zed', env: 'local', strength: 'mcp',
     detect: { project: ['.zed'], user: ['.config/zed'] }, rulesFile: 'AGENTS.md / .rules', mcp: true,
     note: 'MCP (context_servers). No pre-tool deny hook.' },
-  { id: 'aider', name: 'Aider', env: 'local', strength: 'mcp',
+  // Aider has NO MCP client. The previous entry claimed 'MCP since late 2025', which was checked
+  // against aider.chat's own current documentation and is false — there is no MCP page anywhere in
+  // its docs and no MCP option in the tool. Claiming it made `holt hosts` promise a user coverage
+  // that does not exist, which is worse than an admitted gap because it stops them looking further.
+  { id: 'aider', name: 'Aider', env: 'local', strength: 'advisory',
     detect: { project: ['.aider.conf.yml'], user: ['.aider.conf.yml', '.config/aider'] },
-    rulesFile: 'CONVENTIONS.md (via read:)', mcp: true,
-    note: 'MCP since late 2025; no per-call deny hook. Strongest lever here is the git pre-commit hook.' },
-  { id: 'roo', name: 'Roo Code / Kilo Code', env: 'local', strength: 'advisory',
-    detect: { project: ['.roo', '.roorules', '.kilocode'], user: [] }, rulesFile: '.roorules', mcp: false,
-    note: 'Rules-file advisory. (Kilo Code is the maintained Roo successor.)' },
+    rulesFile: 'CONVENTIONS.md (loaded explicitly via --read or .aider.conf.yml `read:`)', mcp: false,
+    note: 'NO MCP client as of 2026-08-01, and nothing is read automatically — not even AGENTS.md. '
+      + 'Coverage here is the git pre-commit hook plus a CONVENTIONS.md the user loads themselves.' },
+  // Split, because they are now two products with two different config formats — and one of them
+  // is archived. Treating them as one row meant holt wrote neither.
+  { id: 'roo', name: 'Roo Code (archived)', env: 'local', strength: 'mcp',
+    detect: { project: ['.roo', '.roorules'], user: [] }, rulesFile: '.roo/rules/ · .roorules', mcp: true,
+    note: 'ARCHIVED by its owner on 2026-05-15 and read-only. Still reads .roo/mcp.json, so holt '
+      + 'wires existing installs; do not adopt it for new work.' },
+  { id: 'kilo', name: 'Kilo Code', env: 'local', strength: 'mcp',
+    detect: { project: ['.kilo', 'kilo.jsonc', '.kilocode'], user: ['.config/kilo'] },
+    rulesFile: 'AGENTS.md', mcp: true,
+    note: 'The maintained Roo successor, rebuilt on the OpenCode engine — which is why its key is '
+      + '`mcp` with type:local entries, not the `mcpServers` its Roo ancestry suggests.' },
+  { id: 'warp', name: 'Warp', env: 'local', strength: 'mcp',
+    detect: { project: ['.warp', 'WARP.md'], user: ['.warp'] }, rulesFile: 'AGENTS.md (WARP.md legacy)', mcp: true,
+    note: 'Terminal agent, MCP via .warp/.mcp.json. AGENTS.md must be ALL CAPS to be recognised.' },
   { id: 'devin-desktop', name: 'Devin Desktop / CLI (was Windsurf)', env: 'local', strength: 'mcp', blockCapable: true,
     detect: { project: ['.devin', '.windsurf', '.windsurfrules'], user: ['.codeium/windsurf'] },
-    rulesFile: 'AGENTS.md / .windsurfrules', mcp: true,
+    rulesFile: 'AGENTS.md · .devin/rules/ · CLAUDE.md', mcp: true,
     note: 'Cognition retired the Windsurf brand (2026); Devin CLI/Desktop accept a Claude-format hook. Legacy .windsurf paths still detected.' },
 
   // --- cloud / ephemeral: the worktree lock does NOT apply; advisory is the only lever ---------
@@ -101,9 +127,13 @@ export const HOSTS = [
   { id: 'replit', name: 'Replit Agent', env: 'cloud', strength: 'advisory',
     detect: { project: ['.replit'], user: [] }, rulesFile: 'AGENTS.md', mcp: false,
     note: 'Repo lives on Replit; remote-MCP-only. Furthest from the local-git model — advisory only.' },
+  // Marked false because holt has no CONFIRMED config path for it. The CLI is understood to read
+  // an mcp.json, but nothing here was verified against Amazon's current documentation, and holt's
+  // rule is that a guessed config is worse than none.
   { id: 'amazon-q', name: 'Amazon Q Developer', env: 'cloud', strength: 'advisory',
-    detect: { project: ['.amazonq'], user: ['.aws/amazonq'] }, rulesFile: 'AGENTS.md', mcp: true,
-    note: 'Server-side issue→PR agent; MCP-capable, no deny hook. Local sessions get MCP; async is advisory.' },
+    detect: { project: ['.amazonq'], user: ['.aws/amazonq'] }, rulesFile: 'AGENTS.md', mcp: false,
+    note: 'Server-side issue→PR agent, no deny hook. Its MCP config path is NOT verified by us, so '
+      + 'holt writes none rather than guessing; coverage here is AGENTS.md advisory.' },
 
   // --- editors / frozen: detect but do not over-integrate --------------------------------------
   { id: 'continue', name: 'Continue.dev (frozen)', env: 'local', strength: 'advisory',

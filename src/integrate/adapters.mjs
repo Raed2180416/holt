@@ -186,6 +186,29 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     // Crush uses yet a third shape: mcp:{name:{type:"stdio",command,args}}. Verified against a
     // live ~/.config/crush/crush.json.
     { host: 'crush', scope: 'project', file: path.join(repoRoot, 'crush.json'), key: 'mcp', shape: 'crush' },
+
+    // ---- hosts the manifest ADVERTISED and integrate never wrote ------------------------
+    // Each path and key below was confirmed against the host's own current documentation. A
+    // wrong config is worse than none, so anything that could not be confirmed is left out and
+    // its manifest entry says so instead.
+    //
+    // Codex CLI is TOML, not JSON — the one major host that is, and the reason holt now has a
+    // TOML writer at all.
+    { host: 'codex', scope: 'project', file: path.join(repoRoot, '.codex', 'config.toml'), key: 'mcp_servers', format: 'toml' },
+    // Cline CLI 2.0. The VS Code extension keeps its servers in UI-managed global storage under
+    // a per-platform path holt deliberately does not write into.
+    { host: 'cline', scope: 'project', file: path.join(repoRoot, '.cline', 'mcp.json'), key: 'mcpServers' },
+    // Amp's map hangs off a DOTTED top-level key, not a bare `mcpServers`.
+    { host: 'amp', scope: 'project', file: path.join(repoRoot, '.amp', 'settings.json'), key: 'amp.mcpServers' },
+    { host: 'factory', scope: 'project', file: path.join(repoRoot, '.factory', 'mcp.json'), key: 'mcpServers' },
+    { host: 'junie', scope: 'project', file: path.join(repoRoot, '.junie', 'mcp', 'mcp.json'), key: 'mcpServers' },
+    // Zed reads `context_servers`, and ignores an entry without source:"custom".
+    { host: 'zed', scope: 'project', file: path.join(repoRoot, '.zed', 'settings.json'), key: 'context_servers', shape: 'zed' },
+    { host: 'warp', scope: 'project', file: path.join(repoRoot, '.warp', '.mcp.json'), key: 'mcpServers' },
+    // Kilo Code v7 was rebuilt on the OpenCode engine, which is why its key and entry shape are
+    // OpenCode's rather than the `mcpServers` its Roo ancestry would suggest.
+    { host: 'kilo', scope: 'project', file: path.join(repoRoot, '.kilo', 'kilo.jsonc'), key: 'mcp', shape: 'kilo' },
+    { host: 'roo', scope: 'project', file: path.join(repoRoot, '.roo', 'mcp.json'), key: 'mcpServers' },
   ];
   const user = [
     { host: 'cursor', scope: 'user', file: path.join(home, '.cursor', 'mcp.json'), key: 'mcpServers' },
@@ -194,6 +217,16 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     { host: 'zed', scope: 'user', file: path.join(home, '.config', 'zed', 'settings.json'), key: 'context_servers' },
     { host: 'continue', scope: 'user', file: path.join(home, '.continue', 'config.json'), key: 'mcpServers' },
     { host: 'opencode', scope: 'user', file: path.join(home, '.config', 'opencode', 'opencode.json'), key: 'mcp', shape: 'opencode' },
+    { host: 'codex', scope: 'user', file: path.join(home, '.codex', 'config.toml'), key: 'mcp_servers', format: 'toml' },
+    // GitHub Copilot CLI. Its cloud coding agent is a different product with no repository file
+    // at all — configured in repo settings — which is why only the CLI appears here.
+    { host: 'copilot', scope: 'user', file: path.join(home, '.copilot', 'mcp-config.json'), key: 'mcpServers' },
+    { host: 'cline', scope: 'user', file: path.join(home, '.cline', 'mcp.json'), key: 'mcpServers' },
+    { host: 'amp', scope: 'user', file: path.join(home, '.config', 'amp', 'settings.json'), key: 'amp.mcpServers' },
+    { host: 'factory', scope: 'user', file: path.join(home, '.factory', 'mcp.json'), key: 'mcpServers' },
+    { host: 'junie', scope: 'user', file: path.join(home, '.junie', 'mcp', 'mcp.json'), key: 'mcpServers' },
+    { host: 'warp', scope: 'user', file: path.join(home, '.warp', '.mcp.json'), key: 'mcpServers' },
+    { host: 'kilo', scope: 'user', file: path.join(home, '.config', 'kilo', 'kilo.jsonc'), key: 'mcp', shape: 'kilo' },
   ];
   return scope === 'user' ? user : scope === 'all' ? [...project, ...user] : project;
 }
@@ -206,13 +239,85 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
  */
 export function mcpServerEntry(bin = 'holt', shape = 'standard') {
   const [cmd, ...prefix] = String(bin).trim().split(/\s+/);
-  if (shape === 'opencode') {
+  if (shape === 'opencode' || shape === 'kilo') {
     return { type: 'local', command: [cmd, ...prefix, 'mcp'], enabled: true };
   }
   if (shape === 'crush') {
     return { type: 'stdio', command: cmd, args: [...prefix, 'mcp'] };
   }
+  if (shape === 'zed') {
+    // Zed requires source:"custom" on a manually-added server; without it the entry is ignored.
+    return { source: 'custom', command: cmd, args: [...prefix, 'mcp'], env: {} };
+  }
   return { command: cmd, args: [...prefix, 'mcp'], env: {} };
+}
+
+/**
+ * JSONC tolerance. Kilo Code's config is `.jsonc` and Amp's may be, so a user's file can legally
+ * carry comments that JSON.parse rejects. Failing to parse would be read as "no file" and, at
+ * project scope, silently REPLACE their config — so comments are stripped for reading only.
+ * String-aware, or a `//` inside a Windows path or a URL would truncate the document.
+ */
+function stripJsonComments(text) {
+  let out = ''; let inStr = false; let esc = false; let line = false; let block = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]; const n = text[i + 1];
+    if (line) { if (c === '\n') { line = false; out += c; } continue; }
+    if (block) { if (c === '*' && n === '/') { block = false; i++; } continue; }
+    if (inStr) { out += c; if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; out += c; continue; }
+    if (c === '/' && n === '/') { line = true; i++; continue; }
+    if (c === '/' && n === '*') { block = true; i++; continue; }
+    out += c;
+  }
+  return out;
+}
+
+/* ----------------------------------------------------------------------- TOML ---- */
+
+/**
+ * A TOML string literal. Basic strings, so backslashes and quotes must be escaped — on Windows
+ * `bin` is a path full of backslashes, and emitting it raw produces a file Codex refuses to parse.
+ */
+const tomlStr = (s) => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+/**
+ * Merge holt's server into a Codex `config.toml`, PRESERVING everything else in the file.
+ *
+ * Codex CLI is the one major host whose MCP config is not JSON, and holt had no TOML writer
+ * anywhere — so Codex was advertised as MCP-capable in the manifest, in HOSTS.md and in the
+ * README while `holt integrate` wrote it nothing at all.
+ *
+ * This is deliberately a NARROW, LINE-ORIENTED merge rather than a TOML parser. A user's
+ * config.toml holds their model settings, approval policy and sandbox rules; round-tripping it
+ * through a hand-written parser risks losing a key holt does not understand, and losing a
+ * sandbox setting is a security regression holt has no business causing. So: find the
+ * `[mcp_servers.holt]` table if it exists, replace exactly that block, and otherwise append.
+ * Every other byte of the file is passed through untouched.
+ */
+export function tomlWithHoltServer(existing, bin = 'holt') {
+  const [cmd, ...prefix] = String(bin).trim().split(/\s+/);
+  const args = [...prefix, 'mcp'];
+  const block = `[mcp_servers.holt]\n`
+    + `command = ${tomlStr(cmd)}\n`
+    + `args = [${args.map(tomlStr).join(', ')}]\n`;
+
+  const src = String(existing ?? '');
+  const lines = src.split('\n');
+  // A table header ends where the NEXT header begins — that span is holt's block and nothing else.
+  const start = lines.findIndex((l) => /^\s*\[mcp_servers\.holt\]\s*$/.test(l));
+  if (start === -1) {
+    const sep = src.length === 0 || src.endsWith('\n\n') ? '' : src.endsWith('\n') ? '\n' : '\n\n';
+    return `${src}${sep}${block}`;
+  }
+  let end = start + 1;
+  while (end < lines.length && !/^\s*\[/.test(lines[end])) end++;
+  // Rebuilt with the SAME trailing shape it was found in. Dropping the final newline made
+  // `integrate` non-idempotent — running it twice produced two different files — and integrate
+  // is documented as idempotent because agents and CI run it repeatedly.
+  const merged = [...lines.slice(0, start), ...block.trimEnd().split('\n'), ...lines.slice(end)]
+    .join('\n');
+  return merged.endsWith('\n') ? merged : `${merged}\n`;
 }
 
 /**
@@ -231,10 +336,33 @@ export async function installMcp(repoRoot, {
       continue;
     }
 
+    // TOML hosts (Codex CLI) merge textually, preserving every setting holt does not understand.
+    if (t.format === 'toml') {
+      let existing = '';
+      let hadFile = true;
+      try {
+        existing = await fs.readFile(t.file, 'utf8');
+      } catch {
+        hadFile = false;
+        if (t.scope === 'user') {
+          results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'skipped (no user config)' });
+          continue;
+        }
+      }
+      const had = /^\s*\[mcp_servers\.holt\]\s*$/m.test(existing);
+      await fs.mkdir(path.dirname(t.file), { recursive: true });
+      await fs.writeFile(t.file, tomlWithHoltServer(existing, bin), 'utf8');
+      results.push({
+        adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+        action: !hadFile ? 'created' : had ? 'updated' : 'added',
+      });
+      continue;
+    }
+
     let cfg = {};
     let exists = true;
     try {
-      cfg = JSON.parse(await fs.readFile(t.file, 'utf8'));
+      cfg = JSON.parse(stripJsonComments(await fs.readFile(t.file, 'utf8')));
     } catch {
       exists = false;
       // Project scope: creating the file is the point — it is how you wire a repo.
@@ -246,6 +374,9 @@ export async function installMcp(repoRoot, {
       }
     }
 
+    // Amp's map lives under the DOTTED top-level key `amp.mcpServers` — which is one literal
+    // key containing a dot, not a nested path. Writing it as a nested object produces a config
+    // Amp silently ignores, so the key is used verbatim exactly as every other host's is.
     cfg[t.key] ??= {};
     const already = !!cfg[t.key].holt;
     cfg[t.key].holt = mcpServerEntry(bin, t.shape);
@@ -258,6 +389,57 @@ export async function installMcp(repoRoot, {
     });
   }
   return results;
+}
+
+/* ---------------------------------------------------------------------- Cursor ---- */
+
+/**
+ * Cursor's deny hook, from Cursor's own current documentation.
+ *
+ * This is the third host where holt BLOCKS deterministically rather than advising, and it is the
+ * one with the widest reach. It was not shipped before for a stated and correct reason — "holt
+ * ships a guessed hook format for none of them, because a wrong hook is worse than none" — and
+ * the schema below is no longer a guess: .cursor/hooks.json, version 1, `beforeShellExecution`,
+ * blocked by a stdout object carrying `permission: "deny"`.
+ *
+ * beforeShellExecution is the right event and the only one needed: every command holt refuses is
+ * a shell command. Hooking more events would put holt in the critical path of file reads and
+ * prompt submissions for no additional protection.
+ */
+export function cursorHooks(bin = 'holt') {
+  return {
+    version: 1,
+    hooks: {
+      beforeShellExecution: [
+        { command: `${bin} hook pre-tool-use --host cursor`, timeout: 120 },
+      ],
+    },
+  };
+}
+
+export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
+  const file = path.join(repoRoot, '.cursor', 'hooks.json');
+  let cfg = {};
+  let created = true;
+  try {
+    cfg = JSON.parse(stripJsonComments(await fs.readFile(file, 'utf8')));
+    created = false;
+  } catch { /* new file */ }
+
+  cfg.version ??= 1;
+  cfg.hooks ??= {};
+  const list = Array.isArray(cfg.hooks.beforeShellExecution) ? cfg.hooks.beforeShellExecution : [];
+  // Never duplicate holt's own entry, and never disturb a hook the user put there.
+  const mine = (h) => typeof h?.command === 'string' && /\bholt\b.*hook\s+pre-tool-use/.test(h.command);
+  const already = list.some(mine);
+  cfg.hooks.beforeShellExecution = [
+    ...list.filter((h) => !mine(h)),
+    { command: `${bin} hook pre-tool-use --host cursor`, timeout: 120 },
+  ];
+
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+  return { adapter: 'cursor', path: file, created, action: created ? 'installed' : already ? 'updated' : 'added' };
 }
 
 /* ------------------------------------------------------------------ Claude Code ---- */
@@ -595,6 +777,8 @@ export async function integrate(repoRoot, {
   results.push(...await installMcp(repoRoot, { bin, home, scope, hosts: present }));
 
   if (present.includes('claude-code')) results.push(await installClaudeCode(repoRoot, { bin }));
+  // Cursor blocks deterministically now that its hook schema is confirmed rather than guessed.
+  if (present.includes('cursor')) results.push(await installCursorHooks(repoRoot, { bin }));
   if (present.includes('opencode')) results.push(await installOpenCode(repoRoot, { bin }));
   results.push(await installGitHooks(repoRoot, { bin }));
 
@@ -610,6 +794,35 @@ export async function integrate(repoRoot, {
  * generic:     the neutral verdict itself, plus an exit code the caller can branch on.
  */
 export function formatVerdict(verdict, { host = 'generic', eventName = 'PreToolUse' } = {}) {
+  // Cursor: .cursor/hooks.json, beforeShellExecution. Its own documented block signal is a
+  // stdout object with `permission`, and the two message fields are separate on purpose — the
+  // user sees why, and the AGENT is told what to do instead, which is what stops it retrying
+  // the same destruction with a different verb.
+  if (host === 'cursor') {
+    if (verdict.decision === 'deny') {
+      return {
+        permission: 'deny',
+        userMessage: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.',
+        agentMessage: verdict.reason ?? 'holt refused this command.',
+      };
+    }
+    // Cursor has no 'ask' state here; the honest mapping for "holt could not verify" is to
+    // surface it as a denial with the reason, never a silent allow.
+    if (verdict.decision === 'ask') {
+      return { permission: 'deny', userMessage: verdict.reason, agentMessage: verdict.reason };
+    }
+    return { permission: 'allow' };
+  }
+
+  // Devin CLI (formerly Windsurf): .devin/hooks.v1.json, PreToolUse. Its documented block signal
+  // is {"decision":"block","reason":...}.
+  if (host === 'devin') {
+    if (verdict.decision === 'deny' || verdict.decision === 'ask') {
+      return { decision: 'block', reason: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.' };
+    }
+    return {};
+  }
+
   if (host === 'claude-code') {
     const out = { hookEventName: eventName, permissionDecision: verdict.decision };
     if (verdict.reason) out.permissionDecisionReason = verdict.reason;

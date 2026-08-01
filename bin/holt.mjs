@@ -91,7 +91,7 @@ AGENT INTEGRATION
   mcp                 run as an MCP server over stdio
   hook <event>        hook entry point; reads the host event as JSON on stdin
                       events: pre-tool-use · session-start · user-prompt-submit
-                      --host claude-code|generic   --command <cmd>  (bypass stdin)
+                      --host claude-code|cursor|devin|generic   --command <cmd>
                       --autoprotect: session-start also locks at-risk workstreams first
                       (holt integrate wires this — zero-touch protection at every session)
 

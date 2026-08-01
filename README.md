@@ -6,7 +6,7 @@
 
 **You ran a dozen agents overnight. holt tells you what each one actually made, which ones<br>collide, and which are safe to delete — and it stops an agent deleting work that exists nowhere else.**
 
-[![tests](https://img.shields.io/badge/tests-445%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+[![tests](https://img.shields.io/badge/tests-451%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
 [![mutation score](https://img.shields.io/badge/mutation%20score-39%2F39%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
@@ -210,7 +210,7 @@ $ holt integrate
 
 holt knows ~20 agent hosts and tells you exactly what protection each gets, because "works everywhere" would be a lie:
 
-- **Deterministic blocking (a destructive command is refused before it runs):** Claude Code and OpenCode today — the two adapters holt has *verified*. Several more hosts (Cursor, Codex, Gemini, Cline, Copilot, Crush, Amp, Goose, Factory, Junie) *support* a deny hook and get MCP + advisory now, with verified deny adapters landing per host — holt ships a guessed hook format for none of them, because a wrong hook is worse than none.
+- **Deterministic blocking (a destructive command is refused before it runs):** Claude Code and OpenCode are *verified live* — holt was driven against the real host and observed to deny. **Cursor** now also blocks, via `.cursor/hooks.json` written to Cursor's own published `beforeShellExecution` schema; that adapter is written from documentation rather than driven live, and `holt hosts` says so rather than letting it borrow the credibility of a demonstrated one. Codex, Gemini, Cline, Copilot, Crush, Amp, Factory and Junie *support* a deny hook and get MCP + advisory now — holt still ships a guessed hook format for none of them, because a wrong hook is worse than none.
 - **MCP + advisory:** any MCP-capable agent can call holt's tools and reads its AGENTS.md guidance.
 - **The universal floor needs no host at all:** git's own worktree lock refuses a `--force` whoever tries, and a git pre-commit hook fires regardless of what wrote the diff.
 - **Cloud/ephemeral agents (Google Jules, Replit Agent, Devin cloud) — stated plainly:** the worktree lock does **not** apply there (no local worktree), so holt reaches them only through advisory AGENTS.md. See [HOSTS.md](HOSTS.md).
@@ -227,7 +227,7 @@ Every optional dependency degrades **loudly**: `holt doctor` shows exactly what'
 
 ## The test suite attacks itself
 
-445 tests, and the interesting ones are the hostile ones:
+451 tests, and the interesting ones are the hostile ones:
 
 - **39/39 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
@@ -248,7 +248,7 @@ because a claim you cannot back is worse than a gap you name.
 
 | Surface | How it was verified |
 |---|---|
-| Core scan, safety, actions, CLI | 445 tests + 39/39 deliberate-defect mutation kills, run on every commit |
+| Core scan, safety, actions, CLI | 451 tests + 39/39 deliberate-defect mutation kills, run on every commit |
 | Linux / macOS / Windows core | CI matrix runs the safety classifier, detection, CLI-as-binary, actions and the invariant fuzzer on all three |
 | Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
 | OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |

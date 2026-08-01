@@ -439,9 +439,24 @@ test('HOSTS: the manifest is well-formed and holt is honest about strength', asy
     if (h.env === 'cloud') assert.notEqual(h.strength, 'block', `${h.id}: a cloud host must not claim blocking`);
     assert.ok(strengthLabel(h).length > 0);
   }
-  // Only the two VERIFIED adapters claim 'block'; nothing else overclaims.
+  // TWO GRADES OF "BLOCKING", AND THE DIFFERENCE IS LOAD-BEARING.
+  //
+  // `verifiedLive` means holt has been DRIVEN against the real host and observed to deny. Only
+  // Claude Code and OpenCode have been. Cursor's adapter is written from Cursor's own published
+  // hook schema — better than the guess this project has always refused to ship, and still not
+  // the same claim. Collapsing the two would let a documentation-derived adapter inherit the
+  // credibility of a demonstrated one, which is the overclaim this test exists to stop.
   const blocking = HOSTS.filter((h) => h.strength === 'block').map((h) => h.id).sort();
-  assert.deepEqual(blocking, ['claude-code', 'opencode'], 'only verified adapters may claim blocking');
+  const live = HOSTS.filter((h) => h.strength === 'block' && h.verifiedLive === true).map((h) => h.id).sort();
+  assert.deepEqual(live, ['claude-code', 'opencode'],
+    'only adapters actually driven against the real host may claim VERIFIED blocking');
+  for (const h of HOSTS.filter((x) => x.strength === 'block')) {
+    assert.equal(typeof h.verifiedLive, 'boolean',
+      `${h.id} claims blocking without stating whether it has been verified live`);
+    assert.match(h.note, /verified|not guessed|deterministic/i,
+      `${h.id} claims blocking but its note does not say what that claim rests on`);
+  }
+  assert.ok(blocking.length >= live.length, 'sanity: verified blocking is a subset of blocking');
   assert.match(CLOUD_CAVEAT, /do not apply to cloud/i, 'the cloud limit must be stated plainly');
 });
 
@@ -453,7 +468,9 @@ test('HOSTS: hostsReport marks what is detected and never claims cloud blocking'
 
   await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
   const rep = await hostsReport(dir, home);
-  assert.ok(rep.counts.blocking === 2, 'exactly two blocking adapters today');
+  // Counts blocking adapters, of which only a subset has been driven live — see the manifest
+  // test above for why the two grades are kept apart.
+  assert.ok(rep.counts.blocking >= 2, `at least the two verified adapters block: ${rep.counts.blocking}`);
   assert.ok(rep.detectedHere.includes('Claude Code'), 'a real marker is detected');
   const cloud = rep.hosts.filter((h) => h.env === 'cloud');
   assert.ok(cloud.length >= 3, 'the cloud segment is enumerated');
