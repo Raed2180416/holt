@@ -405,12 +405,15 @@ function optionFlags() {
  */
 export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400, languageForce = null } = {}) {
   const result = new Map();
-  if (relPaths.length === 0) return result;
+  if (relPaths.length === 0) { result.failed = []; return result; }
 
   if (!_inProbe) await ensureCompat(); // close this toolchain's gaps before extracting anything
+  // Files whose extraction ERRORED. Carried on the result so every caller can distinguish
+  // "no symbols here" from "could not look", which are the same value and opposite meanings.
+  const failed = new Set();
   const usable = await tagWorthy(cwd, relPaths);
   for (const p of relPaths) result.set(p, []); // unusable paths are "no symbols", never "unscanned"
-  if (usable.length === 0) return result;
+  if (usable.length === 0) { result.failed = []; return result; }
 
   // argv has an OS limit; chunk so a workstream touching thousands of files still works.
   const chunks = [];
@@ -444,11 +447,17 @@ export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400,
           // lands in the system temp filesystem, which on many Linux boxes is RAM-backed.
           env: { ...process.env, TMPDIR: scratchDir() },
         },
-        (err, out) => resolve(err && !out ? '' : String(out ?? '')),
+        // A FAILURE MUST NOT LOOK LIKE AN EMPTY ANSWER. Measured: a file containing a real symbol
+        // returns [] under a 1ms timeout — byte-identical to a file that genuinely has none. That
+        // silence then reads as "these two workstreams share nothing", so a timed-out extraction
+        // under CI load became a confident "no duplicates" and a worktree that looked disposable.
+        // The error is carried out of here so callers can say UNMEASURED instead of "nothing".
+        (err, out) => resolve({ text: err && !out ? '' : String(out ?? ''), err: err ?? null }),
       );
     });
+    if (stdout.err) for (const f of group) failed.add(f);
 
-    for (const line of stdout.split('\n')) {
+    for (const line of stdout.text.split('\n')) {
       if (!line.startsWith('{')) continue;
       let tag;
       try { tag = JSON.parse(line); } catch { continue; }
@@ -467,6 +476,7 @@ export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400,
     for (const f of group) if (!result.has(f)) result.set(f, []);
   }
 
+  result.failed = [...failed];
   return result;
 }
 
@@ -742,6 +752,9 @@ export function symbolKey(sym) {
 /** Symbols for files as they exist on disk in `dir`. */
 export async function symbolsOnDisk(dir, relPaths, backend) {
   const result = new Map();
+  // Aggregated from every ctagsBatch below. An extraction that ERRORED is not an empty answer,
+  // and callers must be able to tell the difference — see the note in ctagsBatch.
+  const failed = new Set();
   if (relPaths.length === 0) return result;
   // Resolve the toolchain's gaps BEFORE anything reads _extraFlags. forcedName() below decides
   // whether an ambiguous file is forced to `FSharp` or to holt's private `HoltFSharp`, and that
@@ -772,6 +785,7 @@ export async function symbolsOnDisk(dir, relPaths, backend) {
     }
     for (const [lang, files] of byLang) {
       const m = await ctagsBatch(dir, files, { languageForce: forcedName(lang) });
+      for (const f of m.failed ?? []) failed.add(f);
       for (const [f, syms] of m) result.set(f, syms);
     }
   } else {
@@ -780,6 +794,7 @@ export async function symbolsOnDisk(dir, relPaths, backend) {
 
   if (backend.kind === 'ctags' && ctagsFiles.length) {
     const m = await ctagsBatch(dir, ctagsFiles);
+    for (const f of m.failed ?? []) failed.add(f);
     for (const [f, syms] of m) result.set(f, syms);
   } else if (ctagsFiles.length) {
     await pmap(ctagsFiles, async (p) => {
@@ -794,6 +809,7 @@ export async function symbolsOnDisk(dir, relPaths, backend) {
   }, 16);
 
   for (const p of relPaths) if (!result.has(p)) result.set(p, []);
+  result.failed = [...failed];
   return result;
 }
 

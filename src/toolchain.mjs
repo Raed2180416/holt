@@ -22,9 +22,11 @@
  * because a tool whose job is protecting your work must not execute bytes it cannot identify.
  *
  * WHY THE DOWNLOADER LIVES IN bin/, NOT HERE. holt claims the free tool makes no network calls,
- * and that claim is enforced absolutely: CI greps src/ for fetch/http/net and fails the build on
- * a single hit. That absoluteness is the point — anyone can verify it in one command, with no
- * trust in our judgement about which calls are benign. So this file holds only the parts that
+ * and that claim is enforced absolutely by test/unit/no-network.test.mjs, which asserts src/
+ * imports no network-capable module and contains no call site — a capability check, not a text
+ * search, so it cannot be satisfied by an allowlist of "approved" hosts. That absoluteness is the
+ * point: anyone can verify it in one command, with no trust in our judgement about which calls are
+ * benign. So this file holds only the parts that
  * touch no network (where the binary lives, putting it on PATH, what this platform would need),
  * and bin/install-ctags.mjs holds the fetch. The analysis engine stays provably offline; the
  * capability is not conceded.

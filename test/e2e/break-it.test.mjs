@@ -413,3 +413,66 @@ test('NEVER-WORSE: ordinary build output under a gitignored directory stays disp
   assert.equal(verdict(report, 'build').safe, true,
     'node_modules/ and dist/ are recognised as generated and must not block cleanup');
 });
+
+test('ATTACK: a symbol extraction that FAILED must not read as "no symbols"', async (t) => {
+  // MEASURED, and the mechanism was confirmed before it was fixed: `ctagsBatch` resolved a
+  // timed-out extraction to an empty string, so a file containing a real symbol came back with
+  // ZERO — byte-identical to a file that genuinely has none. Nothing downstream could tell the
+  // difference.
+  //
+  // The consequence was not cosmetic. Under load (the full suite running many files in parallel)
+  // extraction intermittently timed out, "could not look" became "shares nothing with anyone",
+  // and a worktree holding work found nowhere else was reported provably disposable. It surfaced
+  // as a flaky test — `duplicate pair alpha-1/beta-1 not found`, 2042ms on the failing run versus
+  // ~700ms passing — which is exactly how a silent wrong answer disguises itself as a bad test.
+  //
+  // This asserts the DISTINCTION at the extraction layer, where it is deterministic. The
+  // downstream refusal is asserted by the verdict test below.
+  const { ctagsBatch, resolveBackend } = await import('../../src/symbols.mjs');
+  if ((await resolveBackend()).kind !== 'ctags') return;
+
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-unmeasured-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'real.js'), 'export function REAL_SYMBOL_HERE() {}\n');
+
+  // Premise: with a normal timeout the symbol IS found. Without this the test could pass because
+  // extraction never worked at all.
+  const ok = await ctagsBatch(dir, ['real.js'], { timeout: 60_000 });
+  assert.equal((ok.get('real.js') ?? []).length, 1, 'PRECONDITION: the symbol must be findable');
+  assert.deepEqual(ok.failed, [], 'a successful extraction reports no failures');
+
+  // A timeout must be REPORTED, not silently returned as an empty answer.
+  const timedOut = await ctagsBatch(dir, ['real.js'], { timeout: 1 });
+  assert.deepEqual(timedOut.failed, ['real.js'],
+    'a failed extraction must name the files it could not read — returning [] makes it ' +
+    'indistinguishable from a file that genuinely has no symbols');
+});
+
+test('ATTACK: a workstream whose symbols could not be read is NOT called disposable', async (t) => {
+  // The downstream half. An unreadable workstream is the same class as a gitignored one: holt did
+  // not have the evidence, so it must refuse the verdict rather than issue a confident one.
+  const fx = await newRepo('unmeasured-verdict');
+  t.after(() => fx.cleanup());
+  await fx.write('base.txt', 'base\n');
+  await fx.commit('base');
+  const wt = await fx.worktree('unreadable');
+  await fx.write('work.js', 'export function ONLY_COPY() {}\n', wt);
+
+  const report = await inspect(fx.root);
+  const v = verdict(report, 'unreadable');
+  // Simulate what a timed-out extraction leaves behind, then re-derive the verdict.
+  const { analyze } = await import('../../src/analyze.mjs');
+  const { scan } = await import('../../src/scan.mjs');
+  const { discover } = await import('../../src/discover.mjs');
+  const scanned = await scan(await discover(fx.root, {}), {});
+  for (const w of scanned.workstreams) {
+    if (w.id.endsWith('unreadable')) { w.symbolsUnmeasured = ['work.js']; w.added = []; w.addedKeys = []; }
+  }
+  const degraded = await analyze(scanned, {});
+  const dv = degraded.safe.find((s) => s.id.endsWith('unreadable'));
+  assert.equal(dv.safe, false,
+    `a workstream holt could not read symbols from must not be called disposable: ${JSON.stringify(dv)}`);
+  assert.match(JSON.stringify(dv), /could not read symbols/,
+    'and the refusal must say WHY, so the user knows it is a measurement gap, not a finding');
+  assert.ok(v, 'sanity: the fixture produced a verdict at all');
+});

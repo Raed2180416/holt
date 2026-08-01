@@ -370,6 +370,12 @@ export async function scan(disc, opts = {}) {
         w.added = diffSymbols(headSyms, baseSyms);
         w.addedKeys = [...new Set(w.added.map(symbolKey))];
         w.stats.addedSymbols = w.addedKeys.length;
+        // AN EXTRACTION THAT FAILED IS NOT AN EMPTY ANSWER. Measured: a file with a real symbol
+        // comes back with zero under a timeout, byte-identical to a file that has none — so under
+        // load, "could not look" became a confident "shares nothing with anyone", and a worktree
+        // holding unique work looked disposable. Recording WHICH files could not be read lets the
+        // verdict say unmeasured instead of nothing; silence must never read as a negative result.
+        w.symbolsUnmeasured = headSyms.failed ?? [];
       },
       Math.min(opts.concurrency ?? 8, 6),
     );

@@ -215,6 +215,19 @@ export function safeToDelete(scanResult, unique = null) {
       reasons.push(`${ignoredCount} gitignored file(s) holt cannot verify${sample ? ` (e.g. ${sample})` : ''}`);
     }
 
+    // A SYMBOL EXTRACTION THAT FAILED IS NOT A CLEAN BILL OF HEALTH, and this is the same class as
+    // the gitignored case above: holt did not have the evidence, so it must not claim the verdict.
+    // Measured: under a timeout, a file containing a real symbol yields ZERO symbols — identical
+    // to a file that has none. Nothing downstream could tell the difference, so an extraction that
+    // timed out under load became "shares nothing with anyone", and a worktree holding work found
+    // nowhere else was reported provably disposable. Refusing costs one manual check; the silence
+    // cost the file.
+    const unmeasured = w.symbolsUnmeasured ?? [];
+    if (unmeasured.length > 0) {
+      const sample = unmeasured.slice(0, 3).join(', ');
+      reasons.push(`${unmeasured.length} file(s) holt could not read symbols from${sample ? ` (e.g. ${sample})` : ''}`);
+    }
+
     return {
       id: w.id,
       path: w.path,
@@ -222,9 +235,10 @@ export function safeToDelete(scanResult, unique = null) {
       safe: reasons.length === 0,
       // 'unverifiable' is distinct from 'measured': everything git CAN see is clean, but ignored
       // content means holt did not have the evidence to call it disposable.
-      confidence: ignoredCount > 0 && reasons.length === 1
+      confidence: (ignoredCount > 0 || unmeasured.length > 0) && reasons.length === 1
         ? 'unverifiable'
         : scanResult.strictReadOnly ? 'approximate' : 'measured',
+      unmeasuredFiles: unmeasured.length ? unmeasured.slice(0, 10) : undefined,
       ignoredFiles: ignoredCount ? (w.ignored.files ?? []).slice(0, 10) : undefined,
       reasons: reasons.length ? reasons : ['no committed delta, no uncommitted changes, no unique symbols'],
     };
