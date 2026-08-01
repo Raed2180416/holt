@@ -22,7 +22,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, gitOk, pmap, authorEnv } from './git.mjs';
 import { discover, isHoltLock, unquotePorcelain } from './discover.mjs';
-import { underOrEqualAsync, relativeWithinAsync } from './paths.mjs';
+import { underOrEqualAsync, relativeWithinAsync, canonicalPath, samePathSync } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
@@ -198,11 +198,14 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
 async function lockState(wtPath, cwd) {
   const r = await git(['worktree', 'list', '--porcelain'], { cwd });
   if (r.code !== 0) return { locked: false, reason: '' };
-  const target = path.resolve(wtPath);
+  // Canonicalised, not path.resolve'd. git reports /private/var/... on macOS while the caller
+  // holds /var/...; a raw comparison finds no worktree, lockState reports "not locked", and
+  // protect/unprotect/clean silently act as though a lock that exists is not there.
+  const target = await canonicalPath(wtPath);
   let current = null;
   for (const line of r.stdout.split('\n')) {
-    if (line.startsWith('worktree ')) current = path.resolve(line.slice(9));
-    else if (line.startsWith('locked') && current === target) {
+    if (line.startsWith('worktree ')) current = await canonicalPath(line.slice(9));
+    else if (line.startsWith('locked') && current && samePathSync(current, target)) {
       const raw = line.length > 6 ? line.slice(7) : '';
       return { locked: true, reason: unquotePorcelain(raw) };
     }

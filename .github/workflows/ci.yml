@@ -34,7 +34,16 @@ jobs:
       # scan and the no-git-identity rescue path. Every one of those is platform-sensitive (path
       # separators, git's own behaviour, how a shell quotes), and they were being proven on Linux
       # only while shipping to macOS and Windows users.
-      - run: node --test test/unit/safety.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs test/e2e/integration.test.mjs
+      # THE WHOLE SUITE, not a hand-picked list. The list this replaced named 15 files while the
+      # suite had 39, so 24 of them — including the MCP protocol, the TUI, the graph export, the
+      # journal, the team layer and the monster round — were proven on Linux only while shipping
+      # to macOS and Windows users. A hand-maintained list of "the portable ones" is a thing that
+      # goes stale silently: every file added since was excluded by default, which is the wrong
+      # default for the platform-sensitive half of a tool that manipulates paths for a living.
+      #
+      # Tests needing an optional backend (jj, opencode) skip loudly and are counted as skips, so
+      # running everything here costs coverage nothing and gains the 24.
+      - run: npm test
       - run: node bin/holt.mjs doctor --json
       - name: the tool must run against its own repository on this OS
         run: node bin/holt.mjs status --json

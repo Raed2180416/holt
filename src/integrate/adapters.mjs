@@ -330,8 +330,19 @@ export async function installMcp(repoRoot, {
 } = {}) {
   const results = [];
   for (const t of mcpTargets(repoRoot, home, { scope })) {
-    // Only wire hosts the user actually has, when we know which those are.
-    if (hosts && !hosts.some((h) => t.host.startsWith(h.replace('-cli', '')) || h.startsWith(t.host))) {
+    // DETECTION GATES USER SCOPE, NOT PROJECT SCOPE — which is what this file has claimed in
+    // three separate comments ("AGENTS.md and project MCP config go in unconditionally") while
+    // doing the opposite. The gate applied to every row, so `holt integrate` in a repository
+    // where the user has not yet installed, say, Codex wrote nothing for Codex — and the whole
+    // point of a project-scope config is that it is committed and works for the NEXT person, who
+    // does have it. A repo wired for six agents by one developer is the feature.
+    //
+    // The asymmetry is deliberate and is the same one everywhere else here:
+    //   project scope  lives in the repository, is reviewed, and is the artefact being created
+    //   user scope     is somebody's machine — writing there for a tool they do not run is
+    //                  indistinguishable from installing software they did not ask for
+    if (t.scope === 'user' && hosts
+      && !hosts.some((h) => t.host.startsWith(h.replace('-cli', '')) || h.startsWith(t.host))) {
       results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'skipped (host not detected)' });
       continue;
     }

@@ -29,7 +29,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { underOrEqualAsync } from './paths.mjs';
+import {
+  underOrEqualAsync, canonicalPath, foldCase, CASE_INSENSITIVE_FS,
+  samePathSync, underOrEqualSync,
+} from './paths.mjs';
 import { discover } from './discover.mjs';
 import { scan, atRiskFiles, atRiskFromStatus } from './scan.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
@@ -329,47 +332,21 @@ async function findWorkstream(report, target, cwd) {
  * case-insensitive. realpath fails on a path that does not exist yet — that is fine and
  * deliberate: fall back to resolve, because a target that does not exist cannot be a worktree.
  */
-const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
-
-async function canonicalPath(p) {
-  const abs = path.resolve(p);
-  try { return await fs.realpath(abs); } catch { /* does not exist yet — resolve its ancestry */ }
-
-  // A PATH THAT DOES NOT EXIST STILL HAS A CANONICAL LOCATION, and returning the raw string here
-  // was a live false positive: `mv src/a.js src/b.js` — a rename inside one worktree, which loses
-  // nothing — was DENIED on macOS and Windows. The source exists so it canonicalised to
-  // /private/var/..., while the destination does not exist yet so it stayed /var/..., they landed
-  // in different worktrees, and an ordinary refactor looked like a move OUT. A guard that blocks
-  // renaming a file is uninstalled the same day.
-  //
-  // So resolve the nearest ANCESTOR that does exist — a destination's parent directory almost
-  // always does — and re-append the rest. Only a path with no existing ancestor at all falls back
-  // to the raw form, and on that path there is nothing to compare it against anyway.
-  const parts = [];
-  let dir = abs;
-  for (let i = 0; i < 64; i++) {
-    const parent = path.dirname(dir);
-    if (parent === dir) break;            // reached the root without finding anything real
-    parts.unshift(path.basename(dir));
-    dir = parent;
-    try {
-      return path.join(await fs.realpath(dir), ...parts);
-    } catch { /* keep walking up */ }
-  }
-  return abs;
-}
-
-const foldCase = (p) => (CASE_INSENSITIVE_FS ? p.toLowerCase() : p);
-
-/** a and b are the same directory. */
-const samePath = (a, b) => foldCase(a) === foldCase(b);
-
-/** `child` is `parent` or lives underneath it. */
-const underOrEqual = (child, parent) => {
-  const c = foldCase(child);
-  const q = foldCase(parent);
-  return c === q || c.startsWith(q.endsWith(path.sep) ? q : q + path.sep);
-};
+// THE HELPERS BELOW LIVED HERE AS A SECOND COPY, and a second copy is how this class survives.
+//
+// src/paths.mjs is the single source of truth for path comparison, and the guard test that keeps
+// it that way greps src/ for RAW comparisons — so a faithful re-implementation sitting in another
+// file was invisible to it. Two copies of a rule drift; the one nobody is watching drifts first,
+// and every instance of this class in this project has been invisible on Linux and live on macOS
+// and Windows.
+//
+// The reasoning that produced them is preserved in paths.mjs, including the case that made
+// canonicalPath resolve the nearest existing ANCESTOR: `mv src/a.js src/b.js`, a rename inside one
+// worktree that loses nothing, was DENIED on macOS and Windows because the source existed and
+// canonicalised to /private/var/... while the destination did not exist yet and stayed /var/...,
+// so they landed in different worktrees and an ordinary refactor looked like a move OUT.
+const samePath = samePathSync;
+const underOrEqual = underOrEqualSync;
 
 /**
  * Per-assessCommand scratch. `git worktree list` and one `git status` per worktree are asked for

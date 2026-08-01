@@ -105,3 +105,22 @@ export async function relativeWithinAsync(root, abs) {
   const [a, b] = await Promise.all([canonicalPath(root), canonicalPath(abs)]);
   return path.relative(a, b).split(path.sep).join('/');
 }
+
+/**
+ * The SYNCHRONOUS forms, for callers that have ALREADY canonicalised both sides.
+ *
+ * They exist so src/agent.mjs can stop keeping its own private copy of this logic. A second copy
+ * of a rule drifts, and the guard test that keeps path comparison honest greps for the RAW form —
+ * so a faithful re-implementation in another file was invisible to it, which is precisely how
+ * this class keeps surviving.
+ *
+ * These do NOT canonicalise. Handing them raw paths is the original bug; the async forms above
+ * are what you want unless you are comparing two values you canonicalised yourself.
+ */
+export const samePathSync = (a, b) => foldCase(a) === foldCase(b);
+
+export const underOrEqualSync = (child, parent) => {
+  const c = foldCase(child);
+  const q = foldCase(parent);
+  return c === q || c.startsWith(q.endsWith(path.sep) ? q : q + path.sep);
+};
