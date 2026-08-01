@@ -264,7 +264,7 @@ because a claim you cannot back is worse than a gap you name.
 | Codex, Copilot CLI, Cline, Amp, Goose, Factory, Junie | They read AGENTS.md and/or speak MCP, both of which holt writes correctly | We have not driven each host live; their *deny hooks* are not wired (see [HOSTS.md](HOSTS.md)) |
 | jj (Jujutsu) backend | Implemented and unit-tested against a real jj repo | Not exercised across a long multi-workspace session |
 | Windows *end-to-end* agent flows | The core suite passes on Windows in CI | Hooks + MCP under Windows agent hosts are untested by us |
-| Very large repos (10k+ files, 200+ worktrees) | Scans are linear and bounded; measured to 1000 worktrees synthetically | Not measured on a real repository of that size |
+| Very large repos (10k+ files, 200+ worktrees) | **Now measured on real repositories**: 800/800 verdicts correct on redis at 800 worktrees | Timings are **super-linear**, not linear — 16x worktrees costs 37x time, and Linux (94k files) takes 16 min with symbols vs 886 ms with `--no-symbols`. See BENCHMARKS §1. |
 | git-LFS, submodules, sparse-checkout | holt reads git's own output, which handles these | No dedicated test fixture yet |
 
 **Different on jj** — worth knowing before you adopt it there: Jujutsu auto-snapshots the working
@@ -282,7 +282,7 @@ therefore to holt.
 ## Honest boundaries
 
 - **P4 in general remains unsolved.** `verify` decides a *specific suspected pair* empirically; it does not certify compatibility, and the wording is asserted by test.
-- **1000+-worktree scale is unmeasured on a real repository** — the figure published is from a generated fixture.
+- **Scan time is super-linear in worktree count, and file count is worse.** Correctness holds at real scale (800/800 on redis), but a repository the size of the Linux kernel is not usable with symbol extraction today — `--no-symbols` is the working answer there. Measured, with the exact reproduction, in BENCHMARKS §1. The mechanism behind the worktree-count growth is not yet identified.
 
 ## Quick start
 

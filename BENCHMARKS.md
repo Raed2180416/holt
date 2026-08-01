@@ -23,12 +23,37 @@ that got faster by skipping work fails the run outright, which would void the sp
 | 300 | 1.33 s | 4.4 ms | 300/300 correct |
 | 1000 | 5.44 s | 5.4 ms | **1000/1000 correct** |
 
-Time grows linearly in N, not worse. Reproduce: `node eval/bench.mjs 1000` (first argument is N).
+Reproduce: `node eval/bench.mjs 1000` (first argument is N).
 
-**Means:** verdict correctness does not degrade and scan time scales predictably as worktree count
-grows. **Does not mean:** this composition is synthetic and evenly balanced across four fixed
-categories — it says nothing about correctness on adversarially-shaped repositories; see §2 and §3
-for that.
+### The same measurement on a REAL repository, which contradicts the line above
+
+This section used to end "Time grows linearly in N, not worse." That was measured only on the
+fixture described above — a 50-file base — and it is **false on a real repository**. Measured on
+redis (1,858 files per worktree), with peak RSS captured alongside wall clock:
+
+| N worktrees | wall clock | peak RSS | verdicts |
+|---|---|---|---|
+| 50 | 1.9 s | 240 MB | 50/50 correct |
+| 100 | 5.0 s | 254 MB | 100/100 correct |
+| 200 | 5.8 s | 270 MB | 200/200 correct |
+| 400 | 22.1 s | 307 MB | 400/400 correct |
+| 800 | 71.8 s | 346 MB | **800/800 correct** |
+
+16× the worktrees costs 37× the time. That is **super-linear**, and `--no-symbols` recovers only
+2.6× of it at N=800 (71.8 s → 27.4 s), so symbol extraction is not the majority of the cost —
+something scaling with registered worktree COUNT is, and the exact mechanism is not yet identified.
+
+**File count is the harder wall.** The Linux kernel (94,852 files) with a full-repo diff took
+**16 min 26 s and 1.75 GB RSS**, against 886 ms for the identical diff with `--no-symbols` — a
+1113× cost attributable entirely to ctags at that file count. 50,000 uncommitted small files in an
+otherwise trivial repository took 87.8 s versus 0.3 s. Reproduce: shallow-clone the repository,
+touch every tracked file, and run `holt status --json --include-primary`.
+
+**Means:** verdict correctness does NOT degrade at real scale — 800/800 correct on a real
+repository with real file counts, which is the property that matters most. **Does not mean:** the
+timings scale linearly. They do not, on either axis, and a repository of Linux's size is not
+usable with symbol extraction on today. `--no-symbols` is the working answer there and the
+super-linear worktree-count growth is an open defect, recorded here rather than omitted.
 
 ## 2 · The monster round (worst-case composition)
 
