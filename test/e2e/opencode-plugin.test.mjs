@@ -241,3 +241,49 @@ test('OPENCODE: opencode itself loads the plugin (skips if opencode is absent)',
   assert.match(plugins, /holt\.js/,
     `opencode did not discover the plugin. Resolved plugin config: ${plugins.slice(0, 400)}`);
 });
+
+test('OPENCODE DIALECT: the plugin loads in a repo that is NOT a type:module Node project', async (t) => {
+  // MEASURED FAILURE. The plugin was always emitted as ESM. Node decides a `.js` file's dialect
+  // from the NEAREST package.json, and anything other than `"type": "module"` — a package.json
+  // without the field, or no package.json at all — makes it CommonJS. So in every Python, Go,
+  // Rust and Java repository, and most JS ones, Node threw "Cannot use import statement outside a
+  // module" and the plugin never loaded.
+  //
+  // opencode is one of only TWO hosts where holt blocks deterministically, so half the enforcement
+  // coverage was silently absent while `holt integrate` reported success and the file sat there
+  // looking installed. The worst kind of wrong.
+  //
+  // `.mjs` would be unambiguous and does load — but opencode does not DISCOVER `.mjs` plugins,
+  // measured with a positive control (the same file as holt.js appears in `opencode debug config`
+  // and as holt.mjs does not). So the dialect moves, never the filename.
+  const { installOpenCode } = await import('../../src/integrate/adapters.mjs');
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-cjs-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await installOpenCode(dir, { bin: 'holt' });
+
+  const file = path.join(dir, '.opencode', 'plugins', 'holt.js');
+  const src = await fs.readFile(file, 'utf8');
+  assert.doesNotMatch(src, /^import\s/m,
+    'a repo with no package.json gets CommonJS — ESM syntax there is a load failure, not a style choice');
+  assert.match(src, /module\.exports/, 'and it must export the way CommonJS does');
+
+  // The assertion that matters is that NODE ITSELF loads it, not that the text looks right.
+  const { createRequire } = await import('node:module');
+  const loaded = createRequire(path.join(dir, 'noop.js'))(file);
+  assert.equal(typeof loaded.holt, 'function', 'the plugin must actually load and export its hook');
+});
+
+test('OPENCODE DIALECT: a type:module repo still gets ESM, and still loads', async (t) => {
+  // Never-worse. The repos that worked before must keep working, in the dialect they declare.
+  const { installOpenCode } = await import('../../src/integrate/adapters.mjs');
+  const { pathToFileURL } = await import('node:url');
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-esm-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'package.json'), '{"name":"x","type":"module"}\n');
+  await installOpenCode(dir, { bin: 'holt' });
+
+  const file = path.join(dir, '.opencode', 'plugins', 'holt.js');
+  assert.match(await fs.readFile(file, 'utf8'), /^import\s/m, 'a type:module repo gets ESM');
+  const loaded = await import(pathToFileURL(file).href);
+  assert.equal(typeof loaded.holt, 'function', 'and it must actually load');
+});
