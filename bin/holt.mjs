@@ -416,7 +416,24 @@ async function cmdHook(opts) {
       }).catch(() => {});
     }
     out(JSON.stringify(formatVerdict(verdict, { host: opts.host, eventName: 'PreToolUse' })));
-    process.exit(verdict.decision === 'deny' ? 1 : verdict.decision === 'ask' ? 2 : 0);
+
+    // THE REFUSAL IS SAID THREE WAYS, BECAUSE ONE OF THEM WAS RELYING ON LUCK.
+    //
+    // holt emitted a correct `permissionDecision: "deny"` on stdout and then exited 1. Claude
+    // Code documents exit 1 as a NON-BLOCKING error whose stdout JSON is not parsed; exit 2 as
+    // blocking, read from STDERR; and exit 0 as the case where the JSON decision is honoured.
+    // The guard worked in practice only because this client does read the JSON — the most
+    // important refusal in the product was resting on undocumented behaviour, on the one host
+    // the README calls its reference integration and marks verified live.
+    //
+    // So a denial now carries the verdict in every channel a host might read: the JSON above,
+    // the reason on stderr, and exit 2. That is fail-CLOSED under all three documented readings
+    // rather than correct under one of them. `ask` shares exit 2 deliberately — a host that
+    // cannot express "ask" must stop, not proceed, when holt could not verify what a command does.
+    if (verdict.decision !== 'allow' && verdict.reason) {
+      process.stderr.write(`${verdict.reason}\n`);
+    }
+    process.exit(verdict.decision === 'allow' ? 0 : 2);
   }
 
   if (event === 'session-start' || event === 'user-prompt-submit') {

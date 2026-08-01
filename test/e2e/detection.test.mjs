@@ -635,3 +635,54 @@ test('P1 PRECISION: a machine-local gitignored file cannot manufacture a proven 
   assert.ok(real, 'two worktrees editing the same line must still collide');
   assert.equal(real.mergeTreeConflict, true, 'and it must still be PROVEN by git');
 });
+
+
+test('SECURITY: a repository cannot name a file into a ctags option', async (t) => {
+  // A REPOSITORY CONTROLS ITS OWN FILENAMES, and holt hands them to ctags as bare positional
+  // arguments. `-L` is a legal filename and, passed positionally, is parsed as ctags' own
+  // "read the list of files to scan from this file" option — which consumes the NEXT argument and
+  // opens whatever paths it finds INSIDE it. Reproduced against real ctags 6.2:
+  //
+  //     ctags ... -f - -L app.py
+  //     ctags: Warning: cannot open input file "def ordinary(): pass"
+  //
+  // The CONTENTS of app.py became filenames. Aimed at a file listing a real path, ctags reads a
+  // file outside the batch and its source line comes back in the `pattern` field of the JSON holt
+  // parses. That is content disclosure driven by an attacker-chosen filename, in a tool whose
+  // entire premise is being pointed at repositories written by agents and pull requests.
+  //
+  // `--` is NOT the fix and was tried: ctags rejects it outright with `Unknown option: --`.
+  const { argSafePath } = await import('../../src/symbols.mjs');
+
+  // Anything that could begin an option is neutralised...
+  assert.equal(argSafePath('-L'), './-L');
+  assert.equal(argSafePath('--options=/etc/passwd'), './--options=/etc/passwd');
+  assert.equal(argSafePath('src/a.js'), './src/a.js');
+  // ...and paths that are already unambiguous are left exactly alone, or the fix would break
+  // every absolute path holt passes.
+  assert.equal(argSafePath('/abs/x.js'), '/abs/x.js');
+  assert.equal(argSafePath('./already.js'), './already.js');
+  assert.equal(argSafePath('C:\\win\\x.js'), 'C:\\win\\x.js');
+
+  // END TO END: a worktree containing a file named `-L` must scan without ctags ever being
+  // steered by it, and holt must still extract the real symbols around it.
+  const fx = await newRepo('ctags-argv');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('hostile-name');
+  await fx.write('real.py', 'def REAL_SYMBOL_HERE():\n    pass\n', wt);
+  try {
+    await fx.write('-L', '/etc/hostname\n', wt);
+  } catch {
+    return t.skip('this platform will not create a file named -L');
+  }
+
+  const { report } = await inspectFixture(fx);
+  const row = report.unique.find((u) => u.id === 'hostile-name');
+  assert.ok(row, 'the worktree must still scan');
+
+  // The scan still WORKS — a fix that broke extraction would be its own defect.
+  const all = JSON.stringify(report);
+  assert.match(all, /REAL_SYMBOL_HERE/, 'the genuine symbol beside the hostile filename must still be found');
+  // And nothing from outside the worktree leaked into the report.
+  assert.ok(!/\/etc\/hostname/.test(all), `a path from the hostile file must never reach the report: ${all.slice(0, 300)}`);
+});

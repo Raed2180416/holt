@@ -464,7 +464,7 @@ export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400,
           ...(languageForce ? [`--language-force=${languageForce}`] : []),
           ...CTAGS_EXCLUDES,
           '-f', '-',
-          ...group,
+          ...group.map(argSafePath),
         ],
         {
           cwd,
@@ -489,7 +489,11 @@ export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400,
       let tag;
       try { tag = JSON.parse(line); } catch { continue; }
       if (tag._type !== 'tag' || isNoise(tag)) continue;
-      const file = tag.path;
+      // ctags echoes back the path exactly as it was given, so the `./` that argSafePath adds to
+      // stop a filename being read as an option comes back too. Every caller keys on the ORIGINAL
+      // relative path, so it is stripped here — at the one boundary where ctags' output becomes
+      // holt's data — rather than at each of the call sites that would have to remember.
+      const file = tag.path.startsWith('./') ? tag.path.slice(2) : tag.path;
       if (!result.has(file)) result.set(file, []);
       result.get(file).push({
         name: tag.name,
@@ -872,6 +876,34 @@ async function readTextIfSmall(abs) {
  * Blobs are materialised into a temp directory OUTSIDE the repository — never into the
  * user's tree — so one batched ctags run can cover them all. The temp dir is always removed.
  */
+
+/**
+ * A path that cannot be mistaken for a flag.
+ *
+ * ctags takes its input files as bare positional arguments, and a REPOSITORY controls its own
+ * filenames. A file named `-L` is a legal filename and, handed to ctags positionally, is parsed as
+ * ctags' own "read the list of files to scan from this file" option — which then consumes the NEXT
+ * argument and opens whatever paths it finds INSIDE it. Reproduced against real ctags 6.2:
+ *
+ *     ctags ... -f - -L app.py
+ *     ctags: Warning: cannot open input file "def ordinary(): pass"
+ *
+ * The contents of app.py became filenames. Pointed at a file listing a real path, ctags reads a
+ * file outside the batch entirely and its source line comes back in the `pattern` field of the
+ * JSON holt parses — so this is content disclosure from an attacker-named file, in a tool whose
+ * whole premise is being pointed at repositories written by agents and pull requests.
+ *
+ * `--` IS NOT THE FIX and was tried: ctags rejects it outright with `Unknown option: --`. Prefixing
+ * `./` is, because a leading `.` cannot begin an option and the path still resolves identically.
+ * Absolute paths and Windows drive-qualified paths are already unambiguous and are left alone.
+ */
+export function argSafePath(p) {
+  const s = String(p);
+  if (s.startsWith('/') || s.startsWith('./') || s.startsWith('.\\')) return s;
+  if (/^[A-Za-z]:[\\/]/.test(s) || s.startsWith('\\\\')) return s;   // C:\... and UNC
+  return `./${s}`;
+}
+
 export async function symbolsAtBase(repoRoot, baseOid, relPaths, backend) {
   const result = new Map();
   if (relPaths.length === 0) return result;
