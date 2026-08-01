@@ -1256,3 +1256,37 @@ test('GATE: a command holt cannot READ is never a silent allow', async (t) => {
       `an ordinary command must not be interrupted: ${cmd} -> ${JSON.stringify(v)}`);
   }
 });
+
+
+test('GATE: the INDIRECTION half also knows prose from a command', async () => {
+  // The masking test above covers classifyCommand. indirectVerb did not share it, and the gap
+  // showed up within one commit of the indirection check landing: a `git commit -F` whose heredoc
+  // MESSAGE contained `npm ci` in backticks was refused with "the command name comes from a
+  // substitution or variable". The guard blocked a commit because of prose inside the commit
+  // message.
+  //
+  // Both halves are asserted together from here so they cannot drift apart again — one half
+  // knowing the difference between a command and a mention of one is not enough when either half
+  // can refuse.
+  const { indirectVerb } = await import('../../src/agent.mjs');
+
+  for (const cmd of [
+    "cat > msg.txt <<'EOF'\nsome prose with `npm ci` in backticks\nEOF",
+    'cat > msg.txt <<EOF\nrun $(whoami) later, said the docs\nEOF',
+    "echo 'rm -rf wt/x'",
+    'git commit -m "fixed the `git clean -fd` false positive"',
+  ]) {
+    assert.equal(indirectVerb(cmd), null,
+      `prose is not indirection: ${JSON.stringify(cmd)}`);
+  }
+
+  // ANTI-VACUITY: written OUTSIDE any quoted or heredoc region, the same constructs must still be
+  // flagged, or the masking became the bypass.
+  for (const cmd of [
+    '$(echo rm) -rf ../feature',
+    'x=rm; $x -rf ../feature',
+    'eval "rm -rf ../feature"',
+  ]) {
+    assert.ok(indirectVerb(cmd), `real indirection must still be flagged: ${cmd}`);
+  }
+});

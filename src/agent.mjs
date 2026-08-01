@@ -249,14 +249,14 @@ const DESTRUCTIVE = [
  * A quoted TARGET is deliberately still resolved: `rm -rf "wt/my worktree"` must be caught, so
  * only the position of the VERB is tested, never the whole match.
  */
-export function maskedRegions(command) {
+export function maskedRegions(command, { quotes = true } = {}) {
   const out = [];
   const s = String(command);
   let i = 0;
   while (i < s.length) {
     const ch = s[i];
 
-    if (ch === "'" || ch === '"') {
+    if (quotes && (ch === "'" || ch === '"')) {
       const start = i;
       const quote = ch;
       i++;
@@ -323,7 +323,28 @@ const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'pwsh', 'pow
 const SUBSTITUTION = /[$`]/;
 
 export function indirectVerb(command) {
-  for (const seg of lexSegments(String(command ?? ''))) {
+  // HEREDOC BODIES AND QUOTED STRINGS ARE DATA, and this check has to know that or it becomes the
+  // very thing it was added to avoid. Caught immediately in real use: a `git commit -F` whose
+  // heredoc MESSAGE contained the word `npm ci` in backticks was refused with "the command name
+  // comes from a substitution" — the guard blocking a commit because of prose inside the commit
+  // message. classifyCommand already masks these regions; indirectVerb did not, so the same
+  // command was safe from one half of the guard and refused by the other.
+  // HEREDOC BODIES ONLY — quoted strings are deliberately left visible here, and the difference
+  // matters in both directions.
+  //
+  // A quoted string cannot be a VERB, so masking one buys nothing: `echo 'rm -rf x'` was never
+  // going to be read as indirection, because only w[0] is examined. But `sh -c "rm -rf x"` puts
+  // real code inside quotes, and that code is exactly what the recursion below reads to give a
+  // DENY with evidence instead of a shrug. Masking quotes turned that back into "sh executing
+  // input holt cannot see" — softening a proven deny to an ask, which is the bypass this whole
+  // check exists to close. Caught by the test that pins it.
+  const masked = maskedRegions(command, { quotes: false });
+  const visible = masked.length
+    ? [...String(command ?? '')].map((ch, i) =>
+      (masked.some(([a, b]) => i >= a && i <= b) ? ' ' : ch)).join('')
+    : String(command ?? '');
+
+  for (const seg of lexSegments(visible)) {
     let w = seg.words;
     // Drop leading VAR=value assignments and transparent wrappers, as the file layer does.
     let cut = 0;
