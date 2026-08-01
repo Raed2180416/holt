@@ -29,6 +29,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { underOrEqualAsync } from './paths.mjs';
 import { discover } from './discover.mjs';
 import { scan, atRiskFiles, atRiskFromStatus } from './scan.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
@@ -906,9 +907,15 @@ export async function buildBrief(cwd = process.cwd()) {
     return null; // no repo, or unscannable: contribute nothing rather than noise
   }
 
-  const here = report.graph.nodes.find(
-    (n) => n.path && path.resolve(cwd).startsWith(path.resolve(n.path)),
-  );
+  // Canonicalised: a raw path.resolve() comparison finds NOTHING on macOS and Windows, and the
+  // brief then silently drops the sibling context that is the whole point of it — the agent is
+  // told nothing rather than told something wrong, which is harder to notice.
+  let here = null;
+  for (const n of report.graph.nodes) {
+    if (n.path && await underOrEqualAsync(cwd, n.path)) {
+      if (!here || String(n.path).length > String(here.path).length) here = n; // deepest wins
+    }
+  }
 
   const lines = [];
   if (here) {

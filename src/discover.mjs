@@ -13,6 +13,7 @@
 import { git, repoRoot } from './git.mjs';
 import { discoverJjWorkspaces as _discoverJj } from './jj.mjs';
 import path from 'node:path';
+import { canonicalPath, foldCase } from './paths.mjs';
 
 /**
  * Family inference.
@@ -95,7 +96,13 @@ export async function discoverGitWorktrees(cwd) {
   }
 
   const records = parseWorktreePorcelain(r.stdout).filter((w) => !w.bare);
-  const workstreams = records.map((w) => ({
+  // isPrimary is CANONICALISED, not string-compared. git reports the real path while the caller
+  // may hold a symlinked or short-name one — on macOS /var vs /private/var, on Windows an 8.3
+  // name — so a raw comparison marks NO worktree as primary. That silently disables the
+  // primary-tree protection, which matters more than it looks: git REFUSES to lock the main
+  // worktree, so the hook is its only defence, and it is selected by exactly this flag.
+  const canonRoot = foldCase(await canonicalPath(root));
+  const workstreams = await Promise.all(records.map(async (w) => ({
     id: path.basename(w.path),
     path: w.path,
     vcs: 'git',
@@ -106,8 +113,8 @@ export async function discoverGitWorktrees(cwd) {
     lockReason: w.lockReason ?? null,
     prunable: w.prunable,
     prunableReason: w.prunableReason ?? null,
-    isPrimary: path.resolve(w.path) === path.resolve(root),
-  }));
+    isPrimary: foldCase(await canonicalPath(w.path)) === canonRoot,
+  })));
 
   return { root, workstreams, vcs: 'git' };
 }

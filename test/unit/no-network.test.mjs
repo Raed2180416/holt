@@ -158,3 +158,73 @@ test('NO NETWORK: a URL in help text is NOT a network call', async (t) => {
     'a URL inside a string or a comment is text, not a call — flagging it makes the guard a ' +
     'maintenance burden that eventually gets weakened to shut it up');
 });
+
+test('PATHS: no source file compares paths without canonicalising them', async () => {
+  // THIS DEFECT SHIPPED THREE TIMES IN ONE DAY, in three files, each invisible on Linux:
+  //   `rm -rf <worktree holding the only copy of something>` was ALLOWED on macOS and Windows;
+  //   a workstream lookup matched NOTHING so four tests asserted nothing while reporting green;
+  //   `mv src/a.js src/b.js` — a rename inside one worktree — was DENIED.
+  //
+  // One cause each time: path.resolve() makes a path absolute but does not resolve symlinks and
+  // does not fold case. macOS reports /private/var where the caller holds /var; Windows hands out
+  // 8.3 short names and is case-insensitive. Linux is neither, which is why every instance passed
+  // there and only there — and why fixing them one per CI cycle kept finding the next one.
+  //
+  // Fixing three instances is not fixing the class. The class closes when there is ONE way to
+  // compare paths here and the codebase cannot drift back to the raw form. src/paths.mjs is that
+  // way; this test is what keeps it that way.
+  const roots = [path.join(ROOT, 'src'), path.join(ROOT, 'bin')];
+  const RAW_COMPARISON = [
+    { re: /path\.resolve\([^)]*\)\s*===/, what: 'path.resolve(...) === ...' },
+    { re: /===\s*path\.resolve\(/, what: '... === path.resolve(...)' },
+    { re: /\.startsWith\(\s*path\.resolve\(/, what: '.startsWith(path.resolve(...))' },
+    { re: /path\.resolve\([^)]*\)\.startsWith\(/, what: 'path.resolve(...).startsWith(...)' },
+  ];
+
+  const offences = [];
+  for (const root of roots) {
+    for (const file of await sourceFiles(root)) {
+      const rel = path.relative(ROOT, file);
+      if (rel.endsWith('paths.mjs')) continue;            // the module that DEFINES the correct way
+      const code = codeOnly(await fs.readFile(file, 'utf8'));
+      code.split('\n').forEach((line, i) => {
+        for (const { re, what } of RAW_COMPARISON) {
+          if (re.test(line)) offences.push(`${rel}:${i + 1} compares paths with ${what}`);
+        }
+      });
+    }
+  }
+  assert.deepEqual(offences, [],
+    'use canonicalPath / samePathAsync / underOrEqualAsync / findByPath from src/paths.mjs — a raw ' +
+    'path.resolve() comparison silently finds nothing on macOS and Windows:\n  ' + offences.join('\n  '));
+});
+
+test('PATHS: canonicalPath resolves a path that does not exist yet', async (t) => {
+  // The specific hole that denied renames: realpath FAILS on a path that does not exist, and a
+  // move destination never exists yet. Falling back to the raw string put source and destination
+  // in different worktrees on macOS, so an in-place rename looked like a move out.
+  const { canonicalPath } = await import('../../src/paths.mjs');
+  const base = process.env.HOLT_TMPDIR || os.tmpdir();
+  const real = await fs.mkdtemp(path.join(base, 'holt-canon-'));
+  const link = path.join(base, `holt-canon-link-${path.basename(real)}`);
+  t.after(async () => {
+    await fs.rm(link, { force: true }).catch(() => {});
+    await fs.rm(real, { recursive: true, force: true }).catch(() => {});
+  });
+  await fs.mkdir(path.join(real, 'src'), { recursive: true });
+  await fs.writeFile(path.join(real, 'src', 'exists.js'), 'x\n');
+
+  try {
+    await fs.symlink(real, link, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch {
+    return; // platform refuses symlinks
+  }
+
+  // An existing file and a not-yet-existing sibling must canonicalise into the SAME directory —
+  // that equality is exactly what decides rename-vs-move-out.
+  const existing = await canonicalPath(path.join(link, 'src', 'exists.js'));
+  const missing = await canonicalPath(path.join(link, 'src', 'not-created-yet.js'));
+  assert.equal(path.dirname(existing), path.dirname(missing),
+    'a destination that does not exist yet must canonicalise into the same directory as its ' +
+    `siblings, or a rename reads as a move out of the worktree — got ${existing} vs ${missing}`);
+});
