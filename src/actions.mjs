@@ -22,6 +22,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, gitOk, pmap, authorEnv } from './git.mjs';
 import { discover, isHoltLock, unquotePorcelain } from './discover.mjs';
+import { underOrEqualAsync } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
@@ -402,6 +403,150 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
   } finally {
     await fs.rm(tmpIndex, { force: true }).catch(() => {});
   }
+}
+
+/* ============================================================== DISCARD ==== */
+
+/**
+ * The escape hatch. Delete something holt is guarding, with the content captured first.
+ *
+ * WHY THIS EXISTS. The guard refused a scratch file with:
+ *
+ *     holt blocked this: rm (deletes the file) would destroy 1 file(s) whose only copy is on disk.
+ *     … If it is genuinely disposable, discard it explicitly rather than through this command.
+ *
+ * and there was no such command. No flag, no environment variable, no allow-once anywhere in the
+ * source. The instruction named an action the product did not have, which leaves a user exactly
+ * one way out: uninstall the hook. That is the failure this README already names — "because a
+ * gate that only refuses gets switched off" — and the same lesson the A/B measured, where the
+ * warnings-only arm froze at 0% cleanup while the arm with a PERMITTED ACTION cleaned 73%.
+ *
+ * So this is not a bypass, and deliberately not shaped like one. A bypass takes the guard away;
+ * this takes the LOSS away and leaves the guard intact:
+ *
+ *   - the content is captured to refs/holt/discard/* BEFORE anything is removed;
+ *   - the capture is VERIFIED by reading the tree back, exactly as rescue does, and a capture
+ *     that cannot be verified aborts with nothing deleted — the refusal must be the failure mode;
+ *   - it is journalled, so "who deleted this, and where did it go" is answerable months later;
+ *   - the restore command is printed.
+ *
+ * The result is an action an agent is allowed to take, which is the only kind of gate that
+ * survives contact with someone in a hurry.
+ */
+export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
+  const list = (Array.isArray(paths) ? paths : [paths]).filter(Boolean);
+  if (!list.length) return { ok: false, error: 'discard needs at least one path' };
+
+  const disc = await discover(cwd, opts);
+  if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+
+  // Every path must sit inside ONE worktree: the capture is a tree built in that worktree's
+  // index, and silently splitting a discard across two of them would produce two half-captures.
+  const resolved = [];
+  for (const p of list) {
+    const abs = path.resolve(cwd, p);
+    try {
+      await fs.stat(abs);
+    } catch {
+      return { ok: false, error: `no such path: ${p}` };
+    }
+    const owner = await findOwningWorktree(abs, disc);
+    if (!owner) return { ok: false, error: `'${p}' is not inside a worktree of this repository` };
+    resolved.push({ input: p, abs, owner });
+  }
+  const owners = [...new Set(resolved.map((r) => r.owner.path))];
+  if (owners.length > 1) {
+    return { ok: false, error: `paths span ${owners.length} worktrees; discard one worktree's paths at a time`, owners };
+  }
+
+  const ws = resolved[0].owner;
+  const rel = resolved.map((r) => path.relative(ws.path, r.abs).split(path.sep).join('/'));
+
+  if (dryRun) {
+    return { ok: true, dryRun: true, worktree: ws.id, paths: rel, note: 'nothing was captured or removed' };
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const baseRef = `refs/holt/discard/${refSafeId(ws.id)}-${stamp}`;
+  const tmpIndex = path.join(ws.path, '.git-holt-discard-index');
+  const env = { GIT_INDEX_FILE: tmpIndex, ...(await authorEnv(ws.path)) };
+
+  try {
+    // An EMPTY index, not HEAD: a discard captures the paths being discarded and nothing else,
+    // so the ref reads as exactly what was thrown away rather than a whole worktree snapshot.
+    await gitOk(['read-tree', '--empty'], { cwd: ws.path, env, allowMutation: true });
+    // --force so gitignored paths are captured too — those are precisely the ones git cannot
+    // bring back, and the ones the guard refuses hardest.
+    const added = await git(['add', '--all', '--force', '--', ...rel],
+      { cwd: ws.path, env, allowMutation: true });
+
+    const treeR = await gitOk(['write-tree'], { cwd: ws.path, env, allowMutation: true });
+    const tree = treeR.stdout.trim();
+    const msg = `holt discard: ${rel.length} path(s) from ${ws.id}\n\n`
+      + `${rel.join('\n')}\n\nRestore with:  git checkout <this-ref> -- .\n`;
+    const commitR = await gitOk(['commit-tree', tree, '-m', msg],
+      { cwd: ws.path, env, allowMutation: true });
+    const commit = commitR.stdout.trim();
+
+    // VERIFY BEFORE DELETING — the whole point. Read the tree back and confirm every path asked
+    // for is really in it. -z because ls-tree C-quotes non-ASCII paths otherwise, which made an
+    // earlier verification refuse captures that had actually succeeded.
+    const captured = await git(['ls-tree', '-r', '--name-only', '-z', commit], { cwd: ws.path });
+    const capturedFiles = captured.code === 0 ? captured.stdout.split('\0').filter(Boolean) : [];
+    const capturedSet = new Set(capturedFiles);
+    const isCaptured = (f) => capturedSet.has(f) || capturedFiles.some((c) => c.startsWith(`${f}/`));
+    const missing = rel.filter((f) => !isCaptured(f));
+    if (missing.length) {
+      return {
+        ok: false,
+        error: `capture is INCOMPLETE — ${missing.length} path(s) not captured: ${missing.slice(0, 5).join(', ')}`,
+        missing,
+        addWarnings: added.code === 0 ? [] : added.stderr.split('\n').filter(Boolean).slice(0, 5),
+        note: 'NOTHING WAS DELETED. A discard that cannot prove it captured the content must not '
+          + 'proceed — that would be the loss this command exists to prevent.',
+      };
+    }
+
+    await gitOk(['update-ref', '--create-reflog', baseRef, commit],
+      { cwd: ws.path, allowMutation: true });
+
+    // Only now is anything removed.
+    const removed = [];
+    for (const r of resolved) {
+      await fs.rm(r.abs, { recursive: true, force: true });
+      removed.push(r.input);
+    }
+
+    await appendEvent(cwd, {
+      action: 'discard', id: ws.id, path: ws.path,
+      ref: baseRef, commit, paths: rel, count: rel.length,
+    });
+
+    return {
+      ok: true,
+      worktree: ws.id,
+      ref: baseRef,
+      commit,
+      discarded: removed,
+      verified: true,
+      restore: `git checkout ${baseRef} -- .`,
+      inspect: `git show ${commit} --stat`,
+      note: 'content captured and verified before removal; it is recoverable from the ref above.',
+    };
+  } finally {
+    await fs.rm(tmpIndex, { force: true }).catch(() => {});
+  }
+}
+
+/** The worktree a path lives in, chosen by the LONGEST match so nested worktrees resolve right. */
+async function findOwningWorktree(abs, disc) {
+  let best = null;
+  for (const w of disc.workstreams) {
+    if (!w.path) continue;
+    if (!(await underOrEqualAsync(abs, w.path))) continue;
+    if (!best || w.path.length > best.path.length) best = w;
+  }
+  return best;
 }
 
 /** List every rescue holt has ever taken in this repo. */

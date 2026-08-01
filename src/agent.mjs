@@ -925,8 +925,10 @@ async function assessFileTargets(targets, cwd, ctx) {
       `holt blocked this: ${hits[0].kind} would destroy ${total} file(s) whose only copy is on disk.\n`
       + `${lines.join('\n')}\n`
       + 'No commit, index entry or stash holds this content — git cannot bring it back.\n'
-      + 'Run `holt risk` to inspect, `holt rescue <id>` to capture it first, or commit it. '
-      + 'If it is genuinely disposable, discard it explicitly rather than through this command.',
+      + 'Run `holt risk` to inspect, `holt rescue <id>` to capture the whole worktree, or commit it.\n'
+      + `If it is genuinely disposable: holt discard ${hits.map((h) => h.file).slice(0, 3).join(' ')}`
+      + ' — that captures the content to a verified ref FIRST, then removes it, so this is'
+      + ' recoverable and recorded rather than gone.',
   };
 }
 

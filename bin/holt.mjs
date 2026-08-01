@@ -26,7 +26,7 @@ import { renderClusters } from '../src/ascii-graph.mjs';
 import { assessCommand, buildBrief } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import { integrate, detectHosts, hostsReport, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
-import { protect, unprotect, rescue, rescues, clean } from '../src/actions.mjs';
+import { protect, unprotect, rescue, rescues, clean, discard } from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
 import { landingOrder } from '../src/order.mjs';
@@ -78,6 +78,9 @@ ACTING  (these MUTATE the repo; everything above is read-only)
                       exits non-zero if the capture cannot be verified
   rescued             list every rescue taken in this repo
   clean               remove provably-disposable worktrees + branches  [--apply]
+  discard <path>...   delete something holt is guarding, capturing it first  [--dry-run]
+                      the escape hatch: content goes to refs/holt/discard/* and is VERIFIED
+                      before anything is removed, so the guard stays on and the loss does not
   verify <a> <b>      run YOUR test suite on A alone, B alone, and A+B merged; report
                       only what the COMBINATION breaks  [--run "<cmd>"]  (executes code)
 
@@ -904,6 +907,17 @@ async function main() {
   if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));
   if (cmd === 'unprotect') return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
   if (cmd === 'rescued') return void cmdAction(await rescues(opts.cwd));
+  if (cmd === 'discard') {
+    const targets = opts._.slice(1);
+    if (!targets.length) {
+      process.stderr.write(paint('red', 'holt discard: needs at least one path\n'));
+      process.exit(2);
+    }
+    const r = await discard(opts.cwd, targets, opts);
+    cmdAction(r);
+    if (!r.ok) process.exit(1);
+    return;
+  }
   if (cmd === 'clean') return void cmdAction(await clean(opts.cwd, opts));
   if (cmd === 'verify') {
     const [, a, b] = opts._;

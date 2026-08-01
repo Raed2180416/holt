@@ -19,11 +19,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { newRepo } from '../fixtures.mjs';
-import { protect, unprotect, rescue, rescues, clean } from '../../src/actions.mjs';
+import { protect, unprotect, rescue, rescues, clean, discard } from '../../src/actions.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze, safeToDelete } from '../../src/analyze.mjs';
 import { classify } from '../../src/git.mjs';
+import { samePathAsync } from '../../src/paths.mjs';
 
 function sh(cmd, args, cwd) {
   return new Promise((resolve) => {
@@ -679,10 +680,19 @@ async function lockReasonOf(root, wtPath) {
   const out = await new Promise((resolve) => {
     execFile('git', ['worktree', 'list', '--porcelain'], { cwd: root }, (e, so) => resolve(so ?? ''));
   });
+  // COMPARED THROUGH paths.mjs, NEVER RAW — this helper shipped with `cur === wtPath` and went
+  // red on macOS and Windows while passing on Linux, which is the exact class src/paths.mjs
+  // exists to close. The fixture holds the path mkdtemp returned (/var/folders/… on macOS, an
+  // 8.3 name on Windows) while git prints the resolved one (/private/var/folders/…), so the
+  // comparison found no worktree, returned null, and the assertion read as "holt did not lock
+  // it" when holt had locked it correctly. A test helper is as capable of this bug as product
+  // code, and its failure is more confusing because it accuses the product.
   let cur = null;
   for (const line of out.split('\n')) {
     if (line.startsWith('worktree ')) cur = line.slice(9);
-    else if (line.startsWith('locked') && cur === wtPath) return line.slice(6).trim();
+    else if (line.startsWith('locked') && cur && await samePathAsync(cur, wtPath)) {
+      return line.slice(6).trim();
+    }
   }
   return null;
 }
@@ -796,4 +806,82 @@ test('PROTECT: a C-quoted lock reason is still holt’s own lock in the VERDICT,
   const p = await protect(fx.root);
   assert.ok((p.released ?? 0) >= 1, `it must be reconcilable like any other holt lock: ${JSON.stringify(p)}`);
   assert.equal(await lockReasonOf(fx.root, wt), null, 'and the lock must actually be gone');
+});
+
+/* ------------------------------------------------------------- the escape hatch ---- */
+
+test('DISCARD: content is captured and VERIFIED before anything is removed, and stays recoverable', async (t) => {
+  // THE GUARD NAMED A COMMAND THAT DID NOT EXIST. Its refusal ended "If it is genuinely
+  // disposable, discard it explicitly rather than through this command" — and there was no such
+  // command, no flag, and no environment variable anywhere in the source. That leaves a user one
+  // way out, which is to uninstall the hook, and it is the failure this project already named:
+  // a gate that only refuses gets switched off. The A/B measured the same thing — the
+  // warnings-only arm froze at 0% cleanup, the arm with a PERMITTED ACTION cleaned 73%.
+  const fx = await newRepo('discard');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('scratch');
+  await fx.write('notes.md', 'the only copy of this\n', wt);
+  await fx.write('keep.md', 'this one stays\n', wt);
+
+  const before = await inspect(fx.root);
+  assert.equal(before.safe.find((s) => s.id === 'scratch')?.safe, false,
+    'the fixture is void unless holt would refuse to lose this in the first place');
+
+  const r = await discard(fx.root, [path.join(wt, 'notes.md')]);
+  assert.equal(r.ok, true, `discard must succeed: ${JSON.stringify(r)}`);
+  assert.equal(r.verified, true, 'it must claim verification, not merely success');
+
+  // Gone from disk…
+  await assert.rejects(() => fs.stat(path.join(wt, 'notes.md')), 'the path must actually be removed');
+  // …and the file it was NOT asked to touch is untouched.
+  assert.equal(await fs.readFile(path.join(wt, 'keep.md'), 'utf8'), 'this one stays\n');
+
+  // …and RECOVERABLE, which is the entire difference between this and `rm`.
+  const show = await sh('git', ['show', `${r.commit}:notes.md`], fx.root);
+  assert.equal(show.stdout, 'the only copy of this\n',
+    `the discarded content must be readable back out of the ref: ${JSON.stringify(show)}`);
+
+  // …and recorded, so "who deleted this and where did it go" is answerable months later.
+  // The journal lives beside the object database (git common dir), not in the working tree.
+  const common = await sh('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], fx.root);
+  const journal = await fs.readFile(
+    path.join(common.stdout.trim(), 'holt', 'journal.jsonl'), 'utf8').catch(() => '');
+  assert.match(journal, /"action":"discard"/, `the discard must be journalled: ${journal.slice(-400)}`);
+});
+
+test('DISCARD: a capture that cannot be verified deletes NOTHING', async (t) => {
+  // The safety property, and the only one that really matters. If verification is skipped or
+  // wrong, `discard` becomes `rm` with extra steps and a false promise of recoverability — worse
+  // than no command at all, because the promise is what makes someone willing to run it.
+  //
+  // A nested git repository is the documented real cause: `git add` exits non-zero with
+  // "does not have a commit checked out" and indexes nothing beneath it, so the tree is missing
+  // the very path the caller asked to capture.
+  const fx = await newRepo('discard-unverifiable');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('nested');
+  const inner = path.join(wt, 'vendored');
+  await fs.mkdir(inner, { recursive: true });
+  await sh('git', ['init', '-q'], inner);
+  await fs.writeFile(path.join(inner, 'precious.txt'), 'irreplaceable\n');
+
+  const r = await discard(fx.root, [inner]);
+  assert.equal(r.ok, false, `an unverifiable capture must refuse: ${JSON.stringify(r)}`);
+  assert.match(r.error ?? '', /INCOMPLETE/, `the reason must say what went wrong: ${JSON.stringify(r)}`);
+
+  // THE ASSERTION THAT MATTERS: nothing was destroyed.
+  assert.equal(await fs.readFile(path.join(inner, 'precious.txt'), 'utf8'), 'irreplaceable\n',
+    'a refused discard must leave the content exactly where it was');
+});
+
+test('DISCARD: a path outside this repository is refused rather than deleted', async (t) => {
+  const fx = await newRepo('discard-outside');
+  t.after(() => fx.cleanup());
+  await fx.worktree('any');
+  const outside = path.join(path.dirname(fx.root), 'not-in-the-repo.txt');
+  await fs.writeFile(outside, 'someone else\n');
+
+  const r = await discard(fx.root, [outside]);
+  assert.equal(r.ok, false, `discard must not reach outside the repository: ${JSON.stringify(r)}`);
+  assert.equal(await fs.readFile(outside, 'utf8'), 'someone else\n', 'and must not have touched it');
 });
