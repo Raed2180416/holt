@@ -15,7 +15,7 @@
  * introduced looks pre-existing and is OMITTED from `added`. `uniqueSymbolCount` is one of the few
  * reasons `safeToDelete` refuses — an undercount authorises deleting real work.
  *
- * The fix is NUL-delimited batch input (`git cat-file --batch -z`, git >= 2.32) plus a spec-aware
+ * The fix is NUL-delimited batch input (`git cat-file --batch -z`, git >= 2.38) plus a spec-aware
  * read of the `missing` reply, because `-z` alone fixes only HALF of this: git echoes the spec back
  * in `<spec> missing\n`, so a newline-named path that is ABSENT at that oid still splits its own
  * reply across two lines on the OUTPUT side. Both halves are asserted below.
@@ -183,16 +183,18 @@ test('symbolsAtBase -> diffSymbols still reports the workstream novel symbol pas
   );
 });
 
-test('batchNulInputSupported: the 2.32 gate, on the version strings real gits actually print', () => {
-  // `git cat-file --batch -z` landed in git 2.32 (2021-06). Below it there is no safe framing for a
+test('batchNulInputSupported: the 2.38 gate, on the version strings real gits actually print', () => {
+  // `git cat-file --batch -z` landed in git 2.38 (2022-10). Below it there is no safe framing for a
   // newline-bearing spec, so this predicate decides between "read correctly" and "refuse loudly".
+  // Verified against the official git documentation: the 2.32.0 manpage does not list `-z`, while
+  // the 2.38.0 manpage does.
   for (const line of [
-    'git version 2.32.0\n', 'git version 2.55.0\n', 'git version 3.0.0\n',
+    'git version 2.38.0\n', 'git version 2.55.0\n', 'git version 3.0.0\n',
     'git version 2.45.1.windows.1\n', 'git version 2.39.5 (Apple Git-154)\n',
   ]) assert.equal(batchNulInputSupported(line), true, line.trim());
 
   for (const line of [
-    'git version 2.31.1\n', 'git version 2.31.0\n', 'git version 2.0.0\n',
+    'git version 2.37.1\n', 'git version 2.32.0\n', 'git version 2.31.0\n', 'git version 2.0.0\n',
     'git version 1.8.3.1\n', '', 'not a version at all\n', null, undefined,
   ]) assert.equal(batchNulInputSupported(line), false, JSON.stringify(line));
 });
@@ -208,8 +210,9 @@ test('catFileBatch: a git too old for `--batch -z` REFUSES a newline-bearing spe
   if (process.platform === 'win32') return; // no `#!` shim; the newline path is unreachable there anyway
 
   // A REAL old git is not installable in CI, so stand one up: a shim first on PATH that reports
-  // 2.31.1 and delegates everything else to the genuine binary. This exercises the actual probe
-  // (`git version` -> batchNulInputSupported) rather than reaching past it.
+  // 2.37.1 (just below the 2.38 gate) and delegates everything else to the genuine binary. This
+  // exercises the actual probe (`git version` -> batchNulInputSupported) rather than reaching
+  // past it.
   const realGit = await new Promise((res, rej) => execFile(
     process.platform === 'win32' ? 'where' : 'which', ['git'],
     (e, out) => (e ? rej(e) : res(String(out).split('\n')[0].trim())),
@@ -218,7 +221,7 @@ test('catFileBatch: a git too old for `--batch -z` REFUSES a newline-bearing spe
   await fs.mkdir(shimDir, { recursive: true });
   await fs.writeFile(
     path.join(shimDir, 'git'),
-    `#!/bin/sh\nif [ "$1" = "version" ]; then echo "git version 2.31.1"; exit 0; fi\nexec ${JSON.stringify(realGit)} "$@"\n`,
+    `#!/bin/sh\nif [ "$1" = "version" ]; then echo "git version 2.37.1"; exit 0; fi\nexec ${JSON.stringify(realGit)} "$@"\n`,
     { mode: 0o755 },
   );
 
@@ -246,7 +249,7 @@ test('catFileBatch: a git too old for `--batch -z` REFUSES a newline-bearing spe
       (err) => {
         assert.ok(err instanceof GitRefused, `expected GitRefused, got ${err?.constructor?.name}`);
         assert.match(err.message, /contains a newline/);
-        assert.match(err.message, /2\.32/);
+        assert.match(err.message, /2\.38/);
         return true;
       },
     );

@@ -33,7 +33,7 @@ import path from 'node:path';
 const SAFE = new Set([
   // `version` reads nothing but the binary's own build string — it does not even open a repository.
   // It is on the list because catFileBatch() must know whether this git accepts NUL-delimited batch
-  // input (`--batch -z`, git >= 2.32) before it can frame a spec containing a newline safely.
+  // input (`--batch -z`, git >= 2.38) before it can frame a spec containing a newline safely.
   'version',
   'rev-parse', 'rev-list', 'log', 'show', 'cat-file', 'ls-files', 'ls-tree',
   'status', 'diff', 'diff-tree', 'diff-index', 'merge-base', 'name-rev',
@@ -298,10 +298,14 @@ export function git(argv, {
 }
 
 /**
- * `git cat-file --batch -z` — NUL-delimited batch INPUT — landed in git 2.32 (2021-06).
+ * `git cat-file --batch -z` — NUL-delimited batch INPUT — landed in git 2.38 (2022-10).
  * Below that, holt cannot frame a spec containing a newline at all and says so (see catFileBatch).
+ * Verified against the official git documentation: the 2.32.0 manpage does not list `-z`, while
+ * the 2.38.0 manpage does. The previous claim of 2.32 was wrong — on a 2.32–2.37 git, the probe
+ * would report support (because the option is accepted without error on some builds) but the
+ * framing would be newline-delimited, silently mis-attributing records for newline-bearing paths.
  */
-const BATCH_NUL_MIN = { major: 2, minor: 32 };
+const BATCH_NUL_MIN = { major: 2, minor: 38 };
 
 /**
  * Parse the first `<major>.<minor>` out of a `git version …` line and answer whether that git
@@ -379,7 +383,7 @@ export function _resetBatchNulProbe() { _batchNulProbe = null; }
  * Reproduced end to end; pinned by test/unit/cat-file-batch-newline-paths.test.mjs.
  *
  *   INPUT  — `specs.join('\n') + '\n'` turned one newline-bearing spec into two requests. Fixed by
- *            `--batch -z`, which reads NUL-delimited specs (git >= 2.32; see BATCH_NUL_MIN).
+ *            `--batch -z`, which reads NUL-delimited specs (git >= 2.38; see BATCH_NUL_MIN).
  *   OUTPUT — `-z` alone fixes only half of it. git answers a miss with `<spec> missing\n`, echoing
  *            the spec VERBATIM, so an ABSENT newline-named path still spans two physical lines on
  *            the way back. Reading "up to the next \n" splits that reply in two exactly as before.
@@ -387,7 +391,7 @@ export function _resetBatchNulProbe() { _batchNulProbe = null; }
  *            order the specs went out, so the miss form for `specs[specIdx]` is known byte-for-byte
  *            and is tested for first, instead of guessing where the record ends.
  *
- * On a git older than 2.32 there is no safe input framing for a newline-bearing spec, so the batch
+ * On a git older than 2.38 there is no safe input framing for a newline-bearing spec, so the batch
  * is REFUSED with the offending spec named. That is deliberately loud: the alternative is the
  * silent mis-attribution above. Every other spec shape works unchanged on every git.
  *
@@ -419,9 +423,9 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
     if (nlAt !== -1) {
       throw new GitRefused(
         'holt refused `git cat-file --batch`: spec ' + nlAt + ' (' + JSON.stringify(specs[nlAt])
-        + ') contains a newline, and this git is older than 2.32 so it has no NUL-delimited batch '
+        + ') contains a newline, and this git is older than 2.38 so it has no NUL-delimited batch '
         + 'input (`--batch -z`). Reading it on the newline-delimited protocol would silently '
-        + 'attribute every later file\'s content to the wrong file. Upgrade git to 2.32 or newer.',
+        + 'attribute every later file\'s content to the wrong file. Upgrade git to 2.38 or newer.',
       );
     }
   }

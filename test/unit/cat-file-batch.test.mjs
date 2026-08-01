@@ -146,3 +146,49 @@ test('catFileBatch: one onRecord rejection does not kill the rest of the batch (
   assert.equal(got.get(`${head}:a.txt`), 'AAA\n', 'record before the failing one must still arrive');
   assert.equal(got.get(`${head}:c.txt`), 'CCC\n', 'record after the failing one must still arrive');
 });
+
+test('catFileBatch: ALL onRecord rejections still let the batch resolve', async (t) => {
+  const fx = await newRepo('cat7');
+  t.after(() => fx.cleanup());
+  await fx.write('a.txt', 'AAA\n');
+  await fx.write('b.txt', 'BBB\n');
+  const head = await fx.commit('add a, b');
+
+  // Even if EVERY onRecord rejects, the batch itself ran fine — git returned all records,
+  // drain() parsed them all, and the only failures were in the consumer's callback. The batch
+  // must resolve, not reject, because the I/O operation succeeded.
+  await assert.doesNotReject(
+    catFileBatch([`${head}:a.txt`, `${head}:b.txt`], { cwd: fx.root }, () => {
+      throw new Error('every record fails');
+    }),
+    'even if every onRecord rejects, the batch itself ran fine and should resolve',
+  );
+});
+
+test('catFileBatch: a synchronous throw during drain does not crash the data event handler', async (t) => {
+  const fx = await newRepo('cat8');
+  t.after(() => fx.cleanup());
+  await fx.write('a.txt', 'AAA\n');
+  await fx.write('b.txt', 'BBB\n');
+  await fx.write('c.txt', 'CCC\n');
+  const head = await fx.commit('add a, b, c');
+
+  // The exact defect the safeCall wrapper fixes: a synchronous throw inside onRecord during
+  // drain() (called from the 'data' event handler) used to propagate as an uncaught exception
+  // in an event emitter, crashing the process. The try-catch in safeCall converts it to a
+  // rejected promise that .catch(() => {}) swallows. This test proves the process does not
+  // crash and the remaining records are still delivered.
+  const specs = [`${head}:a.txt`, `${head}:b.txt`, `${head}:c.txt`];
+  const got = new Map();
+  await assert.doesNotReject(
+    catFileBatch(specs, { cwd: fx.root }, (spec, content) => {
+      // Synchronous throw — not async rejection. This is the path that used to crash the
+      // 'data' event handler before safeCall was added.
+      if (spec === `${head}:b.txt`) throw new Error('sync throw during drain');
+      got.set(spec, content === null ? null : content.toString('utf8'));
+    }),
+    'a synchronous throw during drain must not crash the batch',
+  );
+  assert.equal(got.get(`${head}:a.txt`), 'AAA\n', 'record before the throw must arrive');
+  assert.equal(got.get(`${head}:c.txt`), 'CCC\n', 'record after the throw must arrive');
+});
