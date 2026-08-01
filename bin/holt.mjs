@@ -36,7 +36,7 @@ import { readJournal, appendEvent } from '../src/journal.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
 import { git } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
-import { loadPolicy, evaluatePolicy } from '../src/team/policy.mjs';
+import { loadPolicy, loadPolicyFrom, evaluatePolicy } from '../src/team/policy.mjs';
 import { fleetScan } from '../src/team/fleet.mjs';
 
 const USAGE = `
@@ -781,7 +781,28 @@ async function main() {
     // covered when nothing ran.
     let loaded;
     try {
-      loaded = await loadPolicy(audit.base ? (await discover(opts.cwd, opts)).root : opts.cwd);
+      // THE POLICY COMES FROM THE BASE REF, NOT THE BRANCH BEING JUDGED.
+      //
+      // Both arms of the old expression resolved to the local filesystem — which, in the only
+      // place this gate runs, is a checkout of the PULL REQUEST. The branch under review supplied
+      // the rules that judged it, so a contributor could loosen a threshold or delete the file
+      // and the gate reported a clean pass. On a fork PR that is an unauthenticated stranger
+      // choosing their own policy, on the feature that requires a paid tier to run at all.
+      //
+      // `git show <base>:<path>` reads the committed object on the protected branch and never
+      // touches the working tree. Changing the policy therefore requires a review on the base
+      // branch, which is the control the feature claims to provide.
+      //
+      // Falling back to the working tree when there is no base is correct and not a hole: with no
+      // base ref there is no PR, holt is running ON the branch, and that tree IS the authority.
+      const baseRef = audit?.base?.oid ?? audit?.base?.ref ?? null;
+      loaded = baseRef
+        ? await loadPolicyFrom(async (rel) => {
+          const r = await git(['show', `${baseRef}:${rel}`], { cwd: opts.cwd });
+          return r.code === 0 ? r.stdout : null;
+        })
+        : await loadPolicy(opts.cwd);
+      loaded.authority = baseRef ? `base ref ${String(baseRef).slice(0, 12)}` : 'working tree (no base ref)';
     } catch (e) {
       if (opts.json) { emitJson({ ok: false, code: e.code, reason: e.message }); process.exit(2); }
       process.stderr.write(paint('red', `holt ci: ${e.message}\n`));

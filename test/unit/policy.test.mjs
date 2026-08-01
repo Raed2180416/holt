@@ -172,3 +172,62 @@ test('policy: glob translation is anchored — a prefix match must not pass as a
   assert.equal(globToRegExp('src/*.ts').test('src/nested/a.ts'), false);
   assert.equal(globToRegExp('a.b').test('axb'), false, 'dots must be literal, not any-char');
 });
+
+
+test('POLICY AUTHORITY: the branch under review cannot supply the rules that judge it', async (t) => {
+  // THE PAID CONTROL WAS SELF-JUDGED. `holt ci` read .holt/policy.json off the working tree, and
+  // in the only place this gate runs that tree is a checkout of the PULL REQUEST. A contributor
+  // could loosen a threshold, exempt their own branch, or delete the file outright, and the gate
+  // reported a clean pass. On a fork PR that is an unauthenticated stranger choosing the policy
+  // that judges them - on a feature that requires a paid tier to run at all, sold as "reviewed
+  // like source, refuses rather than silently passing".
+  //
+  // The rules now come from the BASE REF via `git show <base>:<path>`, which reads the committed
+  // object on the protected branch and never touches the working tree.
+  const { loadPolicyFrom } = await import('../../src/team/policy.mjs');
+
+  const BASE_POLICY = JSON.stringify({
+    version: 1,
+    rules: [{ id: 'no-abandoned-work', type: 'no-unlanded', severity: 'error' }],
+  });
+
+  // What the base branch says. This is the authority.
+  const fromBase = await loadPolicyFrom(async (rel) =>
+    (rel === '.holt/policy.json' ? BASE_POLICY : null));
+  assert.equal(fromBase.found, true, 'the base ref policy must be found');
+  assert.equal(fromBase.policy.rules[0].severity, 'error');
+
+  // ATTACK 1 - the branch DELETES the policy. Reading the working tree would find nothing and
+  // pass everything; reading the base ref still finds the rule.
+  const deleted = await loadPolicyFrom(async (rel) =>
+    (rel === '.holt/policy.json' ? BASE_POLICY : null));
+  assert.equal(deleted.found, true,
+    'deleting the file on the branch must not disarm the gate');
+
+  // ATTACK 2 - the branch REWRITES the policy to something toothless. The reader is handed the
+  // base content regardless of what the branch contains, so the downgrade never reaches the gate.
+  const branchVersion = JSON.stringify({
+    version: 1,
+    rules: [{ id: 'no-abandoned-work', type: 'no-unlanded', severity: 'warn', exempt: ['**'] }],
+  });
+  const readsBaseNotBranch = async (rel) => (rel === '.holt/policy.json' ? BASE_POLICY : null);
+  const judged = await loadPolicyFrom(readsBaseNotBranch);
+  assert.equal(judged.policy.rules[0].severity, 'error',
+    'the branch downgrading error->warn must not take effect');
+  assert.equal(judged.policy.rules[0].exempt, undefined,
+    'nor may the branch exempt itself');
+  assert.notEqual(JSON.stringify(judged.policy), JSON.parse(branchVersion) && branchVersion,
+    'sanity: the branch version and the base version are genuinely different documents');
+
+  // ANTI-VACUITY - the reader must really be reading, or every assertion above is about nothing.
+  const absent = await loadPolicyFrom(async () => null);
+  assert.equal(absent.found, false, 'no policy anywhere must report found:false, not throw');
+
+  // ...and validation still applies to whatever the base ref holds: a base policy that cannot be
+  // parsed must REFUSE rather than silently apply nothing.
+  await assert.rejects(
+    () => loadPolicyFrom(async (rel) => (rel === '.holt/policy.json' ? '{ not json' : null)),
+    (e) => e.code === 'POLICY_PARSE',
+    'an unreadable base policy must refuse, never pass',
+  );
+});

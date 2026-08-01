@@ -86,13 +86,46 @@ function pathsCarriedBy(u, layers) {
   return [...out].sort();
 }
 
-/** Load and validate. Returns {found:false} when absent — absence is not an error. */
-export async function loadPolicy(root) {
+/**
+ * THE RULES MUST NOT COME FROM THE THING BEING JUDGED.
+ *
+ * `holt ci` read `.holt/policy.json` off the working tree — which, in the only place this gate
+ * runs, is a checkout of the PULL REQUEST. The branch under review supplied the rules that judged
+ * it: a contributor could edit a rule, loosen a threshold, or delete the file entirely, and the
+ * gate would report a clean pass. For a fork PR that is an unauthenticated stranger choosing
+ * their own policy. It is the paid control (`policy-file` requires the team tier), and the site
+ * sells it as "reviewed like source, refuses rather than silently passing".
+ *
+ * So the policy is read from the BASE REF — the protected branch the PR is merging into — using
+ * `git show <base>:<path>`, which reads the committed object and never touches the working tree.
+ * A reviewer approving a change to the policy on the base branch is exactly the review step the
+ * feature claims to have.
+ *
+ * `readAt` is injected rather than imported so this module stays free of a git dependency and can
+ * still be unit-tested on plain objects. When it is absent the behaviour is unchanged, which is
+ * what keeps `holt ci` working outside a PR (running on the base branch itself, the working tree
+ * IS the authority).
+ */
+export async function loadPolicyFrom(readAt) {
   for (const rel of POLICY_PATHS) {
-    const p = path.join(root, rel);
     let raw;
-    try { raw = await fs.readFile(p, 'utf8'); } catch { continue; }
+    try { raw = await readAt(rel); } catch { continue; }
+    if (raw == null) continue;
+    const parsed = validatePolicy(raw, rel);
+    if (parsed) return parsed;
+  }
+  return { found: false };
+}
 
+/**
+ * Validation, in ONE place.
+ *
+ * Both readers — the working tree and the base ref — must apply identical rules, or a policy that
+ * the gate accepts from one source and rejects from the other is a difference nobody would find
+ * until it mattered. This project has shipped that exact shape of bug twice (two parsers of one
+ * lock reason; two tables of one host fact), so there is one validator and both call it.
+ */
+function validatePolicy(raw, rel) {
     let doc;
     try {
       // Tolerate // and /* */ comments so a policy can explain itself to reviewers.
@@ -125,6 +158,15 @@ export async function loadPolicy(root) {
       }
     }
     return { found: true, path: rel, policy: doc };
+}
+
+/** Load and validate from the working tree. Returns {found:false} when absent. */
+export async function loadPolicy(root) {
+  for (const rel of POLICY_PATHS) {
+    let raw;
+    try { raw = await fs.readFile(path.join(root, rel), 'utf8'); } catch { continue; }
+    const parsed = validatePolicy(raw, rel);
+    if (parsed) return parsed;
   }
   return { found: false };
 }

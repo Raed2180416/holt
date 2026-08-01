@@ -19,6 +19,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { newRepo } from '../fixtures.mjs';
 import { findRepos } from '../../src/team/fleet.mjs';
 import { evaluatePolicy } from '../../src/team/policy.mjs';
 import { discover } from '../../src/discover.mjs';
@@ -271,4 +273,44 @@ test('JOURNAL: every recorded action names WHO, and never invents one', async (t
       assert.ok(e.actor[k].length > 0, `${e.action}.actor.${k} must never be empty`);
     }
   }
+});
+
+
+test('POLICY AUTHORITY e2e: deleting the policy on the branch does not disarm `holt ci`', async (t) => {
+  // The unit test above exercises the reader with a stub. This drives the SHIPPED COMMAND, which
+  // is where the defect actually lived: both arms of the old expression resolved to the local
+  // filesystem, so the PR checkout supplied its own rules.
+  //
+  // The tell is precise and needs no licence to observe. `holt ci` only reaches the
+  // `unlicensed-policy` refusal when a policy was FOUND; if the gate is reading the working tree,
+  // a branch that deleted the file yields found:false and the command passes silently. So the
+  // presence of the entitlement refusal IS the proof that the base ref was consulted.
+  const fx = await newRepo('policy-authority');
+  t.after(() => fx.cleanup());
+
+  await fx.write('.holt/policy.json', JSON.stringify({
+    version: 1,
+    rules: [{ id: 'no-abandoned-work', type: 'no-unlanded', severity: 'error' }],
+  }, null, 2));
+  await fx.commit('the base branch declares a policy');
+
+  // The attacker's branch: delete the file that judges it.
+  await fx.git(['checkout', '-q', '-b', 'sneaky']);
+  await fs.rm(path.join(fx.root, '.holt', 'policy.json'), { force: true });
+  await fx.commit('remove the policy');
+
+  const bin = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
+  const r = await sh('node', [bin, 'ci', '--base', 'main', '--json'], fx.root);
+  const out = `${r.stdout}${r.stderr}`;
+
+  // FIXTURE VALIDITY: the file really is gone from the working tree.
+  await assert.rejects(() => fs.stat(path.join(fx.root, '.holt', 'policy.json')),
+    'the fixture is void unless the branch really deleted the policy');
+
+  assert.match(out, /policy/i,
+    `the gate must still see a policy from the base ref, got: ${out.slice(0, 500)}`);
+  assert.ok(/unlicensed-policy|violation|no-abandoned-work/i.test(out),
+    `a policy deleted on the branch must still be enforced from the base ref, got: ${out.slice(0, 500)}`);
+  assert.notEqual(r.code, 0,
+    `the gate must not report a clean pass on a branch that deleted its own policy (exit ${r.code}): ${out.slice(0, 400)}`);
 });
