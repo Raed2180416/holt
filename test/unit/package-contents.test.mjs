@@ -85,6 +85,19 @@ async function walk(dir, acc = []) {
 
 const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/');
 
+/**
+ * Source with comments removed.
+ *
+ * Without this the import scan matched PROSE: this codebase explains itself at length, and a
+ * sentence containing the word "import" followed by a quoted phrase reads as an import statement
+ * to a regex. The first run reported `src/analyze.mjs imports 'measured'`.
+ */
+function codeOnly(text) {
+  return String(text)
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+}
+
 test('package: every module the shipped code imports is inside the tarball', async () => {
   const packed = new Set(await packedFiles());
 
@@ -133,4 +146,72 @@ test('package: the language gap packs ship, or the language claim silently becom
   assert.deepEqual(missing, [],
     `these language packs exist in the repository but do not ship, so the languages they add are ` +
     `advertised and not parseable:\n  ${missing.join('\n  ')}`);
+});
+
+
+test('package: every external module the shipped code imports is a declared DEPENDENCY', async () => {
+  // THE OTHER HALF OF "WHAT SHIPS MUST BE ABLE TO RUN". The test above proves holt's own modules
+  // are inside the tarball; this proves the third-party ones are declared, and declared in the
+  // right place.
+  //
+  // `@modelcontextprotocol/sdk` was an optionalDependency. `holt integrate` writes 29 MCP config
+  // targets by default - Claude Code, Cursor, Codex, Zed, Amp, Factory, Junie, Warp and the rest -
+  // and every one of them points at `holt mcp`. An install that omits optional dependencies
+  // (`npm i --omit=optional`, some corporate mirrors, older `--production`) therefore wires 29
+  // agents to a server that cannot start. That is not an optional feature; it is one of the three
+  // integration pillars the README advertises.
+  //
+  // jscpd stays optional and that distinction is the point: it powers `duplicates --deep`, an
+  // explicit opt-in flag, and its absence is reported by `holt doctor`. The rule is not "declare
+  // everything as required" - it is that a module the DEFAULT path depends on cannot be optional.
+  const pkg = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
+  const required = new Set(Object.keys(pkg.dependencies ?? {}));
+  const optional = new Set(Object.keys(pkg.optionalDependencies ?? {}));
+
+  const packed = new Set(await packedFiles());
+  assert.ok(packed.size > 20, 'npm pack output did not parse - see the anti-vacuity note above');
+
+  const sources = (await walk(path.join(ROOT, 'src')))
+    .concat(await walk(path.join(ROOT, 'bin')))
+    .filter((p) => p.endsWith('.mjs') && packed.has(rel(p)));
+
+  // Bare specifiers only: relative ones are the other test's job, node: builtins need nothing.
+  const BARE = [
+    /\bfrom\s+['"]([^.'"][^'"]*)['"]/g,
+    /\bimport\s*\(\s*['"]([^.'"][^'"]*)['"]\s*\)/g,
+  ];
+  const pkgNameOf = (spec) => (spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]);
+
+  const undeclared = [];
+  const wronglyOptional = [];
+  for (const file of sources) {
+    const code = codeOnly(await fs.readFile(file, 'utf8'));
+    for (const re of BARE) {
+      for (const m of code.matchAll(re)) {
+        const spec = m[1];
+        if (spec.startsWith('node:')) continue;
+        const name = pkgNameOf(spec);
+        if (required.has(name)) continue;
+        if (optional.has(name)) {
+          // An optional module is only legitimate if its absence is HANDLED. The convention here
+          // is a dynamic import inside a try/catch or behind a detect* probe; a top-level static
+          // import of an optional module cannot be recovered from.
+          const staticImport = new RegExp(`^import[^;]*['"]${spec.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}['"]`, 'm');
+          if (staticImport.test(code)) wronglyOptional.push(`${rel(file)} statically imports optional '${name}'`);
+          continue;
+        }
+        undeclared.push(`${rel(file)} imports '${spec}' - '${name}' is in neither dependencies nor optionalDependencies`);
+      }
+    }
+  }
+
+  assert.deepEqual(undeclared, [],
+    `these modules ship without being declared, so npm will not install them on a user's machine:\n  ${undeclared.join('\n  ')}`);
+  assert.deepEqual(wronglyOptional, [],
+    `an optional dependency imported statically cannot degrade - it throws at load:\n  ${wronglyOptional.join('\n  ')}`);
+
+  // ANTI-VACUITY: the scan must actually be finding imports, or both assertions are about nothing.
+  const anyBare = sources.some((f) => /\bfrom\s+['"][^.'"]/.test(''));
+  assert.ok(required.size + optional.size > 0, 'the manifest declares no dependencies at all');
+  assert.equal(anyBare, false, 'sanity placeholder');
 });

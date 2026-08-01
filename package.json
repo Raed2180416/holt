@@ -1,7 +1,7 @@
 {
   "name": "holt",
   "version": "0.2.0",
-  "description": "holt™ — know what your agents made, and don't lose any of it: what each worktree produced, which ones collide, which are safe to delete, and a guard that stops an agent deleting work that exists nowhere else.",
+  "description": "holt\u2122 \u2014 know what your agents made, and don't lose any of it: what each worktree produced, which ones collide, which are safe to delete, and a guard that stops an agent deleting work that exists nowhere else.",
   "type": "module",
   "bin": {
     "holt": "./bin/holt.mjs"
@@ -17,6 +17,12 @@
   ],
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "optionalDependencies": {
+    "jscpd": "^5.0.14"
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
@@ -41,10 +47,6 @@
     "cursor"
   ],
   "license": "FSL-1.1-MIT",
-  "optionalDependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "jscpd": "^5.0.14"
-  },
   "author": "Contrare",
   "homepage": "https://raed2180416.github.io/holt/",
   "repository": {
