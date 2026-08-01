@@ -1235,7 +1235,12 @@ test('GATE: a command holt cannot READ is never a silent allow', async (t) => {
 
   // A SHELL'S -c ARGUMENT IS CODE HOLT CAN READ, so wrapping is not a way to soften the verdict.
   // If this returned 'ask' rather than 'deny', `sh -c` would itself be the bypass.
-  for (const cmd of [`sh -c "rm -rf ${wt}"`, `bash -c 'rm -rf ${wt}'`]) {
+  // Forward slashes: `sh -c` names a POSIX shell, and a Windows path full of backslashes inside a
+  // POSIX shell string is incoherent on both platforms — the backslashes read as escapes, so the
+  // fixture was asserting a command nobody would ever run. Windows accepts forward slashes in
+  // paths, so this one form is a real command on every platform.
+  const posixWt = wt.split(path.sep).join('/');
+  for (const cmd of [`sh -c "rm -rf ${posixWt}"`, `bash -c 'rm -rf ${posixWt}'`]) {
     const v = await assessCommand(cmd, fx.root);
     assert.equal(v.decision, 'deny',
       `the inner command is fully visible and destroys work: ${cmd} -> ${JSON.stringify(v)}`);

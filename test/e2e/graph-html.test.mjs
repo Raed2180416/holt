@@ -195,7 +195,20 @@ test('HTML INJECTION: a hostile worktree path and branch name cannot break out o
   const paths = data.nodes.map((n) => n.path).join('\n');
   const branches = data.nodes.map((n) => n.branch).join('\n');
   assert.equal(data.nodes.length, 2, `expected both hostile worktrees in the payload, got ${data.nodes.length}`);
-  assert.match(paths, /script>x/, 'the hostile path did not survive into the payload');
+  // THE PAYLOAD IS TRIMMED TO WHAT THE PLATFORM CAN NAME, so what must survive is whatever
+  // creatableComponent actually planted — not a fixed string. Windows rejects `< > " * : ? |` in a
+  // path component, so `</script>x` becomes `x` there while POSIX carries it whole. Asserting the
+  // POSIX spelling everywhere asserted the fixture, not the product.
+  for (const n of data.nodes) {
+    assert.ok(paths.includes(n.id),
+      `every worktree's real name must arrive in the payload: ${n.id} not in ${paths}`);
+  }
+  // ANTI-VACUITY: something hostile must actually have been planted, or this asserts that two
+  // ordinary names round-trip. What survives differs by platform — Windows rejects `< > " * : ? |`
+  // in a path component, so the payload is trimmed there and carried whole on POSIX — so the check
+  // is that SOME name is not plain, not that a fixed string is present.
+  assert.ok(data.nodes.some((n) => /[^A-Za-z0-9._-]/.test(n.id)),
+    `no hostile character survived into any name, so nothing is being tested: ${ids}`);
   assert.match(branches, /onload=HOLT_XSS\(\)>/, 'the hostile branch did not survive into the payload');
   assert.match(ids, /img src=x/, 'the hostile directory name did not survive into the payload');
 
