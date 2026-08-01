@@ -1164,3 +1164,38 @@ test('FILE GATE: a target beginning with a glob does not become "everything"', a
   assert.equal(wholeTree.decision, 'deny',
     `deleting the worktree root must still be refused: ${JSON.stringify(wholeTree)}`);
 });
+
+
+test('GATE: a dry run and an unstage are not destruction (the annoyance half of the contract)', () => {
+  // "A gate that only refuses gets switched off" is this project's own rule, and a false positive
+  // on something a developer KNOWS is harmless teaches them the whole layer is arbitrary. These
+  // two were found by an adversarial sweep and are the worst kind, because both are what a
+  // CAREFUL developer does:
+  //
+  //   `git clean -fdn`  is the dry run you do BEFORE the destructive form. The pattern looked for
+  //                     f or d anywhere in the flag cluster, so the safety step read as the danger.
+  //   `git restore --staged .`  only unstages; the file on disk is untouched. It was refused while
+  //                     the behaviourally identical `git reset HEAD .` was allowed — an
+  //                     inconsistency a user cannot explain and will not tolerate.
+  //
+  // Both exemptions depend on ANOTHER flag elsewhere in the command, which is why rules carry an
+  // `unless` predicate rather than the negative lookaheads that would have hidden this inside an
+  // already dense regex.
+  for (const cmd of [
+    'git clean -fdn', 'git clean -ndf', 'git clean -fd --dry-run', 'git clean -n',
+    'git restore --staged .', 'git restore --staged -- .', 'git restore --staged src/',
+  ]) {
+    assert.equal(classifyCommand(cmd), null, `harmless, and refusing it costs trust: ${cmd}`);
+  }
+
+  // THE NEVER-WORSE HALF, and it is the whole reason this test is safe to have. Every genuinely
+  // destructive form must still be caught, or the exemption above became a bypass.
+  for (const cmd of [
+    'git clean -fd', 'git clean -fdx', 'git clean -f -d',
+    'git restore .', 'git restore -- .', 'git restore --worktree .',
+    'git restore --staged --worktree .', 'git checkout -- .',
+  ]) {
+    const v = classifyCommand(cmd);
+    assert.ok(v, `this really does destroy work and must still be refused: ${cmd}`);
+  }
+});

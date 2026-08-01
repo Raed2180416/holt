@@ -108,6 +108,13 @@ const GIT_GLOBALS = '(?:-[cC]\\s+\\S+\\s+|--(?:git-dir|work-tree|namespace|exec-
 
 // ORDER MATTERS: the first match wins, so the more specific patterns come first. The general
 // `remove` pattern's `(?:--force|-f)*` also matches `-f -f`, which would mislabel the override.
+  // `--staged` WITHOUT `--worktree` only unstages: the content stays on disk and nothing is lost.
+  // The file's own comment below already said so, and the generic pathspec rules above matched it
+  // first anyway — so `git restore --staged .` was refused while the behaviourally identical
+  // `git reset HEAD .` was allowed, which is the kind of inconsistency that teaches a developer
+  // the whole layer is arbitrary.
+  const unstageOnly = (c) => /\brestore\b/.test(c) && /--staged\b/.test(c) && !/--worktree\b/.test(c);
+
 const DESTRUCTIVE = [
   // DISARMING THE PROTECTION IS ITSELF A DESTRUCTIVE ACT.
   //
@@ -143,7 +150,16 @@ const DESTRUCTIVE = [
   // points. Resolution still decides — a clean worktree has nothing to lose, so the verdict is
   // allow and a developer never notices the rule exists.
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}reset\\s+(?:[^\\s;|&]+\\s+)*--hard\\b`), kind: 'git reset --hard (discards uncommitted work)', cwdTarget: true },
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}clean\\s+-[a-zA-Z]*[fd][a-zA-Z]*\\b`), kind: 'git clean -fd (deletes untracked files)', cwdTarget: true },
+  // `-n` and `--dry-run` make this command PRINT what it would delete and delete nothing. Refusing
+  // a dry run is refusing the exact thing a careful developer does BEFORE the destructive form —
+  // the guard was punishing the caution it exists to encourage, and `-fdn` reads as destructive to
+  // a pattern that only looks for f and d anywhere in the cluster.
+  {
+    re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}clean\\s+-[a-zA-Z]*[fd][a-zA-Z]*\\b`),
+    kind: 'git clean -fd (deletes untracked files)',
+    cwdTarget: true,
+    unless: (c) => /--dry-run\b/.test(c) || /\s-[a-zA-Z]*n[a-zA-Z]*\b/.test(c),
+  },
   // A TREEISH IS ALLOWED TO SIT BETWEEN THE VERB AND THE PATHSPEC, and the old pattern demanded
   // they be adjacent — so `git checkout other -- .`, `git checkout HEAD -- .` and
   // `git checkout main -- src/` all walked straight through a guard that caught `git checkout -- .`.
@@ -154,8 +170,8 @@ const DESTRUCTIVE = [
   // git's unambiguous pathspec separator, and a trailing bare `.` is the whole working tree. Neither
   // matches `git checkout -b feature`, `git checkout main`, or `git restore --source=x` (where the
   // dashes belong to a long option, not a separator) — branch work stays untouched.
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:[^\\s;|&]+\\s+)*--\\s`), kind: 'git checkout/restore of a pathspec (overwrites uncommitted changes)', cwdTarget: true },
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:[^\\s;|&]+\\s+)*\\.\\s*$`), kind: 'git checkout/restore . (overwrites the whole working tree)', cwdTarget: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:[^\\s;|&]+\\s+)*--\\s`), kind: 'git checkout/restore of a pathspec (overwrites uncommitted changes)', cwdTarget: true, unless: unstageOnly },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:[^\\s;|&]+\\s+)*\\.\\s*$`), kind: 'git checkout/restore . (overwrites the whole working tree)', cwdTarget: true, unless: unstageOnly },
   // `--staged` ALONE only unstages: the content stays in the working tree and nothing is lost, so
   // denying it was a false positive on an operation people run all day. `--worktree` (with or
   // without --staged) is the one that overwrites files, and a bare pathspec defaults to it.
@@ -279,7 +295,12 @@ const insideMasked = (regions, idx) => regions.some(([a, b]) => idx >= a && idx 
 export function classifyCommand(command) {
   if (typeof command !== 'string' || !command.trim()) return null;
   const masked = maskedRegions(command);
-  for (const { re, kind, all, cwdTarget } of DESTRUCTIVE) {
+  for (const { re, kind, all, cwdTarget, unless } of DESTRUCTIVE) {
+    // A rule may declare an exemption that is not expressible as "the pattern should not have
+    // matched", because it depends on ANOTHER flag elsewhere in the command — `--dry-run` on a
+    // clean, `--staged` without `--worktree` on a restore. Encoding those as negative lookaheads
+    // inside an already dense regex is how the next reader gets it wrong.
+    if (unless && unless(command)) continue;
     // Scan every occurrence, not just the first: `echo 'rm -rf a' && rm -rf b` must still be
     // caught on the second one. Only a match whose VERB starts outside a data region counts.
     const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
