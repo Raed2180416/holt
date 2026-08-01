@@ -976,14 +976,26 @@ test('FILE GATE: a Windows path survives tokenising — the escape that let work
     'a UNC path opens with two backslashes and must survive intact');
 });
 
-test('FILE GATE: POSIX backslash escapes still mean what they always did (never-worse)', () => {
+test('FILE GATE: backslash keeps the meaning the RUNNING SHELL gives it (never-worse)', () => {
   // The other half. A backslash IS an escape in a POSIX shell, and breaking that to fix Windows
   // would trade one silent mis-parse for another: `rm foo\ bar.txt` is ONE file named "foo
   // bar.txt", and reading it as two would make holt reason about paths that do not exist.
+  //
+  // BUT "never-worse" IS A PER-PLATFORM PROPERTY, and asserting POSIX everywhere is asserting the
+  // wrong thing. cmd and PowerShell have no backslash escape at all — on Windows `a\$b.txt` is a
+  // path with a directory named `a`, and collapsing it to `a$b.txt` would invent a file. CI caught
+  // exactly that: this test failed on windows-latest while the PRODUCT was right. The escaped
+  // SPACE is not platform-split, because `\ ` is how both worlds quote a space.
+  //
+  // Neither branch skips. A skipped assertion cannot detect a regression, and both behaviours are
+  // load-bearing on the platform that has them.
   const first = (cmd) => (resolveFileTargets(cmd)[0] ?? {}).raw;
+  const WIN = process.platform === 'win32';
 
   assert.equal(first('rm foo\\ bar.txt'), 'foo bar.txt', 'an escaped space is part of the name');
-  assert.equal(first('rm a\\$b.txt'), 'a$b.txt', 'an escaped dollar is a literal dollar');
+  assert.equal(first('rm a\\$b.txt'), WIN ? 'a\\$b.txt' : 'a$b.txt',
+    WIN ? 'on Windows a backslash is a separator, never an escape — the path must survive whole'
+        : 'in a POSIX shell an escaped dollar is a literal dollar');
   assert.equal(first('rm "quoted file.txt"'), 'quoted file.txt', 'quoting is unaffected');
   assert.equal(first('rm ./src/a.js'), './src/a.js', 'ordinary relative paths are unaffected');
 
