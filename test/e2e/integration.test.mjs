@@ -901,3 +901,53 @@ test('GATE: a worktree reached through a symlinked path is still protected', asy
   assert.equal(v.decision, 'deny',
     `a worktree is no less protected for being named through a symlink: ${JSON.stringify(v)}`);
 });
+
+test('FILE GATE: a rename stays allowed when the worktree is reached through a symlink', async (t) => {
+  // MEASURED ON macOS AND WINDOWS: `mv src/a.js src/b.js` — a rename INSIDE one worktree, which
+  // loses nothing — was DENIED. A guard that blocks renaming a file is uninstalled the same day.
+  //
+  // The cause is subtle and general: canonicalPath() fell back to the raw path when realpath
+  // failed, and a move DESTINATION does not exist yet. So the source canonicalised (it exists) to
+  // /private/var/... while the destination stayed /var/..., they resolved into different
+  // worktrees, and an ordinary refactor looked like a move OUT. Fixed by resolving the nearest
+  // EXISTING ancestor and re-appending the rest, so a not-yet-existing path still has a canonical
+  // location.
+  //
+  // Reproduced here on any platform by reaching the worktree through a second path.
+  const base = process.env.HOLT_TMPDIR || os.tmpdir();
+  const real = await fs.mkdtemp(path.join(base, 'holt-mv-'));
+  const link = path.join(base, `holt-mv-link-${path.basename(real)}`);
+  t.after(async () => {
+    await fs.rm(link, { force: true }).catch(() => {});
+    await fs.rm(real, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const g = (args, cwd) => new Promise((res) => {
+    execFile('git', args, { cwd, env: process.env }, (e, so) => res({ code: e?.code ?? 0, so }));
+  });
+  await g(['init', '-q', '-b', 'main', '.'], real);
+  await g(['config', 'user.email', 'x@x'], real);
+  await g(['config', 'user.name', 'x'], real);
+  await fs.writeFile(path.join(real, 'base.txt'), 'base\n');
+  await g(['add', '-A'], real);
+  await g(['commit', '-qm', 'base'], real);
+  await g(['worktree', 'add', '-q', '--detach', 'lab'], real);
+  await fs.mkdir(path.join(real, 'lab', 'src'), { recursive: true });
+  await fs.writeFile(path.join(real, 'lab', 'src', 'only_here.js'), 'export function ONLY_HERE() {}\n');
+
+  try {
+    await fs.symlink(real, link, process.platform === 'win32' ? 'junction' : 'dir');
+  } catch {
+    return; // platform refuses symlinks; the direct case is covered by the sibling tests
+  }
+  const viaLink = path.join(link, 'lab');
+
+  const rename = await assessCommand('mv src/only_here.js src/moved.js', viaLink);
+  assert.equal(rename.decision, 'allow',
+    `a rename inside the worktree loses nothing and must stay allowed: ${JSON.stringify(rename)}`);
+
+  // The other direction must still hold, or the fix bought safety away for convenience.
+  const out = await assessCommand(`mv src/only_here.js ${path.join(base, 'stolen.js')}`, viaLink);
+  assert.equal(out.decision, 'deny',
+    `moving the only copy OUT of the worktree is a loss and must still be denied: ${JSON.stringify(out)}`);
+});

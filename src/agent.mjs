@@ -226,7 +226,30 @@ const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform ===
 
 async function canonicalPath(p) {
   const abs = path.resolve(p);
-  try { return await fs.realpath(abs); } catch { return abs; }
+  try { return await fs.realpath(abs); } catch { /* does not exist yet — resolve its ancestry */ }
+
+  // A PATH THAT DOES NOT EXIST STILL HAS A CANONICAL LOCATION, and returning the raw string here
+  // was a live false positive: `mv src/a.js src/b.js` — a rename inside one worktree, which loses
+  // nothing — was DENIED on macOS and Windows. The source exists so it canonicalised to
+  // /private/var/..., while the destination does not exist yet so it stayed /var/..., they landed
+  // in different worktrees, and an ordinary refactor looked like a move OUT. A guard that blocks
+  // renaming a file is uninstalled the same day.
+  //
+  // So resolve the nearest ANCESTOR that does exist — a destination's parent directory almost
+  // always does — and re-append the rest. Only a path with no existing ancestor at all falls back
+  // to the raw form, and on that path there is nothing to compare it against anyway.
+  const parts = [];
+  let dir = abs;
+  for (let i = 0; i < 64; i++) {
+    const parent = path.dirname(dir);
+    if (parent === dir) break;            // reached the root without finding anything real
+    parts.unshift(path.basename(dir));
+    dir = parent;
+    try {
+      return path.join(await fs.realpath(dir), ...parts);
+    } catch { /* keep walking up */ }
+  }
+  return abs;
 }
 
 const foldCase = (p) => (CASE_INSENSITIVE_FS ? p.toLowerCase() : p);
