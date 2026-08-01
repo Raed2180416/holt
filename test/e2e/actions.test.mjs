@@ -19,7 +19,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { newRepo } from '../fixtures.mjs';
-import { protect, unprotect, rescue, rescues, clean, discard } from '../../src/actions.mjs';
+import { protect, unprotect, rescue, rescues, clean, discard, auto } from '../../src/actions.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze, safeToDelete } from '../../src/analyze.mjs';
@@ -1065,4 +1065,52 @@ test('CATASTROPHIC: discard never follows a symlink into another file', async (t
   assert.equal(r2.ok, true, JSON.stringify(r2));
   assert.deepEqual(r2.discarded, [], 'a tracked file is reverted, not deleted');
   assert.equal(await fs.readFile(path.join(wt, 'real.txt'), 'utf8'), 'committed content\n');
+});
+
+
+test('AUTO: does every lossless thing by itself, and refuses to delete anything', async (t) => {
+  // THE AUTOPILOT LINE, asserted rather than described.
+  //
+  // Lossless actions are automated because being wrong is recoverable: a lock placed on a worktree
+  // that did not need one costs nothing and the next run releases it. Destructive actions are NOT,
+  // however confident the verdict — holt was wrong about 8 of 10 worktrees on its own repository
+  // the day this was written, and an automatic sweep is exactly as safe as the verdict behind it.
+  //
+  // The handover is not a warning. This project's own A/B measured warning-only agents freezing at
+  // 0% cleanup while agents given a PERMITTED ACTION reached 73%: what works is handing over a
+  // concrete safe move WITH the evidence, which is what `needsYou.command` is.
+  const fx = await newRepo('autopilot');
+  t.after(() => fx.cleanup());
+
+  const risky = await fx.worktree('holds-work');
+  await fx.write('only.js', 'export function ONLY_COPY() { return 1; }\n', risky);
+  await fx.worktree('empty-one');
+  await fx.worktree('empty-two');
+
+  const r = await auto(fx.root, {});
+
+  // It ACTED on the lossless half.
+  assert.ok(r.did.protected >= 1, `at-risk work must be locked automatically: ${JSON.stringify(r.did)}`);
+  assert.equal(r.atRisk.count, 1, `and reported: ${JSON.stringify(r.atRisk)}`);
+  assert.ok(r.atRisk.ids.includes('holds-work'));
+
+  // It DID NOT delete, and it handed the decision over with the command.
+  assert.ok(r.needsYou.disposable >= 2, `the empty worktrees must be surfaced: ${JSON.stringify(r.needsYou)}`);
+  assert.equal(r.needsYou.command, 'holt clean --apply', 'the handover names an exact, safe move');
+  assert.match(r.needsYou.why, /will not remove them by itself/i, 'and says why it stopped');
+
+  // THE ASSERTION THAT MATTERS: nothing was removed from disk.
+  for (const id of ['empty-one', 'empty-two', 'holds-work']) {
+    await fs.stat(fx.wt(id));   // throws if auto deleted it
+  }
+
+  // ...and the work it locked is still there, byte for byte.
+  assert.equal(await fs.readFile(path.join(risky, 'only.js'), 'utf8'),
+    'export function ONLY_COPY() { return 1; }\n');
+
+  // IDEMPOTENT: running it again locks nothing new and still deletes nothing.
+  const again = await auto(fx.root, {});
+  assert.equal(again.did.protected, 0, 'a second run has nothing left to lock');
+  assert.equal(again.atRisk.count, 1, 'and the verdict is unchanged');
+  await fs.stat(fx.wt('empty-one'));
 });

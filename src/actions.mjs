@@ -443,6 +443,68 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
   }
 }
 
+
+/* ================================================================= AUTO ==== */
+
+/**
+ * The autopilot. Everything holt can do without a human, and nothing it cannot.
+ *
+ * THE LINE, AND WHY IT IS WHERE IT IS. holt already acts — it locks, captures, releases and
+ * removes. The question is which of those it may do UNPROMPTED, and the answer is not a
+ * preference, it follows from one asymmetry:
+ *
+ *   LOSSLESS actions are safe to automate because being wrong is recoverable. A lock placed on a
+ *   worktree that did not need one costs nothing and is released by the next run. A capture is
+ *   purely additive. Reconciliation only ever removes holt's own lock, and only where the verdict
+ *   is measured. If holt is wrong about any of these, nothing is destroyed.
+ *
+ *   DESTRUCTIVE actions must not be automated, however confident the verdict, because being wrong
+ *   is final. `clean --apply` is gated on "provably disposable" — and holt was wrong about 8 of 10
+ *   worktrees on its own repository the day this was written. An automatic sweep is exactly as
+ *   safe as the verdict, and the verdict is the thing that keeps turning out to be wrong. A tool
+ *   that deletes on its own is one bad verdict away from being the disaster it exists to prevent.
+ *
+ * So: holt does the lossless half by itself, every session, with no command typed — and hands the
+ * destructive half to a human or an agent WITH THE EVIDENCE AND THE EXACT COMMAND. That is not
+ * timidity, it is the measured design. This project's own A/B found that warning alone freezes an
+ * agent at 0% cleanup while giving it a PERMITTED ACTION reached 73%: the win came from handing
+ * over a concrete, safe move, not from acting unilaterally and not from nagging.
+ */
+export async function auto(cwd, opts = {}) {
+  const { report } = await assess(cwd, opts);
+
+  // The lossless half, done. protect() both locks what is at risk and releases holt's own locks
+  // whose justification has expired, so one call converges the lock set in both directions.
+  const p = await protect(cwd, opts);
+
+  const disposable = report.safe.filter((s) => s.safe);
+  const unknown = report.safe.filter((s) => s.confidence === 'unknown');
+  const atRisk = report.unique.filter((u) => u.verdict === 'unique-work-uncommitted');
+
+  return {
+    did: {
+      protected: p.protected,
+      released: p.released ?? 0,
+      note: 'lossless only — a lock is reversible and a release only ever undoes holt\'s own lock',
+    },
+    needsYou: {
+      disposable: disposable.length,
+      ids: disposable.map((s) => s.id),
+      command: disposable.length ? 'holt clean --apply' : null,
+      why: disposable.length
+        ? `${disposable.length} workstream(s) hold nothing base lacks. holt will not remove them by `
+          + 'itself: deleting is final, and a verdict is only as good as the scan behind it.'
+        : null,
+    },
+    atRisk: {
+      count: atRisk.length,
+      ids: atRisk.map((u) => u.id),
+      note: atRisk.length ? 'locked — git itself now refuses to remove these' : null,
+    },
+    unknown: unknown.map((u) => ({ id: u.id, why: u.reasons[0] })),
+  };
+}
+
 /* ============================================================== DISCARD ==== */
 
 /**

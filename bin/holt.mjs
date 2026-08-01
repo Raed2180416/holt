@@ -26,7 +26,7 @@ import { renderClusters } from '../src/ascii-graph.mjs';
 import { assessCommand, buildBrief } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import { integrate, detectHosts, hostsReport, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
-import { protect, unprotect, rescue, rescues, clean, discard } from '../src/actions.mjs';
+import { protect, unprotect, rescue, rescues, clean, discard, auto } from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
 import { landingOrder } from '../src/order.mjs';
@@ -71,6 +71,9 @@ COMMANDS
   doctor              environment and backend check  [--install [--yes]]
 
 ACTING  (these MUTATE the repo; everything above is read-only)
+  auto                do everything that cannot lose data, and report what needs you
+                      locks what is at risk, releases locks no longer justified, and hands
+                      the destructive half over WITH the evidence — it never deletes
   protect             git-lock every workstream holding unique work   [--dry-run]
                       a locked worktree REFUSES 'git worktree remove --force'
   unprotect [<id>]    release holt's locks (never touches locks it did not place)
@@ -942,6 +945,7 @@ async function main() {
     }
     return;
   }
+  if (cmd === 'auto') return void cmdAction(await auto(opts.cwd, opts));
   if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));
   if (cmd === 'unprotect') return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
   if (cmd === 'rescued') return void cmdAction(await rescues(opts.cwd));
