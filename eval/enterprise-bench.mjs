@@ -118,9 +118,17 @@ async function createWorktrees(root, count, noise) {
       await fs.writeFile(path.join(wt, `vendor/huge_${i}.js`), Buffer.alloc(3 * 1024 * 1024, 0x41)).catch(() => {});
       planted.huge.push(id);
     } else if (kind < 8) {
+      // landed: committed here AND independently on base -> disposable
       const body = `export function ent_landed_${i}() { return ${i}; }\n`;
       await fs.writeFile(path.join(wt, `src/landed_${i}.js`), body).catch(() => {});
-      try { await sh('git', ['add', '-A'], wt); await sh('git', ['commit', '-q', '-m', `landed ${i}`], wt); } catch {}
+      try {
+        await sh('git', ['add', '-A'], wt);
+        await sh('git', ['commit', '-q', '-m', `landed ${i}`], wt);
+        // Also commit to root so the content is "landed" on base
+        await fs.writeFile(path.join(root, `src/landed_${i}.js`), body).catch(() => {});
+        await sh('git', ['add', '-A'], root);
+        await sh('git', ['commit', '-q', '-m', `base lands ${i}`], root);
+      } catch {}
       planted.disposable.push(id);
     } else { planted.disposable.push(id); }
   }

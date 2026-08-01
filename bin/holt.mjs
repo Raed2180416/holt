@@ -361,7 +361,7 @@ async function cmdDoctor(opts) {
   out('');
   out(`  node              ${info.node}`);
   out(`  repository        ${info.repo ?? paint('red', info.bare ? 'bare repository (no working tree) — holt needs a checkout' : 'not a git repository')}`);
-  out(`  workstreams       ${info.workstreams}`);
+  out(`  workstreams       ${info.workstreams}  (${info.workstreams - 1} linked + 1 primary)`);
   out(`  jj backend        ${info.jj}`);
   out(`  symbol backend    ${ctags.available ? paint('green', info.symbolBackend) : paint('yellow', info.symbolBackend)}`);
   // Never claim language coverage the INSTALLED toolchain cannot deliver: distro ctags packages
