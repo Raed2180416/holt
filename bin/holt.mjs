@@ -39,6 +39,7 @@ import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, Li
 import { loadPolicy, loadPolicyFrom, evaluatePolicy } from '../src/team/policy.mjs';
 import { fleetScan } from '../src/team/fleet.mjs';
 import { loadConfig, ConfigError } from '../src/config.mjs';
+import { stashState, describeStash } from '../src/stash.mjs';
 
 // Commands where a config error must NEVER kill the process. The principle is universal:
 // config tunes HEURISTICS (family grouping, maintenance nagging) — it never changes the
@@ -94,6 +95,7 @@ COMMANDS
                       [--fail-on-unlanded] [--max-age-days <n>] [--ignore <branch>]...
                       (needs full refs: actions/checkout fetch-depth: 0)
   graph               the relationship graph  [--html <file>]
+  stash               stash entries holding work no ref has  [--json]
   gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
   tui                 interactive risk-sorted dashboard  [--snapshot]
   setup               ONE-COMMAND FIRST RUN: install backends, wire agents, show what is at risk
@@ -159,10 +161,24 @@ OPTIONS
   --yes, -y           confirm an action non-interactively (unprotect --force; doctor --install)
   -h, --help          this
   -v, --version       print the version and exit
+  --verbose           show progress during long operations (discover/scan/analyze)
+  --debug             print stack traces on unexpected errors (default: message only)
+  --quiet             suppress non-essential output (headers, tips)
+  --plain             force human-readable output for action commands (default: JSON when piped)
 
 CONFIG (optional — see README.md#configuration)
   .holtrc.json        in the repository root: familyOverrides, maintenanceFloor, maintenanceRatio
                       absent is fine; present-and-invalid is a hard error (exit 2), never silent
+
+QUICK START
+  holt setup                     # first run: install backends, wire agents, show what's at risk
+  holt status                    # see what your workstreams produced
+  holt risk                      # find work that exists nowhere else
+  holt clean                     # see what's disposable (dry-run; add --apply to remove)
+  holt gate <id>                 # pre-delete check: exit 0 = safe, 1 = holds unique work, 2 = unknown
+  holt protect                   # lock at-risk worktrees so 'git worktree remove --force' refuses
+
+Full documentation: https://raed2180416.github.io/holt/
 `;
 
 function parseArgs(argv) {
@@ -219,8 +235,12 @@ function parseArgs(argv) {
       case '--bin': opts.bin = argv[++i]; break;
       case '--remove': opts.remove = true; break;
       case '--concurrency': opts.concurrency = Number(argv[++i]) || 8; break;
+      case '--verbose': opts.verbose = true; break;
+      case '--debug': opts.debug = true; break;
+      case '--quiet': opts.quiet = true; break;
+      case '--plain': opts.plain = true; break;
       default:
-        if (a.startsWith('--')) throw new Error(`unknown option: ${a}`);
+        if (a.startsWith('--')) throw new Error(`unknown option: ${a}\n  Run 'holt --help' for valid options.`);
         opts._.push(a);
     }
   }
@@ -243,23 +263,66 @@ function emitJson(v) { out(JSON.stringify(v, null, 2)); }
  * first if a worktree changed underneath us mid-command.
  */
 async function buildReport(opts) {
+  const verbose = opts.verbose || process.argv.includes('--verbose');
+  const stderr = (s) => { if (verbose) process.stderr.write(s); };
+  stderr('holt: discovering workstreams...\n');
   const disc = await discover(opts.cwd, opts);
   if (!disc.root) {
     const { message } = repoAbsenceError(disc, opts.cwd);
     process.stderr.write(paint('red', `holt: ${message}\n`));
     process.exit(2);
   }
+  stderr(`holt: ${disc.worktrees?.length ?? 0} workstreams found, scanning...\n`);
   const scanned = await scan(disc, opts);
+  stderr(`holt: scan complete (${scanned.workstreams?.length ?? 0} scanned), analyzing...\n`);
   const report = await analyze(scanned, opts);
+  stderr('holt: analysis complete.\n');
   return { report, scanned };
 }
 
 /**
- * Render an action result. Always JSON: these are the outputs a script or an agent chains on,
- * and a prose summary of a destructive operation is harder to act on than the facts.
+ * Render an action result. JSON for scripts/agents (default), human-readable prose when a
+ * human is at a terminal. The prose mode is critical: `clean`, `protect`, `auto` — the commands
+ * that actually CHANGE the repo — must be readable by the person deciding whether to proceed,
+ * not just by the script chaining on the exit code. Scripts and tests that pipe stdout get JSON;
+ * a human at a TTY gets prose. --json forces JSON; --plain forces prose.
  */
-function cmdAction(result) {
-  emitJson(result);
+function cmdAction(result, opts = {}) {
+  const wantJson = opts.json || (!process.stdout.isTTY && !opts.plain);
+  if (wantJson) { emitJson(result); return result; }
+  // Human-readable summary for action commands
+  const lines = [];
+  if (result.dryRun) lines.push(paint('yellow', 'DRY RUN — nothing was changed. Re-run with --apply to execute.\n'));
+  const did = result.did || {};
+  const actions = result.actions || result.wouldRemove || [];
+  if (actions.length) {
+    const isProtect = actions.some((a) => a.action?.includes('lock') || a.action?.includes('protect'));
+    const isClean = actions.some((a) => a.action === 'removed' || (!a.action && result.dryRun && !isProtect));
+    const label = result.dryRun
+      ? (isProtect ? 'would protect' : isClean ? 'would remove' : 'would act on')
+      : 'action(s)';
+    lines.push(paint('bold', `${actions.length} ${label}:`));
+    for (const a of actions) {
+      const action = a.action || (result.dryRun ? 'remove' : 'done');
+      const icon = action === 'removed' || action === 'remove' ? '✗'
+        : action.includes('lock') || action.includes('protect') ? '🔒'
+        : action === 'skipped' || action === 'already-locked' ? '○'
+        : '•';
+      const color = action === 'removed' || action === 'remove' ? 'red'
+        : action.includes('lock') || action.includes('protect') ? 'yellow'
+        : action === 'skipped' || action === 'already-locked' ? 'grey'
+        : 'green';
+      const reason = a.why || a.reason;
+      lines.push(`  ${paint(color, icon)} ${a.id || a.path || '?'}${reason ? paint('grey', ` — ${reason.slice(0, 120)}`) : ''}`);
+    }
+  }
+  for (const [k, v] of Object.entries(did)) {
+    if (Array.isArray(v) && v.length) lines.push(paint('grey', `  ${k}: ${v.length}`));
+    else if (typeof v === 'number' && v > 0) lines.push(paint('grey', `  ${k}: ${v}`));
+  }
+  if (result.note) lines.push(paint('grey', `\n  ${result.note}`));
+  if (lines.length) out(lines.join('\n'));
+  else emitJson(result);
   return result;
 }
 
@@ -624,7 +687,6 @@ async function cmdBrief(opts) {
   const text = await buildBrief(opts.cwd, {
     familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
   });
-  process.stderr.write(`DEBUG brief: buildBrief returned ${text ? 'text' : 'null'}\n`);
   if (opts.json) return emitJson({ context: text });
   if (text) { out(text); return; }
 
@@ -1226,8 +1288,8 @@ async function main() {
     }
     return;
   }
-  if (cmd === 'auto') return void cmdAction(await auto(opts.cwd, opts));
-  if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));
+  if (cmd === 'auto') return void cmdAction(await auto(opts.cwd, opts), opts);
+  if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts), opts);
   if (cmd === 'unprotect') {
     // `--force` overrides a lock holt did NOT place — a materially different act from releasing
     // holt's own, and the one that most needs a human to have deliberately meant it. Refused
@@ -1251,7 +1313,7 @@ async function main() {
         process.exit(2);
       }
     }
-    return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }));
+    return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }), opts);
   }
   if (cmd === 'rescued') return void cmdAction(await rescues(opts.cwd));
   if (cmd === 'discard') {
@@ -1261,11 +1323,11 @@ async function main() {
       process.exit(2);
     }
     const r = await discard(opts.cwd, targets, opts);
-    cmdAction(r);
+    cmdAction(r, opts);
     if (!r.ok) process.exit(1);
     return;
   }
-  if (cmd === 'clean') return void cmdAction(await clean(opts.cwd, opts));
+  if (cmd === 'clean') return void cmdAction(await clean(opts.cwd, opts), opts);
   if (cmd === 'verify') {
     const [, a, b] = opts._;
     if (!a || !b) {
@@ -1273,7 +1335,7 @@ async function main() {
       process.exit(2);
     }
     const r = await verifyPair(opts.cwd, a, b, { run: opts.run ?? null });
-    cmdAction(r);
+    cmdAction(r, opts);
     if (r.ok === false) process.exit(2);
     // Deny on the VERDICT, not on whether a failure name could be parsed. Keying the exit code
     // off interactionFailures.length meant a runner whose output holt cannot parse exited 0 —
@@ -1288,7 +1350,7 @@ async function main() {
       process.exit(2);
     }
     const r = await rescue(opts.cwd, target, opts);
-    cmdAction(r);
+    cmdAction(r, opts);
     // An unverified capture MUST exit non-zero: a script chaining
     //   holt rescue X && git worktree remove X
     // has to stop here, or that chain destroys the work it was meant to save.
@@ -1378,6 +1440,25 @@ async function main() {
       return;
     }
 
+    case 'stash': {
+      const stash = report.stash;
+      if (opts.json) {
+        emitJson(stash);
+      } else {
+        if (!stash || stash.atRisk.length === 0) {
+          out(paint('green', '✓ no stash entries holding unique work'));
+          if (stash?.entries?.length) {
+            out(paint('grey', `  (${stash.entries.length} stash entries, all verified redundant)`));
+          }
+        } else {
+          out(paint('yellow', `⚠ ${stash.atRisk.length} stash entr${stash.atRisk.length === 1 ? 'y' : 'ies'} holding work no ref has:`));
+          out('');
+          out(describeStash(stash));
+        }
+      }
+      return;
+    }
+
     case 'gate': {
       // Pre-delete gate. Exit 0 = disposable, 1 = holds unique work, 2 = unknown.
       const id = opts._[1];
@@ -1451,6 +1532,13 @@ main().catch((err) => {
     process.stderr.write(paint('red', `holt: ${msg.replace(/^holt:\s*/, '')}\n`));
     process.exit(2);
   }
-  process.stderr.write(paint('red', `holt: ${err?.stack ?? msg}\n`));
+  // A stack trace with internal file paths reads as "crashes on first use" for any error that
+  // is not a recognised repository state. Print the message alone; offer the stack with --debug.
+  if (process.argv.includes('--debug')) {
+    process.stderr.write(paint('red', `holt: ${err?.stack ?? msg}\n`));
+  } else {
+    process.stderr.write(paint('red', `holt: ${msg}\n`));
+    process.stderr.write(paint('grey', '  (run with --debug for a stack trace)\n'));
+  }
   process.exit(1);
 });
