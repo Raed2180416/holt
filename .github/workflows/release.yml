@@ -1,0 +1,181 @@
+name: release
+
+# Publishes holt with the supply-chain evidence an enterprise security review asks for:
+# an SBOM in both formats, a Sigstore build-provenance attestation over every release artefact,
+# npm provenance on the published package, and an integrity manifest the customer can re-check
+# offline with `holt audit`.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+# WHAT THIS NEEDS FROM THE REPOSITORY OWNER. Nothing here is configured automatically, and every
+# step that needs a credential is guarded so the workflow still produces the unauthenticated
+# evidence if the credential is absent.
+#
+#   1. npm publishing — ONE of:
+#        (a) PREFERRED, no secret to store: configure a Trusted Publisher for the `holt` package
+#            on npmjs.com → Settings → Trusted publishers, pointing at
+#              repository: Raed2180416/holt      workflow: .github/workflows/release.yml
+#            Configurations created after 2026-05-20 must explicitly allow the `npm publish`
+#            action. The `id-token: write` permission below is what makes this work.
+#        (b) a granular automation token stored as the repository secret  NPM_TOKEN
+#      Provenance requires `repository.url` in package.json to be the HTTPS repo URL. It is.
+#
+#   2. OPTIONAL — a detached Ed25519 signature over MANIFEST.sha256, for air-gapped customers
+#      who cannot reach GitHub to verify the Sigstore attestation. Store the PKCS#8 PEM private
+#      key as the repository secret  HOLT_RELEASE_SIGNING_KEY  and put the matching SPKI-base64
+#      public key in RELEASE_PUBLIC_KEYS_B64 in src/supply-chain.mjs. Until both exist, the
+#      signing step is skipped and `holt audit --require-signature` correctly REFUSES rather
+#      than reporting a signature it cannot check. See SUPPLY-CHAIN.md §5.
+#
+#   No other secret is required. The provenance attestation uses GitHub's OIDC identity and
+#   Sigstore's ephemeral keys — there is no long-lived signing key to protect or rotate.
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Build and attest, but do not publish to npm'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # attach artefacts to the GitHub release
+      id-token: write          # OIDC → Sigstore signing certificate, and npm trusted publishing
+      attestations: write      # persist the provenance attestation
+      artifact-metadata: write # link the attestation on the repository's artifacts page
+    env:
+      # The `secrets` context is NOT available in a step-level `if:`. Only `env` is. Hoisting the
+      # presence test to job level is the supported way to make a step conditional on a secret
+      # existing — writing `if: secrets.X != ''` on the step silently never matches.
+      HAS_SIGNING_KEY: ${{ secrets.HOLT_RELEASE_SIGNING_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Node 24: npm trusted publishing does not work on earlier versions.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+
+      # ── the evidence must be true BEFORE anything is published ────────────────────────────
+      # A release that fails its own audit is the one release that must never ship, so these run
+      # first and the job stops here on any failure.
+      - name: the integrity manifest must be current
+        run: node scripts/gen-manifest.mjs --check
+
+      - name: holt must pass its own supply-chain audit
+        run: node bin/holt.mjs audit
+
+      - name: the full suite, including the mutation gate
+        run: npm run test:all
+
+      # ── SBOM ──────────────────────────────────────────────────────────────────────────────
+      # npm's native generator, restricted to the published dependency set. The wrapper fails the
+      # build if the SBOM describes the dev tree, if any component lacks a purl, or if the
+      # version disagrees with package.json.
+      - name: generate SBOMs (CycloneDX + SPDX)
+        run: node scripts/gen-sbom.mjs
+
+      # ── the artefact ──────────────────────────────────────────────────────────────────────
+      - name: pack the tarball
+        id: pack
+        run: |
+          set -euo pipefail
+          TARBALL="$(npm pack --silent)"
+          echo "tarball=$TARBALL" >> "$GITHUB_OUTPUT"
+          echo "digest=$(sha256sum "$TARBALL" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "tree=$(node scripts/gen-manifest.mjs --digest)" >> "$GITHUB_OUTPUT"
+
+      # ── optional detached signature over the integrity manifest ───────────────────────────
+      # Skipped, loudly, when no key is configured. A missing signature must never be mistaken
+      # for a present one, which is why holt reports `signature: unavailable` rather than `valid`
+      # and why --require-signature refuses.
+      - name: sign the integrity manifest
+        if: env.HAS_SIGNING_KEY == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.HOLT_RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SIGNING_KEY" > /tmp/holt-release.pem
+          openssl pkeyutl -sign -rawin -inkey /tmp/holt-release.pem \
+            -in MANIFEST.sha256 -out /tmp/manifest.sig
+          base64 -w0 /tmp/manifest.sig > MANIFEST.sha256.sig
+          shred -u /tmp/holt-release.pem /tmp/manifest.sig
+          echo "signed MANIFEST.sha256"
+
+      - name: note when the manifest is NOT signed
+        if: env.HAS_SIGNING_KEY != 'true'
+        run: |
+          echo "::notice::HOLT_RELEASE_SIGNING_KEY is not configured, so MANIFEST.sha256 ships unsigned."
+          echo "::notice::Authenticity for this release comes from the Sigstore provenance attestation below."
+
+      # ── provenance: SLSA v1.0 Build L2 ────────────────────────────────────────────────────
+      # GitHub-hosted runner + provenance generated by GitHub's control plane and signed with a
+      # short-lived Sigstore certificate bound to this workflow's OIDC identity. Build L3 would
+      # require running the build inside a REUSABLE workflow so build logic is isolated from the
+      # caller; we do not do that yet and therefore do not claim L3.
+      #
+      # Every artefact a customer might download is a subject, not just the tarball: an SBOM
+      # nobody can authenticate is a text file.
+      - name: attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            ${{ steps.pack.outputs.tarball }}
+            holt.cdx.json
+            holt.spdx.json
+            MANIFEST.sha256
+
+      # ── publish ───────────────────────────────────────────────────────────────────────────
+      - name: publish to npm with provenance
+        if: ${{ github.event_name == 'push' && !inputs.dry-run }}
+        run: npm publish --provenance --access public
+        env:
+          # Harmless and ignored when a Trusted Publisher is configured; the fallback when one
+          # is not. One of the two must exist or this step fails — deliberately, because a
+          # release that silently did not publish is worse than one that failed.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: attach the evidence to the GitHub release
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARBALL: ${{ steps.pack.outputs.tarball }}
+          DIGEST: ${{ steps.pack.outputs.digest }}
+          TREE: ${{ steps.pack.outputs.tree }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Verify this release"
+            echo
+            echo '```console'
+            echo "gh attestation verify $TARBALL --repo ${{ github.repository }}"
+            echo "npm audit signatures"
+            echo "holt audit          # offline: integrity + the full capability ledger"
+            echo '```'
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| tarball sha256 | \`$DIGEST\` |"
+            echo "| tree digest (MANIFEST.sha256) | \`$TREE\` |"
+            echo "| SBOM | \`holt.cdx.json\` (CycloneDX 1.5) · \`holt.spdx.json\` (SPDX 2.3) |"
+            echo "| provenance | SLSA v1.0 Build L2, Sigstore |"
+            echo
+            echo "Full details: [SUPPLY-CHAIN.md](SUPPLY-CHAIN.md) · [security questionnaire](docs/SECURITY-QUESTIONNAIRE.md)"
+          } > /tmp/notes.md
+          gh release create "${GITHUB_REF_NAME}" --notes-file /tmp/notes.md --title "${GITHUB_REF_NAME}" \
+            || gh release edit "${GITHUB_REF_NAME}" --notes-file /tmp/notes.md
+          FILES="$TARBALL holt.cdx.json holt.spdx.json MANIFEST.sha256"
+          [ -f MANIFEST.sha256.sig ] && FILES="$FILES MANIFEST.sha256.sig"
+          # shellcheck disable=SC2086
+          gh release upload "${GITHUB_REF_NAME}" $FILES --clobber

@@ -6,8 +6,8 @@
 
 **You ran a dozen agents overnight. holt tells you what each one actually made, which ones<br>collide, and which are safe to delete — and it stops an agent deleting work that exists nowhere else.**
 
-[![tests](https://img.shields.io/badge/tests-369%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
-[![mutation score](https://img.shields.io/badge/mutation%20score-29%2F29%20killed-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-417%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+[![mutation score](https://img.shields.io/badge/mutation%20score-33%2F33%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
@@ -227,9 +227,9 @@ Every optional dependency degrades **loudly**: `holt doctor` shows exactly what'
 
 ## The test suite attacks itself
 
-369 tests, and the interesting ones are the hostile ones:
+417 tests, and the interesting ones are the hostile ones:
 
-- **29/29 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
+- **33/33 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
 - **The CLI is tested as a binary**, because at one point 169 tests passed while `holt protect` printed *"unknown command"* — every test called functions directly and the dispatcher was dead. Exit codes are asserted per command; they're the contract scripts chain on.
 - **The eval polices itself.** It refuses to score trials the agent never ran (a credits-exhausted run once fabricated "+17 pts" from agents that did nothing — that scenario is now a permanent regression test), and its answer key is proven unreachable from trial repos after an agent found it and scored by reading it.
@@ -248,7 +248,7 @@ because a claim you cannot back is worse than a gap you name.
 
 | Surface | How it was verified |
 |---|---|
-| Core scan, safety, actions, CLI | 369 tests + 29/29 deliberate-defect mutation kills, run on every commit |
+| Core scan, safety, actions, CLI | 417 tests + 33/33 deliberate-defect mutation kills, run on every commit |
 | Linux / macOS / Windows core | CI matrix runs the safety classifier, detection, CLI-as-binary, actions and the invariant fuzzer on all three |
 | Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
 | OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |
@@ -279,10 +279,52 @@ therefore to holt.
 
 ---
 
+## Prove the "no network" claim yourself — `holt audit`
+
+Every dev tool says it doesn't phone home. holt ships the evidence, and it is the *customer* who
+runs it, on the copy they installed, offline, with no repository and no account:
+
+```console
+$ holt audit
+holt supply-chain audit   holt 0.2.0 · 52 files
+  tree digest  22c5c0dc4960e101f23606967326306ef8095a8c6349775b7bb50f2ab6d4b8f6
+
+  ✓ the installed files match the manifest that shipped with them
+  ✓ the detector can still see the code it is judging
+  ✓ every shipped file holds only the capabilities it declares
+  ✓ network egress matches the declared destinations
+  ✓ no networked git verb is reachable, with or without the mutation opt-in
+  ✓ every external binary the package can execute is declared, including the ones named by a variable
+  ✓ every environment variable read is declared
+
+  7/7 checks passed.
+```
+
+`src/supply-chain.mjs` **declares** every capability the package holds — every file that can
+touch the filesystem, spawn a process, evaluate code or open a socket; every binary it can
+execute, including the call sites where the executable is a *variable*; every environment
+variable it reads; the one network destination it has and what triggers it. `holt audit` compares
+that declaration against the bytes on disk and **fails in both directions**: an undeclared
+capability, or a declaration with nothing behind it.
+
+Exactly one file in the package can reach the network — the pinned, hash-verified `ctags`
+download behind `holt setup`, which you can skip entirely. And git cannot reach it either: every
+networked git verb is outside the argv allowlist, which the audit proves by *calling* the
+classifier rather than reading a list.
+
+Free on every tier, and deliberately so — asking a security reviewer to buy a licence before they
+can check whether the tool is safe to buy is a closed loop.
+
+**Zero required runtime dependencies.** SBOMs in CycloneDX 1.5 and SPDX 2.3, SLSA v1.0 Build L2
+provenance, and `gh attestation verify` for publisher authenticity:
+[SUPPLY-CHAIN.md](SUPPLY-CHAIN.md) · [security questionnaire](docs/SECURITY-QUESTIONNAIRE.md).
+
 ## Honest boundaries
 
 - **P4 in general remains unsolved.** `verify` decides a *specific suspected pair* empirically; it does not certify compatibility, and the wording is asserted by test.
 - **1000+-worktree scale is unmeasured on a real repository** — the figure published is from a generated fixture.
+- **`holt audit` runs inside the package it audits.** It detects a substituted or modified package; it is not a defence against an attacker who already owns the machine. Pair it with `gh attestation verify`, which is signed outside the package.
+- **SLSA Build L2, not L3.** L3 needs the build to run in a reusable workflow. It is on the list and it is not claimed.
 
 ## Quick start
 

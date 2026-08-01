@@ -1,7 +1,7 @@
 {
   "name": "holt",
   "version": "0.2.0",
-  "description": "holt™ — know what your agents made, and don't lose any of it: what each worktree produced, which ones collide, which are safe to delete, and a guard that stops an agent deleting work that exists nowhere else.",
+  "description": "holt\u2122 \u2014 know what your agents made, and don't lose any of it: what each worktree produced, which ones collide, which are safe to delete, and a guard that stops an agent deleting work that exists nowhere else.",
   "type": "module",
   "bin": {
     "holt": "./bin/holt.mjs"
@@ -13,7 +13,10 @@
   "files": [
     "bin",
     "src",
-    "README.md"
+    "README.md",
+    "MANIFEST.sha256",
+    "MANIFEST.sha256.sig",
+    "SUPPLY-CHAIN.md"
   ],
   "engines": {
     "node": ">=18"
@@ -24,7 +27,10 @@
     "test:e2e": "node --test \"test/e2e/*.test.mjs\"",
     "selfcheck": "node bin/holt.mjs doctor",
     "test:mutation": "node test/mutation.mjs",
-    "test:all": "npm test && npm run test:mutation"
+    "test:all": "npm test && npm run test:mutation",
+    "manifest": "node scripts/gen-manifest.mjs",
+    "audit:supply-chain": "node bin/holt.mjs audit",
+    "prepack": "node scripts/gen-manifest.mjs"
   },
   "keywords": [
     "git",

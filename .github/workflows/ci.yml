@@ -34,8 +34,15 @@ jobs:
       # scan and the no-git-identity rescue path. Every one of those is platform-sensitive (path
       # separators, git's own behaviour, how a shell quotes), and they were being proven on Linux
       # only while shipping to macOS and Windows users.
-      - run: node --test test/unit/safety.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs test/e2e/integration.test.mjs
+      # supply-chain.test.mjs is in the CROSS-PLATFORM list, not the Linux-only one, because the
+      # audit enumerates and hashes the shipped file set — the single most path-separator-
+      # sensitive thing in the package. A manifest keyed by "src\git.mjs" on Windows and
+      # "src/git.mjs" everywhere else would report every file as missing on one OS, and a
+      # customer's first experience of our security evidence would be it failing on their laptop.
+      - run: node --test test/unit/safety.test.mjs test/unit/supply-chain.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs test/e2e/integration.test.mjs
       - run: node bin/holt.mjs doctor --json
+      - name: the supply-chain audit must pass on this OS
+        run: node bin/holt.mjs audit
       - name: the tool must run against its own repository on this OS
         run: node bin/holt.mjs status --json
 
@@ -212,6 +219,67 @@ jobs:
           done
           echo "tarball is clean: bin/ src/ README LICENSE only"
 
+  supply-chain:
+    name: supply-chain evidence
+    runs-on: ubuntu-latest
+    # Everything here works with NO credentials. The two credentialed halves — npm provenance and
+    # the detached manifest signature — live in release.yml and are guarded there, so this job
+    # can prove the evidence is TRUE on every commit rather than only at release time. An SBOM
+    # and an integrity manifest first generated on release day are two artefacts nobody has ever
+    # seen fail.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: npm ci
+
+      - name: the integrity manifest must match the shipped files
+        # Without this the manifest becomes a file somebody remembers to regenerate, and a
+        # one-commit-stale manifest reports every honest change as tampering — the fastest way
+        # to teach a customer to ignore the integrity check entirely.
+        run: node scripts/gen-manifest.mjs --check
+
+      - name: holt must pass its own supply-chain audit
+        run: node bin/holt.mjs audit
+
+      - name: the audit must be able to FAIL — a check nobody has seen go red is decoration
+        # Law: prove the instrument can detect presence before trusting its silence. A planted
+        # fetch() in a file that declares no network must turn the audit red and exit non-zero.
+        # This runs against a disposable COPY; the checkout is never mutated.
+        run: |
+          set -euo pipefail
+          WORK="$(mktemp -d)"
+          cp -r bin src package.json README.md LICENSE.md MANIFEST.sha256 SUPPLY-CHAIN.md "$WORK/"
+          printf '\nexport const leak = (u) => fetch(u);\n' >> "$WORK/src/analyze.mjs"
+          node "$WORK/bin/holt.mjs" audit --json > "$WORK/out.json" && rc=0 || rc=$?
+          if [ "$rc" = 0 ]; then echo "::error::the audit passed a planted fetch() — it proves nothing"; exit 1; fi
+          node -e "
+            const r = require('$WORK/out.json');
+            const c = r.checks.find(x => x.id === 'network');
+            if (r.ok || c.ok) { console.error('the network check stayed green'); process.exit(1); }
+            console.log('audit correctly failed:', c.summary);
+          "
+          rm -rf "$WORK"
+
+      - name: SBOM — CycloneDX and SPDX, describing the SHIPPED tree not the dev tree
+        run: node scripts/gen-sbom.mjs --out "$RUNNER_TEMP"
+
+      - name: the SBOM must not describe software we do not ship
+        run: |
+          set -euo pipefail
+          node -e "
+            const b = require('$RUNNER_TEMP/holt.cdx.json');
+            const pkg = require('./package.json');
+            if (b.metadata.component.version !== pkg.version) throw new Error('SBOM version drift');
+            const dev = (b.components||[]).filter(c => /stryker|babel|@types/i.test(c.name));
+            if (dev.length) throw new Error('dev-only packages in the SBOM: ' + dev.map(c=>c.name).join(', '));
+            const required = (b.components||[]).filter(c => c.scope !== 'optional');
+            console.log('CycloneDX ' + b.specVersion + ': ' + required.length + ' required, ' + ((b.components||[]).length - required.length) + ' optional');
+          "
+
+      - name: the supply-chain suite
+        run: node --test test/unit/supply-chain.test.mjs
+
   business:
     name: commerce and entitlement
     runs-on: ${{ matrix.os }}
@@ -229,6 +297,12 @@ jobs:
       # invariant), the policy engine's refuse-don't-silently-pass behaviour, and the full
       # Stripe purchase path over a real socket.
       - run: node --test test/unit/license.test.mjs test/unit/policy.test.mjs test/unit/server.test.mjs test/unit/milestone.test.mjs test/e2e/purchase-path.test.mjs test/e2e/branches.test.mjs test/e2e/autoprotect.test.mjs
+      # NOTE: this grep covers src/ ONLY, and the shipped package is bin/ + src/. The one file in
+      # the project that really does open a socket (bin/install-ctags.mjs) was therefore in the
+      # half this gate never looked at — the promise was true, but this instrument could not have
+      # detected it being false. The complete check is `holt audit` in the supply-chain job, which
+      # covers every shipped file and which a CUSTOMER can run. This stays as a fast, independent
+      # second opinion.
       - name: no src/ file may make a network call (the no-telemetry promise)
         if: runner.os != 'Windows'
         run: |

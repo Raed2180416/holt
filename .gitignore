@@ -27,3 +27,13 @@ crush.json
 # The operator launch runbook names where the licence signing key lives. .npmignore is not
 # access control — it stays out of the public repository entirely.
 LAUNCH-RUNBOOK.md
+
+# SBOMs are generated per release by scripts/gen-sbom.mjs and attached to the GitHub release.
+# Committing them would create a fourth surface that rots against the lockfile — the SBOM must
+# describe the release it ships with, never a snapshot somebody regenerated once.
+holt.cdx.json
+holt.spdx.json
+
+# The detached manifest signature is produced in the release workflow from a repository secret.
+# MANIFEST.sha256 itself IS committed and IS shipped: it is the thing `holt audit` checks against.
+MANIFEST.sha256.sig
