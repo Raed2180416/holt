@@ -420,7 +420,44 @@ export function lexSegments(command) {
   for (let i = 0; i < command.length; i++) {
     let ch = command[i];
 
-    if (ch === '\\') { buf += command[i + 1] ?? ''; has = true; i++; continue; }
+    // A BACKSLASH IS AN ESCAPE IN A POSIX SHELL AND A PATH SEPARATOR ON WINDOWS, and treating it
+    // as an escape unconditionally was a live safety hole:
+    //
+    //     mv secret.js C:\Users\x\stolen.js   ->   destination parsed as "C:UsersxStolen.js"
+    //
+    // which is a RELATIVE path, so it resolved INSIDE the worktree, so holt read a move OUT of the
+    // worktree as an in-place rename and ALLOWED it. On Windows an agent could move the only copy
+    // of a file out from under holt and the guard would permit it.
+    //
+    // The discrimination has to keep POSIX semantics exactly — `rm foo\ bar.txt` is one file named
+    // "foo bar.txt", and breaking that would be its own defect — so the rule is narrow and keyed on
+    // shapes no POSIX shell produces:
+    //
+    //   `C:\…`      the buffer so far is exactly a drive letter and a colon: a Windows absolute path
+    //   `\\host\…`  a leading double backslash: a UNC path
+    //   win32       on Windows itself, a backslash before a normal path character is a separator;
+    //               before a space or a quote it is still an escape, which is how cmd and
+    //               PowerShell quote paths containing spaces
+    //
+    // Everything else keeps the old behaviour, so nothing about POSIX parsing changes.
+    if (ch === '\\') {
+      const next = command[i + 1] ?? '';
+      // STARTS with a drive letter, not EQUALS one: after the first separator the buffer is
+      // `C:\Users`, and an equality test would make only the first backslash literal and eat the
+      // rest — which is the same mangling in slower motion.
+      const driveQualified = /^[A-Za-z]:/.test(buf);
+      // A UNC path opens with two backslashes. After the FIRST one is taken literally the buffer
+      // holds a single backslash, so the continuation test is "this token began with one" — not
+      // "begins with two", which never matches at that point and ate the rest of the path.
+      const uncStart = (!has && next === '\\') || buf.startsWith('\\');
+      const winSeparator = process.platform === 'win32' && next !== '' && !/[\s'"]/.test(next);
+      if (driveQualified || uncStart || winSeparator) {
+        buf += ch;              // literal separator — do NOT consume the character after it
+        has = true;
+        continue;
+      }
+      buf += next; has = true; i++; continue;
+    }
     if (ch === "'") {
       const end = command.indexOf("'", i + 1);
       buf += end === -1 ? command.slice(i + 1) : command.slice(i + 1, end);

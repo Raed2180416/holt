@@ -951,3 +951,43 @@ test('FILE GATE: a rename stays allowed when the worktree is reached through a s
   assert.equal(out.decision, 'deny',
     `moving the only copy OUT of the worktree is a loss and must still be denied: ${JSON.stringify(out)}`);
 });
+
+test('FILE GATE: a Windows path survives tokenising — the escape that let work be moved out', () => {
+  // MEASURED SAFETY HOLE, Windows only. The tokeniser treated `\` as a POSIX shell escape
+  // unconditionally, so:
+  //
+  //     mv secret.js C:\Users\x\stolen.js   ->   destination parsed as "C:UsersxStolen.js"
+  //
+  // which is a RELATIVE path. It resolved INSIDE the worktree, so holt read a move OUT of the
+  // worktree as an in-place rename and ALLOWED it — an agent on Windows could move the only copy
+  // of a file out from under the guard and holt would permit it.
+  //
+  // Asserted at the PARSE, because that is where the defect is and it is the same on every
+  // platform. Resolution is deliberately platform-dependent below that: on Linux `C:\Users\x` is
+  // a perfectly legal relative filename, so asserting a verdict here would be asserting the
+  // platform, not the product.
+  const dest = (cmd) => (resolveFileTargets(cmd).find((t) => t.dest) ?? {}).dest;
+
+  assert.equal(dest('mv a.js C:\\Users\\x\\stolen.js'), 'C:\\Users\\x\\stolen.js',
+    'a drive-qualified path must keep every separator');
+  assert.equal(dest('mv a.js D:\\tmp\\deep\\out.js'), 'D:\\tmp\\deep\\out.js',
+    'and keep them all the way down, not just the first');
+  assert.equal(dest('mv a.js \\\\server\\share\\out.js'), '\\\\server\\share\\out.js',
+    'a UNC path opens with two backslashes and must survive intact');
+});
+
+test('FILE GATE: POSIX backslash escapes still mean what they always did (never-worse)', () => {
+  // The other half. A backslash IS an escape in a POSIX shell, and breaking that to fix Windows
+  // would trade one silent mis-parse for another: `rm foo\ bar.txt` is ONE file named "foo
+  // bar.txt", and reading it as two would make holt reason about paths that do not exist.
+  const first = (cmd) => (resolveFileTargets(cmd)[0] ?? {}).raw;
+
+  assert.equal(first('rm foo\\ bar.txt'), 'foo bar.txt', 'an escaped space is part of the name');
+  assert.equal(first('rm a\\$b.txt'), 'a$b.txt', 'an escaped dollar is a literal dollar');
+  assert.equal(first('rm "quoted file.txt"'), 'quoted file.txt', 'quoting is unaffected');
+  assert.equal(first('rm ./src/a.js'), './src/a.js', 'ordinary relative paths are unaffected');
+
+  // And the resolution still separates a rename from a move-out on THIS platform.
+  const posix = resolveFileTargets('mv src/a.js /elsewhere/b.js').find((t) => t.dest);
+  assert.equal(posix.dest, '/elsewhere/b.js', 'a POSIX destination is untouched');
+});
