@@ -23,7 +23,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { HOSTS, strengthLabel, CLOUD_CAVEAT } from '../src/integrate/hosts.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -105,6 +105,10 @@ async function main() {
   console.log('HOSTS.md regenerated from src/integrate/hosts.mjs.');
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// pathToFileURL, not a raw `file://${process.argv[1]}` template: on Windows, argv[1] carries
+// backslashes and no scheme (C:\path\to\script.mjs), while import.meta.url is a proper file URL
+// (file:///C:/path/to/script.mjs). The string comparison never matched, so `main()` never ran
+// when the script was invoked directly on Windows — the generator silently did nothing.
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => { console.error(e?.stack || e?.message || e); process.exit(2); });
 }

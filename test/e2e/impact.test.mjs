@@ -12,6 +12,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { newRepo } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
@@ -164,6 +166,66 @@ test('IMPACT: every finding carries the caveats that make it honest', async (t) 
   assert.match(text, /not a conflict/i, 'the output must refuse the conflict claim explicitly');
   assert.match(text, /TEXTUALLY/i, 'the textual-match limitation must be stated');
   assert.match(text, /P4/, 'the deferred problem must be named, not quietly implied');
+});
+
+test('IMPACT: a symlink is never read as the consumer\'s own text', async (t) => {
+  // THE SAME CLASS content-identity.mjs `pathContentKey` was fixed for, found by sweeping every
+  // reader that attributes bytes to a worktree path, and REPRODUCED here before this pin existed.
+  //
+  // What git tracks at a symlink path is the TARGET STRING. Both backends read through the link
+  // anyway — ripgrep opens a symlink handed to it as an explicit path argument, and the node
+  // fallback's `fs.stat` followed it and reported `isFile()` — so a worktree whose only committed
+  // file is a link to a file OUTSIDE the repository was reported as referencing every identifier
+  // in that external file. Verbatim, before the fix:
+  //
+  //     'alpha' references 1 symbol(s) that 'beta' defines and 'alpha' does not
+  //
+  // ...for an `alpha` whose entire tracked content is the string `/…/ext/target.js`, in which the
+  // symbol does not appear. A dependency edge with no evidence anywhere in what alpha tracks.
+  const fx = await newRepo('impact-symlink');
+  t.after(() => fx.cleanup());
+
+  // The TARGET, outside the repository, references the producer's symbol. The LINK does not.
+  const ext = path.join(path.dirname(fx.root), 'ext');
+  await fs.mkdir(ext, { recursive: true });
+  await fs.writeFile(path.join(ext, 'target.js'),
+    'import { computeRetryBudget } from "./retry.js";\ncomputeRetryBudget(3);\n');
+
+  const producer = await fx.worktree('producer-1');
+  await fx.write('src/retry.js',
+    'export function computeRetryBudget(attempts) {\n  return attempts * 250;\n}\n', producer);
+  await fx.commit('add retry budget', producer);
+
+  const linker = await fx.worktree('linker-1');
+  try {
+    await fs.symlink(path.join(ext, 'target.js'), path.join(linker, 'src', 'borrowed.js'));
+  } catch {
+    return t.skip('this platform will not create a symlink here');
+  }
+  await fx.commit('linker commits a link to an external file', linker);
+
+  // GROUND TRUTH: the symbol appears nowhere in what the linker actually tracks.
+  const tracked = await fx.git(['show', 'HEAD:src/borrowed.js'], linker);
+  assert.doesNotMatch(tracked, /computeRetryBudget/,
+    'fixture is wrong if the tracked content mentions the symbol');
+
+  const { imp } = await run(fx);
+  const bled = findPair(imp, 'producer-1', 'linker-1');
+  assert.equal(bled, undefined,
+    `the link's TARGET is not the linker's work — no edge may be reported: ${JSON.stringify(imp.pairs)}`);
+
+  // NEVER-WORSE CONTROL, in the same repository so a search that simply went inert fails it: a
+  // REGULAR file with the same text IS a reference, and must still be found.
+  const real = await fx.worktree('consumer-1');
+  await fx.write('src/caller.js',
+    'import { computeRetryBudget } from "./retry.js";\ncomputeRetryBudget(3);\n', real);
+  await fx.commit('a real consumer', real);
+
+  const after = await run(fx);
+  assert.ok(findPair(after.imp, 'producer-1', 'consumer-1'),
+    `a real reference in a real file must still be reported: ${JSON.stringify(after.imp.pairs)}`);
+  assert.equal(findPair(after.imp, 'producer-1', 'linker-1'), undefined,
+    'and the symlink still must not be one');
 });
 
 test('IMPACT: a repo with one workstream reports nothing and says why', async (t) => {

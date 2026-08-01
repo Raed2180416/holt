@@ -305,6 +305,9 @@ test('PARITY: rescue may never say nothing-to-rescue where gate refuses on conte
   // The ignore rules cover a FILE, a DIRECTORY, and recognisable build output — the three shapes
   // git's `status --ignored=matching` reports differently.
   await fx.write('.gitignore', 'notes.local\nsecrets/\nnode_modules/\n');
+  // The manifest IS the evidence: generated-named dirs earn disposal from the command that
+  // recreates them (GENERATOR_MANIFESTS). A JS repo without package.json is not a JS repo.
+  await fx.write('package.json', '{\"name\":\"fixture\",\"private\":true}\n');
   await fx.commit('ignore rules');
 
   // --- shapes that MUST hold work ------------------------------------------------
@@ -953,6 +956,9 @@ test('CATASTROPHIC: a hand-authored file under vendor/ is not invisible', async 
   // with a node_modules becomes permanently unclearable — the failure this list exists to prevent.
   const fx2 = await newRepo('generated-still-invisible');
   t.after(() => fx2.cleanup());
+  // The manifest IS the evidence — committed at base so every worktree checkout carries it.
+  await fx2.write('package.json', '{"name":"fixture","private":true}\n');
+  await fx2.commit('add the build manifest');
   const wt2 = await fx2.worktree('built');
   await fx2.write('node_modules/react/index.js', 'module.exports = 1;\n', wt2);
   await fx2.write('dist/bundle.js', 'console.log(1);\n', wt2);
@@ -1093,6 +1099,257 @@ test('CATASTROPHIC: discard never follows a symlink into another file', async (t
 });
 
 
+test('CATASTROPHIC: clean never fingerprints a symlink by what it points at', async (t) => {
+  // THE SAME CLASS AS THE TEST ABOVE, one layer down, and it reached a DELETION.
+  //
+  // scan.mjs fingerprinted every touched file with a bare `fs.readFile`, which silently follows
+  // symlinks and hashes the RESOLVED TARGET's bytes. A committed symlink's git blob is the target
+  // path STRING — `git cat-file -p HEAD:link.js` prints the path and nothing else — so two
+  // worktrees each committing an UNRELATED symlink, pointing at two DIFFERENT external files that
+  // happened to hold identical bytes at scan time, fingerprinted identically. safeToDelete's
+  // siblingCoverage saw a content match, reported each `safe: true, redundantWith: [the other]`,
+  // and `clean --apply` would have removed the only copy of real work. Reproduced end to end
+  // (discover -> scan -> analyze -> clean) before the fix.
+  //
+  // The fix is in one shared reader (content-identity.mjs `pathContentKey`): lstat first, key a
+  // symlink by its target string. This test proves the fix at the level that actually deletes.
+  const fx = await newRepo('clean-symlink-fingerprint');
+  t.after(() => fx.cleanup());
+
+  // Two targets OUTSIDE the repository whose bytes are identical right now.
+  const ext = path.join(path.dirname(fx.root), 'ext');
+  await fs.mkdir(ext, { recursive: true });
+  const same = 'export function shared() { return 42; }\n';
+  await fs.writeFile(path.join(ext, 'alpha-target.js'), same);
+  await fs.writeFile(path.join(ext, 'beta-target.js'), same);
+
+  const a = await fx.worktree('alpha');
+  const b = await fx.worktree('beta');
+  try {
+    await fs.symlink(path.join(ext, 'alpha-target.js'), path.join(a, 'link.js'));
+    await fs.symlink(path.join(ext, 'beta-target.js'), path.join(b, 'link.js'));
+  } catch {
+    return t.skip('this platform will not create a symlink here');
+  }
+  await fx.commit('alpha commits a link to its own target', a);
+  await fx.commit('beta commits a link to a different target', b);
+
+  // GROUND TRUTH, from git itself: the two worktrees' tracked content is provably DIFFERENT.
+  const alphaTracked = await fx.git(['show', 'HEAD:link.js'], a);
+  const betaTracked = await fx.git(['show', 'HEAD:link.js'], b);
+  assert.notEqual(alphaTracked, betaTracked,
+    'fixture is wrong if the two links track the same string');
+
+  // POSITIVE CONTROL, in the same repository so a detector that simply went blind fails it: two
+  // worktrees committing the SAME target string DO hold the same work. Deliberately dangling —
+  // the pre-fix reader threw on these and returned null, so a genuinely redundant pair could
+  // never be reclaimed either. Refusing more is not a fix.
+  const c = await fx.worktree('gamma');
+  const d = await fx.worktree('delta');
+  await fs.symlink('../shared/thing.js', path.join(c, 'same.js'));
+  await fs.symlink('../shared/thing.js', path.join(d, 'same.js'));
+  await fx.commit('gamma commits a link', c);
+  await fx.commit('delta commits the identical link', d);
+
+  const disc = await discover(fx.root);
+  const sc = await scan(disc, { symbols: false });
+  const byId = (id) => sc.workstreams.find((w) => w.id === id);
+
+  // THE FINGERPRINTS THEMSELVES, before any verdict reads them.
+  assert.notEqual(byId('alpha').contentKeys['link.js'], byId('beta').contentKeys['link.js'],
+    'links to different targets must not share a content key');
+  assert.ok(byId('alpha').contentKeys['link.js'],
+    'and they must still HAVE keys — two nulls agreeing is not a fix');
+  assert.equal(byId('gamma').contentKeys['same.js'], byId('delta').contentKeys['same.js'],
+    'identical committed links hold identical tracked content and must match');
+  assert.ok(byId('gamma').contentKeys['same.js'], 'a dangling link still has tracked content');
+
+  // THE VERDICT.
+  const verdicts = safeToDelete(sc);
+  const v = (id) => verdicts.find((x) => x.id === id);
+  for (const id of ['alpha', 'beta']) {
+    assert.equal(v(id).safe, false,
+      `${id} holds the only copy of its link and must not be disposable: ${JSON.stringify(v(id))}`);
+    assert.deepEqual(v(id).redundantWith, undefined,
+      `${id} must not be reported as redundant with anyone`);
+  }
+  assert.equal(v('gamma').safe, true, `the genuine pair must still be reclaimable: ${JSON.stringify(v('gamma'))}`);
+  assert.deepEqual(v('gamma').redundantWith, ['delta']);
+
+  // AND THE COMMAND THAT DELETES. `clean --apply` must leave the false pair standing, and drain
+  // the genuine pair to exactly one survivor (it re-verifies before each removal, so the last
+  // member finds no sibling and is refused).
+  const applied = await clean(fx.root, { apply: true, symbols: false });
+  const acted = new Map(applied.actions.map((x) => [x.id, x.action]));
+  assert.equal(acted.get('alpha'), undefined, `alpha must never enter the plan: ${JSON.stringify(applied)}`);
+  assert.equal(acted.get('beta'), undefined, `beta must never enter the plan: ${JSON.stringify(applied)}`);
+  assert.ok(await fs.stat(a).then(() => true, () => false), 'alpha worktree must still exist');
+  assert.ok(await fs.stat(b).then(() => true, () => false), 'beta worktree must still exist');
+  assert.equal(applied.removed, 1, `exactly one of the genuine pair goes: ${JSON.stringify(applied)}`);
+
+  // The work is still there, byte for byte, and git agrees the repository is intact.
+  assert.equal(await fx.git(['show', 'HEAD:link.js'], a), alphaTracked);
+  assert.equal(await fx.git(['show', 'HEAD:link.js'], b), betaTracked);
+  const fsck = await fx.git(['fsck', '--strict', '--no-progress'], fx.root);
+  assert.doesNotMatch(fsck, /missing|corrupt/i, `git fsck must be clean: ${fsck}`);
+});
+
+
+test('SYMLINK RECALL: identical links at DIFFERENT paths are redundant on content identity alone', async (t) => {
+  // THE OTHER HALF OF THE DEFECT ABOVE — the half a false-positive-only fix leaves broken, and
+  // the half no test in this repository could see.
+  //
+  // MEASURED, not assumed: with the pre-fix `fs.readFile` reader restored in
+  // content-identity.mjs, the test above still passed its positive control — gamma and delta came
+  // back `safe: true, redundantWith: [...]` even though their symlink content keys were both
+  // `null`. They commit the identical link at the identical PATH, so they are mergedTree twins and
+  // tree identity carries that verdict by itself. The control therefore proves nothing about the
+  // symlink content key, and an implementation that keyed EVERY symlink `null` would pass the
+  // whole file while quietly refusing to reclaim any linked worktree ever again.
+  //
+  // So: the same target string at DIFFERENT paths. Different paths mean different tree oids,
+  // mergedTree twinning cannot answer, and the only instrument left is the symlink's own content
+  // key. Deliberately dangling, because a dangling link is exactly where the pre-fix reader threw
+  // and returned null. Refusing more is not a fix: two worktrees whose entire committed delta is
+  // provably the same tracked content ARE mutually redundant, and holt has to say so.
+  const fx = await newRepo('clean-symlink-recall');
+  t.after(() => fx.cleanup());
+
+  const e = await fx.worktree('epsilon');
+  const z = await fx.worktree('zeta');
+  try {
+    await fs.mkdir(path.join(e, 'x'), { recursive: true });
+    await fs.mkdir(path.join(z, 'y'), { recursive: true });
+    await fs.symlink('../vendor/dep.js', path.join(e, 'x', 'same.js'));
+    await fs.symlink('../vendor/dep.js', path.join(z, 'y', 'same.js'));
+  } catch {
+    return t.skip('this platform will not create a symlink here');
+  }
+  await fx.commit('epsilon commits the link under x/', e);
+  await fx.commit('zeta commits the same link under y/', z);
+
+  // GROUND TRUTH from git: the tracked content is the same string at both paths.
+  assert.equal(await fx.git(['show', 'HEAD:x/same.js'], e), await fx.git(['show', 'HEAD:y/same.js'], z),
+    'fixture is wrong if the two links do not track the same string');
+
+  const disc = await discover(fx.root);
+  const sc = await scan(disc, { symbols: false });
+  const byId = (id) => sc.workstreams.find((w) => w.id === id);
+
+  // THE FIXTURE INVARIANT THAT MAKES THIS TEST MEAN ANYTHING: the OTHER instrument is blind here,
+  // so whatever verdict follows came from the symlink content key and nothing else.
+  assert.notEqual(byId('epsilon').committed.mergedTree, byId('zeta').committed.mergedTree,
+    'same content at different paths must NOT be mergedTree twins, or this test proves nothing');
+
+  assert.ok(byId('epsilon').contentKeys['x/same.js'],
+    'a dangling committed link still has tracked content: its target string');
+  assert.equal(byId('epsilon').contentKeys['x/same.js'], byId('zeta').contentKeys['y/same.js'],
+    'identical target strings are identical tracked content, at whatever path they sit');
+
+  // THE VERDICT, reached through content identity alone.
+  const verdicts = safeToDelete(sc);
+  const v = (id) => verdicts.find((x) => x.id === id);
+  for (const id of ['epsilon', 'zeta']) {
+    assert.equal(v(id).safe, true,
+      `${id} is genuinely held by its sibling and must be reclaimable: ${JSON.stringify(v(id))}`);
+  }
+  assert.deepEqual(v('epsilon').redundantWith, ['zeta']);
+  assert.deepEqual(v('zeta').redundantWith, ['epsilon']);
+
+  // AND THE COMMAND THAT DELETES: exactly one goes, the survivor keeps the work, git stays intact.
+  const applied = await clean(fx.root, { apply: true, symbols: false });
+  assert.equal(applied.removed, 1, `exactly one of the pair goes: ${JSON.stringify(applied)}`);
+  const survivors = await Promise.all([e, z].map((p) => fs.stat(p).then(() => p, () => null)));
+  const alive = survivors.filter(Boolean);
+  assert.equal(alive.length, 1, `exactly one worktree survives: ${JSON.stringify(survivors)}`);
+  const rel = alive[0] === e ? 'x/same.js' : 'y/same.js';
+  assert.equal((await fx.git(['show', `HEAD:${rel}`], alive[0])).trim(), '../vendor/dep.js',
+    'the survivor still holds the link, byte for byte');
+  const fsck2 = await fx.git(['fsck', '--strict', '--no-progress'], fx.root);
+  assert.doesNotMatch(fsck2, /missing|corrupt/i, `git fsck must be clean: ${fsck2}`);
+});
+
+
+test('SYMLINK LAYERS: untracked and dirty links are keyed by target too, and neither licences a delete', async (t) => {
+  // PROVE PRESENCE BEFORE TRUSTING SILENCE. scan.mjs claims the single `pathContentKey` loop over
+  // `result.touched` is "the whole content-identity surface — there is no second, unfixed path for
+  // one of the layers". Committed is pinned two tests up. This pins the other two layers, so the
+  // claim is measured rather than asserted in a comment: if a future refactor fingerprints
+  // untracked or dirty paths through some other reader, this goes red rather than going quiet.
+  //
+  // It also pins the SECOND rule these layers depend on. A content match with a NON-DURABLE holder
+  // is an observation, never a licence: the sibling's copy is one `git checkout` from gone, and
+  // holt never sees that moment. So even a genuine untracked twin must leave `safe` false.
+  const fx = await newRepo('symlink-layers');
+  t.after(() => fx.cleanup());
+
+  const ext = path.join(path.dirname(fx.root), 'ext');
+  await fs.mkdir(ext, { recursive: true });
+  const same = 'export function shared() { return 42; }\n';
+  await fs.writeFile(path.join(ext, 'alpha-target.js'), same);
+  await fs.writeFile(path.join(ext, 'beta-target.js'), same);
+
+  const a = await fx.worktree('alpha');
+  const b = await fx.worktree('beta');
+
+  // THE DIRTY LAYER first, because `fx.commit` stages EVERYTHING in the worktree: committed
+  // pointing at one target, retargeted on disk to the other. What is fingerprinted must be what
+  // is ON DISK NOW (the new target string) — that is the whole reason a dirty path cannot vouch
+  // for a sibling's deletion.
+  try {
+    await fs.symlink(path.join(ext, 'alpha-target.js'), path.join(a, 'tracked.js'));
+  } catch {
+    return t.skip('this platform will not create a symlink here');
+  }
+  await fx.commit('alpha commits a link', a);
+  await fs.unlink(path.join(a, 'tracked.js'));
+  await fs.symlink(path.join(ext, 'beta-target.js'), path.join(a, 'tracked.js'));
+
+  // THE UNTRACKED LAYER, created after the commit so it stays untracked.
+  await fs.symlink(path.join(ext, 'alpha-target.js'), path.join(a, 'note.js'));
+  await fs.symlink(path.join(ext, 'beta-target.js'), path.join(b, 'note.js'));
+
+  // A GENUINE untracked twin: same target string in two worktrees.
+  const c = await fx.worktree('gamma');
+  const d = await fx.worktree('delta');
+  await fs.symlink('../shared/thing.js', path.join(c, 'twin.js'));
+  await fs.symlink('../shared/thing.js', path.join(d, 'twin.js'));
+
+  const sc = await scan(await discover(fx.root), { symbols: false });
+  const byId = (id) => sc.workstreams.find((w) => w.id === id);
+  const A = byId('alpha');
+
+  // EVERY LAYER REACHED THE READER, and every one of them got a SYMLINK key ('l:'), not the
+  // bytes at the other end of the link.
+  assert.ok(A.uncommitted.untracked.includes('note.js'), `untracked layer: ${JSON.stringify(A.uncommitted)}`);
+  assert.ok(A.uncommitted.files.includes('tracked.js'), `dirty layer: ${JSON.stringify(A.uncommitted)}`);
+  for (const f of ['note.js', 'tracked.js']) {
+    assert.match(A.contentKeys[f] ?? '', /^l:/,
+      `${f} must be keyed as a symlink, not by its target's bytes: ${A.contentKeys[f]}`);
+  }
+  assert.equal(A.contentKeys['tracked.js'], byId('beta').contentKeys['note.js'],
+    'a retargeted link fingerprints as the target it points at NOW, which is beta\'s target');
+
+  // THE FALSE PAIR, one layer down from the committed one: two untracked links to two different
+  // targets that hold identical bytes right now.
+  assert.notEqual(A.contentKeys['note.js'], byId('beta').contentKeys['note.js'],
+    'untracked links to different targets must not share a content key');
+
+  // THE GENUINE untracked twin DOES match — going blind is not the fix here either...
+  assert.ok(byId('gamma').contentKeys['twin.js'], 'an untracked link still has content');
+  assert.equal(byId('gamma').contentKeys['twin.js'], byId('delta').contentKeys['twin.js'],
+    'identical untracked links hold identical content and must match');
+
+  // ...and STILL does not licence a deletion, because neither copy is committed.
+  const verdicts = safeToDelete(sc);
+  for (const id of ['alpha', 'beta', 'gamma', 'delta']) {
+    const v = verdicts.find((x) => x.id === id);
+    assert.equal(v.safe, false,
+      `${id}'s only holder is uncommitted and must not make it disposable: ${JSON.stringify(v)}`);
+  }
+});
+
+
 test('AUTO: does every lossless thing by itself, and refuses to delete anything', async (t) => {
   // THE AUTOPILOT LINE, asserted rather than described.
   //
@@ -1204,6 +1461,140 @@ test('RECALL: mutually redundant worktrees are disposable, and the LAST one neve
   const soloVerdict = (await inspect(fx.root)).safe.find((s) => s.id === 'solo');
   assert.equal(soloVerdict.safe, false,
     `work no sibling holds must still be refused: ${JSON.stringify(soloVerdict)}`);
+});
+
+test('SAFETY: a sibling holding the identical bytes UNCOMMITTED is not a durable backup', async (t) => {
+  // THE LOSS WINDOW THIS CLOSES, stated as the sequence that destroys the work:
+  //
+  //   1. `keeper` COMMITS work.js. Its copy is in the object store: recoverable forever.
+  //   2. `sloppy` holds the identical bytes, never committed — a working-tree file, nothing more.
+  //   3. holt matched the two on content identity and called `keeper` safe:true,
+  //      redundantWith ['sloppy'] — because both copies existed ON DISK at scan time.
+  //   4. `clean --apply` re-verifies (both still on disk, both still matching) and removes
+  //      `keeper`. The committed, recoverable copy is the one that goes.
+  //   5. Anything at all happens in `sloppy` — `git checkout`, an editor revert, the next agent
+  //      writing that path — and the last copy is gone. None of those is a holt command; holt's
+  //      gate never runs, git never warns, and the content existed nowhere else.
+  //
+  // The re-verification in step 4 cannot close this: it proves the bytes are on disk at the
+  // instant of removal, which was never in doubt. The question is whether the SURVIVOR is
+  // recoverable, and an uncommitted file is not. So a redundancy claim now requires the sibling's
+  // matching copy to be COMMITTED. Uncommitted matches are still reported — they are true, and
+  // naming them tells a human the one action that would make the worktree disposable — but they
+  // cannot produce safe:true.
+  //
+  // Every content body below is DISTINCT on purpose: content identity is scan-wide, so one shared
+  // body would let an unrelated case's committed copy vouch for another's and each assertion
+  // would stop testing what it says it tests.
+  const fx = await newRepo('durable-redundancy');
+  t.after(() => fx.cleanup());
+
+  const UNTRACKED_BODY = 'export function UNTRACKED_TWIN_WORK() { return 1; }\n';
+  const PAIR_BODY = 'export function COMMITTED_PAIR_WORK() { return 2; }\n';
+  const STAGED_BODY = 'export function STAGED_TWIN_WORK() { return 3; }\n';
+  const DIRTIED_BODY = 'export function DIRTIED_OVER_WORK() { return 4; }\n';
+
+  // (a) THE WINDOW — committed here, UNTRACKED in the sibling.
+  const keeper = await fx.worktree('keeper');
+  await fx.write('feat/keeper/work.js', UNTRACKED_BODY, keeper);
+  await fx.commit('keeper: committed, recoverable', keeper);
+  const sloppy = await fx.worktree('sloppy');
+  await fx.write('feat/sloppy/work.js', UNTRACKED_BODY, sloppy); // never added, never committed
+
+  // (a2) STAGED IS NOT COMMITTED. `git add` writes a blob but no ref reaches it; a reset, a
+  // checkout or a gc takes it, and nothing in git's UI calls that a loss.
+  const staged = await fx.worktree('staged-holder');
+  await fx.write('feat/staged/work.js', STAGED_BODY, staged);
+  await fx.git(['add', 'feat/staged/work.js'], staged);
+  const committedStaged = await fx.worktree('committed-vs-staged');
+  await fx.write('feat/cs/work.js', STAGED_BODY, committedStaged);
+  await fx.commit('committed-vs-staged: the only committed copy of this body', committedStaged);
+
+  // (a3) COMMITTED THEN MODIFIED ON TOP. The path IS in the sibling's committed delta, but the
+  // bytes fingerprinted from disk are the MODIFIED ones — the commit does not hold them and
+  // cannot vouch for them. Without this distinction "is the path committed" would pass for
+  // "are these bytes committed".
+  const dirtied = await fx.worktree('dirty-holder');
+  await fx.write('feat/dirty/work.js', 'export function SOMETHING_ELSE() { return 0; }\n', dirtied);
+  await fx.commit('dirty-holder: commits one thing…', dirtied);
+  await fx.write('feat/dirty/work.js', DIRTIED_BODY, dirtied); // …then overwrites it, uncommitted
+  const committedDirty = await fx.worktree('committed-vs-dirty');
+  await fx.write('feat/cd/work.js', DIRTIED_BODY, committedDirty);
+  await fx.commit('committed-vs-dirty: the only committed copy of this body', committedDirty);
+
+  // (b) THE CONTROL, and the recall this must not cost: two COMMITTED copies of one body.
+  for (const [id, dir] of [['pair-x', 'feat/x'], ['pair-y', 'feat/y']]) {
+    const wt = await fx.worktree(id);
+    await fx.write(`${dir}/pair.js`, PAIR_BODY, wt);
+    await fx.commit(`${id}: the same work, committed`, wt);
+  }
+
+  const report = await inspect(fx.root);
+  const v = (id) => report.safe.find((s) => s.id === id);
+  const u = (id) => report.unique.find((s) => s.id === id);
+
+  // NON-VACUITY FIRST, and deliberately blind to WHICH field the holder lands in: the match
+  // itself must be FOUND, or every assertion below passes for the wrong reason (holt simply not
+  // seeing the twin would satisfy "not disposable" while proving nothing about durability).
+  const seesTwin = (x) => [...(x.redundantWith ?? []), ...(x.redundantWithUncommitted ?? [])];
+  assert.deepEqual(seesTwin(v('keeper')), ['sloppy'],
+    `holt must SEE the sibling's identical bytes: ${JSON.stringify(v('keeper'))}`);
+  assert.deepEqual(seesTwin(v('committed-vs-staged')), ['staged-holder'],
+    JSON.stringify(v('committed-vs-staged')));
+  assert.deepEqual(seesTwin(v('committed-vs-dirty')), ['dirty-holder'],
+    JSON.stringify(v('committed-vs-dirty')));
+
+  // (a) THE REFUSAL.
+  assert.equal(v('keeper').safe, false,
+    `a committed copy must not be deleted because a sibling holds it UNCOMMITTED: ${JSON.stringify(v('keeper'))}`);
+  assert.equal(v('keeper').redundantWith, undefined,
+    `redundantWith is what every consumer reads as "safe, someone else has it" — an uncommitted `
+    + `holder must never appear there: ${JSON.stringify(v('keeper'))}`);
+  assert.ok(v('keeper').reasons.some((r) => /UNCOMMITTED there/.test(r)),
+    `the refusal must say WHY it declines a match it can plainly see: ${JSON.stringify(v('keeper').reasons)}`);
+
+  // …and `unique` must AGREE. Two commands giving opposite answers about the same bytes is the
+  // failure this codebase keeps paying for: `risk` saying "nothing found nowhere else" beside a
+  // gate that refuses to delete it.
+  assert.ok(u('keeper').uniqueSymbolCount > 0,
+    `unique must not report the work as held elsewhere while safeToDelete refuses to delete it: `
+    + `${JSON.stringify(u('keeper'))}`);
+
+  // (a2) and (a3).
+  assert.equal(v('committed-vs-staged').safe, false,
+    `staged-but-uncommitted is not a durable copy: ${JSON.stringify(v('committed-vs-staged'))}`);
+  assert.deepEqual(v('committed-vs-staged').redundantWithUncommitted, ['staged-holder'],
+    JSON.stringify(v('committed-vs-staged')));
+  assert.equal(v('committed-vs-dirty').safe, false,
+    `a committed PATH whose on-disk bytes are modified does not vouch for those bytes: `
+    + `${JSON.stringify(v('committed-vs-dirty'))}`);
+  assert.deepEqual(v('committed-vs-dirty').redundantWithUncommitted, ['dirty-holder'],
+    JSON.stringify(v('committed-vs-dirty')));
+
+  // (b) RECALL PRESERVED — committed on both sides is still redundant, still disposable.
+  assert.equal(v('pair-x').safe, true, JSON.stringify(v('pair-x')));
+  assert.equal(v('pair-y').safe, true, JSON.stringify(v('pair-y')));
+  assert.deepEqual(v('pair-x').redundantWith, ['pair-y'], JSON.stringify(v('pair-x')));
+  assert.deepEqual(v('pair-y').redundantWith, ['pair-x'], JSON.stringify(v('pair-y')));
+  assert.equal(v('pair-x').redundantWithUncommitted, undefined, JSON.stringify(v('pair-x')));
+
+  // THE REAL DESTRUCTIVE COMMAND, because a verdict that never reaches `clean` proves nothing.
+  const cleaned = await clean(fx.root, { apply: true });
+  const alive = async (id) => { try { await fs.stat(fx.wt(id)); return true; } catch { return false; } };
+
+  for (const id of ['keeper', 'committed-vs-staged', 'committed-vs-dirty']) {
+    assert.equal(await alive(id), true,
+      `${id} holds the only DURABLE copy of its work and must survive: removed=${JSON.stringify(cleaned.removed)}`);
+  }
+  // …and the work itself is on disk, which is the only thing that actually matters.
+  assert.match(await fs.readFile(path.join(fx.wt('keeper'), 'feat/keeper/work.js'), 'utf8'),
+    /UNTRACKED_TWIN_WORK/);
+
+  const pairLeft = [];
+  for (const id of ['pair-x', 'pair-y']) if (await alive(id)) pairLeft.push(id);
+  assert.equal(pairLeft.length, 1,
+    `the genuinely durable pair must still drain to exactly one survivor — this fix must not buy `
+    + `safety by refusing everything: left=${JSON.stringify(pairLeft)}`);
 });
 
 test('RECALL: the same work at a DIFFERENT PATH, in a DIFFERENT INDENTATION STYLE, is still disposable',

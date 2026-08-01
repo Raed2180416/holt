@@ -226,7 +226,7 @@ test('P3 PRECISION: two workstreams that coincidentally pick the same name for u
   // created together in this fixture, so they honestly ARE one family; that fact is irrelevant to
   // this test, which is about duplicate detection using CONTENT (declared body), not about
   // family. Asserting on family here would test the wrong layer.
-  assert.equal(orchid.familyRule, 'fork+creation-time', 'the fixture must have real provenance to assign a family from');
+  assert.equal(orchid.familyRule, 'creation-burst', 'the fixture must have real provenance to assign a family from');
 
   // ANTI-VACUITY: symbol-identity must actually see the coincidence, or this test proves nothing.
   assert.ok(orchid.addedKeys.some((k) => k.endsWith(':process')), 'orchid must add a symbol named process');
@@ -235,6 +235,112 @@ test('P3 PRECISION: two workstreams that coincidentally pick the same name for u
   const dup = report.duplicates.find((d) => pairMatches(d, 'orchid', 'quokka'));
   assert.equal(dup, undefined,
     `two unrelated functions that happen to share a name must not be reported as duplicate work: ${JSON.stringify(dup)}`);
+});
+
+/**
+ * THE OTHER HALF OF THE SAME GATE. The declared-body check above bought its precision with a
+ * TEXTUAL comparison, and textual equality answers "did they type the same bytes", not "did
+ * they build the same thing". Two agents that genuinely duplicated a helper almost never type
+ * the same bytes: one wraps the signature, the other keeps it on one line; one indents with
+ * four spaces, the other with tabs; one leaves a blank line before the loop. Under the textual
+ * gate every one of those was a MISMATCH and the real duplicate went unreported — a recall
+ * regression the precision fix did not need to buy, and one no corpus that plants
+ * byte-identical bodies can see. The comparison is now over a whitespace-normalised,
+ * string-literal-aware token stream, so this pair (identical tokens, different layout) is a
+ * duplicate again while the negative control above stays silent.
+ */
+test('P3 RECALL: the same function reformatted in two worktrees is still duplicate work', async (t) => {
+  const fx = await newRepo('reformatted-dup');
+  t.after(() => fx.cleanup());
+
+  // Four-space indent, signature wrapped over four lines, body compressed onto one line.
+  await fx.worktree('orchid');
+  await fx.write('src/retry.js',
+    'export function retryWithBackoff(\n' +
+    '    task,\n' +
+    '    attempts\n' +
+    ') {\n' +
+    '    let delay = 100;\n' +
+    '    for (let i = 0; i < attempts; i++) {\n' +
+    '        try { return task(); } catch (e) { delay = delay * 2; }\n' +
+    '    }\n' +
+    '    throw new Error("retry exhausted");\n' +
+    '}\n',
+    fx.wt('orchid'));
+  await fx.commit('orchid adds retry-with-backoff', fx.wt('orchid'));
+
+  // IDENTICAL TOKEN SEQUENCE. Tabs, signature on one line, body expanded over five, one blank
+  // line. Every difference from orchid's copy is whitespace layout and nothing else.
+  await fx.worktree('quokka');
+  await fx.write('src/backoff.js',
+    'export function retryWithBackoff(task, attempts) {\n' +
+    '\tlet delay = 100;\n' +
+    '\n' +
+    '\tfor (let i = 0; i < attempts; i++) {\n' +
+    '\t\ttry {\n' +
+    '\t\t\treturn task();\n' +
+    '\t\t} catch (e) {\n' +
+    '\t\t\tdelay = delay * 2;\n' +
+    '\t\t}\n' +
+    '\t}\n' +
+    '\tthrow new Error("retry exhausted");\n' +
+    '}\n',
+    fx.wt('quokka'));
+  await fx.commit('quokka adds retry-with-backoff', fx.wt('quokka'));
+
+  const { scanned, report } = await inspectFixture(fx);
+  // ANTI-VACUITY: the two files really are different bytes, or the gate is never exercised.
+  const orchidText = await fsp.readFile(path.join(fx.wt('orchid'), 'src/retry.js'), 'utf8');
+  const quokkaText = await fsp.readFile(path.join(fx.wt('quokka'), 'src/backoff.js'), 'utf8');
+  assert.notEqual(orchidText, quokkaText, 'the fixture must not plant byte-identical bodies');
+
+  const orchid = scanned.workstreams.find((w) => w.id === 'orchid');
+  const quokka = scanned.workstreams.find((w) => w.id === 'quokka');
+  assert.ok(orchid.addedKeys.some((k) => k.endsWith(':retryWithBackoff')), 'orchid must add retryWithBackoff');
+  assert.ok(quokka.addedKeys.some((k) => k.endsWith(':retryWithBackoff')), 'quokka must add retryWithBackoff');
+
+  const dup = report.duplicates.find((d) => pairMatches(d, 'orchid', 'quokka'));
+  assert.ok(dup, 'a reformatted copy of the same function is the same work and must be reported');
+  assert.ok(dup.sharedSymbols.some((s) => s.endsWith(':retryWithBackoff')),
+    `expected retryWithBackoff as shared evidence, got: ${JSON.stringify(dup.sharedSymbols)}`);
+});
+
+/**
+ * The boundary of the relaxation above: whitespace OUTSIDE a string literal is layout, and
+ * whitespace INSIDE one is data. Two bodies whose only difference is the spacing inside a
+ * literal are two different programs, and normalising layout must not blur that.
+ */
+test('P3 PRECISION: whitespace inside a string literal is content, not layout', async (t) => {
+  const fx = await newRepo('literal-whitespace');
+  t.after(() => fx.cleanup());
+
+  await fx.worktree('orchid');
+  await fx.write('src/banner.js',
+    'export function renderBanner(name) {\n' +
+    '  const sep = "col   sep";\n' +
+    '  return sep + name;\n' +
+    '}\n',
+    fx.wt('orchid'));
+  await fx.commit('orchid renders a banner', fx.wt('orchid'));
+
+  await fx.worktree('quokka');
+  await fx.write('src/label.js',
+    'export function renderBanner(name) {\n' +
+    '  const sep = "col sep";\n' +
+    '  return sep + name;\n' +
+    '}\n',
+    fx.wt('quokka'));
+  await fx.commit('quokka renders a label', fx.wt('quokka'));
+
+  const { scanned, report } = await inspectFixture(fx);
+  const orchid = scanned.workstreams.find((w) => w.id === 'orchid');
+  const quokka = scanned.workstreams.find((w) => w.id === 'quokka');
+  assert.ok(orchid.addedKeys.some((k) => k.endsWith(':renderBanner')), 'orchid must add renderBanner');
+  assert.ok(quokka.addedKeys.some((k) => k.endsWith(':renderBanner')), 'quokka must add renderBanner');
+
+  const dup = report.duplicates.find((d) => pairMatches(d, 'orchid', 'quokka'));
+  assert.equal(dup, undefined,
+    `string-literal contents differ, so these are not the same code: ${JSON.stringify(dup)}`);
 });
 
 /* -------------------------------------------------- P6: safe to delete ---- */
@@ -334,24 +440,20 @@ test('P2: an unknown workstream id is an explicit error, not an empty digest', a
   assert.ok(Array.isArray(digest.known) && digest.known.length > 0, 'should list what IS known');
 });
 
-/* ---------------------------------------------- P2/family: provenance, not naming ---- */
+/* ---------------------------------------------- P2/family: creation-burst, not naming ---- */
 
 /**
- * FAMILY COMES FROM GIT PROVENANCE — fork point (`git merge-base`) plus creation time — NOT
- * FROM NAMING. See assignFamilies/inferFamily in src/discover.mjs for the full design. Naming
- * lies in both directions, and this fixture proves both:
+ * FAMILY COMES FROM CREATION-BURST CLUSTERING with name-stem corroboration — NOT from fork
+ * point and NOT from naming alone. See assignFamilies/inferFamily in src/discover.mjs for the
+ * full design. Naming lies in both directions, and this fixture proves both:
  *
- *   auth-1 / auth-2   NAME says one family (numeric-suffix pattern -> "auth" under the OLD,
- *                     deleted, name-only heuristic). HISTORY says two: auth-2 forks from a
- *                     commit that only exists because an unrelated commit landed on main AFTER
- *                     auth-1 was created, and the two were created four days apart. Real
- *                     dispatches do not straddle an intervening unrelated commit and a
- *                     four-day gap — this is two independent efforts that happened to pick
- *                     similar names.
+ *   auth-1 / auth-2   NAME says one family (numeric-suffix pattern -> "auth"). CREATION TIME
+ *                     says two: auth-1 is backdated four days, auth-2 is now — far outside the
+ *                     60min burst window AND the 6h stem-bridge window. This is two independent
+ *                     efforts that happened to pick similar names.
  *
- *   alpha / zebra / quux   NAME says three singletons (no pattern matches any of them — the OLD
- *                     heuristic would never have grouped these). HISTORY says one: all three
- *                     fork from the identical commit and are created within seconds of each
+ *   alpha / zebra / quux   NAME says three singletons (no pattern matches any of them).
+ *                     CREATION TIME says one: all three are created within seconds of each
  *                     other — exactly what a real fan-out dispatch looks like.
  *
  * Creation time is backdated with fs.utimes on the worktree's private `gitdir` file — the exact
@@ -383,7 +485,11 @@ async function provenanceFixture() {
   await fx.write('src/auth2_only.js', 'export function AUTH2_ONLY_SYMBOL() { return "two"; }\n', fx.wt('auth-2'));
   await fx.write('src/shared_task.js', 'export function SHARED_TASK_SYMBOL() { return 42; }\n', fx.wt('auth-2'));
   await fx.commit('auth-2 independently builds a different thing, and the identical shared task', fx.wt('auth-2'));
-  // auth-2 keeps its real (current) creation time — four days after auth-1's backdated one.
+  // auth-2 is backdated > 60min before the fan-out below, so creation-burst clustering puts it
+  // in a separate cluster from alpha/zebra/quux. auth-1 is 4 days backdated (separate cluster),
+  // auth-2 is 90min backdated (separate cluster), alpha/zebra/quux are within seconds (one
+  // cluster). Different stems ("auth" vs no-stem) mean no stem bridge across the clusters.
+  await backdateWorktreeCreation(fx.wt('auth-2'), 90 * 60 * 1000); // 90 minutes
 
   // Yet another unrelated commit, so the fan-out below forks from a THIRD commit — distinct
   // from both auth-1's and auth-2's — rather than accidentally sharing auth-2's fork point.
@@ -405,7 +511,7 @@ async function provenanceFixture() {
   return fx;
 }
 
-test('FAMILY PROVENANCE, presence: a real fan-out (same fork point, created together) is grouped, despite three unrelated-looking names', async (t) => {
+test('FAMILY: a real fan-out (created together in a burst) is grouped, despite three unrelated-looking names', async (t) => {
   const fx = await provenanceFixture();
   t.after(() => fx.cleanup());
 
@@ -414,14 +520,14 @@ test('FAMILY PROVENANCE, presence: a real fan-out (same fork point, created toge
   const zebra = scanned.workstreams.find((w) => w.id === 'zebra');
   const quux = scanned.workstreams.find((w) => w.id === 'quux');
 
-  assert.equal(alpha.familyRule, 'fork+creation-time', 'the fixture must have real provenance, not a name fallback');
+  assert.equal(alpha.familyRule, 'creation-burst', 'the fixture must have real provenance, not a name fallback');
   assert.equal(alpha.family, zebra.family,
     `alpha and zebra forked from the same commit within seconds of each other and must be one family, got ${alpha.family} / ${zebra.family}`);
   assert.equal(alpha.family, quux.family,
     `quux is part of the same fan-out and must share the family, got ${alpha.family} / ${quux.family}`);
 });
 
-test('FAMILY PROVENANCE, the lie naming tells: a numeric-suffix name pair forked from DIFFERENT commits, days apart, is NOT one family', async (t) => {
+test('FAMILY: a numeric-suffix name pair created DAYS apart is NOT one family, despite the naming lie', async (t) => {
   const fx = await provenanceFixture();
   t.after(() => fx.cleanup());
 
@@ -435,10 +541,10 @@ test('FAMILY PROVENANCE, the lie naming tells: a numeric-suffix name pair forked
   // proves the fix rather than an accident of naming.
   assert.notEqual(auth1.id.match(/^(.*?)-\d+$/)?.[1], undefined, 'fixture invalid: auth-1 must match the numeric-suffix pattern');
 
-  assert.equal(auth1.familyRule, 'fork+creation-time', 'the fixture must have real provenance, not a name fallback');
-  assert.equal(auth2.familyRule, 'fork+creation-time', 'the fixture must have real provenance, not a name fallback');
+  assert.equal(auth1.familyRule, 'creation-burst', 'the fixture must have real provenance, not a name fallback');
+  assert.equal(auth2.familyRule, 'creation-burst', 'the fixture must have real provenance, not a name fallback');
   assert.notEqual(auth1.family, auth2.family,
-    `different fork commits, four days apart: provenance must keep these separate, got ${auth1.family} / ${auth2.family}`);
+    `different creation bursts, four days apart: creation-time clustering must keep these separate, got ${auth1.family} / ${auth2.family}`);
 });
 
 test('FAMILY CONSEQUENCE: duplicate work inside the real fan-out is expected-fanout; across the two unrelated efforts is cross-dispatch-waste', async (t) => {
@@ -496,14 +602,14 @@ test('FAMILY BOUNDARY: a genuine fan-out staggered by 20 minutes stays ONE famil
 
   await fx.worktree('mira');
   await fx.write('src/mira.js', 'export function STAGGERED_SHARED() { return 3; }\n', fx.wt('mira'));
-  await fx.commit('second half, twenty minutes later, same fork point', fx.wt('mira'));
+  await fx.commit('second half, twenty minutes later, same burst window', fx.wt('mira'));
 
   const { scanned, report } = await inspectFixture(fx);
   const one = scanned.workstreams.find((w) => w.id === 'karl');
   const two = scanned.workstreams.find((w) => w.id === 'mira');
-  assert.equal(one.familyRule, 'fork+creation-time', 'must be a provenance answer, not a name fallback');
+  assert.equal(one.familyRule, 'creation-burst', 'must be a provenance answer, not a name fallback');
   assert.equal(one.family, two.family,
-    `same fork point, 20-minute stagger: one dispatch, got ${one.family} / ${two.family}`);
+    `same burst window, 20-minute stagger: one dispatch, got ${one.family} / ${two.family}`);
 
   const dup = report.duplicates.find((d) => pairMatches(d, 'karl', 'mira'));
   assert.ok(dup, 'the pair shares STAGGERED_SHARED and must be found as duplicate work');
@@ -511,37 +617,44 @@ test('FAMILY BOUNDARY: a genuine fan-out staggered by 20 minutes stays ONE famil
     `a staggered dispatch duplicating its own work is expected, got ${JSON.stringify(dup)}`);
 });
 
-test('FAMILY BOUNDARY: a naming stem bridges time-clusters of the SAME fork point, and only the same fork point', async (t) => {
-  // The corroboration step: when the timer says "two dispatches" but provenance already put both
-  // on ONE fork commit and the names carry one fan-out stem (auth-1/auth-2), two independent
-  // witnesses outvote the timer. The control matters more than the positive: the same stem must
-  // bridge NOTHING across different fork points — otherwise this reintroduces name-derived
-  // grouping through the back door, which is the exact heuristic provenance replaced.
+test('FAMILY BOUNDARY: a naming stem bridges burst-clusters within the stem-bridge window, and NOT beyond it', async (t) => {
+  // The stem-bridge step: when the burst window says "two dispatches" (clusters > 60min apart)
+  // but the names carry one fan-out stem (auth-1/auth-2), the stem is a second, independent
+  // witness that they are one stretched dispatch — and it bridges ACROSS fork points (the whole
+  // point of the redesign: fork point is non-discriminating on a stable trunk). The 6h outer
+  // bound keeps day-apart efforts with coincidentally similar names separate.
+  //
+  // The control matters more than the positive: the same stem must bridge NOTHING beyond the
+  // 6h window — otherwise a name coincidence reunites unrelated efforts days apart, which is the
+  // exact over-merging the redesign exists to prevent.
   const fx = await newRepo('stem-bridge');
   t.after(() => fx.cleanup());
 
   await fx.worktree('auth-1');
   await fx.write('src/a1.js', 'export function STEM_A1() { return 1; }\n', fx.wt('auth-1'));
-  await fx.commit('first, backdated past any window', fx.wt('auth-1'));
-  await backdateWorktreeCreation(fx.wt('auth-1'), 3 * 60 * 60 * 1000); // 3h — outside even 60min
+  await fx.commit('first, backdated past the burst window', fx.wt('auth-1'));
+  await backdateWorktreeCreation(fx.wt('auth-1'), 3 * 60 * 60 * 1000); // 3h — outside 60min burst, inside 6h stem bridge
 
   await fx.worktree('auth-2');
   await fx.write('src/a2.js', 'export function STEM_A2() { return 2; }\n', fx.wt('auth-2'));
-  await fx.commit('second, three hours later, SAME fork point, same stem', fx.wt('auth-2'));
+  await fx.commit('second, three hours later, same stem — stem bridge reaches', fx.wt('auth-2'));
 
-  // Control: same stem, DIFFERENT fork point (an intervening commit separates them).
-  await fx.write('WALL.md', 'an intervening commit — the next worktree forks from a different commit\n');
-  await fx.commit('intervening commit on main');
+  // Control: same stem, but > 6h away — the stem bridge must NOT reach.
   await fx.worktree('auth-3');
   await fx.write('src/a3.js', 'export function STEM_A3() { return 3; }\n', fx.wt('auth-3'));
-  await fx.commit('same stem, different fork point — must NOT be bridged', fx.wt('auth-3'));
+  await fx.commit('third, same stem but far future — stem bridge must not reach', fx.wt('auth-3'));
+  // auth-3 is created NOW, auth-2 was created NOW (not backdated). auth-1 is 3h ago.
+  // auth-1 and auth-2: 3h gap, same stem → bridged. auth-3 and auth-2: seconds apart → same burst.
+  // So all three would be in one family. To make auth-3 a genuine control, backdate it to > 6h
+  // from auth-2's cluster.
+  await backdateWorktreeCreation(fx.wt('auth-3'), 10 * 60 * 60 * 1000); // 10h — outside 6h stem bridge from both
 
   const { scanned } = await inspectFixture(fx);
   const byId = Object.fromEntries(scanned.workstreams.map((w) => [w.id, w]));
   assert.equal(byId['auth-1'].family, byId['auth-2'].family,
-    'same fork point + same stem: the stem bridges the 3-hour gap');
+    'same stem within 6h: the stem bridges the 3-hour gap across burst clusters');
   assert.notEqual(byId['auth-2'].family, byId['auth-3'].family,
-    'different fork points: the stem must bridge NOTHING — this is what keeps names from becoming the primary signal again');
+    'same stem beyond 6h: the stem must bridge NOTHING — this is what keeps names from over-merging');
 });
 
 test('FAMILY BOUNDARY: the primary worktree is never swept into a dispatch family', async (t) => {
@@ -720,6 +833,9 @@ test('SAFETY: recognisable build output does NOT block cleanup — the gate must
   const fx = await newRepo('ignored-build');
   t.after(() => fx.cleanup());
   await fx.write('.gitignore', 'node_modules/\ndist/\n');
+  // The manifest IS the evidence: generated-named dirs earn disposal from the command that
+  // recreates them (GENERATOR_MANIFESTS). A JS repo without package.json is not a JS repo.
+  await fx.write('package.json', '{\"name\":\"fixture\",\"private\":true}\n');
   await fx.commit('add gitignore');
 
   const wt = await fx.worktree('just-build-output');
@@ -879,6 +995,9 @@ test('P0 PRECISION: a bare generated entry is not "work found nowhere else"', as
   const fx = await newRepo('generated-bare-entry');
   t.after(() => fx.cleanup());
   await fx.write('.gitignore', 'node_modules/\n');
+  // The manifest IS the evidence: generated-named dirs earn disposal from the command that
+  // recreates them (GENERATOR_MANIFESTS). A JS repo without package.json is not a JS repo.
+  await fx.write('package.json', '{\"name\":\"fixture\",\"private\":true}\n');
   await fx.commit('ignore dependencies the way every JS repo does');
 
   const realDeps = path.join(fx.root, 'node_modules');

@@ -295,3 +295,261 @@ test('ROUND TRIP: integrate -> uninstall -> integrate leaves a clean, fully-wire
   const settings = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
   assert.equal(settings.hooks.PreToolUse.length, 1, 'no leftover duplication across the round trip');
 });
+
+/* ------------------------------------------------------- ownership adversarial ---- */
+//
+// These tests reproduce the bug classes found in the integrate/uninstall ownership audit.
+// Each one would have PASSED before the fix (the bug was silent) and FAILS if the fix is
+// reverted — they are the re-seeded vacuous tests the work order demands.
+
+test('OWNERSHIP: JSONC comments in .claude/settings.json are preserved across integrate', async (t) => {
+  const dir = await tmp('jsonc-claude');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  // A user's settings.json with comments — the kind an enterprise repo annotates.
+  const original = `{
+  // Team policy: all hooks must time out
+  "hooks": {
+    "PreToolUse": [
+      // Lint check runs before every Bash call
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "my-linter --check", "timeout": 30 }] }
+    ]
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), original, 'utf8');
+
+  await installClaudeCode(dir, { bin: 'holt' });
+  const after = await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8');
+  assert.ok(after.includes('// Team policy'), 'user comment must survive integrate');
+  assert.ok(after.includes('// Lint check'), 'inline comment must survive integrate');
+  assert.ok(after.includes('my-linter --check'), 'user hook must survive integrate');
+  assert.ok(after.includes('holt hook pre-tool-use'), 'holt hook must be installed');
+});
+
+test('OWNERSHIP: JSONC comments in .cursor/hooks.json are preserved across integrate', async (t) => {
+  const dir = await tmp('jsonc-cursor');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.cursor'), { recursive: true });
+  const original = `{
+  // Cursor hook config
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      // User's own deny rule
+      { "command": "my-tool --guard", "timeout": 60 }
+    ]
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.cursor', 'hooks.json'), original, 'utf8');
+
+  const { installCursorHooks } = await import('../../src/integrate/adapters.mjs');
+  await installCursorHooks(dir, { bin: 'holt' });
+  const after = await fs.readFile(path.join(dir, '.cursor', 'hooks.json'), 'utf8');
+  assert.ok(after.includes('// Cursor hook config'), 'top-level comment must survive');
+  assert.ok(after.includes("// User's own deny rule"), 'inline comment must survive');
+  assert.ok(after.includes('my-tool --guard'), 'user hook must survive');
+  assert.ok(after.includes('holt hook pre-tool-use'), 'holt hook must be installed');
+});
+
+test('OWNERSHIP: user-widened holt entry — user commands in holt matcher entry survive reconcile', async (t) => {
+  const dir = await tmp('widened');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  // User added their own lint check to holt's PreToolUse matcher entry.
+  const original = `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "holt hook pre-tool-use --host claude-code", "timeout": 120 },
+          { "type": "command", "command": "my-extra-lint --check", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), original, 'utf8');
+
+  await installClaudeCode(dir, { bin: 'holt' });
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  // holt's command must be present (reconciled to current)
+  const preToolUse = after.hooks.PreToolUse;
+  const holtEntry = preToolUse.find((e) => e.hooks?.some((h) => h.command?.includes('holt hook pre-tool-use')));
+  assert.ok(holtEntry, 'holt entry must be present');
+  // User's extra lint check must survive — either in holt's entry or as a separate entry
+  const allCommands = preToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
+  assert.ok(allCommands.some((c) => c?.includes('my-extra-lint --check')),
+    `user's extra lint check must survive reconcile, got commands: ${JSON.stringify(allCommands)}`);
+  // There must be exactly ONE holt pre-tool-use command (the old one stripped, new one appended)
+  const holtCmds = allCommands.filter((c) => c?.includes('holt hook pre-tool-use'));
+  assert.equal(holtCmds.length, 1,
+    `exactly one holt pre-tool-use command after reconcile, got: ${JSON.stringify(holtCmds)}`);
+});
+
+test('OWNERSHIP: non-array hooks value is preserved, not clobbered with []', async (t) => {
+  const dir = await tmp('non-array');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  // User misconfigured hooks.PreToolUse as a single object instead of an array.
+  const original = `{
+  "hooks": {
+    "PreToolUse": { "matcher": "Bash", "hooks": [{ "command": "user-check", "timeout": 30 }] }
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), original, 'utf8');
+
+  await installClaudeCode(dir, { bin: 'holt' });
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  // The non-array value must be preserved (as a user entry), and holt's entry added.
+  const preToolUse = after.hooks.PreToolUse;
+  assert.ok(Array.isArray(preToolUse), 'PreToolUse must be an array after integrate');
+  const allCommands = preToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
+  assert.ok(allCommands.some((c) => c?.includes('user-check')),
+    `user's non-array hook content must survive, got: ${JSON.stringify(allCommands)}`);
+  assert.ok(allCommands.some((c) => c?.includes('holt hook pre-tool-use')),
+    'holt hook must be installed alongside the preserved user content');
+});
+
+test('OWNERSHIP: foreign tool with "hook pre-tool-use" is NOT claimed as holt\'s', async (t) => {
+  const dir = await tmp('foreign-hook');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  // A different tool that happens to use "hook pre-tool-use" but is NOT holt — and does
+  // NOT carry holt's distinctive flags (--host, --autoprotect), so isHoltHookCommand
+  // correctly leaves it alone.
+  const original = `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "other-tool hook pre-tool-use --verbose", "timeout": 60 }
+        ]
+      }
+    ]
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), original, 'utf8');
+
+  await installClaudeCode(dir, { bin: 'holt' });
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  const allCommands = after.hooks.PreToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
+  assert.ok(allCommands.some((c) => c?.includes('other-tool hook pre-tool-use')),
+    `foreign tool's hook must NOT be claimed as holt's, got: ${JSON.stringify(allCommands)}`);
+  assert.ok(allCommands.some((c) => c?.includes('holt hook pre-tool-use')),
+    'holt hook must be installed without clobbering the foreign tool');
+});
+
+test('OWNERSHIP: renamed binary (no "holt" in name) is still recognised via --host flag', async (t) => {
+  const dir = await tmp('renamed-bin');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  // A prior install used a renamed binary (e.g. a symlink called "my-guard"). The command
+  // does NOT contain "holt" but DOES contain "--host claude-code" — holt's distinctive flag.
+  // isHoltHookCommand must recognise this as holt's and reconcile it, not duplicate it.
+  const original = `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "my-guard hook pre-tool-use --host claude-code --old-flag", "timeout": 120 }
+        ]
+      }
+    ]
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), original, 'utf8');
+
+  await installClaudeCode(dir, { bin: 'holt' });
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  const allCommands = after.hooks.PreToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
+  // The old entry with --old-flag must be GONE (reconciled, not duplicated)
+  assert.ok(!allCommands.some((c) => c?.includes('--old-flag')),
+    `old renamed-binary entry must be reconciled (removed), got: ${JSON.stringify(allCommands)}`);
+  // The new holt entry must be present
+  assert.ok(allCommands.some((c) => c?.includes('holt hook pre-tool-use --host claude-code')),
+    'new holt entry must be installed');
+  // There must be exactly ONE holt pre-tool-use command
+  const holtCmds = allCommands.filter((c) => c?.includes('hook pre-tool-use') && (c?.includes('--host') || c?.includes('holt')));
+  assert.equal(holtCmds.length, 1,
+    `exactly one holt pre-tool-use command after reconcile, got: ${JSON.stringify(holtCmds)}`);
+});
+
+test('OWNERSHIP: uninstall preserves user commands in a user-widened holt entry', async (t) => {
+  const dir = await tmp('uninstall-widened');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  // User widened holt's entry with their own lint check.
+  const original = `{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "holt hook pre-tool-use --host claude-code", "timeout": 120 },
+          { "type": "command", "command": "my-extra-lint --check", "timeout": 30 }
+        ]
+      }
+    ]
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), original, 'utf8');
+
+  await uninstall(dir, {});
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  const allCommands = (after.hooks?.PreToolUse || []).flatMap((e) => e.hooks || []).map((h) => h.command);
+  assert.ok(!allCommands.some((c) => c?.includes('holt hook pre-tool-use')),
+    'holt commands must be removed by uninstall');
+  assert.ok(allCommands.some((c) => c?.includes('my-extra-lint --check')),
+    `user's extra lint check must survive uninstall, got: ${JSON.stringify(allCommands)}`);
+});
+
+test('OWNERSHIP: uninstall deletes holt-only settings.json with comments entirely', async (t) => {
+  const dir = await tmp('uninstall-jsonc');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  const original = `{
+  // Team policy
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "holt hook pre-tool-use --host claude-code", "timeout": 120 }] }
+    ]
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), original, 'utf8');
+
+  await uninstall(dir, {});
+  const exists = await fs.access(path.join(dir, '.claude', 'settings.json')).then(() => true).catch(() => false);
+  assert.ok(!exists, 'holt-only settings.json with comments should be deleted entirely');
+});
+
+test('OWNERSHIP: uninstall preserves JSONC comments when user content remains', async (t) => {
+  const dir = await tmp('uninstall-jsonc-kept');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  const original = `{
+  // Team policy
+  "hooks": {
+    "PreToolUse": [
+      // holt's hook
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "holt hook pre-tool-use --host claude-code", "timeout": 120 }] },
+      // user's hook
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "my-linter --check", "timeout": 30 }] }
+    ]
+  }
+}`;
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), original, 'utf8');
+
+  await uninstall(dir, {});
+  const after = await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8');
+  assert.ok(after.includes('// Team policy'), 'top-level comment must survive uninstall');
+  assert.ok(after.includes('my-linter --check'), 'user hook must survive uninstall');
+  assert.ok(!after.includes('holt hook pre-tool-use'), 'holt hook must be removed');
+  // Note: comments inside the array (e.g. "// user's hook") may be mis-associated or lost
+  // when the element before them is removed. This is a jsonc-parser limitation — the comment
+  // before the removed element stays, but the comment before the next element may be lost.
+  // The important guarantees are: user content survives, top-level comments survive, and
+  // holt's hooks are removed.
+});

@@ -30,6 +30,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
+import { parse as jsoncParse, modify as jsoncModify, applyEdits as jsoncApplyEdits } from 'jsonc-parser';
 import { HOSTS, getHost, strengthLabel, CLOUD_CAVEAT } from './hosts.mjs';
 
 const HOLT_BEGIN = '<!-- BEGIN holt -->';
@@ -296,9 +297,10 @@ export async function retireLegacyMcp(repoRoot, { home = os.homedir(), scope = '
   const results = [];
   for (const t of legacyMcpTargets(repoRoot, home)) {
     if (t.scope === 'user' && scope === 'project') continue; // never touch HOME unless asked
-    let cfg;
+    let cfg, rawText;
     try {
-      cfg = JSON.parse(stripJsonComments(await fs.readFile(t.file, 'utf8')));
+      rawText = await fs.readFile(t.file, 'utf8');
+      cfg = JSON.parse(stripJsonComments(rawText));
     } catch {
       continue; // no file (the common case) — nothing to retire, nothing to say
     }
@@ -311,7 +313,10 @@ export async function retireLegacyMcp(repoRoot, { home = os.homedir(), scope = '
       await fs.rm(t.file, { force: true });
       results.push({ adapter: 'mcp-retire', host: t.host, scope: t.scope, path: t.file, action: `removed — ${t.reason}` });
     } else {
-      await fs.writeFile(t.file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+      // JSONC-PRESERVING WRITE: surgically remove the holt key, preserving comments.
+      let output = jsoncWrite(rawText, [[[t.key], cfg[t.key] ?? undefined]], { tabSize: 2, insertSpaces: true });
+      if (!output.endsWith('\n')) output += '\n';
+      await fs.writeFile(t.file, output, 'utf8');
       results.push({
         adapter: 'mcp-retire', host: t.host, scope: t.scope, path: t.file,
         action: `holt's entry removed, your other settings kept — ${t.reason}`,
@@ -361,6 +366,104 @@ function stripJsonComments(text) {
     out += c;
   }
   return out;
+}
+
+/**
+ * JSONC-PRESERVING WRITE. The SOTA for editing JSON-with-comments files (VSCode's own
+ * settings.json editor uses this library) is jsonc-parser's modify()+applyEdits(), which
+ * operates on the TEXT directly — surgically editing only the paths that changed, preserving
+ * every comment, every blank line, every formatting choice the user made.
+ *
+ * The previous code parsed with stripJsonComments, modified the object, and wrote with
+ * JSON.stringify — destroying every comment in the file. Enterprise repos annotate their
+ * configs; losing those annotations on a `holt integrate` is the kind of silent damage that
+ * teaches a user to never let the tool touch their settings again.
+ *
+ * This function takes the ORIGINAL text (with comments), a set of [pathSegments, value] edits,
+ * and returns the text with those edits applied and everything else byte-identical. Path segments
+ * are arrays of strings/numbers (e.g. ['hooks', 'PreToolUse'] or ['mcpServers', 'holt']).
+ *
+ * Setting a value to `undefined` REMOVES that key/element (jsonc-parser convention), preserving
+ * comments that were associated with the position.
+ */
+function jsoncWrite(text, edits, { tabSize = 2, insertSpaces = true } = {}) {
+  const fmt = { tabSize, insertSpaces, eol: '\n' };
+  let result = text;
+  for (const [jsonPath, value] of edits) {
+    const editErrors = [];
+    const editsForThis = jsoncModify(result, jsonPath, value, { formattingOptions: fmt, allowTrailingCommas: true }, editErrors);
+    result = jsoncApplyEdits(result, editsForThis, { formattingOptions: fmt });
+  }
+  return result;
+}
+
+/**
+ * Element-level JSONC-preserving reconciliation of a hook event array.
+ *
+ * Instead of replacing the whole array (which destroys comments inside it), this function:
+ *   1. Removes holt's existing entries by index (highest to lowest, so earlier indices don't shift)
+ *   2. Appends holt's new entries at the end of the array
+ *
+ * This preserves comments before user entries and before the array itself. Comments before
+ * holt's removed entries stay in place (jsonc-parser attaches them to the next element), which
+ * is the best available behavior — the comment is not lost, just re-associated.
+ *
+ * `isMineEntry(entry)` returns true for entries holt should remove/replace.
+ * `newEntries` is the array of holt's new entries to append.
+ * Returns the edited text, or null if no edits were needed.
+ */
+function jsoncReconcileArray(text, arrayPath, isMineEntry, newEntries, { tabSize = 2, insertSpaces = true } = {}) {
+  const fmt = { tabSize, insertSpaces, eol: '\n' };
+  const cfg = JSON.parse(stripJsonComments(text));
+  // Navigate to the array
+  let arr = cfg;
+  for (const seg of arrayPath) {
+    arr = arr?.[seg];
+    if (arr == null) break;
+  }
+  if (!Array.isArray(arr)) return null; // nothing to reconcile
+
+  // Find indices of holt's entries
+  const mineIndices = [];
+  for (let i = 0; i < arr.length; i++) {
+    if (isMineEntry(arr[i])) mineIndices.push(i);
+  }
+  if (mineIndices.length === 0 && newEntries == null) return null;
+  if (mineIndices.length === 0 && newEntries?.length === 0) return null;
+
+  let result = text;
+  // Remove holt's entries from highest index to lowest (so earlier indices don't shift)
+  for (let i = mineIndices.length - 1; i >= 0; i--) {
+    const idx = mineIndices[i];
+    const edits = jsoncModify(result, [...arrayPath, idx], undefined, { formattingOptions: fmt, allowTrailingCommas: true });
+    result = jsoncApplyEdits(result, edits, { formattingOptions: fmt });
+  }
+
+  // Append new entries at the end
+  if (newEntries && newEntries.length > 0) {
+    // After removals, the array length has changed. Re-parse to find the new length.
+    const newCfg = JSON.parse(stripJsonComments(result));
+    let newArr = newCfg;
+    for (const seg of arrayPath) newArr = newArr?.[seg];
+    const startIdx = Array.isArray(newArr) ? newArr.length : 0;
+    for (let i = 0; i < newEntries.length; i++) {
+      const edits = jsoncModify(result, [...arrayPath, startIdx + i], newEntries[i], { formattingOptions: fmt, allowTrailingCommas: true });
+      result = jsoncApplyEdits(result, edits, { formattingOptions: fmt });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Read a JSONC file as an object (comments stripped for parsing) AND return the raw text.
+ * The raw text is kept so jsoncWrite can preserve comments when writing back.
+ */
+async function readJsonc(file) {
+  let text;
+  try { text = await fs.readFile(file, 'utf8'); } catch { return { cfg: null, text: null }; }
+  const cfg = JSON.parse(stripJsonComments(text));
+  return { cfg, text };
 }
 
 /* ----------------------------------------------------------------------- TOML ---- */
@@ -473,8 +576,10 @@ export async function installMcp(repoRoot, {
 
     let cfg = {};
     let exists = true;
+    let rawText = null;
     try {
-      cfg = JSON.parse(stripJsonComments(await fs.readFile(t.file, 'utf8')));
+      rawText = await fs.readFile(t.file, 'utf8');
+      cfg = JSON.parse(stripJsonComments(rawText));
     } catch {
       exists = false;
       // Project scope: creating the file is the point — it is how you wire a repo.
@@ -494,7 +599,16 @@ export async function installMcp(repoRoot, {
     cfg[t.key].holt = mcpServerEntry(bin, t.shape);
 
     await fs.mkdir(path.dirname(t.file), { recursive: true });
-    await fs.writeFile(t.file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+    // JSONC-PRESERVING WRITE: if we have the original text, use jsonc-parser to surgically
+    // edit only the holt key, preserving comments. For a new file, use JSON.stringify.
+    let output;
+    if (rawText != null) {
+      output = jsoncWrite(rawText, [[[t.key], cfg[t.key]]], { tabSize: 2, insertSpaces: true });
+      if (!output.endsWith('\n')) output += '\n';
+    } else {
+      output = `${JSON.stringify(cfg, null, 2)}\n`;
+    }
+    await fs.writeFile(t.file, output, 'utf8');
     results.push({
       adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
       action: !exists ? 'created' : already ? 'updated' : 'added',
@@ -521,9 +635,23 @@ export async function installMcp(repoRoot, {
  *
  * The fix matches on the STRUCTURE of the call — `hook <subcommand>` — never on `bin`, so an
  * entry written by any past or future version of holt is found and reconciled, not duplicated.
+ *
+ * BINARY-TOKEN OWNERSHIP (the widening bug). The original regex `\bhook\s+<subcommand>\b`
+ * matched ANY command containing that substring — including a different tool's hook that
+ * happened to call `some-other-tool hook pre-tool-use`. The fix requires BOTH the structural
+ * pattern AND a holt-specific signal. The signal is: `holt` appears in the command (as the
+ * binary name, in a path segment, or as an npx package) OR one of holt's distinctive flags
+ * (`--host`, `--autoprotect`) is present. This is bin-agnostic (`holt`, `node /path/to/holt.mjs`,
+ * `npx holt`, even a renamed binary all match via the flags) but does not match foreign tools
+ * that happen to use the same subcommand naming convention without holt's flags.
  */
 function isHoltHookCommand(command, subcommand) {
-  return typeof command === 'string' && new RegExp(`\\bhook\\s+${subcommand}\\b`).test(command);
+  if (typeof command !== 'string') return false;
+  if (!new RegExp(`\\bhook\\s+${subcommand}\\b`).test(command)) return false;
+  // Must also reference holt — by name, or by one of holt's distinctive flags. The `--host`
+  // and `--autoprotect` flags are holt-specific and appear in every hook command holt writes,
+  // regardless of what the binary is called. This covers the renamed-binary edge case.
+  return /\bholt\b/.test(command) || /--host\b/.test(command) || /--autoprotect\b/.test(command);
 }
 
 /** Every literal `command` string nested under a Claude Code hook-list entry. */
@@ -553,36 +681,102 @@ export function cursorHooks(bin = 'holt') {
       beforeShellExecution: [
         { command: `${bin} hook pre-tool-use --host cursor`, timeout: 120 },
       ],
+      // Cursor supports stop (fires when the agent loop ends) and sessionEnd (fires when
+      // the IDE session ends). Both are advisory — holt injects context only when something
+      // CHANGED during the response, and warns at session end. See the SOTA research in the
+      // Claude Code section for the full design rationale.
+      stop: [
+        { command: `${bin} hook stop --host cursor`, timeout: 60 },
+      ],
+      sessionEnd: [
+        { command: `${bin} hook session-end --host cursor`, timeout: 60 },
+      ],
     },
   };
 }
 
+// Which subcommand each Cursor hook event invokes — used by isHoltHookCommand for ownership.
+const CURSOR_EVENT_SUBCOMMAND = {
+  beforeShellExecution: 'pre-tool-use',
+  stop: 'stop',
+  sessionEnd: 'session-end',
+};
+
 export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(repoRoot, '.cursor', 'hooks.json');
+  let rawText = null;
   let cfg = {};
   let created = true;
   try {
-    cfg = JSON.parse(stripJsonComments(await fs.readFile(file, 'utf8')));
+    rawText = await fs.readFile(file, 'utf8');
+    cfg = JSON.parse(stripJsonComments(rawText));
     created = false;
   } catch { /* new file */ }
 
   cfg.version ??= 1;
   cfg.hooks ??= {};
-  const list = Array.isArray(cfg.hooks.beforeShellExecution) ? cfg.hooks.beforeShellExecution : [];
-  // Never duplicate holt's own entry, and never disturb a hook the user put there. Matched
-  // structurally (isHoltHookCommand), not against the current `bin` string — see the comment on
-  // that helper for the duplication this previously caused when a prior install used a
-  // different bin.
-  const mine = (h) => isHoltHookCommand(h?.command, 'pre-tool-use');
-  const already = list.some(mine);
-  cfg.hooks.beforeShellExecution = [
-    ...list.filter((h) => !mine(h)),
-    { command: `${bin} hook pre-tool-use --host cursor`, timeout: 120 },
-  ];
+  const wanted = cursorHooks(bin).hooks;
+  let installed = 0;
+  let reconciled = 0;
+  let unchanged = 0;
+
+  // Build the in-memory cfg (for action computation and fallback write) — same pattern as
+  // installClaudeCode: iterate over each event, preserve user entries, replace holt's.
+  for (const [event, entries] of Object.entries(wanted)) {
+    const sub = CURSOR_EVENT_SUBCOMMAND[event];
+    const list = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : [];
+    const nonArrayRemnant = Array.isArray(cfg.hooks[event]) ? null
+      : (cfg.hooks[event] != null ? cfg.hooks[event] : null);
+    const mine = (h) => isHoltHookCommand(h?.command, sub);
+    const already = list.some(mine);
+    if (!already) installed++;
+    else {
+      const currentHolt = list.filter(mine);
+      if (JSON.stringify(currentHolt) !== JSON.stringify(entries)) reconciled++;
+      else unchanged++;
+    }
+    cfg.hooks[event] = [
+      ...list.filter((h) => !mine(h)),
+      ...(nonArrayRemnant ? [nonArrayRemnant] : []),
+      ...entries,
+    ];
+  }
 
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
-  return { adapter: 'cursor', path: file, created, action: created ? 'installed' : already ? 'updated' : 'added' };
+  // JSONC-PRESERVING WRITE: use element-level reconciliation to preserve comments.
+  let output;
+  if (rawText != null) {
+    let result = rawText;
+    const parsedRaw = JSON.parse(stripJsonComments(rawText));
+    if (parsedRaw.hooks == null) {
+      result = jsoncWrite(rawText, [[['hooks'], {}]], { tabSize: 2, insertSpaces: true });
+    }
+    for (const [event, entries] of Object.entries(wanted)) {
+      const sub = CURSOR_EVENT_SUBCOMMAND[event];
+      const parsedResult = JSON.parse(stripJsonComments(result));
+      const eventArr = parsedResult.hooks?.[event];
+      if (Array.isArray(eventArr)) {
+        const isMine = (h) => isHoltHookCommand(h?.command, sub);
+        const reconciled_text = jsoncReconcileArray(result, ['hooks', event], isMine, entries, { tabSize: 2, insertSpaces: true });
+        if (reconciled_text != null) result = reconciled_text;
+      } else if (eventArr != null) {
+        const nonArrayRemnant = eventArr;
+        result = jsoncWrite(result, [[['hooks', event], [nonArrayRemnant, ...entries]]], { tabSize: 2, insertSpaces: true });
+      } else {
+        result = jsoncWrite(result, [[['hooks', event], entries]], { tabSize: 2, insertSpaces: true });
+      }
+    }
+    output = result;
+    if (!output.endsWith('\n')) output += '\n';
+  } else {
+    output = `${JSON.stringify(cfg, null, 2)}\n`;
+  }
+  await fs.writeFile(file, output, 'utf8');
+  const action = installed && !reconciled && !unchanged ? 'installed'
+    : reconciled ? `reconciled ${reconciled} stale hook(s)${installed ? `, installed ${installed} new` : ''}`
+    : installed ? `installed ${installed} new hook(s) (rest already present)`
+    : 'already present';
+  return { adapter: 'cursor', path: file, created, installed, reconciled, unchanged, action };
 }
 
 /* ------------------------------------------------------------------ Claude Code ---- */
@@ -598,6 +792,19 @@ export function claudeCodeHooks(bin = 'holt') {
     UserPromptSubmit: [
       { hooks: [{ type: 'command', command: `${bin} hook user-prompt-submit --host claude-code`, timeout: 60 }] },
     ],
+    // Stop fires when Claude finishes responding. holt uses it to warn the agent about at-risk
+    // work before it stops — closing the "biggest cadence hole" where an agent creates something
+    // irreplaceable and then stops, with no warning that the worktree holds the only copy. The
+    // hook can block with decision:"block" to keep the agent running, but must check
+    // stop_hook_active to prevent infinite loops.
+    Stop: [
+      { hooks: [{ type: 'command', command: `${bin} hook stop --host claude-code`, timeout: 60 }] },
+    ],
+    // SessionEnd fires when the session terminates. Advisory-only — cannot block. holt uses it
+    // for a final warning about at-risk work, which is precisely when someone tears down worktrees.
+    SessionEnd: [
+      { hooks: [{ type: 'command', command: `${bin} hook session-end --host claude-code`, timeout: 60 }] },
+    ],
   };
 }
 
@@ -607,6 +814,8 @@ const CLAUDE_EVENT_SUBCOMMAND = {
   PreToolUse: 'pre-tool-use',
   SessionStart: 'session-start',
   UserPromptSubmit: 'user-prompt-submit',
+  Stop: 'stop',
+  SessionEnd: 'session-end',
 };
 
 /**
@@ -618,36 +827,140 @@ const CLAUDE_EVENT_SUBCOMMAND = {
  * true reconciliation rather than an append-if-absent: a stale entry from ANY prior version
  * (different bin, different flags, a since-corrected subcommand) is found and fixed in place
  * instead of accumulating as a second, possibly-broken, hook that still fires on every tool call.
+ *
+ * COMMAND-LEVEL GRANULARITY (the user-widened-hook bug). The previous code replaced the ENTIRE
+ * entry when ANY of its commands matched holt's pattern — so a user who added their own hook to
+ * holt's matcher entry (e.g. a lint check alongside holt's pre-tool-use) lost their addition on
+ * every reconcile. The fix operates at the COMMAND level within each entry: only holt's own
+ * commands are removed and replaced; user-added commands in the same entry survive.
+ *
+ * NON-ARRAY PRESERVATION. If `cfg.hooks[event]` is not an array (e.g. a user misconfigured it as
+ * a single object), the previous code silently replaced it with `[]`, losing the user's value.
+ * Now the non-array value is preserved as a separate entry and holt's hooks are appended.
+ *
+ * JSONC PRESERVATION. Comments in the settings file are preserved using jsonc-parser's surgical
+ * edit API — the same library VSCode uses for its own settings.json editor.
  */
 export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(repoRoot, '.claude', 'settings.json');
+  let rawText = null;
   let cfg = {};
   let created = true;
-  try { cfg = JSON.parse(await fs.readFile(file, 'utf8')); created = false; } catch { /* new */ }
+  try {
+    rawText = await fs.readFile(file, 'utf8');
+    cfg = JSON.parse(stripJsonComments(rawText));
+    created = false;
+  } catch { /* new file */ }
 
   cfg.hooks ??= {};
   const wanted = claudeCodeHooks(bin);
   let installed = 0;
   let reconciled = 0;
   let unchanged = 0;
+
+  // Build the in-memory cfg (for action computation and fallback write)
   for (const [event, entries] of Object.entries(wanted)) {
     const sub = CLAUDE_EVENT_SUBCOMMAND[event];
     const existing = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : [];
-    const mine = existing.filter((e) => commandsOf(e).some((c) => isHoltHookCommand(c, sub)));
-    const others = existing.filter((e) => !mine.includes(e));
+    const nonArrayRemnant = Array.isArray(cfg.hooks[event]) ? null : (cfg.hooks[event] != null ? cfg.hooks[event] : null);
 
-    if (mine.length === 0) {
-      installed++;
-    } else if (JSON.stringify(mine) !== JSON.stringify(entries)) {
-      reconciled++;
-    } else {
-      unchanged++;
+    // COMMAND-LEVEL GRANULARITY: for each existing entry, remove only holt's commands and
+    // keep the user's. An entry that had ONLY holt's commands is removed entirely; an entry
+    // that had holt's + user's commands keeps the user's.
+    const preserved = [];
+    let foundHolt = false;
+    for (const entry of existing) {
+      const cmds = commandsOf(entry);
+      const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
+      const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
+      if (holtCmds.length > 0) {
+        foundHolt = true;
+        if (userCmds.length > 0) {
+          preserved.push({ ...entry, hooks: entry.hooks.filter((h) => !isHoltHookCommand(h?.command, sub)) });
+        }
+      } else {
+        preserved.push(entry);
+      }
     }
-    cfg.hooks[event] = [...others, ...entries];
+
+    if (!foundHolt) {
+      installed++;
+    } else {
+      const currentHolt = existing.filter((e) => commandsOf(e).some((c) => isHoltHookCommand(c, sub)));
+      if (JSON.stringify(currentHolt) !== JSON.stringify(entries)) {
+        reconciled++;
+      } else {
+        unchanged++;
+      }
+    }
+    cfg.hooks[event] = [...preserved, ...(nonArrayRemnant ? [nonArrayRemnant] : []), ...entries];
   }
 
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+
+  // JSONC-PRESERVING WRITE: if we have the original text, use element-level reconciliation
+  // to preserve comments. For a new file, fall back to JSON.stringify.
+  let output;
+  if (rawText != null) {
+    // First, ensure cfg.hooks exists in the text (it may not if the user file had no hooks key)
+    let textWithHooks = rawText;
+    const parsedRaw = JSON.parse(stripJsonComments(rawText));
+    if (parsedRaw.hooks == null) {
+      // No hooks key in the original — add it
+      textWithHooks = jsoncWrite(rawText, [[['hooks'], {}]], { tabSize: 2, insertSpaces: true });
+    }
+
+    // For each event, use element-level reconciliation
+    let result = textWithHooks;
+    for (const [event, entries] of Object.entries(wanted)) {
+      const sub = CLAUDE_EVENT_SUBCOMMAND[event];
+      const parsedResult = JSON.parse(stripJsonComments(result));
+      const eventArr = parsedResult.hooks?.[event];
+
+      if (Array.isArray(eventArr)) {
+        // Element-level: remove holt's entries, append new ones
+        const isMine = (entry) => {
+          const cmds = commandsOf(entry);
+          const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
+          const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
+          // If the entry has ONLY holt's commands, it's entirely holt's — remove it.
+          // If it has holt's + user's, we need to strip holt's commands from it.
+          return holtCmds.length > 0 && userCmds.length === 0;
+        };
+        const reconciled_text = jsoncReconcileArray(result, ['hooks', event], isMine, entries, { tabSize: 2, insertSpaces: true });
+        if (reconciled_text != null) result = reconciled_text;
+
+        // Handle user-widened entries: entries that have BOTH holt's and user's commands
+        // need holt's old commands stripped from them (the new holt entry is appended above).
+        // We replace each widened entry with a version that only has the user's commands.
+        const parsedAfterReconcile = JSON.parse(stripJsonComments(result));
+        const arrAfterReconcile = parsedAfterReconcile.hooks?.[event] || [];
+        for (let i = 0; i < arrAfterReconcile.length; i++) {
+          const entry = arrAfterReconcile[i];
+          const cmds = commandsOf(entry);
+          const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
+          const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
+          if (holtCmds.length > 0 && userCmds.length > 0) {
+            // Widened entry — strip holt's commands, keep user's
+            const strippedEntry = { ...entry, hooks: (entry.hooks || []).filter((h) => !isHoltHookCommand(h?.command, sub)) };
+            result = jsoncWrite(result, [[['hooks', event, i], strippedEntry]], { tabSize: 2, insertSpaces: true });
+          }
+        }
+      } else if (eventArr != null) {
+        // Non-array value — replace with the new array (preserving the user's value as first entry)
+        const nonArrayRemnant = eventArr;
+        result = jsoncWrite(result, [[['hooks', event], [nonArrayRemnant, ...entries]]], { tabSize: 2, insertSpaces: true });
+      } else {
+        // Event doesn't exist yet — add it
+        result = jsoncWrite(result, [[['hooks', event], entries]], { tabSize: 2, insertSpaces: true });
+      }
+    }
+    output = result;
+    if (!output.endsWith('\n')) output += '\n';
+  } else {
+    output = `${JSON.stringify(cfg, null, 2)}\n`;
+  }
+  await fs.writeFile(file, output, 'utf8');
   const action = installed && !reconciled && !unchanged ? 'installed'
     : reconciled ? `reconciled ${reconciled} stale hook(s) from a prior version${installed ? `, installed ${installed} new` : ''}`
     : installed ? `installed ${installed} new hook(s) (rest already present)`
@@ -1024,8 +1337,11 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
       continue;
     }
 
-    let cfg;
-    try { cfg = JSON.parse(stripJsonComments(await fs.readFile(t.file, 'utf8'))); } catch { continue; }
+    let cfg, rawText;
+    try {
+      rawText = await fs.readFile(t.file, 'utf8');
+      cfg = JSON.parse(stripJsonComments(rawText));
+    } catch { continue; }
     if (!cfg[t.key] || !cfg[t.key].holt) continue;
     delete cfg[t.key].holt;
     if (Object.keys(cfg[t.key]).length === 0) delete cfg[t.key];
@@ -1033,7 +1349,10 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
       await fs.rm(t.file, { force: true });
       results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'removed (holt-only content)' });
     } else {
-      await fs.writeFile(t.file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+      // JSONC-PRESERVING WRITE: surgically remove the holt key, preserving comments.
+      let output = jsoncWrite(rawText, [[[t.key], cfg[t.key] ?? undefined]], { tabSize: 2, insertSpaces: true });
+      if (!output.endsWith('\n')) output += '\n';
+      await fs.writeFile(t.file, output, 'utf8');
       results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: "holt's entry removed, your other settings kept" });
     }
   }
@@ -1042,46 +1361,121 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
   {
     const file = path.join(repoRoot, '.claude', 'settings.json');
     try {
-      const cfg = JSON.parse(await fs.readFile(file, 'utf8'));
+      const rawText = await fs.readFile(file, 'utf8');
+      const cfg = JSON.parse(stripJsonComments(rawText));
       let removed = 0;
+      let result = rawText;
       for (const [event, sub] of Object.entries(CLAUDE_EVENT_SUBCOMMAND)) {
         if (!Array.isArray(cfg.hooks?.[event])) continue;
-        const before = cfg.hooks[event].length;
-        cfg.hooks[event] = cfg.hooks[event].filter((e) => !commandsOf(e).some((c) => isHoltHookCommand(c, sub)));
-        removed += before - cfg.hooks[event].length;
-        if (cfg.hooks[event].length === 0) delete cfg.hooks[event];
+        const isMine = (entry) => {
+          const cmds = commandsOf(entry);
+          const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
+          const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
+          // Entirely holt's entry (no user commands) — remove it
+          return holtCmds.length > 0 && userCmds.length === 0;
+        };
+        const isWidened = (entry) => {
+          const cmds = commandsOf(entry);
+          const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
+          const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
+          // Widened entry: has BOTH holt's and user's commands — strip holt's, keep user's
+          return holtCmds.length > 0 && userCmds.length > 0;
+        };
+        const eventArr = cfg.hooks[event];
+        const mineCount = eventArr.filter(isMine).length;
+        const widenedCount = eventArr.filter(isWidened).length;
+        if (mineCount === 0 && widenedCount === 0) continue;
+        removed += mineCount + widenedCount;
+
+        // Remove entirely-holt entries via element-level reconciliation
+        if (mineCount > 0) {
+          const reconciled = jsoncReconcileArray(result, ['hooks', event], isMine, null, { tabSize: 2, insertSpaces: true });
+          if (reconciled != null) result = reconciled;
+        }
+
+        // Handle widened entries: replace each with a version that only has user's commands
+        if (widenedCount > 0) {
+          const parsedResult = JSON.parse(stripJsonComments(result));
+          const currentArr = parsedResult.hooks?.[event] || [];
+          for (let i = 0; i < currentArr.length; i++) {
+            const entry = currentArr[i];
+            const cmds = commandsOf(entry);
+            const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
+            if (holtCmds.length > 0) {
+              const userHooks = (entry.hooks || []).filter((h) => !isHoltHookCommand(h?.command, sub));
+              const strippedEntry = { ...entry, hooks: userHooks };
+              result = jsoncWrite(result, [[['hooks', event, i], strippedEntry]], { tabSize: 2, insertSpaces: true });
+            }
+          }
+        }
+
+        // Check if the array is now empty — if so, remove the event key
+        const parsedResult = JSON.parse(stripJsonComments(result));
+        if (parsedResult.hooks?.[event] != null && Array.isArray(parsedResult.hooks[event]) && parsedResult.hooks[event].length === 0) {
+          result = jsoncWrite(result, [[['hooks', event], undefined]], { tabSize: 2, insertSpaces: true });
+        }
       }
       if (removed > 0) {
-        if (cfg.hooks && Object.keys(cfg.hooks).length === 0) delete cfg.hooks;
-        if (Object.keys(cfg).length === 0) {
+        // Check if hooks is now empty — if so, remove the hooks key
+        const parsedResult = JSON.parse(stripJsonComments(result));
+        if (parsedResult.hooks != null && Object.keys(parsedResult.hooks).length === 0) {
+          result = jsoncWrite(result, [[['hooks'], undefined]], { tabSize: 2, insertSpaces: true });
+        }
+        // Check if the file is now empty (only whitespace/comments) — if so, delete it
+        const finalParsed = JSON.parse(stripJsonComments(result));
+        if (Object.keys(finalParsed).length === 0) {
           await fs.rm(file, { force: true });
           results.push({ adapter: 'claude-code', path: file, action: 'removed (holt-only content)' });
         } else {
-          await fs.writeFile(file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+          if (!result.endsWith('\n')) result += '\n';
+          await fs.writeFile(file, result, 'utf8');
           results.push({ adapter: 'claude-code', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
         }
       }
     } catch { /* no settings.json */ }
   }
 
-  // ---- Cursor hooks.json: same pattern ----
+  // ---- Cursor hooks.json: same multi-event pattern as Claude Code ----
   {
     const file = path.join(repoRoot, '.cursor', 'hooks.json');
     try {
-      const cfg = JSON.parse(stripJsonComments(await fs.readFile(file, 'utf8')));
-      const list = Array.isArray(cfg.hooks?.beforeShellExecution) ? cfg.hooks.beforeShellExecution : [];
-      const kept = list.filter((h) => !isHoltHookCommand(h?.command, 'pre-tool-use'));
-      if (kept.length !== list.length) {
-        if (kept.length) cfg.hooks.beforeShellExecution = kept; else delete cfg.hooks.beforeShellExecution;
-        if (cfg.hooks && Object.keys(cfg.hooks).length === 0) delete cfg.hooks;
-        const onlyVersionLeft = Object.keys(cfg).length === 0
-          || (Object.keys(cfg).length === 1 && 'version' in cfg);
+      const rawText = await fs.readFile(file, 'utf8');
+      const cfg = JSON.parse(stripJsonComments(rawText));
+      let removed = 0;
+      let result = rawText;
+      for (const [event, sub] of Object.entries(CURSOR_EVENT_SUBCOMMAND)) {
+        if (!Array.isArray(cfg.hooks?.[event])) continue;
+        const isMine = (h) => isHoltHookCommand(h?.command, sub);
+        const list = cfg.hooks[event];
+        const mineCount = list.filter(isMine).length;
+        if (mineCount === 0) continue;
+        removed += mineCount;
+        const reconciled = jsoncReconcileArray(result, ['hooks', event], isMine, null, { tabSize: 2, insertSpaces: true });
+        if (reconciled != null) result = reconciled;
+
+        // Check if the array is now empty — if so, remove the event key
+        const parsedResult = JSON.parse(stripJsonComments(result));
+        if (parsedResult.hooks?.[event] != null && Array.isArray(parsedResult.hooks[event]) && parsedResult.hooks[event].length === 0) {
+          result = jsoncWrite(result, [[['hooks', event], undefined]], { tabSize: 2, insertSpaces: true });
+        }
+      }
+      if (removed > 0) {
+        // Check if hooks is now empty
+        const parsedResult = JSON.parse(stripJsonComments(result));
+        if (parsedResult.hooks != null && Object.keys(parsedResult.hooks).length === 0) {
+          result = jsoncWrite(result, [[['hooks'], undefined]], { tabSize: 2, insertSpaces: true });
+        }
+        // Check if only version remains
+        const finalParsed = JSON.parse(stripJsonComments(result));
+        const onlyVersionLeft = Object.keys(finalParsed).length === 0
+          || (Object.keys(finalParsed).length === 1 && 'version' in finalParsed);
         if (onlyVersionLeft) {
           await fs.rm(file, { force: true });
           results.push({ adapter: 'cursor', path: file, action: 'removed (holt-only content)' });
         } else {
-          await fs.writeFile(file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
-          results.push({ adapter: 'cursor', path: file, action: "holt's hook removed, your settings kept" });
+          if (!result.endsWith('\n')) result += '\n';
+          await fs.writeFile(file, result, 'utf8');
+          results.push({ adapter: 'cursor', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
         }
       }
     } catch { /* no hooks.json */ }

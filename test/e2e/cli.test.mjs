@@ -289,14 +289,14 @@ test('FIRST RUN: no worktrees yet gets an honest message, never a silent all-cle
 
   const risk = await holt(['risk', '--cwd', fx.root], fx.root);
   assert.equal(risk.code, 0, `risk exited ${risk.code}: ${risk.stderr}`);
-  assert.match(risk.stdout, /no worktrees yet/i,
-    `risk must say WHY everything is zero, got: ${risk.stdout}`);
+  assert.match(risk.stdout, /no other worktrees yet/i,
+    `risk must say WHY everything is zero — and "no OTHER worktrees": the primary exists and the reader is in it, got: ${risk.stdout}`);
   assert.ok(!/Nothing unique anywhere/.test(risk.stdout),
     'must not print the "verified clean" verdict when nothing was ever compared');
 
   const status = await holt(['status', '--cwd', fx.root], fx.root);
   assert.equal(status.code, 0, `status exited ${status.code}: ${status.stderr}`);
-  assert.match(status.stdout, /no worktrees yet/i,
+  assert.match(status.stdout, /no other worktrees yet/i,
     `status must say WHY every DECISIONS row is zero, got: ${status.stdout}`);
 
   // `holt brief` collapses onto the same fixed sentence regardless of WHY there was nothing to
@@ -412,4 +412,91 @@ test('CLI: --version answers, in every spelling people actually try', async () =
     assert.match(r.stdout, new RegExp(`holt ${version.replace(/\./g, '\\.')}`),
       `holt ${flag} must print the package version, got: ${r.stdout || r.stderr}`);
   }
+});
+
+test('FIRST RUN: a bare repo WITH linked worktrees answers from the bare side — the canonical layout is not a dead end', async (t) => {
+  // Adversarial review refuted the bare-repo refusal above with the layout it is FOR: `repo.git`
+  // plus linked checkouts is the recommended way to run worktrees, `git worktree list` from the
+  // bare side enumerates every checkout, and the old message ("needs at least one checkout; run
+  // it from a normal clone instead") was false in both halves — there were two checkouts, and
+  // there was no clone to run from. Discovery now re-roots at the first live checkout; the
+  // refusal survives only where its message is true (a bare repo with NO worktrees — the test
+  // above, which stays).
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-bare-wt-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const bare = path.join(dir, 'repo.git');
+  const sh = (args, cwd) => new Promise((res, rej) =>
+    execFile('git', args, { cwd }, (e, so, se) => (e ? rej(new Error(String(se))) : res(String(so)))));
+  await sh(['init', '-q', '--bare', '-b', 'main', bare], dir);
+  await sh(['-C', bare, 'worktree', 'add', '-q', '--orphan', '-b', 'main', path.join(dir, 'wt-a')], dir);
+  await sh(['config', 'user.email', 't@t'], path.join(dir, 'wt-a'));
+  await sh(['config', 'user.name', 't'], path.join(dir, 'wt-a'));
+  await fs.writeFile(path.join(dir, 'wt-a', 'a.txt'), 'base\n');
+  await sh(['add', '-A'], path.join(dir, 'wt-a'));
+  await sh(['commit', '-qm', 'base'], path.join(dir, 'wt-a'));
+  await sh(['-C', bare, 'worktree', 'add', '-q', '-b', 'feat-b', path.join(dir, 'wt-b'), 'main'], dir);
+  await fs.writeFile(path.join(dir, 'wt-b', 'only.js'), 'export function UNIQUE_B() { return 1; }\n');
+
+  const r = await holt(['risk', '--cwd', bare], bare);
+  assert.equal(r.code, 0, `risk from the bare side must answer, got exit ${r.code}: ${r.stderr}`);
+  assert.doesNotMatch(r.stderr + r.stdout, /run it from a normal clone/,
+    'the false prescription must be gone for the layout that has no clone to run from');
+  assert.match(r.stdout, /wt-b/, `wt-b must be scanned from the bare side: ${r.stdout}`);
+  assert.match(r.stdout, /unique-work-uncommitted|uncommitted/,
+    `wt-b's uncommitted-only work must be found: ${r.stdout}`);
+});
+
+test('FIRST RUN: the solo-repo caveat — a dirty, unscanned primary is NAMED beside every all-clear', async (t) => {
+  // The commonest first-run shape there is: one repository, no fan-out, uncommitted-only work in
+  // the primary. "Nothing unique anywhere. Every workstream is reproducible from base." was true
+  // of the zero workstreams scanned and false of the repository — and the prescribed remedy
+  // (add a worktree, re-run) produced the same false all-clear. The verdict now carries the
+  // caveat naming what holt is NOT auditing, in both shapes, with the command that covers it.
+  const fx = await newRepo('solo-caveat');
+  t.after(() => fx.cleanup());
+  await fx.write('newfile.mjs', 'export function UNCOMMITTED_CRITICAL() {}\n');
+
+  const solo = await holt(['risk', '--cwd', fx.root], fx.root);
+  assert.match(solo.stdout, /primary worktree .* holds 1 uncommitted change/,
+    `solo: the dirty primary must be named: ${solo.stdout}`);
+  assert.match(solo.stdout, /--include-primary/, 'and the covering command must be named');
+
+  await fx.git(['worktree', 'add', '-q', '-b', 'spawned', path.join(fx.root, '..', 'solo-caveat-sib'), 'main']);
+  const withSib = await holt(['risk', '--cwd', fx.root], fx.root);
+  assert.match(withSib.stdout, /primary worktree .* holds 1 uncommitted change/,
+    `with a sibling: the caveat must survive beside the real verdict: ${withSib.stdout}`);
+
+  // And --include-primary actually covers it — the caveat is a pointer, not a dead end.
+  const covered = await holt(['risk', '--include-primary', '--cwd', fx.root], fx.root);
+  assert.match(covered.stdout, /unique-work-uncommitted/,
+    `--include-primary must surface the primary's at-risk work: ${covered.stdout}`);
+});
+
+test('FIRST RUN: `holt brief` never fabricates a clean bill when the scan could not answer', async (t) => {
+  // Adversarial review reproduced this with two mundane breakages (an unreadable .git pointer, a
+  // missing base object): buildBrief() returns null for "clean", "scan threw" AND "every sibling
+  // skipped", and the CLI printed "every sibling workstream is clean right now" at exit 0 while
+  // `holt status` in the same repo said "scanned 0/2 · 2 skipped". Fail-open on missing evidence,
+  // in the one channel agents read. The claim is now made only after re-deriving the scan.
+  const fx = await newRepo('brief-truth');
+  t.after(() => fx.cleanup());
+  const sib = path.join(fx.root, '..', 'brief-truth-sib2');
+  await fx.git(['worktree', 'add', '-q', '-b', 'sib2', sib, 'main']);
+  await fs.writeFile(path.join(sib, 'unique.txt'), 'only here\n');
+
+  // Healthy shape first (anti-vacuity): with a real dirty sibling the brief has plenty to say.
+  const healthy = await holt(['brief', '--cwd', fx.root], fx.root);
+  assert.match(healthy.stdout, /holt/, `sanity: ${healthy.stdout}`);
+  assert.doesNotMatch(healthy.stdout, /clean right now/,
+    'a repo with a dirty sibling must never read as clean');
+
+  // Break the sibling the way the refutation did: its .git pointer unreadable.
+  await fs.chmod(path.join(sib, '.git'), 0o000);
+  t.after(() => fs.chmod(path.join(sib, '.git'), 0o644).catch(() => {}));
+  const broken = await holt(['brief', '--cwd', fx.root], fx.root);
+  assert.doesNotMatch(broken.stdout, /clean right now/,
+    `a scan that could not answer must never print the clean bill: ${broken.stdout}`);
+  assert.match(broken.stdout + broken.stderr, /could not (be )?scan|cannot vouch/i,
+    `the brief must say it cannot vouch: ${broken.stdout} ${broken.stderr}`);
+  assert.notEqual(broken.code, 0, 'and it must not exit 0 while unable to vouch');
 });

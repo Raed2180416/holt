@@ -34,10 +34,11 @@ import {
   samePathSync, underOrEqualSync, relativeWithinAsync,
 } from './paths.mjs';
 import { discover, repoAbsenceError } from './discover.mjs';
-import { scan, atRiskFiles, atRiskFromStatus } from './scan.mjs';
+import { scan, atRiskFiles, atRiskFromStatus, generatedEvidence } from './scan.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
 import { scratchDir } from './symbols.mjs';
 import { git } from './git.mjs';
+import { stashState, describeStash, MAX_ENTRIES } from './stash.mjs';
 
 /* ------------------------------------------------------------------ cache ---- */
 
@@ -61,6 +62,24 @@ async function fingerprint(root) {
       .catch(() => ({ code: 1, stdout: '' }));
     h.update(p).update(String(st.code)).update(st.stdout);
   }
+
+  // THE STASH MOVES WITHOUT ANY WORKING TREE MOVING, and the report now reports on it.
+  //
+  // Every input above is a WORKTREE fact, which was exactly right while the report only described
+  // worktrees. `git stash drop` changes no worktree's status and no worktree's presence — so with
+  // the stash section keyed on those inputs alone, the fingerprint would be unchanged, the cached
+  // report would be served, and holt would go on naming an entry that no longer exists. A warning
+  // about work that was already made safe is not a harmless extra: it is the false alarm that
+  // teaches a reader to ignore the true one.
+  //
+  // THE WHOLE REFLOG, NOT `refs/stash` — the ref names stash@{0} only, so `drop stash@{1}` leaves
+  // it untouched while destroying an entry. Hashing the reflog's commit list catches push, pop,
+  // drop at any index, and clear. One cheap call, and in a repository with no stash it fails
+  // immediately and contributes a constant.
+  const stashLog = await git(['log', '-g', '--format=%H', 'refs/stash'], { cwd: root })
+    .catch(() => ({ code: 1, stdout: '' }));
+  h.update('stash').update(String(stashLog.code)).update(stashLog.stdout);
+
   return h.digest('hex').slice(0, 32);
 }
 
@@ -116,6 +135,21 @@ const GIT_GLOBALS = '(?:-[cC]\\s+\\S+\\s+|--(?:git-dir|work-tree|namespace|exec-
   const unstageOnly = (c) => /\brestore\b/.test(c) && /--staged\b/.test(c) && !/--worktree\b/.test(c);
 
 /**
+ * The tokens `git stash` itself would see, as one shared scan.
+ *
+ * Both questions below — "is there a pathspec" and "which layers does this sweep" — are answered
+ * from the same argv, and answering them from two private copies of the same tokenizer is how the
+ * two drift apart. Stops at the next shell separator so a LATER command is never read as this
+ * stash's own arguments.
+ */
+function stashArgs(command) {
+  const m = new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\b\\s*([\\s\\S]*)`).exec(String(command ?? ''));
+  if (!m) return [];
+  const rest = m[1].split(/&&|\|\||[;&|\n]/)[0];
+  return (rest.match(/'[^']*'|"[^"]*"|\S+/g) ?? []).map((t) => t.replace(/^['"]|['"]$/g, ''));
+}
+
+/**
  * Does this `git stash` invocation carry a PATHSPEC?
  *
  * `git stash push -- <path>` (or `git stash <path>`, or `git stash -u -- <path>`) scopes the
@@ -130,18 +164,15 @@ const GIT_GLOBALS = '(?:-[cC]\\s+\\S+\\s+|--(?:git-dir|work-tree|namespace|exec-
  * pathspecs unambiguously; without it, the first bare (non-flag) token is one.
  */
 function stashHasPathspec(command) {
-  const m = new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\b\\s*([\\s\\S]*)`).exec(String(command ?? ''));
-  if (!m) return false;
-  // Stop at the next shell separator so a LATER command is never read as this stash's own args.
-  const rest = m[1].split(/&&|\|\||[;&|\n]/)[0];
-  const tokens = rest.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+  const tokens = stashArgs(command);
+  if (!tokens.length) return false;
 
   let i = 0;
   if (tokens[0] === 'push') i = 1;
   else if (tokens[0] === 'save') return false; // save never takes a pathspec — always the whole tree
 
   for (; i < tokens.length; i++) {
-    const t = tokens[i].replace(/^['"]|['"]$/g, '');
+    const t = tokens[i];
     if (t === '--') return tokens.slice(i + 1).length > 0;
     if (/^-/.test(t)) {
       if (/^(-m|--message)$/.test(t)) i++; // consumes its value, never a path
@@ -150,6 +181,38 @@ function stashHasPathspec(command) {
     return true; // a bare operand with no preceding '--': git treats it as a pathspec
   }
   return false;
+}
+
+/**
+ * WHICH WORKING-TREE LAYERS THIS PARTICULAR SWEEP CAN ACTUALLY REACH.
+ *
+ * The same class of defect as gating a stash on committed history, one layer down. A bare
+ * `git stash` does not touch untracked files — git-stash(1) is explicit, and it is checkable:
+ * in a worktree whose only content is an untracked file, `git stash` prints "No local changes to
+ * save", exits 0, and leaves the file exactly where it was. So refusing (or even asking about)
+ * that invocation is a warning about work the command provably cannot take, and a guard whose
+ * stated reason is untrue is one the reader learns to discount.
+ *
+ *   always            tracked modifications, staged or not          (layer 'uncommitted')
+ *   -u/--include-untracked  adds files git has never tracked        (layer 'untracked')
+ *   -a/--all                adds those AND ignored files            (layer 'gitignored')
+ *
+ * Short options cluster (`-ua`, `-um wip`), so flags are matched inside a cluster rather than as
+ * whole tokens. `-m`/`--message` consumes the token after it, which is a message and must never
+ * be read as a flag or a path.
+ */
+function stashSweepLayers(command) {
+  const layers = new Set(['uncommitted']);
+  const tokens = stashArgs(command);
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '--') break;                       // everything after this is a pathspec
+    if (!t.startsWith('-')) continue;
+    if (/^(-m|--message)$/.test(t)) { i++; continue; }
+    if (t === '--all' || /^-[a-zA-Z]*a/.test(t)) { layers.add('untracked'); layers.add('gitignored'); }
+    if (t === '--include-untracked' || /^-[a-zA-Z]*u/.test(t)) layers.add('untracked');
+  }
+  return layers;
 }
 
 const DESTRUCTIVE = [
@@ -225,22 +288,25 @@ const DESTRUCTIVE = [
   // the loss path is exactly these verbs, and they were the one part of it left unguarded. They
   // are as final as `reset --hard`, which has been in this table from the beginning.
   //
+  // `stashScope` — NOT `cwdTarget`/`all` — because the evidence for a stash verb is not a
+  // worktree's disposability. See assessStashCommand: `drop`/`clear` destroy STASH ENTRIES, so
+  // the only thing that can make them dangerous is an entry existing.
+  //
   // `list`, `show` and `apply` are reads and stay out entirely.
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+(?:drop|clear)\\b`), kind: 'git stash drop/clear (destroys stashed work)', cwdTarget: true, all: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+(?:drop|clear)\\b`), kind: 'git stash drop/clear (destroys stashed work)', stashScope: 'entries' },
 
   // POP IS THE RECOVERY ACTION, AND A FLAT DENY ON IT WAS THE OVER-REFUSAL THAT MADE TONIGHT'S
   // INCIDENT WORSE: an agent that had just had eleven siblings' work swept into the stash by a
   // bare `git stash` was then BLOCKED from putting any of it back with `pop`. Its actual risk is
   // narrow — a pop that hits a conflict can drop the entry with the content left unapplied — and
   // `apply` does everything `pop` does except that one unsafe last step. So the honest verdict is
-  // `ask`, evidence-gated exactly like every other rule here (still `all: true`: the entry being
-  // popped may belong to ANY worktree sharing this repository's one `refs/stash`, not only the
-  // one `pop` is run from), never hardened into a refusal that blocks the only way back.
+  // `ask`, evidence-gated on the SAME thing `drop` is (the entry being popped may belong to any
+  // worktree sharing this repository's one `refs/stash`, so the stash is read repo-wide, not per
+  // worktree), never hardened into a refusal that blocks the only way back.
   {
     re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+pop\\b`),
     kind: 'git stash pop (drops the entry even if applying fails)',
-    cwdTarget: true,
-    all: true,
+    stashScope: 'entries',
     verdict: 'ask',
     recovery: '`git stash apply` does everything `pop` does except drop the entry afterward — '
       + 'the same content back, without the one step that can lose it on a conflict.',
@@ -268,6 +334,12 @@ const DESTRUCTIVE = [
     re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\b(?!\\s+(?:apply|list|show|branch|create|store|pop|drop|clear)\\b)`),
     kind: 'git stash / stash push (sweeps every uncommitted change in this worktree into the shared stash)',
     cwdTarget: true,
+    // `'mention'`, not `'entries'`: pushing ADDS an entry, it destroys none, so existing entries
+    // must never make this fire — a clean tree still sweeps nothing and is still allowed silently.
+    // They belong in the MESSAGE, because "your work is now in the stash, alongside four older
+    // entries holding content no ref holds" is the sentence that stops a pile from being forgotten.
+    // Forgetting is how the stash loses work without anybody typing `drop`.
+    stashScope: 'mention',
     verdict: 'ask',
     recovery: '`git stash list` shows what just got queued, and `git stash apply` restores the '
       + 'most recent entry without dropping it.',
@@ -589,7 +661,7 @@ export function indirectVerb(command) {
 export function classifyCommand(command) {
   if (typeof command !== 'string' || !command.trim()) return null;
   const masked = maskedRegions(command);
-  for (const { re, kind, all, cwdTarget, unless, verdict, recovery } of DESTRUCTIVE) {
+  for (const { re, kind, all, cwdTarget, stashScope, unless, verdict, recovery } of DESTRUCTIVE) {
     // A rule may declare an exemption that is not expressible as "the pattern should not have
     // matched", because it depends on ANOTHER flag elsewhere in the command — `--dry-run` on a
     // clean, `--staged` without `--worktree` on a restore. Encoding those as negative lookaheads
@@ -609,6 +681,10 @@ export function classifyCommand(command) {
         target: m.groups?.target ? m.groups.target.replace(/^['"]|['"]$/g, '') : null,
         all: !!all,
         cwdTarget: !!cwdTarget,
+        // Which store this rule destroys. `'entries'` means the STASH — read the stash itself for
+        // evidence (src/stash.mjs), because no worktree holds what a stash entry holds. Null on
+        // every other rule, and nothing without it pays a single git call for the stash.
+        stashScope: stashScope ?? null,
         // A rule may cap its OWN verdict below the table's default 'deny' — stash is recoverable
         // (the content lands in a stash commit, not nowhere), so its worst honest answer is
         // "confirm before you do this", never a flat refusal. Absent on every other rule, where
@@ -719,7 +795,11 @@ function newProbeCtx(cwd) {
             { cwd: root },
           ).catch(() => null);
           if (!r || r.code !== 0) return null;
-          return atRiskFromStatus(r.stdout);
+          // The same manifest evidence the scan uses — the fast probe and the scan must not
+          // disagree about whether `build/only.js` is noise, because the probe is what the
+          // per-command guard actually consults. One readdir, cached with the status.
+          const activeDirs = await generatedEvidence(root);
+          return atRiskFromStatus(r.stdout, activeDirs);
         })());
       }
       return dirty.get(root);
@@ -1374,6 +1454,190 @@ export async function assessCommand(command, cwd = process.cwd()) {
   return wtVerdict ?? fileVerdict ?? { decision: 'allow', reason: null, kind: null, targets: [] };
 }
 
+/* ------------------------------------------------------- the stash's own evidence ---- */
+
+/**
+ * WHICH ENTRY THIS `drop`/`pop` DESTROYS.
+ *
+ * `git stash drop stash@{2}` cannot destroy `stash@{0}`, and weighing it against the whole stash
+ * is the same over-refusal as weighing a stash against committed history, one scope down.
+ *
+ * AND A DROP WITH NO SELECTOR IS NOT "EVERY ENTRY" EITHER — that is the same mistake with the
+ * default. `git stash drop` drops stash@{0} and nothing else (git-stash(1): "<stash> … defaults
+ * to the latest one"), so a stash whose newest entry is disposable and whose OLDER entry holds
+ * the only copy of something must still allow the bare drop. Reading the absent selector as "all"
+ * refused it, naming an entry the command provably cannot reach — the checkably-false refusal
+ * this whole area already learned to avoid once, reintroduced at the level of a default.
+ *
+ * `clear` takes no selector — it always means every entry — so callers must not consult this
+ * for it.
+ *
+ * @returns {string|undefined} the selector, or `undefined` when an operand IS present and holt
+ *   cannot resolve it — never conflated with "no operand", because the safe answer differs:
+ *   an unreadable selector must weigh every entry, an absent one weighs exactly stash@{0}.
+ */
+function stashSelector(command) {
+  const tokens = stashArgs(command);
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === '--') continue;
+    // Every option `drop`/`pop` accepts (-q/--quiet, --index) is boolean and consumes no value.
+    if (t.startsWith('-')) continue;
+    // git accepts both spellings for the same entry: `stash@{2}` and a bare `2`.
+    const m = /^(?:(?:refs\/)?stash@\{(\d+)\}|(\d+))$/.exec(t);
+    return m ? `stash@{${m[1] ?? m[2]}}` : undefined;
+  }
+  return 'stash@{0}';
+}
+
+/**
+ * `drop` / `clear` / `pop`, answered from the stash reflog and nothing else.
+ *
+ * THE EVIDENCE IS THE ENTRY, NOT THE WORKTREE. After a sweep the working tree is byte-clean and
+ * the stash is the workstream — so a worktree-shaped check answers "nothing at risk" about the
+ * one place the work now lives. It also answers the reverse, which is what the refutation
+ * measured: with `git stash list` verified EMPTY, these verbs were still being asked about, on
+ * evidence describing content no stash entry holds. An empty stash makes every one of them a
+ * provable no-op.
+ *
+ * PER-BLOB REACHABILITY, not "is this stash commit reachable" — a stash commit never is, by
+ * construction, so that question refuses every drop forever. `stashState` asks whether the
+ * CONTENT is reachable from a real ref: apply an entry and commit it, and dropping the entry
+ * loses nothing, so the guard steps back. See src/stash.mjs for the full argument.
+ */
+async function assessStashEntries(command, cwd, hit) {
+  // Resolve `git -C <path>` against the ASSESSED cwd, not process.cwd(). A relative path like
+  // `git -C ../other-wt stash drop` must target the sibling worktree, not whatever directory
+  // Node happened to start in.
+  const cFlag = gitCFlag(command);
+  const dir = cFlag ? path.resolve(cwd, cFlag) : cwd;
+  // `stashState` is documented never to throw; the catch is there so that promise remaining true
+  // is not something this file has to trust, and so `null` stays a value the checks below handle.
+  const state = await stashState(dir).catch(() => null);
+  // "holt could not look" is not "there is nothing there", and conflating them is the exact
+  // silence this whole module exists to break.
+  if (!state || (!state.checked && state.total === 0)) {
+    return {
+      decision: 'ask',
+      kind: hit.kind,
+      targets: [],
+      reason: `holt could not read this repository's stash, so it cannot say what ${hit.kind} `
+        + 'would destroy. Run `git stash list` and confirm manually before proceeding.',
+    };
+  }
+  if (state.total === 0) {
+    return { decision: 'allow', reason: null, kind: hit.kind, targets: [] };
+  }
+
+  let scoped = state.entries;
+  // `drop`/`pop` WITHOUT A SELECTOR MEAN stash@{0}, NOT "the whole stash" — verified against
+  // git: with two entries queued, a bare `git stash drop` prints "Dropped refs/stash@{0}" and
+  // leaves stash@{1} exactly where it was. Weighing every entry against a command that removes
+  // one is the same over-refusal as weighing a stash against committed history, one scope down:
+  // it refuses a provably safe drop on evidence from an entry the command cannot reach.
+  // `clear` is the one that genuinely takes them all, and it takes no selector at all — read
+  // from the argv rather than by searching the string, so a stash MESSAGE containing the word
+  // "clear" (`git stash push -m "clear the decks"`) cannot rewrite which entries are at stake.
+  if (stashArgs(command)[0] !== 'clear') {
+    const selector = stashSelector(command);
+    // `undefined` is an operand holt could not resolve — NOT an absent one. The safe answers
+    // differ, and collapsing them loses one of the two: an unreadable selector must weigh every
+    // entry (holt does not know which is going), an absent one weighs exactly stash@{0}.
+    if (selector !== undefined) {
+      const one = state.entries.find((e) => e.selector === selector);
+      if (one) scoped = [one];
+      // A selector holt could not match means "not there" ONLY when holt saw the whole stash.
+      // The walk is capped (MAX_ENTRIES), and beyond the cap an unmatched selector means "not
+      // looked at" — so there, every entry is weighed rather than none.
+      else if (state.total < MAX_ENTRIES) scoped = [];
+    }
+  }
+
+  const doomed = scoped.filter((e) => e.uniqueCount > 0);
+  if (doomed.length === 0) {
+    return { decision: 'allow', reason: null, kind: hit.kind, targets: [] };
+  }
+
+  const detail = describeStash({ atRisk: doomed, truncated: state.truncated });
+  const targets = doomed.map((e) => e.selector);
+  // Same cap the table declares, read the same way as everywhere else: `pop` is the way BACK
+  // from a sweep and must never harden into a refusal, `drop`/`clear` have no equivalent that
+  // keeps the entry and stay final.
+  if ((hit.verdict ?? 'deny') === 'ask') {
+    return {
+      decision: 'ask',
+      kind: hit.kind,
+      targets,
+      reason: `holt is asking before this: ${hit.kind}. The stash holds content no ref holds:\n`
+        + `${detail}\n`
+        // THE SPECIFIC RISK, SAID OUT LOUD. `pop` = apply, then drop — and it drops on a partial
+        // apply too. So this content survives ONLY IF the apply succeeds; if it conflicts, the
+        // entry is unlinked anyway and the blobs above become unreachable in the same command.
+        // A message that only says "content no ref holds" describes the stake without describing
+        // the mechanism, and the mechanism is the whole reason `apply` is the better verb.
+        + 'This content survives only if the apply succeeds — `pop` drops the entry either way, '
+        + 'including on a conflict.\n'
+        + `${hit.recovery}\n`
+        + 'Run `git stash list` to inspect first, or confirm this is what you mean.',
+    };
+  }
+  return {
+    decision: 'deny',
+    kind: hit.kind,
+    targets,
+    reason: `holt blocked this: ${hit.kind} would destroy stashed content that no ref holds.\n`
+      + `${detail}\n`
+      + 'A stash entry is a commit nothing points at: unlink it from the reflog and those blobs '
+      + 'are unreachable in the same breath.\n'
+      + 'Run `git stash apply` to bring it back into a worktree first, or `holt rescue <id>` to '
+      + 'capture it to a ref — then dropping it loses nothing and holt will say so.',
+  };
+}
+
+/**
+ * WHAT THIS PARTICULAR SWEEP WOULD ACTUALLY TAKE OUT OF THE WORKING TREE.
+ *
+ * One `git status`, intersected with the layers this invocation reaches (stashSweepLayers): a
+ * bare `git stash` cannot touch an untracked file, so an untracked-only worktree is a proven
+ * no-op there and asking about it is a warning about work the command leaves on disk. `-u` adds
+ * the untracked layer, `-a` adds ignored content too, and each is judged on exactly what it
+ * takes.
+ *
+ * The at-risk mapping is scan.mjs's (`atRiskFromStatus`), the same instrument the file-granular
+ * layer uses — so recognisable build output is already excluded and the two layers cannot drift
+ * into describing the same file two different ways. `git status` reports the whole worktree with
+ * root-relative paths from any subdirectory, so running it where the stash would run is exact.
+ */
+async function sweptContent(command, cwd, ctx) {
+  const layers = stashSweepLayers(command);
+  // Resolve `git -C <path>` against the assessed cwd, not process.cwd() — same fix as
+  // assessStashEntries. A relative -C path must target the worktree the agent specified.
+  const cFlag = gitCFlag(command);
+  const root = await canonicalPath(cFlag ? path.resolve(cwd, cFlag) : cwd);
+  const dirty = await ctx.dirtyFiles(root);
+  if (dirty === null) return { unreadable: true, files: [] };
+  const files = [];
+  for (const [p, layer] of dirty) if (layers.has(layer)) files.push({ path: p, layer });
+  files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { unreadable: false, files };
+}
+
+/** The sweep half of a guard message: which files leave the working tree, and from which layer. */
+function describeSweep(sweep, id) {
+  const sample = sweep.files.slice(0, 3).map((f) => `\n      ${f.path} (${f.layer})`).join('');
+  const more = sweep.files.length > 3 ? `\n      +${sweep.files.length - 3} more` : '';
+  return `  • ${id ?? 'this worktree'}: ${sweep.files.length} file(s) this sweep would take`
+    + `${sample}${more}`;
+}
+
+/** What the stash is ALREADY holding, for a message about adding one more entry to it. */
+async function describeQueued(dir) {
+  const state = await stashState(dir).catch(() => null);
+  if (!state || !state.atRisk.length) return '';
+  return `  …and the stash already holds ${state.atRisk.length} entr(y/ies) whose content no ref `
+    + `holds:\n${describeStash(state)}\n`;
+}
+
 /** The worktree-granularity half: unchanged behaviour, returns null when no rule matches. */
 async function assessWorktreeCommand(command, cwd, ctx) {
   const hit = classifyCommand(command);
@@ -1458,6 +1722,43 @@ async function assessWorktreeCommand(command, cwd, ctx) {
     if (!isWt) return null;
   }
 
+  // ---- A STASH VERB IS WEIGHED ONLY AGAINST WHAT A STASH CAN DESTROY ----------------------
+  //
+  // Everything below this point answers "would DELETING this workstream lose something", and
+  // that is the wrong question for `git stash`. Its blast radius is provably bounded to the
+  // working tree and the stash reflog: no spelling of it can reach a commit. Routed through the
+  // workstream's `safe` flag — built from committed deltas AND uncommitted counts AND unique
+  // symbols spanning every layer — the guard asked about a bare `git stash` in a worktree with a
+  // VERIFIED-EMPTY `git status`, citing a symbol sitting safely in committed history. The real
+  // command there prints "No local changes to save". The reason was not merely cautious, it was
+  // checkably false, and a guard whose stated reason is false teaches its reader to discount
+  // every message it prints — which is how the true ones get ignored too.
+  //
+  // So each verb is answered from the store IT writes to:
+  //   drop / clear / pop           the stash reflog (src/stash.mjs). Nothing queued, nothing to
+  //                                lose: an empty stash makes all three provable no-ops.
+  //   stash / push / save          this worktree's status, restricted to the layers this exact
+  //                                invocation sweeps (see stashSweepLayers). A clean tree sweeps
+  //                                nothing and is allowed in silence.
+  if (hit.stashScope === 'entries') return assessStashEntries(command, cwd, hit);
+
+  // Deliberately BEFORE the scan: a no-op stash must not pay for a full repository analysis in
+  // the agent's critical path, and it must not be able to fail on one either. One `git status`.
+  const sweep = hit.stashScope === 'mention' ? await sweptContent(command, cwd, ctx) : null;
+  if (sweep?.unreadable) {
+    return {
+      decision: 'ask',
+      kind: hit.kind,
+      targets: [],
+      reason: `holt could not read this worktree's status, so it cannot say what ${hit.kind} `
+        + 'would sweep. Run `git status` and confirm manually before proceeding.',
+    };
+  }
+  if (sweep && sweep.files.length === 0) {
+    // PROVEN NO-OP. git itself would print "No local changes to save" here.
+    return { decision: 'allow', reason: null, kind: hit.kind, targets: [] };
+  }
+
   let report;
   try {
     // includePrimary: git REFUSES to lock the main worktree, so for it the hook is the only
@@ -1475,27 +1776,49 @@ async function assessWorktreeCommand(command, cwd, ctx) {
     };
   }
 
+  // Resolve `git -C <path>` against the assessed cwd once — used by both the workstream lookup
+  // and the queued-stash description below. A relative -C path must target the worktree the
+  // agent specified, not whatever directory Node happened to start in.
+  const resolvedCFlag = gitCFlag(command);
+  const assessedCwd = resolvedCFlag ? path.resolve(cwd, resolvedCFlag) : cwd;
+
   // `worktree prune` affects every prunable worktree at once, so evaluate all of them.
   const targets = hit.all
     ? report.safe.filter((s) => !s.safe)
     : hit.cwdTarget
-      ? [(await findWorkstream(report, gitCFlag(command) ?? cwd, cwd)) ?? (await containingWorkstream(report, cwd))].filter(Boolean)
+      ? [(await findWorkstream(report, assessedCwd, cwd)) ?? (await containingWorkstream(report, cwd))].filter(Boolean)
       : [await findWorkstream(report, hit.target, cwd)].filter(Boolean);
 
-  const holding = targets.filter((s) => !s.safe);
+  // A sweep that reached here HAS something to take (the no-op case returned above), and the
+  // report is consulted for ONE thing: the workstream's id, so the message can name it. Its
+  // `safe` flag never enters the verdict — that flag is about deleting the worktree, and this
+  // command cannot delete anything. A tree holt cannot place in a workstream still gets the
+  // question asked; the evidence is the status, not the id.
+  const holding = sweep
+    ? (targets.length ? targets : [{ id: null }])
+    : targets.filter((s) => !s.safe);
   if (holding.length === 0) {
     return { decision: 'allow', reason: null, kind: hit.kind, targets: targets.map((t) => t.id) };
   }
 
-  const unknown = holding.filter((s) => s.confidence === 'unknown');
-  const detail = holding.slice(0, 3).map((s) => {
-    const u = report.unique.find((x) => x.id === s.id);
-    const sample = u
-      ? [...u.byLayer.uncommitted, ...u.byLayer.untracked, ...u.byLayer.committed]
-        .slice(0, 3).map((x) => x.key).join(', ')
-      : '';
-    return `  • ${s.id}: ${s.reasons.join('; ')}${sample ? `\n      e.g. ${sample}` : ''}`;
-  }).join('\n');
+  const unknown = sweep ? [] : holding.filter((s) => s.confidence === 'unknown');
+  const detail = sweep
+    ? describeSweep(sweep, targets[0]?.id ?? null)
+    : holding.slice(0, 3).map((s) => {
+      const u = report.unique.find((x) => x.id === s.id);
+      const sample = u
+        ? [...u.byLayer.uncommitted, ...u.byLayer.untracked, ...u.byLayer.committed]
+          .slice(0, 3).map((x) => x.key).join(', ')
+        : '';
+      return `  • ${s.id}: ${s.reasons.join('; ')}${sample ? `\n      e.g. ${sample}` : ''}`;
+    }).join('\n');
+
+  // The one sentence a sweep's message needs and a deletion's does not: what the stash DID find
+  // already queued. Pushing destroys no entry, so existing entries can never make this rule fire
+  // — but "your work is now in the stash, alongside four older entries holding content no ref
+  // holds" is what stops a pile from being silently forgotten, and forgetting is how a stash
+  // loses work without anybody typing `drop`. Paid for only on the path that already asks.
+  const queued = sweep ? await describeQueued(assessedCwd) : '';
 
   // A RULE THAT CAPPED ITS OWN VERDICT AT 'ask' NEVER ESCALATES TO 'deny', no matter how much is
   // at stake — the whole point of capping it here is that this action is recoverable (see the
@@ -1506,10 +1829,15 @@ async function assessWorktreeCommand(command, cwd, ctx) {
     return {
       decision: 'ask',
       kind: hit.kind,
-      targets: holding.map((h) => h.id),
+      targets: holding.map((h) => h.id).filter(Boolean),
       reason:
-        `holt is asking before this: ${hit.kind} would touch work that exists nowhere else, ` +
-        `across ${holding.length} workstream(s):\n${detail}\n` +
+        (sweep
+          // NAMES ONLY THE LAYERS THIS INVOCATION REACHES. Nothing committed appears here,
+          // because nothing committed is at stake — see the block above assessStashEntries.
+          ? `holt is asking before this: ${hit.kind}. It would take work out of `
+            + `${holding.length} workstream(s) that no one else has been asked about:\n${detail}\n${queued}`
+          : `holt is asking before this: ${hit.kind} would touch work that exists nowhere else, `
+            + `across ${holding.length} workstream(s):\n${detail}\n`) +
         (unknown.length
           ? `  ${unknown.length} of these could not be scanned, so holt cannot confirm they are safe.\n`
           : '') +
@@ -1521,7 +1849,7 @@ async function assessWorktreeCommand(command, cwd, ctx) {
   return {
     decision: 'deny',
     kind: hit.kind,
-    targets: holding.map((h) => h.id),
+    targets: holding.map((h) => h.id).filter(Boolean),
     reason:
       `holt blocked this: ${hit.kind} would destroy work that exists nowhere else.\n${detail}\n` +
       (unknown.length
@@ -1615,6 +1943,35 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
     const top = report.collisions[0];
     lines.push(
       `${report.counts.collisions} workstream collision(s); highest: ${top.a} <-> ${top.b} (${top.why}).`,
+    );
+  }
+
+  // THE STASH, TOLD TO THE AGENT THAT WILL NEVER THINK TO LOOK.
+  //
+  // The line above says "N workstreams hold work existing ONLY as uncommitted changes". After a
+  // sweep that number is zero and the brief simply omits the sentence — so an agent inheriting a
+  // repository whose only unrecoverable work is stashed is told nothing at all, and the brief's
+  // silence reads as "there is nothing here". That silence is what the guard cannot fix on its
+  // own: the guard only speaks when someone types a stash verb, and forgetting never does.
+  //
+  // Bounded to entries that hold content no ref holds, so a stash everyone has already rescued
+  // stops being mentioned the moment it stops mattering.
+  const stashed = report.stash?.atRisk ?? [];
+  if (stashed.length) {
+    lines.push(
+      `${stashed.length} stash entr(y/ies) hold content NO ref holds — no worktree shows this ` +
+      `work and deleting a worktree will not lose it, but \`git stash drop\`/\`clear\` will: ` +
+      `${stashed.slice(0, 3).map((e) => e.selector).join(', ')}. ` +
+      '`git stash apply` then commit, or `holt rescue`, makes it reachable.',
+    );
+  }
+  // LOUD BREAK: if holt stopped scanning at MAX_ENTRIES, entries beyond the cap were NOT checked
+  // and might hold the only copy of real work. The brief must say so — an agent that sees "N
+  // stash entries at risk" and does not know there are MORE is operating on incomplete evidence.
+  if (report.stash?.truncated) {
+    lines.push(
+      `⚠ holt scanned only the first ${MAX_ENTRIES} stash entries — there are more. ` +
+      'Review the remaining entries manually before dropping anything.',
     );
   }
 

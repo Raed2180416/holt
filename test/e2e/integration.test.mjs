@@ -571,10 +571,21 @@ test('COVERAGE: git -C redirects which worktree a path-less verb acts on', async
  *
  * Both halves get the SAME fix: evidence-gated, capped at 'ask', never silent and never a wall.
  */
+/** One-line git for tests that have to establish what the REAL command does. */
+const gitIn = (args, cwd) => new Promise((res) => {
+  execFile('git', args, { cwd, env: { ...process.env } },
+    (e, so, se) => res({ code: e?.code ?? 0, out: String(so ?? ''), err: String(se ?? '') }));
+});
+
 test('COVERAGE: bare `git stash`/`stash push`/`stash save` are evidence-gated — ask, not a silent allow', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
   const wt = fx.wt('uniqueUncommitted');
+  // A TRACKED MODIFICATION IS WHAT A BARE `git stash` ACTUALLY SWEEPS. The fixture's own
+  // `only_uncommitted.js` is UNTRACKED, which bare stash provably leaves alone (asserted in the
+  // never-worse test below), so gating the bare forms on it would be asserting a refusal about
+  // work the command cannot touch. Give the worktree something bare stash really does take.
+  await fs.writeFile(path.join(wt, 'src/base.js'), 'export function baseline() { return 42; }\n');
 
   for (const cmd of ['git stash', 'git stash push', 'git stash push -u', 'git stash push -u -m wip', 'git stash save wip']) {
     const v = await assessCommand(cmd, wt);
@@ -583,6 +594,7 @@ test('COVERAGE: bare `git stash`/`stash push`/`stash save` are evidence-gated �
     assert.match(v.reason, /uncommitted/i, `${cmd} must say what is at stake: ${v.reason}`);
     assert.match(v.reason, /workstream/i, `${cmd} must say WHICH workstream(s): ${v.reason}`);
     assert.match(v.reason, /git stash (list|apply)/, `${cmd} must name the recovery path: ${v.reason}`);
+    assert.match(v.reason, /src\/base\.js/, `${cmd} must name the file it would sweep: ${v.reason}`);
   }
 });
 
@@ -621,9 +633,31 @@ test('COVERAGE: stash SCOPED to a pathspec is deliberate and bounded — it stay
 
   // `save` is the one exception: it has NO pathspec support in git at all, so trailing words are
   // always a message, never a path — it must stay in the evidence-gated, ask-on-dirty bucket.
+  //
+  // "ON DIRTY" IS LOAD-BEARING, AND THIS TEST ONCE ASSERTED IT WITHOUT IT. Against this
+  // worktree — whose only content is UNTRACKED — the identical command is a proven no-op, so the
+  // old expectation of `ask` here was the very defect the CATASTROPHIC tests below exist to
+  // catch, sitting inside the test meant to pin the exemption. Both halves are proven with the
+  // real command rather than assumed.
+  const noop = await gitIn(['stash', 'save', 'src/only_uncommitted.js'], wt);
+  assert.match(noop.out, /No local changes to save/,
+    `premise: bare save cannot reach an untracked file, so here it is a no-op: ${JSON.stringify(noop)}`);
+  assert.equal((await gitIn(['stash', 'list'], wt)).out, '', 'premise: and queued nothing');
+  assert.equal((await assessCommand('git stash save src/only_uncommitted.js', wt)).decision, 'allow',
+    'a no-op must not be asked about, however its trailing word is spelled');
+
+  // Give it something bare `save` really does sweep, and the message word stays a message.
+  await fs.writeFile(path.join(wt, 'src/base.js'), 'export function baseline() { return 42; }\n');
   const saveV = await assessCommand('git stash save src/only_uncommitted.js', wt);
   assert.equal(saveV.decision, 'ask',
     `save cannot be scoped to a path — its trailing words are a message, so it still sweeps everything: ${JSON.stringify(saveV)}`);
+  assert.match(saveV.reason, /src\/base\.js/,
+    `and what it sweeps is the tracked modification, not the word that looks like a path: ${saveV.reason}`);
+
+  // The same dirty tree, scoped for real: still allowed. Without this the assertion above could
+  // be satisfied by a rule that simply asks about everything once anything is dirty.
+  assert.equal((await assessCommand('git stash push -- src/only_uncommitted.js', wt)).decision, 'allow',
+    'a real pathspec still bounds the blast radius, dirty tree or not');
 });
 
 test('COVERAGE: `git stash pop` stops being a flat deny — it is the recovery action, not a new act', async (t) => {
@@ -633,6 +667,14 @@ test('COVERAGE: `git stash pop` stops being a flat deny — it is the recovery a
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
   const wt = fx.wt('uniqueUncommitted');
+
+  // THE EVIDENCE FOR pop/drop/clear IS THE STASH ITSELF, so the entry has to exist before any of
+  // these verbs means anything. Sweep the fixture's uncommitted work into a real stash entry —
+  // the exact incident shape — and assert against a stash that genuinely holds something.
+  const swept = await gitIn(['stash', 'push', '-u', '-m', 'incident'], wt);
+  assert.equal(swept.code, 0, `fixture setup: the sweep must succeed: ${swept.err}`);
+  const list = await gitIn(['stash', 'list'], wt);
+  assert.match(list.out, /stash@\{0\}/, `fixture setup: an entry must exist: ${JSON.stringify(list)}`);
 
   const v = await assessCommand('git stash pop', wt);
   assert.equal(v.decision, 'ask', `pop must ask, never flatly deny the only way back: ${JSON.stringify(v)}`);
@@ -646,6 +688,214 @@ test('COVERAGE: `git stash pop` stops being a flat deny — it is the recovery a
   for (const cmd of ['git stash drop', 'git stash clear']) {
     const d = await assessCommand(cmd, wt);
     assert.equal(d.decision, 'deny', `${cmd} is genuinely final and must stay denied: ${JSON.stringify(d)}`);
+  }
+});
+
+/* ------------------------------------------- THE STASH'S REAL BLAST RADIUS ---- */
+
+/**
+ * A STASH CANNOT TOUCH COMMITTED HISTORY, SO COMMITTED HISTORY IS NOT EVIDENCE ABOUT A STASH.
+ *
+ * The rules above were gated on the workstream's whole `safe` flag — the right evidence for
+ * "would DELETING this workstream lose something", built from committed deltas, uncommitted
+ * counts and unique-symbol reasons that span every layer. Aimed at `git stash` it was not merely
+ * cautious, it was FALSE: reproduced on the standard fixture, the `uniqueCommitted` worktree has
+ * a verified-empty `git status` and a real `git stash` there prints "No local changes to save" —
+ * a guaranteed no-op — yet holt asked, citing `callable:COMMITTED_ONLY_SYMBOL`, which is safely
+ * committed history that no stash verb can reach.
+ *
+ * A guard whose stated reason is checkably untrue is worse than one that stays quiet: the next
+ * reader learns to discount every message it prints.
+ *
+ * So every stash verdict is weighed against the evidence THAT verb can actually destroy:
+ *   sweep (`stash`/`push`/`save`)  the uncommitted (+ untracked with -u, + ignored with -a) layers
+ *                                  of the one worktree it runs in — never a commit
+ *   pop / drop / clear             `git stash list` — an empty stash cannot lose anything
+ */
+const COMMITTED_EVIDENCE = /base lacks|found nowhere else|COMMITTED_ONLY_SYMBOL/;
+
+test('CATASTROPHIC: a stash verdict never rests on committed-layer evidence a stash cannot touch', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const wt = fx.wt('uniqueCommitted');
+
+  // ---- the premise, proven rather than assumed ------------------------------------------
+  const st = await gitIn(['status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching'], wt);
+  assert.equal(st.out, '', `premise: uniqueCommitted's status must be empty: ${JSON.stringify(st)}`);
+  const real = await gitIn(['stash'], wt);
+  assert.match(real.out, /No local changes to save/,
+    `premise: a real bare stash here must be a proven no-op: ${JSON.stringify(real)}`);
+
+  // ---- the verdict must match the fact ----------------------------------------------------
+  for (const cmd of ['git stash', 'git stash push', 'git stash push -u', 'git stash save wip']) {
+    const v = await assessCommand(cmd, wt);
+    assert.equal(v.decision, 'allow',
+      `${cmd} is a no-op in a worktree with a clean status — committed work is not at stake and asking about it is a false alarm: ${JSON.stringify(v)}`);
+  }
+
+  // ---- and when the sweep DOES have something to take, it says only what it takes ---------
+  await fs.writeFile(path.join(wt, 'src/base.js'), 'export function baseline() { return 7; }\n');
+  const v = await assessCommand('git stash', wt);
+  assert.equal(v.decision, 'ask', `a tracked modification IS swept, so this asks: ${JSON.stringify(v)}`);
+  assert.match(v.reason, /src\/base\.js/, `it must name the file it sweeps: ${v.reason}`);
+  assert.doesNotMatch(v.reason, COMMITTED_EVIDENCE,
+    'the reason must not cite committed-layer evidence — `git stash` cannot reach a commit, '
+    + `and a reason that is factually false is the defect: ${v.reason}`);
+  assert.doesNotMatch(v.reason, /only_committed\.js/,
+    `nor name a committed file as being at stake: ${v.reason}`);
+});
+
+test('CATASTROPHIC: pop/drop/clear are weighed against `git stash list`, not against the worktrees', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const wt = fx.wt('uniqueUncommitted');
+
+  // ---- an EMPTY stash: there is nothing any of these verbs can destroy --------------------
+  const empty = await gitIn(['stash', 'list'], wt);
+  assert.equal(empty.out, '', `premise: the fixture starts with no stash entries: ${JSON.stringify(empty)}`);
+  for (const cmd of ['git stash pop', 'git stash drop', 'git stash clear', 'git stash drop stash@{2}']) {
+    const v = await assessCommand(cmd, wt);
+    assert.equal(v.decision, 'allow',
+      `${cmd} against an EMPTY stash cannot lose anything — refusing it is a refusal about work that does not exist: ${JSON.stringify(v)}`);
+  }
+
+  // ---- a REAL entry: now they matter, and the evidence is the entry ------------------------
+  const swept = await gitIn(['stash', 'push', '-u', '-m', 'incident'], wt);
+  assert.equal(swept.code, 0, `setup: ${swept.err}`);
+  assert.match((await gitIn(['stash', 'list'], wt)).out, /stash@\{0\}/, 'setup: an entry must exist');
+
+  const dropped = await assessCommand('git stash drop', wt);
+  assert.equal(dropped.decision, 'deny', `dropping a real entry is final: ${JSON.stringify(dropped)}`);
+  assert.match(dropped.reason, /stash@\{0\}/, `and must name the entry it would destroy: ${dropped.reason}`);
+  assert.doesNotMatch(dropped.reason, COMMITTED_EVIDENCE,
+    `a stash verdict must not be justified by committed history: ${dropped.reason}`);
+
+  const popped = await assessCommand('git stash pop', wt);
+  assert.equal(popped.decision, 'ask', `pop stays the recovery action: ${JSON.stringify(popped)}`);
+  assert.match(popped.reason, /git stash apply/, `naming apply: ${popped.reason}`);
+  assert.doesNotMatch(popped.reason, COMMITTED_EVIDENCE,
+    `and not resting on committed history either: ${popped.reason}`);
+});
+
+test('CATASTROPHIC: a drop is weighed against the ONE entry it removes, not the whole stash', async (t) => {
+  // The last scope error of the same family. `git stash drop`/`pop` with no selector remove
+  // stash@{0} and nothing else — verified below with the real command — so justifying a refusal
+  // with an older entry's contents is a warning about work the command provably cannot reach,
+  // exactly like citing a commit was.
+  const fx = await newRepo('stash-scope');
+  t.after(() => fx.cleanup());
+  const root = fx.root;
+
+  // stash@{1}: content that lives NOWHERE else once it is dropped.
+  await fs.writeFile(path.join(root, 'src/base.js'), 'export function baseline() { return 111; }\n');
+  assert.equal((await gitIn(['stash', 'push', '-m', 'older-and-unique'], root)).code, 0, 'setup');
+  // stash@{0}: content that is ALSO committed, so dropping it loses nothing.
+  await fs.writeFile(path.join(root, 'config/registry.mjs'), 'export const REGISTRY = { LANDED: 1 };\n');
+  assert.equal((await gitIn(['stash', 'push', '-m', 'newer-and-landed'], root)).code, 0, 'setup');
+  await fs.writeFile(path.join(root, 'config/registry.mjs'), 'export const REGISTRY = { LANDED: 1 };\n');
+  await gitIn(['add', '-A'], root);
+  assert.equal((await gitIn(['commit', '-m', 'land the newer content'], root)).code, 0, 'setup');
+
+  const list = (await gitIn(['stash', 'list'], root)).out;
+  assert.match(list, /stash@\{0\}: On main: newer-and-landed/, `setup: ${list}`);
+  assert.match(list, /stash@\{1\}: On main: older-and-unique/, `setup: ${list}`);
+
+  // ---- the premise, from git itself: a bare drop takes stash@{0} ONLY --------------------
+  const probe = await newRepo('stash-scope-probe');
+  t.after(() => probe.cleanup());
+  await fs.writeFile(path.join(probe.root, 'src/base.js'), 'a\n');
+  await gitIn(['stash'], probe.root);
+  await fs.writeFile(path.join(probe.root, 'src/base.js'), 'b\n');
+  await gitIn(['stash'], probe.root);
+  const dropOut = await gitIn(['stash', 'drop'], probe.root);
+  assert.match(dropOut.out, /Dropped refs\/stash@\{0\}/, `premise: ${JSON.stringify(dropOut)}`);
+  assert.match((await gitIn(['stash', 'list'], probe.root)).out, /^stash@\{0\}/,
+    'premise: and the older entry survives it');
+
+  // ---- so the verdict follows the entry the command actually removes ----------------------
+  const bare = await assessCommand('git stash drop', root);
+  assert.equal(bare.decision, 'allow',
+    `stash@{0}'s content is committed, so dropping it loses nothing — refusing on stash@{1}'s `
+    + `contents is a refusal about an entry this command cannot touch: ${JSON.stringify(bare)}`);
+
+  const older = await assessCommand('git stash drop stash@{1}', root);
+  assert.equal(older.decision, 'deny',
+    `stash@{1} holds the only copy and IS destroyed by this: ${JSON.stringify(older)}`);
+  assert.match(older.reason, /stash@\{1\}/, `naming the entry it destroys: ${older.reason}`);
+  assert.doesNotMatch(older.reason, /stash@\{0\}/,
+    `and not the one it leaves alone: ${older.reason}`);
+
+  // `clear` is the verb that really does take everything, and it must still see stash@{1}.
+  const cleared = await assessCommand('git stash clear', root);
+  assert.equal(cleared.decision, 'deny', `clear takes every entry: ${JSON.stringify(cleared)}`);
+  assert.match(cleared.reason, /stash@\{1\}/, `including the unique one: ${cleared.reason}`);
+});
+
+test('CATASTROPHIC: an entry whose content a ref now holds stops being refused — landing work relaxes the guard', async (t) => {
+  // CONSERVATIVE IS NOT CORRECT. A stash commit is unreachable from a branch BY CONSTRUCTION, so
+  // "is this entry reachable" refuses every drop forever and teaches people to switch the guard
+  // off. The honest question is whether the CONTENT is reachable — and doing the right thing
+  // (apply it, commit it) must visibly change the answer, or the guard is just a nag.
+  const fx = await newRepo('stash-relax');
+  t.after(() => fx.cleanup());
+  const root = fx.root;
+
+  await fs.writeFile(path.join(root, 'src/base.js'), 'export function baseline() { return 99; }\n');
+  assert.equal((await gitIn(['stash', 'push', '-m', 'wip'], root)).code, 0, 'setup');
+  assert.match((await gitIn(['stash', 'list'], root)).out, /stash@\{0\}/, 'setup: one entry');
+
+  const before = await assessCommand('git stash drop', root);
+  assert.equal(before.decision, 'deny',
+    `while the stash is the only copy, dropping it is final: ${JSON.stringify(before)}`);
+
+  // Do the right thing: bring it back and commit it. The ENTRY is untouched — same commit, same
+  // reflog position — and only the content's reachability changed.
+  assert.equal((await gitIn(['stash', 'apply'], root)).code, 0, 'setup: apply');
+  await gitIn(['add', '-A'], root);
+  assert.equal((await gitIn(['commit', '-m', 'land the wip'], root)).code, 0, 'setup: commit');
+  assert.match((await gitIn(['stash', 'list'], root)).out, /stash@\{0\}/,
+    'premise: the entry is STILL there — nothing about it changed');
+
+  const after = await assessCommand('git stash drop', root);
+  assert.equal(after.decision, 'allow',
+    `the identical blob is now in a ref's history, so the entry holds nothing unique and the `
+    + `guard must step back: ${JSON.stringify(after)}`);
+  assert.equal((await assessCommand('git stash clear', root)).decision, 'allow',
+    'and clear likewise — there is nothing left for either verb to lose');
+});
+
+test('CATASTROPHIC: a bare stash is judged on what bare stash sweeps — untracked needs -u', async (t) => {
+  // The same class as the committed-evidence bug, one layer down: `git stash` with no `-u` does
+  // not touch untracked files at all, so refusing it because untracked work exists is a refusal
+  // about work the command provably leaves on disk. Proven here with the real command.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const wt = fx.wt('uniqueUncommitted');
+  const only = path.join(wt, 'src/only_uncommitted.js');
+
+  const st = await gitIn(['status', '--porcelain=v1', '--untracked-files=all'], wt);
+  assert.equal(st.out.trim(), '?? src/only_uncommitted.js',
+    `premise: the only content here is UNTRACKED: ${JSON.stringify(st)}`);
+
+  const real = await gitIn(['stash'], wt);
+  assert.match(real.out, /No local changes to save/,
+    `premise: a bare stash here is a proven no-op: ${JSON.stringify(real)}`);
+  assert.ok(await fs.stat(only).then(() => true, () => false),
+    'premise: and the untracked file is still on disk afterwards');
+  assert.equal((await gitIn(['stash', 'list'], wt)).out, '',
+    'premise: with nothing queued in the stash');
+
+  assert.equal((await assessCommand('git stash', wt)).decision, 'allow',
+    'so the bare form must be allowed — it cannot reach the untracked file');
+  assert.equal((await assessCommand('git stash push', wt)).decision, 'allow',
+    'same command, same answer');
+
+  // …and the flags that DO reach it are still gated, which is what makes the allow above a
+  // measurement rather than a hole.
+  for (const cmd of ['git stash -u', 'git stash push -u', 'git stash push --include-untracked', 'git stash -a']) {
+    const v = await assessCommand(cmd, wt);
+    assert.equal(v.decision, 'ask', `${cmd} DOES sweep untracked work and must ask: ${JSON.stringify(v)}`);
+    assert.match(v.reason, /only_uncommitted\.js/, `naming it: ${v.reason}`);
   }
 });
 
@@ -704,7 +954,7 @@ async function findWorkstreamByPath(workstreams, dir) {
 
 async function fileRiskFixture() {
   const fx = await newRepo('file-risk');
-  await fx.write('.gitignore', 'node_modules/\ndist/\ncoverage/\n*.log\n.env\nsecrets/\n');
+  await fx.write('.gitignore', 'node_modules/\ndist/\nbuild/\ncoverage/\n*.log\n.env\nsecrets/\n');
   await fx.write('src/committed.js', 'export function COMMITTED_HERE() {}\n');
   await fx.write('docs/guide.md', '# guide\n');
   await fx.commit('ignore rules, a committed source file and a committed doc');

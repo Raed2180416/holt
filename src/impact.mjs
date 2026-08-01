@@ -88,6 +88,39 @@ function refSearchable(file) {
 }
 
 /**
+ * The consumer's own files — SYMLINKS EXCLUDED, before either search backend sees the list.
+ *
+ * SAME CLASS AS content-identity.mjs `pathContentKey`, reproduced here after that one was fixed.
+ * What git tracks at a symlink path is the TARGET STRING; the bytes at the other end belong to
+ * whatever the link points at, which may be outside the repository entirely. Both backends read
+ * through a link — ripgrep opens a symlink handed to it as an explicit path argument, and the node
+ * fallback's `fs.stat` follows it and reports `isFile()` — so a worktree whose only committed file
+ * was a link to an external file fingerprinted as REFERENCING every identifier in that external
+ * file. Measured before this filter: a worktree committing one symlink, whose git-tracked content
+ * is a path string containing no identifiers at all, was reported as
+ * `'alpha' references 1 symbol(s) that 'beta' defines` — a dependency edge with no evidence
+ * anywhere in what alpha actually tracks.
+ *
+ * FILTERED ONCE, HERE, rather than in either backend: the fallback is documented as "same
+ * semantics" as ripgrep, and guarding only the branch that happens to call `stat` would make the
+ * two disagree about the same repository depending on whether ripgrep is installed.
+ *
+ * A vanished path (a rename's source, or a file the commit deleted) drops out for free, which is
+ * also right — it cannot hold a reference either, and previously it was handed to ripgrep as a
+ * nonexistent argument.
+ */
+async function ownFilesOnly(cwd, files) {
+  const keep = [];
+  await pmap(files, async (rel) => {
+    try {
+      const st = await fs.lstat(path.join(cwd, rel));
+      if (st.isFile()) keep.push(rel); // lstat: a symlink is NOT isFile() here, which is the point
+    } catch { /* vanished between scan and search: nothing to read, nothing to attribute */ }
+  }, 16);
+  return keep;
+}
+
+/**
  * Find which of `names` appear (word-bounded) in `files` under `cwd`.
  * One ripgrep invocation per consumer, not per symbol.
  */
@@ -119,7 +152,12 @@ async function referencesInFallback(cwd, files, names, { maxBytes = 2 * 1024 * 1
 
   await pmap(files, async (rel) => {
     try {
-      const st = await fs.stat(path.join(cwd, rel));
+      // lstat, not stat. `ownFilesOnly` already dropped every symlink from `files`, so this is
+      // belt-and-braces against a path that becomes a link between the filter and the read — but
+      // it is also the rule this codebase applies to every reader that attributes bytes to a path
+      // (content-identity.mjs `pathContentKey`, git.mjs `readWorktreeFile`, symbols.mjs
+      // `tagWorthy`): stat() answers about the TARGET, and the target's text is somebody else's.
+      const st = await fs.lstat(path.join(cwd, rel));
       if (!st.isFile() || st.size > maxBytes) return;
       const buf = await fs.readFile(path.join(cwd, rel));
       if (buf.includes(0)) return;
@@ -175,7 +213,9 @@ export async function impact(scanResult, { limitPerSide = 300, concurrency = 4 }
   const pairs = [];
 
   await pmap(live, async (consumer) => {
-    const consumerFiles = consumer.touched.filter(refSearchable);
+    // Extension filter first (cheap, no syscall), then the symlink/vanished filter — so a repo
+    // full of lockfiles does not pay an lstat per file to learn it was never searchable.
+    const consumerFiles = await ownFilesOnly(consumer.path, consumer.touched.filter(refSearchable));
     if (!consumerFiles.length) return;
 
     // Everything any OTHER workstream defines, searched in one pass over this consumer.

@@ -469,6 +469,23 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
     // reply side — see the framing note in the doc comment above.
     const missReply = (spec) => Buffer.from(`${spec} missing\n`, 'utf8');
 
+    // PER-RECORD CATCH: one onRecord rejection must not kill the entire batch. The old form was
+    // `inFlight.push(Promise.resolve(onRecord(...)))` — a synchronous throw inside onRecord
+    // crashed the 'data' handler (uncaught in an event emitter), and an async rejection
+    // propagated through `Promise.all(inFlight)` at close time, rejecting the whole batch and
+    // discarding every record after the failing one. Against a 5,500-file chunk, one bad path
+    // could lose symbol information for thousands of files. Now each call is wrapped: sync throws
+    // become rejected promises, and each promise has a `.catch()` that swallows the rejection so
+    // Promise.all never sees it. The caller's own per-record catch (e.g. symbolsAtBase) handles
+    // the application-level fallback for the one file that failed.
+    const safeCall = (spec, content, idx) => {
+      try {
+        return Promise.resolve(onRecord(spec, content, idx)).catch(() => {});
+      } catch {
+        return Promise.resolve();
+      }
+    };
+
     function drain() {
       for (;;) {
         if (specIdx >= specs.length) return;
@@ -476,7 +493,7 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
           const miss = missReply(specs[specIdx]);
           if (pending.length >= miss.length && pending.subarray(0, miss.length).equals(miss)) {
             pending = pending.subarray(miss.length);
-            inFlight.push(Promise.resolve(onRecord(specs[specIdx], null, specIdx)));
+            inFlight.push(safeCall(specs[specIdx], null, specIdx));
             specIdx++;
             continue;
           }
@@ -491,7 +508,7 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
             // whole record and shifting every record after it by one.
             if (pending.length < miss.length && miss.subarray(0, pending.length).equals(pending)) return;
             pending = pending.subarray(nl + 1);
-            inFlight.push(Promise.resolve(onRecord(specs[specIdx], null, specIdx)));
+            inFlight.push(safeCall(specs[specIdx], null, specIdx));
             specIdx++;
             continue;
           }
@@ -502,7 +519,7 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
         const content = Buffer.from(pending.subarray(0, awaitingSize)); // copy: don't pin the chunk
         pending = pending.subarray(awaitingSize + 1);
         awaitingSize = null;
-        inFlight.push(Promise.resolve(onRecord(specs[specIdx], content, specIdx)));
+        inFlight.push(safeCall(specs[specIdx], content, specIdx));
         specIdx++;
       }
     }

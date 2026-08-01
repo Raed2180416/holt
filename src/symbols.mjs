@@ -392,7 +392,13 @@ async function tagWorthy(cwd, relPaths) {
   const oversized = [];
   await pmap(relPaths, async (rel) => {
     try {
-      const st = await fs.stat(path.join(cwd, rel));
+      // lstat, NOT stat. stat() follows the link and answers about its TARGET, so a symlink to a
+      // .js file passes isFile() and ctags then extracts the TARGET's symbols and attributes them
+      // to this worktree — symbols git does not track here at all (what git tracks at a symlink
+      // path is the target string). A symlink genuinely declares nothing, so it correctly falls
+      // into the "no symbols" branch rather than into `failed`: holt did look, and there is
+      // nothing at this path to find. Same class as content-identity.mjs `pathContentKey`.
+      const st = await fs.lstat(path.join(cwd, rel));
       if (!st.isFile() || st.size === 0) return; // not a file, or genuinely empty: correctly "no symbols"
       if (st.size > MAX_TAG_FILE_BYTES) { oversized.push(rel); return; }
       keep.push(rel);
@@ -946,9 +952,13 @@ export function scratchDir() {
   return process.env.HOLT_TMPDIR || process.env.TMPDIR || os.tmpdir();
 }
 
+// lstat for the same reason tagWorthy() lstats: this reads WORKTREE paths (symbolsOnDisk's
+// fallback-extract and key-file branches do not go through ctagsBatch, so they need the guard
+// independently), and stat() would follow a symlink and hand back the target's text as this
+// path's own. See content-identity.mjs `pathContentKey` for the class.
 async function readTextIfSmall(abs) {
   try {
-    const st = await fs.stat(abs);
+    const st = await fs.lstat(abs);
     if (!st.isFile() || st.size > MAX_TEXT_BYTES) return null;
     const buf = await fs.readFile(abs);
     if (buf.includes(0)) return null; // binary
@@ -1041,17 +1051,26 @@ export async function symbolsAtBase(repoRoot, baseOid, relPaths, backend) {
         await catFileBatch(specs, { cwd: repoRoot }, async (_spec, content, idx) => {
           const rel = group[idx];
           if (content === null) { result.set(rel, []); return; } // absent at base = wholly new file
-          const dest = path.join(tmp, rel);
-          await ensureDir(path.dirname(dest));
-          await fs.writeFile(dest, content);
-          materialised.push(rel);
+          try {
+            const dest = path.join(tmp, rel);
+            await ensureDir(path.dirname(dest));
+            await fs.writeFile(dest, content);
+            materialised.push(rel);
+          } catch {
+            // PER-RECORD CATCH: one file failing to materialise must not kill the entire chunk's
+            // batch. The old form let a single writeFile rejection propagate through
+            // Promise.all(inFlight) in catFileBatch, rejecting the whole batch and treating every
+            // remaining file in the chunk as absent-at-base — losing symbol information for up to
+            // CAT_FILE_BATCH_CHUNK files because of one bad path. Now the failure is scoped to the
+            // one file: it is treated as absent-at-base (no symbols), and the rest of the chunk
+            // proceeds normally.
+            result.set(rel, []);
+          }
         });
       } catch {
         // The whole CHUNK's batch process failed to run (spawn error, timeout). Same fallback
         // the old per-file call made on an individual failure: treat as absent-at-base rather
-        // than crashing the scan. A read that could not happen is not evidence of anything —
-        // but this mirrors the prior behavior exactly rather than upgrading it, which is a
-        // separate, out-of-scope fix.
+        // than crashing the scan. A read that could not happen is not evidence of anything.
         for (const rel of group) if (!result.has(rel)) result.set(rel, []);
       }
     }

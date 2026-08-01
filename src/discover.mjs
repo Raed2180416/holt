@@ -151,6 +151,19 @@ export function unquotePorcelain(s) {
  */
 export const DEFAULT_FAMILY_WINDOW_MS = 60 * 60 * 1000;
 
+/**
+ * The name-stem bridge window: how far apart two creation-burst clusters may be and still merge
+ * when their members share a fan-out naming stem (`auth-1`/`auth-2`).
+ *
+ * 6 hours. The stem is a second, independent witness that two clusters are one dispatch — but
+ * a witness that can bridge ACROSS fork points (the whole point of the redesign) needs a tighter
+ * outer bound than the unbounded single-linkage chain the old design produced. Six hours covers
+ * a staggered dispatch with a long pause (lunch, a meeting, CI retry) while keeping day-apart
+ * efforts with coincidentally similar names separate. The burst window above handles the tight
+ * case; this handles the stretched one, and only when names corroborate.
+ */
+export const STEM_BRIDGE_WINDOW_MS = 6 * 60 * 60 * 1000;
+
 const FAMILY_PATTERNS = [
   // wf_11177c4b-466-1  ->  wf_11177c4b-466      (Claude Code / workflow fan-out)
   { re: /^(.*?)-\d+$/, name: 'numeric-suffix' },
@@ -262,13 +275,43 @@ function clusterBySingleLink(items, windowMs) {
 }
 
 /**
- * Assign `family`/`familyRule` to every workstream: user override, then fork-point +
- * creation-time provenance, then name as a last resort. See the file-level comment above for
- * the design and DEFAULT_FAMILY_WINDOW_MS for the clustering window.
+ * Assign `family`/`familyRule` to every workstream: user override, then creation-burst
+ * clustering with name-stem corroboration, then name as a last resort.
+ *
+ * THE REDESIGN (refutation wbllbr27p finding 1-2). The first provenance design grouped by
+ * fork point, then single-linked by creation time within each fork group. On a stable trunk
+ * — the overwhelmingly common case, where main does not move between dispatches — EVERY
+ * worktree shares the same fork point, so the fork-point grouping provided zero discrimination
+ * and the 60-minute single-linkage chain merged unrelated efforts hours apart into one family.
+ * Cross-dispatch waste was silently downgraded to "expected fan-out", `holt plan` lost its
+ * collapse recommendation, and `holt context` returned an empty sibling list for a genuine
+ * 17ms-apart fan-out separated by one intervening commit.
+ *
+ * The redesign drops fork point as a signal entirely and uses TWO independent witnesses:
+ *
+ *   CREATION-BURST (primary)   Single-link cluster ALL non-primary worktrees by creation time
+ *                              within `familyWindowMs` (default 60min). A burst is a tight
+ *                              cluster of worktrees created close together — the shape of a
+ *                              real fan-out, staggered by minutes not hours.
+ *
+ *   NAME-STEM BRIDGE (secondary)  When two burst-clusters carry the same fan-out naming stem
+ *                              (`auth-1`/`auth-2`), merge them — ACROSS fork points — up to
+ *                              `STEM_BRIDGE_WINDOW_MS` (default 6h) between the clusters'
+ *                              nearest members. The stem is a second, independent witness that
+ *                              two clusters are one stretched dispatch, and 6h is the outer
+ *                              bound on a paused-but-same-dispatch fan-out (lunch, a meeting,
+ *                              a CI retry). Day-apart efforts with coincidentally similar names
+ *                              stay separate.
+ *
+ * Fork point is no longer computed or used. A stable trunk makes it non-discriminating, and
+ * an intervening commit on main makes it confidently wrong (two worktrees created 17ms apart
+ * get different fork points and lose their sibling relationship). Creation time + naming are
+ * the two signals that survive both cases.
  */
 export async function assignFamilies(root, workstreams, {
   familyOverrides = [],
   familyWindowMs = DEFAULT_FAMILY_WINDOW_MS,
+  stemBridgeWindowMs = STEM_BRIDGE_WINDOW_MS,
   base = null,
 } = {}) {
   const results = new Map();
@@ -290,83 +333,107 @@ export async function assignFamilies(root, workstreams, {
   }
 
   if (pending.length) {
-    let baseOid = null;
-    try {
-      baseOid = (await resolveBase(root, base))?.oid ?? null;
-    } catch {
-      baseOid = null; // no usable base (e.g. empty repo) — provenance cannot answer for anyone
-    }
-
-    const provenance = await pmap(pending, async (w) => {
-      const [fp, t] = await Promise.all([
-        forkPoint(root, baseOid, w.head),
-        creationTimeMs(root, w.path),
-      ]);
-      return { id: w.id, forkPoint: fp, t };
+    // Creation time is the primary signal. No fork point is computed — see the redesign note
+    // above for why it was dropped.
+    const timed = await pmap(pending, async (w) => {
+      const t = await creationTimeMs(root, w.path);
+      return { id: w.id, t };
     });
 
-    const byFork = new Map();
-    for (const p of provenance) {
-      // Family requires BOTH facts. Either missing means history genuinely cannot answer for
-      // this workstream, so it falls through to the name-based fallback below.
-      if (!p.forkPoint || p.t == null) continue;
-      if (!byFork.has(p.forkPoint)) byFork.set(p.forkPoint, []);
-      byFork.get(p.forkPoint).push(p);
-    }
-    for (const [fp, items] of byFork) {
-      let clusters = clusterBySingleLink(items, familyWindowMs);
+    // Worktrees WITH a creation time: cluster by burst, then bridge by stem.
+    const withTime = timed.filter((p) => p.t != null);
+    // Worktrees WITHOUT a creation time: fall through to naming fallback below.
+    const withoutTime = timed.filter((p) => p.t == null).map((p) => p.id);
 
-      // CORROBORATION ACROSS THE TIME BOUNDARY. Any window is a guess about orchestration speed,
-      // and a dispatch staggered past it gets split — the exact confidently-wrong flip
-      // adversarial review demonstrated. But when two time-clusters of the SAME fork point carry
-      // the same fan-out naming stem (`auth-1`/`auth-2`), the name is not the primary signal —
-      // provenance already put them on one fork commit — it is a second, independent witness
-      // breaking the timing tie, and two witnesses beat a timer. Names never group across
-      // DIFFERENT fork points (that stays the naming heuristic this design replaced), and
-      // singleton name-rules contribute nothing.
+    if (withTime.length) {
+      // STEP 1: CREATION-BURST CLUSTERING (primary).
+      // Single-link by creation time across ALL worktrees (not grouped by fork point). A tight
+      // burst of creations is the shape of a real fan-out; the window is a guess about
+      // orchestration speed, and 60min covers a staggered dispatch while keeping day-apart
+      // efforts separate.
+      let clusters = clusterBySingleLink(withTime, familyWindowMs);
+
+      // STEP 2: NAME-STEM BRIDGE (secondary, ACROSS fork points).
+      // When two burst-clusters carry the same fan-out naming stem, merge them — up to
+      // STEM_BRIDGE_WINDOW_MS between the clusters' nearest members. The stem is a second,
+      // independent witness that two clusters are one stretched dispatch. Singleton name-rules
+      // (no fan-out pattern) contribute nothing — a name like `karl` is not evidence of a
+      // shared dispatch.
       if (clusters.length > 1) {
         const stemOf = (id) => {
           const n = inferFamily(id, []);
           return n.rule !== 'singleton' ? n.family : null;
         };
-        const byStem = new Map();
-        clusters.forEach((ids, ci) => {
+        // For each cluster, compute its time span [min, max] and the set of stems it carries.
+        const clusterInfo = clusters.map((ids) => {
+          const members = withTime.filter((p) => ids.includes(p.id));
+          const minT = Math.min(...members.map((m) => m.t));
+          const maxT = Math.max(...members.map((m) => m.t));
+          const stems = new Set();
           for (const id of ids) {
             const stem = stemOf(id);
-            if (!stem) continue;
-            if (!byStem.has(stem)) byStem.set(stem, new Set());
-            byStem.get(stem).add(ci);
+            if (stem) stems.add(stem);
           }
+          return { ids, minT, maxT, stems };
         });
-        const mergeInto = new Map();
-        for (const cis of byStem.values()) {
-          if (cis.size < 2) continue;
-          const [root, ...rest] = [...cis].sort((a, b) => a - b);
-          for (const ci of rest) mergeInto.set(ci, mergeInto.get(root) ?? root);
+
+        // Merge clusters that share a stem AND whose FARTHEST members are within
+        // stemBridgeWindowMs. Iterative pairwise merging with updated time spans — NOT union-find
+        // — because union-find is transitive: A-B within 6h and B-C within 6h merges A-C even
+        // when A-C are 10h apart, which is the same unbounded-chain problem the redesign dropped
+        // fork-point grouping to fix. Iterative merging with span updates ensures the ENTIRE
+        // span of a merged cluster is considered before another cluster joins it.
+        let merged = clusterInfo.map((c) => ({ ...c, ids: [...c.ids] }));
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (let i = 0; i < merged.length && !changed; i++) {
+            for (let j = i + 1; j < merged.length && !changed; j++) {
+              const a = merged[i], b = merged[j];
+              let sharedStem = false;
+              for (const s of a.stems) { if (b.stems.has(s)) { sharedStem = true; break; } }
+              if (!sharedStem) continue;
+              // FARTHEST-MEMBERS gap: the max distance between any member of one cluster and any
+              // member of the other. This ensures the merged cluster's total span stays within
+              // the window — a chain of 3h gaps cannot span 10h through transitive merges.
+              const gap = Math.max(
+                Math.abs(a.maxT - b.minT),
+                Math.abs(b.maxT - a.minT),
+              );
+              if (gap <= stemBridgeWindowMs) {
+                merged[i] = {
+                  ids: [...a.ids, ...b.ids],
+                  minT: Math.min(a.minT, b.minT),
+                  maxT: Math.max(a.maxT, b.maxT),
+                  stems: new Set([...a.stems, ...b.stems]),
+                };
+                merged.splice(j, 1);
+                changed = true;
+              }
+            }
+          }
         }
-        if (mergeInto.size) {
-          const merged = new Map();
-          clusters.forEach((ids, ci) => {
-            const target = mergeInto.get(ci) ?? ci;
-            merged.set(target, [...(merged.get(target) ?? []), ...ids]);
-          });
-          clusters = [...merged.values()];
-        }
+        clusters = merged.map((c) => c.ids);
       }
 
-      clusters.forEach((ids, idx) => {
-        // Suffixed only when the SAME fork point produced more than one time-cluster (two
-        // unrelated dispatches that happened to both start from that commit) — the common case
-        // stays a plain, stable label.
-        const label = clusters.length > 1 ? `fork:${fp.slice(0, 12)}#${idx + 1}` : `fork:${fp.slice(0, 12)}`;
-        for (const id of ids) results.set(id, { family: label, familyRule: 'fork+creation-time' });
+      // STEP 3: LABEL. The family label is a stable, opaque identifier derived from the
+      // earliest creation time in the cluster — not from a fork commit (which is no longer
+      // computed) and not from a name (which is the fallback, not the primary). The timestamp
+      // makes it stable across re-runs and distinguishable from name-fallback labels.
+      clusters.forEach((ids) => {
+        const members = withTime.filter((p) => ids.includes(p.id));
+        const minT = Math.min(...members.map((m) => m.t));
+        const label = `burst:${new Date(minT).toISOString().replace(/[:.]/g, '')}`;
+        for (const id of ids) results.set(id, { family: label, familyRule: 'creation-burst' });
       });
     }
+
+    // Worktrees without a creation time fall through to the naming fallback.
   }
 
   return workstreams.map((w) => {
     if (results.has(w.id)) return { ...w, ...results.get(w.id) };
-    // Provenance could not answer: fall back to naming, and say so honestly in familyRule.
+    // Creation time could not be determined: fall back to naming, and say so honestly.
     const named = inferFamily(w.id, []); // overrides already resolved in the pass above
     return { ...w, family: named.family, familyRule: `name-fallback:${named.rule}` };
   });
@@ -401,6 +468,12 @@ const WORKTREE_ATTR_KEYS = new Set(['HEAD', 'branch', 'detached', 'bare', 'locke
  * an attribute key. Since the vocabulary above is closed and git always emits `HEAD` (or `bare`)
  * immediately after the path, that boundary is exact rather than heuristic — and it needs no
  * `git version` gate, unlike `worktree list -z` which only landed in git 2.36.
+ *
+ * WHAT THIS STILL CANNOT SEE, stated rather than glossed: a path whose bytes after a newline spell
+ * an attribute key exactly — a directory literally named `weird\nbare`. Line framing cannot carry
+ * that at all, so no reader of THIS stream can recover it; only `-z` can, and requiring git 2.36
+ * to read an ordinary repository is the worse trade. The realistic case — any other newline —
+ * is now correct, where before every one of them silently truncated.
  *
  * Same defect class as the batched object reader (`catFileBatch`, src/git.mjs) and as
  * `listTrackedFiles()`: a legal-but-unusual byte in a path silently re-frames a git protocol.
@@ -466,6 +539,22 @@ export async function discoverGitWorktrees(cwd) {
     const bare = await git(['rev-parse', '--is-bare-repository'], { cwd })
       .then((r) => r.code === 0 && r.stdout.trim() === 'true')
       .catch(() => false);
+
+    // A BARE REPOSITORY WITH LINKED WORKTREES IS THE CANONICAL WORKTREE LAYOUT, not a dead end.
+    // `git worktree list` runs fine from the bare repo and enumerates every live checkout — the
+    // record filter below already drops the bare entry itself. The old refusal here told a user
+    // standing in `repo.git` beside two working checkouts that holt "needs at least one checkout;
+    // run it from a normal clone instead" — both halves false, proven by adversarial review
+    // driving holt's own exported functions from the bare side. Discovery re-roots at the first
+    // live checkout; the refusal survives only for a bare repo with NO worktrees, where its
+    // message is actually true.
+    if (bare) {
+      const wl = await git(['worktree', 'list', '--porcelain'], { cwd }).catch(() => null);
+      if (wl && wl.code === 0) {
+        const live = parseWorktreePorcelain(wl.stdout).filter((w) => !w.bare);
+        if (live.length > 0) return discoverGitWorktrees(live[0].path);
+      }
+    }
     return { root: null, workstreams: [], vcs: null, bare };
   }
 

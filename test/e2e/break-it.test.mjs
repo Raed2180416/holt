@@ -420,6 +420,9 @@ test('NEVER-WORSE: ordinary build output under a gitignored directory stays disp
   const fx = await newRepo('ignored-generated');
   t.after(() => fx.cleanup());
   await fx.write('.gitignore', 'node_modules/\ndist/\n');
+  // The manifest IS the evidence: generated-named dirs earn disposal from the command that
+  // recreates them (GENERATOR_MANIFESTS). A JS repo without package.json is not a JS repo.
+  await fx.write('package.json', '{\"name\":\"fixture\",\"private\":true}\n');
   await fx.commit('add gitignore');
 
   const wt = await fx.worktree('build');
@@ -611,4 +614,258 @@ test('ATTACK: an oversized file with a PROVEN byte twin must not veto redundancy
   const vl = verdict(report2, 'big-lone');
   assert.equal(vl.safe, false,
     `an oversized file with NO twin must still refuse disposal: ${JSON.stringify(vl)}`);
+});
+
+/* ------------------------------------------------------------------------------------------
+ * ONE INSTRUMENT'S BLIND SPOT MUST NOT VETO ANOTHER INSTRUMENT'S PROOF.
+ *
+ * Two instruments answer "does a living sibling already hold this committed work?":
+ *
+ *   per-file content identity  — path-blind, reindent-blind, but it needs to READ each file's
+ *                                bytes, and it declines files over a 16 MiB cap, files that are
+ *                                not on disk at all (a committed DELETE, a rename's source path)
+ *                                and files whose read fails for any reason.
+ *   whole merged-tree identity — git's own oid. Narrower question (identical tree, same paths),
+ *                                answered with total reliability: no cap, no reads, no failure
+ *                                modes, and the tree it compares is a COMMITTED one by
+ *                                construction, so a match is durable by definition.
+ *
+ * They compose — EITHER one proves redundancy. The two tests below are the two shapes where the
+ * first instrument cannot answer while the second answers perfectly, and the controls beside
+ * them are the shapes where NEITHER may answer.
+ * --------------------------------------------------------------------------------------- */
+
+test('ATTACK: a file over the fingerprint cap must not veto git\'s own proof of redundancy', async (t) => {
+  // THE REFUTER'S FIXTURE. Two worktrees committing a byte-identical file past content-identity's
+  // 16 MiB cap, at the SAME path — so `merge-tree` hands back ONE tree oid for both, which is git
+  // proving they are the same work with no heuristic involved. Per-file identity declines to
+  // fingerprint the file at all (`contentKeys['feat/huge.js'] === null`), so coverage can never
+  // reach `allMatched`, and a single such file silently poisons the redundancy verdict for the
+  // WHOLE workstream.
+  const fx = await newRepo('oversized-tree-twin');
+  t.after(() => fx.cleanup());
+
+  // Past MAX_FINGERPRINT_BYTES (16 MiB), so contentFingerprint() returns null by policy.
+  const SEVENTEEN_MIB = 17 * 1024 * 1024;
+  const huge = `// ${'x'.repeat(SEVENTEEN_MIB)}\nexport function BURIED_HUGE() {}\n`;
+
+  const a = await fx.worktree('huge-a');
+  await fx.write('feat/huge.js', huge, a);
+  await fx.commit('the huge file', a);
+
+  const b = await fx.worktree('huge-b');
+  await fx.write('feat/huge.js', huge, b);
+  await fx.commit('the identical huge file', b);
+
+  // CONTROL, in the same repository: a genuinely DIFFERENT oversized file at the same path.
+  // Its bytes are equally unfingerprintable, so nothing about the size cap may rescue it — only
+  // the tree oid, which differs. If this one ever turns disposable the fix is a hole.
+  const c = await fx.worktree('huge-c');
+  await fx.write('feat/huge.js', `// ${'y'.repeat(SEVENTEEN_MIB)}\nexport function OTHER_HUGE() {}\n`, c);
+  await fx.commit('a different huge file', c);
+
+  const report = await inspect(fx.root);
+  const [va, vb, vc] = ['huge-a', 'huge-b', 'huge-c'].map((id) => verdict(report, id));
+  assert.ok(va && vb && vc, 'sanity: all three worktrees produced verdicts');
+
+  for (const [v, sibling] of [[va, 'huge-b'], [vb, 'huge-a']]) {
+    assert.equal(v.safe, true,
+      `git's own merged-tree oid proves a living sibling holds this exact committed work — a `
+      + `fingerprint the size cap declined to compute is not evidence against it: ${JSON.stringify(v)}`);
+    assert.ok((v.redundantWith ?? []).some((id) => id.endsWith(sibling)),
+      `the verdict must NAME the sibling holding the twin: ${JSON.stringify(v.redundantWith)}`);
+    assert.equal(v.confidence, 'measured',
+      `a git tree oid IS a measurement: ${JSON.stringify(v)}`);
+    assert.doesNotMatch(JSON.stringify(v.reasons), /base lacks/,
+      `"base lacks this" is true and irrelevant once a living sibling is proven to hold it: ${JSON.stringify(v.reasons)}`);
+    assert.doesNotMatch(JSON.stringify(v.reasons), /could not read symbols/,
+      'whole-tree identity subsumes anything symbols could have established about these paths');
+  }
+
+  assert.equal(vc.safe, false,
+    `a DIFFERENT oversized file, equally unfingerprintable, must stay refused: ${JSON.stringify(vc)}`);
+  assert.equal(vc.redundantWith, undefined,
+    `and must name no holder at all: ${JSON.stringify(vc.redundantWith)}`);
+});
+
+test('ATTACK: a committed DELETION has no bytes to fingerprint and must not veto redundancy', async (t) => {
+  // THE SAME CLASS AT ZERO COST, and far more common than a 16 MiB file: a path that a worktree
+  // committed a DELETE for is not on disk, so `fs.readFile` fails and `contentKeys[path]` is null
+  // exactly as it is for an oversized file. Two agents told to remove the same dead module produce
+  // ONE merged tree oid between them — git proving the work is identical — while per-file coverage
+  // has nothing to read and abstains forever. Same instrument gap, same wrong verdict.
+  //
+  // A rename's SOURCE path (recorded by `--name-status -M`) is the third member of this family.
+  const fx = await newRepo('deletion-tree-twin');
+  t.after(() => fx.cleanup());
+
+  const a = await fx.worktree('del-a');
+  await fx.git(['rm', '-q', 'src/base.js'], a);
+  await fx.commit('remove the dead module', a);
+
+  const b = await fx.worktree('del-b');
+  await fx.git(['rm', '-q', 'src/base.js'], b);
+  await fx.commit('remove the same dead module', b);
+
+  // CONTROL: deletes a DIFFERENT file. Equally unfingerprintable, genuinely different work.
+  const c = await fx.worktree('del-c');
+  await fx.git(['rm', '-q', 'config/registry.mjs'], c);
+  await fx.commit('remove a different file', c);
+
+  const report = await inspect(fx.root);
+  const [va, vb, vc] = ['del-a', 'del-b', 'del-c'].map((id) => verdict(report, id));
+  assert.ok(va && vb && vc, 'sanity: all three worktrees produced verdicts');
+
+  for (const [v, sibling] of [[va, 'del-b'], [vb, 'del-a']]) {
+    assert.equal(v.safe, true,
+      `two worktrees deleting the same file share one merged tree oid — that is proof, not a `
+      + `heuristic, and an absent file's absent fingerprint cannot outrank it: ${JSON.stringify(v)}`);
+    assert.ok((v.redundantWith ?? []).some((id) => id.endsWith(sibling)),
+      `the verdict must NAME the sibling: ${JSON.stringify(v.redundantWith)}`);
+  }
+  assert.equal(vc.safe, false,
+    `deleting a DIFFERENT file is different work and must stay refused: ${JSON.stringify(vc)}`);
+
+  // PRECISION, through the destructive command itself: the true pair drains to exactly one
+  // survivor and the genuinely different worktree is untouched.
+  const { clean } = await import('../../src/actions.mjs');
+  const cleaned = await clean(fx.root, { apply: true });
+  const left = [];
+  for (const id of ['del-a', 'del-b', 'del-c']) {
+    try { await fs.stat(fx.wt(id)); left.push(id); } catch { /* removed */ }
+  }
+  assert.ok(left.includes('del-c'), `the differently-scoped worktree must survive: removed=${cleaned.removed}`);
+  assert.equal(left.filter((id) => id !== 'del-c').length, 1,
+    `the identical pair must drain to exactly one survivor, never zero: left=${JSON.stringify(left)}`);
+});
+
+test('ATTACK: an unreadable fingerprint must not be counted as evidence the work is held elsewhere',
+  async () => {
+    // THE SAME NULL, THE OPPOSITE POLARITY — and this is the dangerous one.
+    //
+    // In safeToDelete a missing fingerprint made holt REFUSE (annoying). In uniqueWork it did the
+    // reverse: `fileIsContentUnique` returned false for a file it could not read, which reads as
+    // "some sibling holds this content", which DELETES the symbol from uniqueSymbols, which
+    // removes the `symbol(s) found nowhere else` reason from the deletion gate. A failed read
+    // making holt more willing to delete is the catastrophic direction, and it fires on nothing
+    // more exotic than two agents independently naming a function `Handler`.
+    //
+    // Driven through the exported analyzer rather than a repository, because the reachable
+    // real-world nulls (oversized, deleted, rename source) are all files ctags never tags, so a
+    // fixture cannot put a SYMBOL behind an unreadable fingerprint — only a read race can, and a
+    // race is not a test. The scan shape below is exactly what scanFiles() emits.
+    const { uniqueWork } = await import('../../src/analyze.mjs');
+    const { symbolKey } = await import('../../src/symbols.mjs');
+    const ws = (id, file, key, tree, sym) => {
+      // Derived through symbolKey exactly as scan.mjs does, so the fixture cannot drift from the
+      // real key space (a hand-written `function:Handler` never matches — kinds are bucketed).
+      const added = [{ file, kind: 'function', name: sym }];
+      return {
+        id, path: `/tmp/${id}`, ok: true, family: id,
+        committed: { files: [file], count: 1, how: 'merge-tree', mergedTree: tree, lineEndingOnlyVsBase: false },
+        uncommitted: { files: [], untracked: [], count: 0, how: 'status' },
+        ignored: { files: [], count: 0, how: 'ignored' },
+        touched: [file],
+        contentKeys: { [file]: key },
+        added,
+        addedKeys: [...new Set(added.map(symbolKey))],
+        symbolsUnmeasured: [],
+      };
+    };
+
+    // w1's file could not be fingerprinted (null). w2 declares a same-NAMED symbol in a totally
+    // different file, whose content is readable and shares nothing. Different merged trees, so
+    // no instrument anywhere proves w1's work exists elsewhere.
+    const nameCollision = {
+      workstreams: [
+        ws('w1', 'a/thing.js', null, 'tree-one', 'Handler'),
+        ws('w2', 'b/other.js', 'n:beef', 'tree-two', 'Handler'),
+      ],
+    };
+    const u1 = uniqueWork(nameCollision).find((u) => u.id === 'w1');
+    assert.equal(u1.uniqueSymbolCount, 1,
+      `a name collision is not a content match, and an unreadable file is not a proof of one — `
+      + `w1's Handler exists nowhere else: ${JSON.stringify(u1)}`);
+    assert.equal(u1.verdict, 'unique-work-committed', JSON.stringify(u1));
+
+    // CONTROL, and it is the whole reason this cannot just answer "unique" whenever the read
+    // fails: when the sibling's MERGED TREE is identical, git has already proven it holds this
+    // exact committed path. The symbol is then genuinely shared and must not be counted.
+    const treeTwins = {
+      workstreams: [
+        ws('t1', 'a/thing.js', null, 'same-tree', 'Handler'),
+        ws('t2', 'a/thing.js', null, 'same-tree', 'Handler'),
+      ],
+    };
+    const t1 = uniqueWork(treeTwins).find((u) => u.id === 't1');
+    assert.equal(t1.uniqueSymbolCount, 0,
+      `an identical merged tree proves the sibling holds this path — claiming unique work here `
+      + `would re-break the redundancy verdict: ${JSON.stringify(t1)}`);
+
+    // CONTROL: a READABLE fingerprint with a durable twin still means "held elsewhere". The fix
+    // must not have turned content identity off.
+    const realDuplicate = {
+      workstreams: [
+        ws('d1', 'a/thing.js', 'n:same', 'tree-one', 'Handler'),
+        ws('d2', 'b/thing.js', 'n:same', 'tree-two', 'Handler'),
+      ],
+    };
+    const d1 = uniqueWork(realDuplicate).find((u) => u.id === 'd1');
+    assert.equal(d1.uniqueSymbolCount, 0,
+      `a proven content twin still makes the symbol shared: ${JSON.stringify(d1)}`);
+  });
+
+test('ATTACK: a generated-NAMED dir is only disposable when the repo carries the command that recreates it', async (t) => {
+  // REPRODUCED DATA LOSS, pre-existing at every commit tonight: gate said "✓ disposable", clean
+  // --apply removed the worktree, `git fsck` found nothing, and the content had never been a git
+  // object — unrecoverable. The whole verdict rested on the directory being NAMED `build/`.
+  //
+  // GENERATED_DIRS' own comment block states the rule this file had already learned twice, for
+  // `vendor/` and for `logs/`: "The rule is not 'does this look like noise', it is 'can a command
+  // in this repository recreate it'" — and then nothing ever checked for the command. A repo with
+  // no package.json, no Makefile, no build system of any kind cannot recreate build/only.js; its
+  // name is the only evidence, and names are exactly what this product exists to distrust.
+  //
+  // The fix: a generated-named dir earns disposal from the MANIFEST that recreates it, per
+  // worktree — node_modules from package.json, target from Cargo.toml, build from any build
+  // manifest. No manifest, no disposal: the content downgrades to "cannot verify", the same
+  // verdict a `secrets/` dir already gets. WITH the manifest, everything stays reclaimable —
+  // the monster fixture pins that a worktree full of real build junk still cleans.
+  const fx = await newRepo('generated-needs-evidence');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', 'build/\n');
+  await fx.commit('base with build/ ignored');
+
+  // Layer 1: GITIGNORED. No build system anywhere; hand-placed content under build/.
+  const wt = await fx.worktree('wt-bi');
+  await fx.write('build/only.js', 'export function BuildDirOnlyWork(n){return n*5;}\n', wt);
+  let report = await inspect(fx.root);
+  let v = verdict(report, 'wt-bi');
+  assert.equal(v.safe, false,
+    `no manifest can recreate build/ here — its name is not evidence: ${JSON.stringify(v)}`);
+  assert.match(JSON.stringify(v.reasons), /cannot verify|gitignored/i,
+    `the refusal must say holt cannot verify the ignored content: ${JSON.stringify(v)}`);
+
+  // Layer 2: UNTRACKED, no gitignore at all — the same hole with less ceremony.
+  const wt2 = await fx.worktree('wt-untracked');
+  await fx.write('dist/handmade.js', 'export function HandTweakedOutput(){return 7;}\n', wt2);
+  report = await inspect(fx.root);
+  v = verdict(report, 'wt-untracked');
+  assert.equal(v.safe, false,
+    `untracked dist/ content with no build system is at-risk work, not noise: ${JSON.stringify(v)}`);
+
+  // CONTROL — the never-worse half: the SAME content with the manifest present stays disposable,
+  // because `npm run build`/`npm ci` genuinely recreates it. Refusing here would freeze the tool.
+  const fx2 = await newRepo('generated-with-evidence');
+  t.after(() => fx2.cleanup());
+  await fx2.write('.gitignore', 'build/\nnode_modules/\n');
+  await fx2.write('package.json', JSON.stringify({ name: 'x', scripts: { build: 'node make.js' } }));
+  await fx2.commit('base with a real build system');
+  const wt3 = await fx2.worktree('wt-build-ok');
+  await fx2.write('build/bundle.js', 'var generated=1;\n', wt3);
+  await fx2.write('node_modules/dep/index.js', 'module.exports=1;\n', wt3);
+  const report2 = await inspect(fx2.root);
+  const v3 = verdict(report2, 'wt-build-ok');
+  assert.equal(v3.safe, true,
+    `build output WITH its manifest is reproducible and must stay reclaimable: ${JSON.stringify(v3)}`);
 });

@@ -103,8 +103,8 @@ const MUTATIONS = [
     "id": "file-gate-trigger-happy",
     "defect": "the file layer stops excluding regenerable output, so `rm -rf node_modules` and `> app.log` are refused — the shape that gets a guard uninstalled",
     "file": "src/scan.mjs",
-    "find": "    if (looksGenerated(p)) continue;",
-    "replace": "    // mutated: generated output is defended like source",
+    "find": "      if (looksGenerated(p) || SCRATCH_WHEN_IGNORED.test(p)) continue;",
+    "replace": "      // mutated: generated output is defended like source",
     "tests": [
       "test/e2e/integration.test.mjs"
     ]
@@ -131,8 +131,8 @@ const MUTATIONS = [
     id: 'unique-loose',
     defect: 'uniqueWork() treats a symbol shared by several workstreams as unique to each',
     file: 'src/analyze.mjs',
-    find: '.filter((k) => symbolOwners.get(k).length === 1)',
-    replace: '.filter((k) => symbolOwners.get(k).length >= 1)',
+    find: '        if (symbolOwners.get(k).length === 1) return true;',
+    replace: '        if (symbolOwners.get(k).length >= 1) return true; // mutated: every symbol is "unique"',
     tests: ['test/e2e/detection.test.mjs'],
   },
   {
@@ -418,6 +418,18 @@ const MUTATIONS = [
     find: "  if (hit.verdict === 'ask') {",
     replace: '  if (false) {',
     tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'redundancy-ignores-durability',
+    defect: 'redundancy is claimed against UNCOMMITTED siblings (durableOnly:false), authorising '
+      + 'deletion of a worktree whose only twin has not committed the work — the twin can be erased '
+      + 'by a git checkout, editor revert or agent write that holt never sees or gates, and the work '
+      + 'is lost. The durability bar (durableOnly:true) is the entire reason redundancy can authorise '
+      + 'a deletion without losing work.',
+    file: 'src/analyze.mjs',
+    find: 'const committedCoverage = siblingCoverage(w, committedFiles, { durableOnly: true });',
+    replace: 'const committedCoverage = siblingCoverage(w, committedFiles, { durableOnly: false });',
+    tests: ['test/e2e/detection.test.mjs', 'test/e2e/actions.test.mjs'],
   },
 ];
 

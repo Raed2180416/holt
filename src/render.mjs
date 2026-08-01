@@ -73,10 +73,46 @@ export function renderHeader(report) {
  * already knows which one happened, say so, in the same words `holt setup` already uses for the
  * same situation (see step 3 of cmdSetup in bin/holt.mjs).
  */
+/**
+ * What holt is NOT vouching for, said out loud whenever an all-clear-shaped line prints.
+ *
+ * The primary worktree is excluded from the scan by default, and the commonest first-run shape
+ * there is — one repository, no fan-out yet, uncommitted-only work in the primary — got
+ * "Nothing unique anywhere. Every workstream is reproducible from base.": true of the zero
+ * workstreams scanned, false of the repository, and shown to exactly the person least equipped
+ * to know the difference. A dirty (or unreadable) excluded primary is named beside every verdict
+ * that could otherwise read as "holt checked everything".
+ */
+function primaryCaveat(report) {
+  const p = report.primaryUnscanned;
+  if (!p) return [];
+  if (p.dirtyFiles === 0) return [];
+  return [p.dirtyFiles === null
+    ? c('yellow', `  (holt could not even read the primary worktree's status — '${p.id}' is NOT covered by the verdict above)`)
+    : c('yellow', `  (your primary worktree '${p.id}' holds ${p.dirtyFiles} uncommitted change(s) holt is NOT auditing — `
+      + 'the verdict above is about the OTHER worktrees. `holt risk --include-primary` covers it.)')];
+}
+
 function noSiblingsNote(report) {
-  return report.counts.scanned > 0 ? null
-    : c('grey', '  no worktrees yet — holt has nothing to relate until agents fan out. '
-      + '`git worktree add ../<name> <branch>`, then re-run.');
+  // Gated on WORKSTREAMS, not on scanned: `counts.scanned` counts only the workstreams that
+  // scanned OK, so a total scan failure used to print "no worktrees yet — fan out and re-run"
+  // two lines beneath its own header reading "scanned 0/2 · 2 skipped" — denying the existence
+  // of worktrees it had just counted, and prescribing MORE of them as the remedy. The two empty
+  // states are opposites: no worktrees is a fresh repo; all-skipped is a scan holt must not
+  // paper over with onboarding advice.
+  if (report.counts.workstreams === 0) {
+    // "no OTHER worktrees" — the primary exists and the reader is standing in it. The old text
+    // said "no worktrees yet" about a repository with one, which is the kind of small falsehood
+    // that costs the tool its word right at first contact.
+    return c('grey', '  no other worktrees yet — holt relates parallel workstreams, and this repo has '
+      + 'only the primary. `git worktree add ../<name> <branch>`, then re-run.');
+  }
+  if (report.counts.scanned === 0) {
+    return c('red', `  none of the ${report.counts.workstreams} workstream(s) could be scanned — `
+      + 'every verdict below is about NOTHING. See the skip reasons above; holt cannot vouch for '
+      + 'unscanned work.');
+  }
+  return null;
 }
 
 /** The default view: the decision surface, not the inventory. */
@@ -132,6 +168,8 @@ export function renderSummary(report) {
     if (atRisk.length > 12) out.push(c('grey', `  … and ${atRisk.length - 12} more`));
   }
 
+  out.push(...stashSection(report));
+
   if (report.collisions.length) {
     out.push('', c('bold', 'COLLISIONS'));
     out.push('');
@@ -179,6 +217,54 @@ export function renderSummary(report) {
   return out.join('\n');
 }
 
+/**
+ * THE STASH — a REPOSITORY-level section, deliberately not a workstream row.
+ *
+ * This is what would have made the reported incident visible. Sweep work into the stash and every
+ * other block goes quiet in the same instant: the worktree is byte-clean, so it holds no unique
+ * work, is not at risk, and is provably disposable. Each of those is true about the worktree and
+ * together they are a report claiming the repository holds nothing unrecoverable while a stash
+ * commit holds the only copy of it.
+ *
+ * A stash has no path, no branch and nothing to land, so it gets its own lines rather than a
+ * fabricated row in a list that `gate`, `rescue` and `clean` all act on.
+ *
+ * A FUNCTION, NOT AN INLINE BLOCK, because both renderers that describe risk have an early return
+ * for "no workstream rows to show" — and that early return is reached in EXACTLY the swept-stash
+ * case. Written inline once, the section sat below the return that the incident triggers, which
+ * is a stash warning that appears in every situation except the one it was written for.
+ *
+ * ONLY WHEN THERE IS SOMETHING TO SAY: entries whose content a ref already holds are not printed.
+ * `git stash apply` + commit makes an entry harmless, and a section that keeps shouting after
+ * that teaches the reader to skip it.
+ */
+function stashSection(report) {
+  const stash = report.stash;
+  if (!stash || (!stash.atRisk.length && stash.checked)) return [];
+  const out = ['', c('bold', 'STASH — held by no worktree, and by no ref either'), ''];
+  if (!stash.checked) {
+    out.push(c('yellow', "  holt could not fully check this repository's stash — treat its entries as holding unique work"));
+  }
+  for (const e of stash.atRisk.slice(0, 6)) {
+    out.push(
+      `  ${pad(e.selector, 14)} ${padStart(e.uniqueCount, 4)} ` +
+      `${c('grey', 'file(s) whose content no ref holds')}  ${c('grey', e.message)}`,
+    );
+    const sample = e.unique.slice(0, 3).map((u) => `${u.path} (${u.layer})`);
+    if (sample.length) out.push(c('grey', `     ${sample.join('  ')}`));
+  }
+  if (stash.atRisk.length > 6) out.push(c('grey', `  … and ${stash.atRisk.length - 6} more`));
+  out.push('');
+  out.push(c('grey', '  `git stash apply` then commit — or `holt rescue` — makes these reachable;'));
+  out.push(c('grey', '  until then `git stash drop`/`clear` destroys them and git cannot bring them back.'));
+  return out;
+}
+
+/** Does the stash hold content no ref holds? The one fact that can falsify "nothing unique". */
+function stashHoldsUnique(report) {
+  return !!report.stash && (report.stash.atRisk.length > 0 || report.stash.checked === false);
+}
+
 export function renderRisk(report) {
   const out = [renderHeader(report), ''];
   out.push(c('bold', 'UNIQUE WORK  —  what only exists here'));
@@ -194,9 +280,23 @@ export function renderRisk(report) {
     // one was reproducible from base. With zero workstreams scanned there was no checking to do,
     // and printing the verdict anyway reads as "holt looked and this repo is fine" to someone who
     // has simply not created a second worktree yet. Say THAT instead.
+    //
+    // AND THE VERDICT IS ABOUT WORKSTREAMS, WHICH IS NOT THE SAME AS "ABOUT THIS REPOSITORY".
+    // The swept-stash case lands here with every workstream genuinely reproducible from base and
+    // the only copy of real work sitting in a stash commit — so the green line was literally true
+    // about what it measured and read as an all-clear about something else. It is qualified when
+    // the stash holds content no ref holds, and the section still prints. This early return is
+    // precisely the path the incident takes; a stash section below it would never have run.
     const note = noSiblingsNote(report);
-    if (note) { out.push(note, ''); return out.join('\n'); }
-    out.push(c('green', '  Nothing unique anywhere. Every workstream is reproducible from base.'));
+    if (note) {
+      out.push(note, ...primaryCaveat(report), ...stashSection(report), '');
+      return out.join('\n');
+    }
+    out.push(stashHoldsUnique(report)
+      ? c('yellow', '  No WORKSTREAM holds unique work — but the stash does, and no ref holds that content.')
+      : c('green', '  Nothing unique anywhere. Every workstream is reproducible from base.'));
+    out.push(...primaryCaveat(report));
+    out.push(...stashSection(report));
     out.push('');
     return out.join('\n');
   }

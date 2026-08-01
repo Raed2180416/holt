@@ -46,7 +46,27 @@ jobs:
             # Only http(s) origins, nothing that could inject markup.
             case "$HOLT_API_URL" in
               https://*|http://*)
-                node -e 'const fs=require("fs");const u=process.env.HOLT_API_URL;const p="site/index.html";fs.writeFileSync(p,fs.readFileSync(p,"utf8").split("__HOLT_API__").join(u));console.log("checkout wired to",u)' ;;
+                node -e '
+                  const fs=require("fs");
+                  const u=process.env.HOLT_API_URL;
+                  // HARDENING: the URL is injected into HTML attributes (data-checkout="…").
+                  // The case statement already restricts to http(s), but a URL containing quotes,
+                  // angle brackets, or spaces could still break out of the attribute context and
+                  // inject markup. Validate the URL is a proper origin with no HTML-special chars
+                  // before substituting; refuse (and keep the safe fallback) if it is not.
+                  try {
+                    const parsed=new URL(u);
+                    if(!/^https?:$/.test(parsed.protocol))throw new Error("not http(s)");
+                    if(parsed.pathname!="/"&&parsed.pathname!=="")throw new Error("must be an origin, not a path");
+                    if(/["<>{}\s]/.test(u))throw new Error("contains HTML-special characters");
+                  }catch(e){
+                    console.error("HOLT_API_URL rejected ("+e.message+"), leaving the mailto fallback");
+                    process.exit(0);
+                  }
+                  const p="site/index.html";
+                  fs.writeFileSync(p,fs.readFileSync(p,"utf8").split("__HOLT_API__").join(u));
+                  console.log("checkout wired to",u);
+                ' ;;
               *) echo "HOLT_API_URL is not an http(s) URL; leaving the mailto fallback"; ;;
             esac
           else

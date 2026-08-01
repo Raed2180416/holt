@@ -16,9 +16,13 @@
  *     worktree and never a user-global path — holt already promises `integrate` touches nothing
  *     outside the repo without `--global`; config follows the same rule.
  *
- *   - LOUD ON ERROR. A file that exists but fails to parse, isn't a JSON object, has an unknown
- *     key, or has a key of the wrong shape throws `ConfigError` — it is never silently ignored.
- *     A user who believes their config is active is owed the truth if it is not.
+ *   - LOUD ON ERROR — BUT NEVER LETHAL. A file that exists but fails to parse, isn't a JSON
+ *     object, or has a key of the wrong shape throws `ConfigError` — it is never silently
+ *     ignored. A user who believes their config is active is owed the truth if it is not.
+ *     BUT: an unknown key is a WARNING, not an error — a user who adds `$schema` or a future
+ *     key holt doesn't know about yet must not have their guard killed by it. And a ConfigError
+ *     must NEVER kill the hook/gate/rescue/doctor commands — those are safety-critical and must
+ *     fall back to defaults with a warning rather than leaving the agent unprotected.
  *
  *   - CANNOT MAKE HOLT LESS SAFE. Every key here tunes a HEURISTIC (name-based family grouping,
  *     the maintenance-nag threshold) — never the content-identity safety contract in analyze.mjs
@@ -38,6 +42,12 @@ export const CONFIG_FILENAME = '.holtrc.json';
 
 const KNOWN_KEYS = ['familyOverrides', 'maintenanceFloor', 'maintenanceRatio'];
 
+// Keys that are silently ignored — they are standard JSON config metadata, not holt settings.
+// `$schema` is the JSON Schema standard self-reference key; any editor that supports JSON
+// schemas will add it automatically, and killing the guard on it would be a self-inflicted
+// wound.
+const IGNORED_KEYS = ['$schema'];
+
 export class ConfigError extends Error {
   constructor(message, filePath) {
     super(message);
@@ -46,16 +56,31 @@ export class ConfigError extends Error {
   }
 }
 
-/** Validate a parsed config object. Throws ConfigError on anything outside the documented schema. */
+/** A warning about an unknown key — non-fatal, but surfaced to the user. */
+export class ConfigWarning {
+  constructor(message, filePath) {
+    this.message = message;
+    this.path = filePath;
+  }
+}
+
+/** Validate a parsed config object. Throws ConfigError on structural errors; warns on unknown keys. */
 function validate(raw, filePath) {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
     throw new ConfigError(`${filePath}: top-level value must be a JSON object`, filePath);
   }
+
+  const warnings = [];
   for (const key of Object.keys(raw)) {
+    if (IGNORED_KEYS.includes(key)) continue;
     if (!KNOWN_KEYS.includes(key)) {
-      throw new ConfigError(
-        `${filePath}: unknown key "${key}" (known keys: ${KNOWN_KEYS.join(', ')})`, filePath,
-      );
+      // Unknown keys WARN, they do not kill. A user who adds a future key or `$schema` must not
+      // have their guard die. The warning is still loud — printed to stderr — so the user knows
+      // their config is not fully in effect.
+      warnings.push(new ConfigWarning(
+        `${filePath}: unknown key "${key}" (known keys: ${KNOWN_KEYS.join(', ')}) — ignored`,
+        filePath,
+      ));
     }
   }
 
@@ -93,26 +118,27 @@ function validate(raw, filePath) {
     out.maintenanceRatio = v;
   }
 
-  return out;
+  return { config: out, warnings };
 }
 
 /**
  * Load `.holtrc.json` from the main worktree root, if present.
  *
  * @param {string} cwd  any path inside the repository
- * @returns {Promise<{found: boolean, path: string|null, config: object}>}
- * @throws {ConfigError} when the file exists but is invalid — never swallowed.
+ * @returns {Promise<{found: boolean, path: string|null, config: object, warnings: ConfigWarning[]}>}
+ * @throws {ConfigError} when the file exists but is structurally invalid (not JSON, not an
+ *   object, wrong-type key). Unknown keys produce warnings, not errors.
  */
 export async function loadConfig(cwd) {
   const root = await repoRoot(cwd);
-  if (!root) return { found: false, path: null, config: {} };
+  if (!root) return { found: false, path: null, config: {}, warnings: [] };
 
   const filePath = path.join(root, CONFIG_FILENAME);
   let raw;
   try {
     raw = await fs.readFile(filePath, 'utf8');
   } catch (e) {
-    if (e.code === 'ENOENT') return { found: false, path: null, config: {} };
+    if (e.code === 'ENOENT') return { found: false, path: null, config: {}, warnings: [] };
     throw new ConfigError(`${filePath}: could not be read (${e.message})`, filePath);
   }
 
@@ -123,5 +149,6 @@ export async function loadConfig(cwd) {
     throw new ConfigError(`${filePath}: invalid JSON (${e.message})`, filePath);
   }
 
-  return { found: true, path: filePath, config: validate(parsed, filePath) };
+  const { config, warnings } = validate(parsed, filePath);
+  return { found: true, path: filePath, config, warnings };
 }

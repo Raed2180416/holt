@@ -28,7 +28,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   TEST_COUNT_PATTERNS,
   MUTATION_PATTERNS,
@@ -103,7 +103,7 @@ async function main() {
   console.log(`published numbers match the suite (${o.tests} tests, ${o.mutation} mutations)`);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => {
     console.error('::error::' + (err?.stack || err));
     process.exit(1);

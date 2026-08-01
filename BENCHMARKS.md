@@ -3,7 +3,7 @@
 Every number on this page is reproducible from this repository with the command shown beside it.
 No number is published without its conditions. Each section states what was measured, how the
 fixture was constructed, the exact command to reproduce it, and one sentence on what the result
-does and does not establish. Runtime for the figures below: Linux, Node v24.18.0, holt v0.2.0.
+does and does not establish. Runtime for the figures below: Linux, Node v24.18.0, holt v0.3.0.
 
 ## 1 · Correctness at scale
 
@@ -19,9 +19,9 @@ that got faster by skipping work fails the run outright, which would void the sp
 
 | N | total | per worktree | verdicts |
 |---|---|---|---|
-| 100 | 532 ms | 5.3 ms | 100/100 correct |
-| 300 | 1.33 s | 4.4 ms | 300/300 correct |
-| 1000 | 5.44 s | 5.4 ms | **1000/1000 correct** |
+| 100 | 715 ms | 7.2 ms | 100/100 correct |
+| 300 | 2.15 s | 7.2 ms | 300/300 correct |
+| 1000 | 7.97 s | 8.0 ms | **1000/1000 correct** |
 
 Reproduce: `node eval/bench.mjs 1000` (first argument is N).
 
@@ -181,19 +181,19 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 474 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
-| deliberate-defect mutations | 39/39 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
+| tests | 696 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| deliberate-defect mutations | 42/42 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
 
-One test is deliberately excluded from that figure. `npm test` defines 475 tests; the opencode
+One test is deliberately excluded from that figure. `npm test` defines 697 tests; the opencode
 plugin test cannot execute without opencode installed, and a skipped test prints `ok` while never
 running — so counting it would inflate the claim. CI compares the published number against tests
 that actually PASSED, never against the total defined, and prints every skip. A developer with
-opencode installed sees 475.
+opencode installed sees 697.
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
-broken, not merely observed to be green. **Does not mean:** 28 hand-picked mutations amount to full
+broken, not merely observed to be green. **Does not mean:** 42 hand-picked mutations amount to full
 mutation coverage of the codebase — they target the highest-stakes behaviors by design (see
 `test/mutation.mjs` for why hand-picked mutations were chosen over exhaustive Stryker mutation).
 
@@ -292,8 +292,35 @@ positive this fix targets does not occur anywhere in this corpus, by the corpus'
 above) — it targets a real, separate, small-fan-out risk this apparatus does not plant, and the
 regression test proves it directly instead.
 
+**The recall half, and why this corpus cannot grade it.** That precision was first bought with a
+*textual* comparison of the two declared bodies, and text equality answers "did they type the same
+bytes", not "did they build the same thing" — a genuine duplicate almost never types the same
+bytes (one wraps the signature, the other keeps it on one line; one indents with tabs, the other
+with four spaces). Under the textual gate every such pair was a MISMATCH and the real duplicate
+went **unreported**. bench50 structurally cannot see that regression, because `wt-symbol-dup`
+plants bodies that are byte-identical to `wt-unique`'s — the one input shape on which textual and
+token-stream equality can never disagree. The comparison is now over a whitespace-normalised,
+string-literal-aware token stream: outside a literal a whitespace run collapses (to nothing beside
+a delimiter, so re-wrapping an argument list is the same code); inside a literal whitespace is
+data and stays byte-significant; and when the lexer cannot be sure it tracked the literals — an
+unterminated quote, which is what a Rust lifetime, a Lisp quote, an apostrophe in a trailing
+comment and a window truncated mid-string all look like — it bails and the strict textual verdict
+stands, so being unsure can only cost recall, never precision. For declared-body comparison of the
+*same* symbol name this is sound even in off-side-rule languages: the caller already per-line
+trimmed away every indent, and two valid Python bodies cannot differ in only a line boundary
+(splitting or joining statements needs a `;` or a `\`, both kept and compared). Pinned in
+`test/e2e/detection.test.mjs` ("P3 RECALL: the same function reformatted in two worktrees is still
+duplicate work", and "P3 PRECISION: whitespace inside a string literal is content, not layout" for
+the boundary), and at the granularity no worktree fixture reaches in
+`test/unit/declared-body-tokens.test.mjs`, whose five contract clauses are each shown to be
+load-bearing by seven mutants of the lexer, 0 survivors.
+
 Reproduce: `node score-holt.mjs`, then read `byQuestion.duplicate` and
-`duplicateSymbolSideChannel` in the resulting `score-holt.json`.
+`duplicateSymbolSideChannel` in the resulting `score-holt.json`. Re-measured after the
+token-stream change on the full 50-language corpus: `duplicate` precision **0.75**, recall
+**1.00** (tp 150, fp 50, tn 7450, fn 0 / n 7650), all 50 false positives still the single
+`wt-unique + wt-symbol-dup` shape (`knownGaps.symbolVsContentDuplicate` 50), side channel
+850/850 — i.e. the recall relaxation cost this corpus's precision nothing.
 
 **Means:** the 0.75 precision on this question is fully accounted for by one documented,
 hand-verified case bench50 itself says should not be used to grade symbol-level precision, and a

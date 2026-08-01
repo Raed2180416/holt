@@ -26,6 +26,7 @@
 import { git, pmap, worktreeSnapshot, readWorktreeFile } from './git.mjs';
 import { symbolKey } from './symbols.mjs';
 import { isHoltLock } from './discover.mjs';
+import { stashState } from './stash.mjs';
 
 /* ------------------------------------------------------------------ helpers ---- */
 
@@ -107,6 +108,125 @@ export function overlappingPairs(workstreams) {
   return [...pairs.values()];
 }
 
+/* ------------------------------------------------- content ownership ---- */
+
+/**
+ * WHO ELSE HOLDS THIS EXACT CONTENT — and is their copy DURABLE?
+ *
+ * One map, built once per scan, over `w.contentKeys` (see content-identity.mjs), shared by
+ * `uniqueWork()` and `safeToDelete()`. They used to build the same map twice from the same
+ * field, which is precisely how two functions answering "does anyone else hold this" drift into
+ * opposite answers about the identical bytes.
+ *
+ * THE DURABILITY DISTINCTION, and why a redundancy claim is not a content match.
+ *
+ * A content match proves only that the same bytes are sitting in two directories RIGHT NOW. It
+ * does NOT prove the sibling's copy will still exist a minute later. If the sibling's copy is
+ * uncommitted — a working-tree edit, a staged change, or an untracked file — then a plain
+ * `git checkout`, an editor revert, or the next agent writing over that path destroys it, and
+ * git will not even mention that anything was lost. None of those operations goes through holt,
+ * so holt's own gate never sees the moment the "backup" disappears.
+ *
+ * Compose that with a verdict built on the match and holt becomes the cause of the loss: it
+ * tells `clean --apply` that worktree A (whose copy IS committed, i.e. recoverable from the
+ * object store forever) is disposable because sibling B holds the same bytes — and B's copy is
+ * the fragile one. The re-verification `clean --apply` does before each removal does not close
+ * this: it only proves the bytes are still on disk at that instant, which was never in doubt.
+ * The set drains to one survivor, and the survivor is the copy nothing can recover.
+ *
+ * So: a copy counts as DURABLE when the sibling has COMMITTED it — the path is in that
+ * workstream's committed delta AND is not also dirty in its working tree (a committed path with
+ * uncommitted modifications on top fingerprints as the MODIFIED bytes, which are not what the
+ * commit holds, so it cannot vouch for them). Base is durable by definition and is handled
+ * separately, by `lineEndingOnlyVsBase`, which compares against base's committed content.
+ *
+ * Non-durable holders are still tracked and still REPORTED — "your sibling has these exact bytes
+ * but has not committed them" is a true and useful observation. It is simply not a licence to
+ * delete the copy that IS committed.
+ *
+ * @param {object[]} live  scanned workstreams with `ok === true`
+ */
+function contentOwnership(live) {
+  const all = new Map();      // content-identity key -> Set(workstream id) — every holder
+  const durable = new Map();  // content-identity key -> Set(workstream id) — committed holders
+
+  for (const w of live) {
+    const committed = new Set(w.committed?.files ?? []);
+    // Both halves matter: a tracked path with working-tree modifications, and an untracked path.
+    // In either case the bytes fingerprinted from disk are NOT the bytes any commit holds.
+    const dirty = new Set([...(w.uncommitted?.files ?? []), ...(w.uncommitted?.untracked ?? [])]);
+
+    for (const [file, key] of Object.entries(w.contentKeys ?? {})) {
+      if (!key) continue; // unreadable/oversized: cannot prove a match, the safe direction
+      if (!all.has(key)) all.set(key, new Set());
+      all.get(key).add(w.id);
+      if (!committed.has(file) || dirty.has(file)) continue;
+      if (!durable.has(key)) durable.set(key, new Set());
+      durable.get(key).add(w.id);
+    }
+  }
+
+  /** Workstreams OTHER than `w` holding `key`; `durableOnly` restricts to committed copies. */
+  const others = (key, w, durableOnly) => {
+    const holders = (durableOnly ? durable : all).get(key);
+    if (!holders) return [];
+    return [...holders].filter((id) => id !== w.id);
+  };
+
+  return { others };
+}
+
+/**
+ * THE SECOND REDUNDANCY INSTRUMENT: git's own merged-tree oid, per workstream.
+ *
+ * WHY IT EXISTS BESIDE contentOwnership() AND NOT INSTEAD OF IT. These two answer the same
+ * question with opposite strengths, and each is blind exactly where the other sees:
+ *
+ *   contentOwnership  — path-blind and reindent-blind (its whole reason for being), but it must
+ *                       READ every file's bytes. It returns NOTHING for a file over the 16 MiB
+ *                       fingerprint cap, for a path that is not on disk at all (a committed
+ *                       DELETE, a rename's source path — both of which `merge-tree` lists in the
+ *                       committed delta), and for any read that fails.
+ *   mergedTreeTwins   — a narrower question (identical tree, therefore identical content at
+ *                       identical paths) answered with total reliability: no cap, no file reads,
+ *                       no per-file failure modes. It is git comparing two objects.
+ *
+ * MEASURED, and this is the regression that put this function back: two worktrees each
+ * committing a byte-identical file past the 16 MiB cap — and two worktrees each committing the
+ * same DELETION, which costs nothing to construct and is what happens whenever two agents are
+ * told to remove the same dead module — produce ONE tree oid between them. git has proven they
+ * are the same work. Per-file coverage has no bytes to read, never reaches `allMatched`, and one
+ * such file silently poisoned the redundancy verdict for the ENTIRE workstream. A stronger
+ * instrument's blind spot must never veto a weaker-scoped instrument's proof: EITHER one
+ * establishes redundancy.
+ *
+ * DURABILITY IS FREE HERE. contentOwnership has to work to tell a committed copy from a dirty
+ * working-tree copy (see its doc comment) because it fingerprints bytes off the disk. A merged
+ * tree is computed from base and the sibling's HEAD COMMIT, so a match is a match against
+ * committed content by construction — it can never name a holder whose only copy is uncommitted.
+ *
+ * Only NON-NULL oids are compared. `strictReadOnly` scans have no merged tree at all, and a
+ * `null === null` grouping would have declared every one of them a twin of every other.
+ *
+ * @param {object[]} live  scanned workstreams with `ok === true`
+ * @returns {Map<string, string[]>}  workstream id -> OTHER ids whose merged tree is the same oid
+ */
+function mergedTreeTwins(live) {
+  const byTree = new Map();
+  for (const w of live) {
+    const tree = w.committed?.mergedTree;
+    if (!tree) continue;
+    if (!byTree.has(tree)) byTree.set(tree, []);
+    byTree.get(tree).push(w.id);
+  }
+  const twins = new Map();
+  for (const ids of byTree.values()) {
+    if (ids.length < 2) continue;
+    for (const id of ids) twins.set(id, ids.filter((other) => other !== id));
+  }
+  return twins;
+}
+
 /* ------------------------------------------------------ P0: unique work ---- */
 
 /**
@@ -146,21 +266,46 @@ export function uniqueWork(scanResult) {
   // function the same common thing (`Handler`, `Config`, `parse`) trip it. A symbol name is
   // cheap evidence; the file it lives in is the actual work, so a name collision downgrades a
   // symbol to "shared" only when the file's CONTENT is ALSO shared — never on name alone.
-  const contentOwners = new Map(); // content-identity key -> Set(workstream id)
-  for (const w of live) {
-    for (const key of Object.values(w.contentKeys ?? {})) {
-      if (!key) continue; // unreadable/oversized: cannot prove a match, the safe direction
-      if (!contentOwners.has(key)) contentOwners.set(key, new Set());
-      contentOwners.get(key).add(w.id);
-    }
-  }
+  const ownership = contentOwnership(live);
+  const treeTwins = mergedTreeTwins(live);
+  const committedPaths = new Map(live.map((w) => [w.id, new Set(w.committed?.files ?? [])]));
 
-  /** Is `w`'s own copy of the file at `file` backed by content no OTHER live workstream holds? */
+  /**
+   * Is `w`'s own copy of the file at `file` backed by content no OTHER live workstream holds
+   * DURABLY?
+   *
+   * "Durably" is the same standard `safeToDelete` applies (see contentOwnership above), and it
+   * has to be, or the two would once again answer differently about the same bytes: a sibling
+   * whose only copy is uncommitted cannot make this work "already held elsewhere", because that
+   * copy can be erased by a `git checkout` holt never sees. Reporting the work as unique is what
+   * `risk` must say when the sole other copy is that fragile — the alternative is `unique` calling
+   * it "nothing found nowhere else" while `safeToDelete` refuses to delete it, which is the
+   * two-commands-disagree failure this codebase keeps paying for.
+   *
+   * A MISSING FINGERPRINT IS "CANNOT ANSWER", NOT "ANSWERED: HELD ELSEWHERE" — and here that
+   * distinction runs in the direction that loses work, which is why it is the more dangerous half
+   * of the same defect safeToDelete carries. `null` means the file is over the 16 MiB cap, is not
+   * on disk, or failed to read; returning false for it handed the verdict to the NAME match
+   * alone, so a sibling that merely declared something else called `Handler` erased this
+   * workstream's symbol from `uniqueSymbols` — and with it the `symbol(s) found nowhere else`
+   * reason that stops `gate` and `clean --apply`. A read failure making holt MORE willing to
+   * delete is exactly the shape this file refuses everywhere else ("BLINDNESS IS NOT EMPTINESS").
+   *
+   * So an unreadable file stays unique unless the OTHER total instrument answers: an identical
+   * merged tree oid proves a sibling holds this very path with this very content (see
+   * mergedTreeTwins), which is a real content match and must still count. That keeps the
+   * fail-closed choice from turning into over-refusal on the genuine-duplicate case — the same
+   * "either instrument proves it" composition safeToDelete applies to the opposite polarity.
+   */
   function fileIsContentUnique(w, file) {
     const key = w.contentKeys?.[file];
-    if (!key) return false; // cannot prove it — falls back to the name-only check below
-    const holders = contentOwners.get(key);
-    return !holders || holders.size === 1;
+    if (!key) {
+      // Whole-tree identity can only speak for COMMITTED paths; an uncommitted or untracked file
+      // is not in the merged tree at all, so nothing proves a sibling holds it.
+      const provenByTree = committedPaths.get(w.id)?.has(file) && (treeTwins.get(w.id)?.length ?? 0) > 0;
+      return !provenByTree;
+    }
+    return ownership.others(key, w, true).length === 0;
   }
 
   return live
@@ -364,35 +509,51 @@ export function safeToDelete(scanResult, unique = null) {
   // a file is "held elsewhere" when some OTHER live workstream carries a file with the same
   // content-identity key, at any path.
   const live = scanResult.workstreams.filter((w) => w.ok);
-  const fpOwners = new Map(); // content-identity key -> Set(workstream id)
-  for (const w of live) {
-    for (const key of Object.values(w.contentKeys ?? {})) {
-      if (!key) continue; // unreadable or oversized: cannot be matched, the safe direction
-      if (!fpOwners.has(key)) fpOwners.set(key, new Set());
-      fpOwners.get(key).add(w.id);
-    }
-  }
+  const ownership = contentOwnership(live);
+  // ...AND the whole-tree instrument, which answers exactly where the per-file one cannot. See
+  // mergedTreeTwins() for why deleting it in favour of per-file identity was a regression.
+  const treeTwins = mergedTreeTwins(live);
 
   /**
    * Does every file in `files` have a content-identity twin in some OTHER live workstream?
    * Returns the full set of files matched, and every sibling that contributed a match — so a
    * partial match (one of two files has a twin, the other does not) is visible rather than
    * forcing an all-or-nothing verdict, and the caller can still decide the count precisely.
+   *
+   * `durableOnly` is the difference between "a sibling has these bytes on disk" (an observation)
+   * and "a sibling has COMMITTED these bytes" (a backup). Only the second may authorise a
+   * deletion — see contentOwnership's doc comment for why the first one gets holt blamed for the
+   * loss it caused. Both are computed below: the durable one decides, the other one reports.
+   *
+   * THE TWO WAYS A FILE FAILS TO MATCH ARE NOT THE SAME ANSWER, and collapsing them is what let
+   * one file veto a whole workstream's verdict:
+   *
+   *   `unreadable` — no fingerprint exists for this path at all (over the 16 MiB cap, not on disk
+   *                  because the commit DELETED it or it is a rename's source, or the read
+   *                  failed). Content identity CANNOT ANSWER. Another instrument may.
+   *   `mismatched` — the fingerprint was computed fine and no other live workstream holds it.
+   *                  That is content identity ANSWERING NO, and nothing may overrule it.
+   *
+   * The fallback below rescues only the first. A single genuinely unique file among three still
+   * blocks the verdict, exactly as before.
    */
-  function siblingCoverage(w, files) {
+  function siblingCoverage(w, files, { durableOnly }) {
     const owners = new Set();
     const matchedFiles = [];
+    const unreadable = [];
+    const mismatched = [];
     for (const f of files) {
       const key = w.contentKeys?.[f];
-      if (!key) continue;
-      const holders = fpOwners.get(key);
-      if (!holders) continue;
-      const others = [...holders].filter((id) => id !== w.id);
-      if (!others.length) continue;
+      if (!key) { unreadable.push(f); continue; }
+      const others = ownership.others(key, w, durableOnly);
+      if (!others.length) { mismatched.push(f); continue; }
       matchedFiles.push(f);
       for (const id of others) owners.add(id);
     }
-    return { owners: [...owners], matchedFiles, allMatched: files.length > 0 && matchedFiles.length === files.length };
+    return {
+      owners: [...owners], matchedFiles, unreadable, mismatched,
+      allMatched: files.length > 0 && matchedFiles.length === files.length,
+    };
   }
 
   return scanResult.workstreams.map((w) => {
@@ -428,6 +589,15 @@ export function safeToDelete(scanResult, unique = null) {
     // this reason fires again, and it is refused. The set drains to exactly one survivor by
     // construction, without anyone having to sequence it. `gate` re-scans per invocation and
     // behaves identically.
+    //
+    // THAT PROPERTY HOLDS ONLY IF THE SURVIVOR IS RECOVERABLE. Re-verification proves the twin's
+    // bytes are still on disk at the instant of removal — which was never the risk. The risk is
+    // what happens to the survivor AFTERWARDS, and an UNCOMMITTED twin can be erased by a
+    // `git checkout`, an editor revert or the next agent's write, none of which holt sees or
+    // gates. So redundancy is claimed against DURABLE copies only (`durableOnly: true`); the
+    // full match is computed too, and reported, but it cannot authorise a deletion. See
+    // contentOwnership() above for the full argument.
+    //
     // PER-FILE CONTENT IDENTITY, NOT WHOLE-TREE IDENTITY. `w.committed.mergedTree` equality (the
     // original form of this check) only fires when the worktree's ENTIRE committed state matches
     // a sibling's at the SAME paths — the same branch checked out twice. `siblingCoverage`
@@ -436,8 +606,42 @@ export function safeToDelete(scanResult, unique = null) {
     // twin in some other live workstream, wherever that twin lives? A worktree whose committed
     // files are only PARTLY covered is correctly left un-redundant — `allMatched` requires all of
     // them, so one genuinely unique file among three still blocks the verdict.
-    const committedCoverage = siblingCoverage(w, w.committed?.files ?? []);
-    const heldAlsoBy = committedCoverage.allMatched ? committedCoverage.owners : [];
+    //
+    // ...BUT NOT *INSTEAD OF* WHOLE-TREE IDENTITY. Replacing one with the other bought the recall
+    // gain by deleting a fallback, and the bill came due on every committed path per-file
+    // identity structurally cannot fingerprint: anything over the 16 MiB cap, anything not on
+    // disk (a committed DELETE, a rename's source path), anything whose read fails. One such file
+    // dragged `allMatched` to false and poisoned the verdict for the WHOLE workstream — even when
+    // `merge-tree` had already handed both worktrees the SAME tree oid, which is git itself
+    // proving the committed content is byte-for-byte identical. The two instruments are blind in
+    // different places and compose: EITHER proves redundancy.
+    //
+    // THE FALLBACK IS SCOPED TO "CANNOT ANSWER", NEVER TO "ANSWERED NO". It fires only when every
+    // file that failed to match failed for lack of a fingerprint (`unreadable`) — a file whose
+    // fingerprint computed cleanly and matched nobody (`mismatched`) is a real negative and keeps
+    // its veto, so a worktree holding one genuinely unique file among three stays refused. And a
+    // tree-oid match is durable by construction (merge-tree reads HEAD commits, never the working
+    // tree), so it clears the same durability bar `durableOnly: true` enforces above.
+    const committedFiles = w.committed?.files ?? [];
+    const committedCoverage = siblingCoverage(w, committedFiles, { durableOnly: true });
+    const treeHolders = !committedCoverage.allMatched
+      && risk.committedCount > 0
+      && committedCoverage.unreadable.length > 0
+      && committedCoverage.mismatched.length === 0
+      ? (treeTwins.get(w.id) ?? [])
+      : [];
+    const heldAlsoBy = committedCoverage.allMatched ? committedCoverage.owners : treeHolders;
+
+    // THE TRUE OBSERVATION THAT IS NOT A BACKUP. Exactly the files durable coverage could not
+    // account for, matched against siblings' UNCOMMITTED copies. Named in the refusal reason and
+    // carried on the verdict as `redundantWithUncommitted`, because "your sibling has these
+    // bytes but has not committed them" is worth telling a human — it names the one action
+    // (commit it there) that would make this worktree genuinely disposable.
+    const durablyMatched = new Set(committedCoverage.matchedFiles);
+    const gapCoverage = heldAlsoBy.length === 0
+      ? siblingCoverage(w, committedFiles.filter((f) => !durablyMatched.has(f)), { durableOnly: false })
+      : { owners: [], matchedFiles: [], unreadable: [], mismatched: [], allMatched: false };
+    const heldUncommittedBy = gapCoverage.allMatched ? gapCoverage.owners : [];
 
     // BASE CAN BE THE LIVING SIBLING TOO — the same reasoning as `heldAlsoBy` above, aimed at
     // base instead of another worktree.
@@ -458,7 +662,14 @@ export function safeToDelete(scanResult, unique = null) {
       && w.committed?.lineEndingOnlyVsBase === true;
 
     if (risk.committedCount > 0 && heldAlsoBy.length === 0 && !lineEndingOnlyVsBase) {
-      reasons.push(`${risk.committedCount} file(s) base lacks`);
+      // The refusal SAYS WHY it is not accepting the match it can plainly see, and names the one
+      // thing that would change the answer. A bare "N file(s) base lacks" next to a sibling
+      // holding the identical bytes reads as holt failing to notice.
+      reasons.push(heldUncommittedBy.length
+        ? `${risk.committedCount} file(s) base lacks — the identical content is in `
+          + `${heldUncommittedBy.join(', ')}, but UNCOMMITTED there, so it is not a durable copy `
+          + '(commit it there to make this worktree disposable)'
+        : `${risk.committedCount} file(s) base lacks`);
     }
     const uncommittedCount = risk.layers.uncommitted.length + risk.layers.untracked.length;
     if (uncommittedCount > 0) reasons.push(`${uncommittedCount} uncommitted file(s)`);
@@ -509,7 +720,17 @@ export function safeToDelete(scanResult, unique = null) {
     // "unmeasured" in any sense that matters to disposal — refusing on it would let a weaker
     // instrument's failure veto a stronger instrument's success, which is over-refusal wearing a
     // safety costume. Files NOT covered by content identity keep the full refusal below.
-    const contentProven = new Set(committedCoverage.matchedFiles);
+    // DURABLE coverage only, for the same reason the verdict above uses it: an uncommitted twin
+    // is not a stronger instrument's success, it is a copy that can vanish without holt seeing.
+    // AND WHOLE-TREE IDENTITY COUNTS AS COVERAGE TOO, for every committed path at once — that is
+    // what an identical tree oid means. Leaving it out would have re-created the exact stacked
+    // over-refusal the test above this one pins: `redundantWith:[sibling]` printed beside "holt
+    // could not read symbols from feat/huge.js", about a file whose sibling copy git has already
+    // proven identical. The oversized file that cannot be fingerprinted is usually the same file
+    // that is too large to tag, so these two gaps land on the same path by default.
+    const contentProven = new Set(
+      treeHolders.length ? [...committedCoverage.matchedFiles, ...committedFiles] : committedCoverage.matchedFiles,
+    );
     const unmeasured = (w.symbolsUnmeasured ?? []).filter((f) => !contentProven.has(f));
     if (unmeasured.length > 0) {
       const sample = unmeasured.slice(0, 3).join(', ');
@@ -526,6 +747,11 @@ export function safeToDelete(scanResult, unique = null) {
       // because it holds nothing. The distinction matters to a human reading the report and it
       // is what makes the last-one-standing behaviour legible rather than surprising.
       redundantWith: heldAlsoBy.length ? heldAlsoBy : (lineEndingOnlyVsBase ? ['base'] : undefined),
+      // The observation that is NOT a redundancy claim: siblings holding this worktree's exact
+      // content, uncommitted. Reported (it is true, and it names the action that would make this
+      // worktree disposable) and deliberately kept OUT of `redundantWith`, which every consumer
+      // reads as "safe because someone else has it".
+      redundantWithUncommitted: heldUncommittedBy.length ? heldUncommittedBy : undefined,
       // Surfaced so protect/clean/render can see a lock holt placed without it counting as a
       // reason the worktree is undeletable. Absent when there is no holt lock.
       holtLocked: holtLocked || undefined,
@@ -808,6 +1034,124 @@ function isCommentOnlyLine(line) {
   return line.length > 1 && line.startsWith('{') && line.endsWith('}');
 }
 
+// Characters whose ADJACENT layout whitespace carries no token information: single-character
+// delimiters in every language holt extracts symbols for. A delimiter is its own token, so
+// deleting the space beside it cannot merge two tokens into one — `f(\n  a,\n  b\n)` and
+// `f(a, b)` are the same token sequence and must normalise identically, which is exactly the
+// re-wrapping case textual equality got wrong. Operator characters are deliberately NOT in this
+// set, for the mirror-image reason: `a < = b` vs `a <= b` and `x = a - -b` vs `x = a--b` are
+// different token sequences, so spacing around operators stays significant and those bodies keep
+// disagreeing. The residual risk is a language where a DOUBLED delimiter is itself a lexeme
+// (Lua `[[`, Haskell `{-`, OCaml `(*`) written with its halves apart — and even then the only
+// consequence is that a name symbol-identity ALREADY matched stays in the shared set, i.e. the
+// pre-body-check behaviour, never a pair this comparison invents.
+const LAYOUT_ELIDABLE = new Set(['(', ')', '[', ']', '{', '}', ',', ';', ':', '.']);
+
+// The quote characters that open a string literal in the languages this comparison covers.
+const STRING_DELIMITERS = new Set(['"', "'", '`']);
+
+const isLayoutSpace = (c) => c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v';
+
+/**
+ * A declared body reduced to a WHITESPACE-NORMALISED, STRING-LITERAL-AWARE token stream.
+ *
+ * Why not plain text equality (which is what this check used to do): the question is "did these
+ * two workstreams build the same thing", and byte equality answers the much narrower "did they
+ * type the same bytes". Two agents that genuinely duplicated a helper will not have typed the
+ * same bytes — one wraps the signature over four lines, the other keeps it on one; one indents
+ * with tabs, the other with four spaces; one leaves a blank line before the loop. Under textual
+ * equality every one of those is a MISMATCH, the name is dropped from the shared set, and the
+ * real duplicate goes unreported. Precision was worth buying; that recall was not the price.
+ *
+ * The rules:
+ *   - whitespace OUTSIDE a string literal is layout. A run collapses to a single separator, and
+ *     to nothing at all beside a delimiter character (see LAYOUT_ELIDABLE).
+ *   - whitespace INSIDE a string literal is DATA, preserved byte for byte. `"a  b"` and `"a b"`
+ *     are two different programs and this check must keep saying so.
+ *   - when the lexer cannot be sure it tracked the literals — an unterminated quote, which is
+ *     what a Rust lifetime (`&'a str`), a Lisp quote (`'sym`), an apostrophe in a trailing
+ *     comment, or a 40-line window that truncated mid-string all look like — it returns null,
+ *     and the caller falls back to the STRICT textual comparison. The fallback is never "these
+ *     agree": an unsure lexer can only cost recall, never precision.
+ *   - the other half of that case, stated because it is NOT obvious: when such apostrophes happen
+ *     to come in an EVEN number they pair into a literal that is not one (`'a>(s: &'` out of a
+ *     Rust signature) and no null is returned. That is safe for the same reason and in the same
+ *     direction — the span is kept VERBATIM, so a mis-lexed region is strictly HARDER to match,
+ *     never easier. Both halves fail closed. Pinned in test/unit/declared-body-tokens.test.mjs.
+ *
+ * WHITESPACE-SIGNIFICANT LANGUAGES, and why this is still sound for them. In a free-form
+ * language this is token-stream equality outright: re-indenting and re-wrapping cannot change
+ * the token sequence, so equal normalised streams means equal tokens. In an off-side-rule
+ * language (Python, Haskell, YAML, Makefile) indentation IS a token — but readDeclaredBody's
+ * per-line `.trim()` already discarded every leading indent before this function is ever
+ * called, so no indentation signal is lost HERE that the caller had not already dropped. What
+ * this adds for those languages is erasing the line BOUNDARY, and two valid off-side bodies
+ * cannot differ in only that: splitting or joining statements in Python needs a `;` or a `\`,
+ * both non-whitespace characters this normalisation keeps and compares. The one new equivalence
+ * it does create there — `def f(): return 1` against the same body written over two lines — is
+ * one the duplicate question wants, because that is the same code.
+ *
+ * Exported alongside declaredBodiesAgree so the lexer's contract — literals verbatim, layout
+ * collapsed, unsure means null — is pinned directly, at a granularity no worktree fixture can
+ * reach.
+ *
+ * @param {string} body  a declared body, already per-line trimmed and comment-stripped
+ * @returns {string|null} the normalised token stream, or null when the lexer cannot be sure
+ */
+export function layoutNormalisedBody(body) {
+  const out = [];
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+
+    if (STRING_DELIMITERS.has(ch)) {
+      let j = i + 1;
+      let closed = false;
+      while (j < body.length) {
+        if (body[j] === '\\') { j += 2; continue; } // an escape consumes the next character, quote or not
+        if (body[j] === ch) { j++; closed = true; break; }
+        j++;
+      }
+      if (!closed) return null; // UNSURE — see the fallback contract above
+      out.push(body.slice(i, j)); // verbatim: the whitespace in here is data
+      i = j;
+      continue;
+    }
+
+    if (isLayoutSpace(ch)) {
+      let j = i;
+      while (j < body.length && isLayoutSpace(body[j])) j++;
+      const prev = out.length ? out[out.length - 1].slice(-1) : '';
+      const next = j < body.length ? body[j] : '';
+      // Leading/trailing layout disappears; so does layout touching a delimiter. Everything
+      // else keeps ONE separator, so two identifiers can never be fused into a third.
+      if (prev && next && !LAYOUT_ELIDABLE.has(prev) && !LAYOUT_ELIDABLE.has(next)) out.push(' ');
+      i = j;
+      continue;
+    }
+
+    out.push(ch);
+    i++;
+  }
+  return out.join('');
+}
+
+/**
+ * Do two successfully-read declared bodies AGREE?
+ *
+ * Exported for direct unit coverage of the lexer's bail-out, which an end-to-end fixture can
+ * only reach indirectly. `null` bodies (unreadable) never get here — the caller treats those as
+ * unknown, not as disagreement.
+ *
+ * @param {{ text: string, tokens: string|null }} a
+ * @param {{ text: string, tokens: string|null }} b
+ */
+export function declaredBodiesAgree(a, b) {
+  if (a.text === b.text) return true;            // byte-identical: agreed, no lexing needed
+  if (a.tokens === null || b.tokens === null) return false; // unsure -> the strict verdict stands
+  return a.tokens === b.tokens;
+}
+
 /**
  * The text a matched symbol's own declaration actually spans, best-effort.
  *
@@ -881,14 +1225,18 @@ export async function duplicates(scanResult, { minShared = 1 } = {}) {
     return m;
   });
   const boundariesByFile = live.map(() => new Map());
-  const bodyCache = new Map(); // `${index}:${key}` -> normalised body text | null, read once each
+  // `${index}:${key}` -> { text, tokens } | null. Read AND normalised once each: the token
+  // stream is derived per (workstream, symbol), never per pair, so an N-way fan-out sharing a
+  // name still lexes each body exactly once.
+  const bodyCache = new Map();
 
   async function declaredBodyFor(i, key) {
     const cacheKey = `${i}:${key}`;
     if (bodyCache.has(cacheKey)) return bodyCache.get(cacheKey);
-    const body = await readDeclaredBody(live[i], symByKey[i].get(key), boundariesByFile[i]);
-    bodyCache.set(cacheKey, body);
-    return body;
+    const text = await readDeclaredBody(live[i], symByKey[i].get(key), boundariesByFile[i]);
+    const entry = text === null ? null : { text, tokens: layoutNormalisedBody(text) };
+    bodyCache.set(cacheKey, entry);
+    return entry;
   }
 
   const owners = new Map(); // symbolKey -> [index]
@@ -912,8 +1260,9 @@ export async function duplicates(scanResult, { minShared = 1 } = {}) {
         const [bodyA, bodyB] = await Promise.all([declaredBodyFor(i, key), declaredBodyFor(j, key)]);
         // FAIL OPEN ON SILENCE: if either side could not be read, that is unknown, not a
         // mismatch, so the name still counts. Only a POSITIVE disagreement between two
-        // successfully-read bodies removes it.
-        if (bodyA !== null && bodyB !== null && bodyA !== bodyB) continue;
+        // successfully-read bodies removes it — and disagreement is judged on the token stream,
+        // so a body that was merely re-indented or re-wrapped still counts as the same code.
+        if (bodyA !== null && bodyB !== null && !declaredBodiesAgree(bodyA, bodyB)) continue;
         const k = pairKey(i, j);
         if (!pairs.has(k)) pairs.set(k, { i: Math.min(i, j), j: Math.max(i, j), shared: [] });
         pairs.get(k).shared.push(key);
@@ -998,7 +1347,9 @@ export function contextDigest(scanResult, workstreamId, { maxItems = 12 } = {}) 
   contested.sort((a, b) => b.fileCount - a.fileCount);
   alreadyBuilt.sort((a, b) => b.count - a.count);
 
-  // "Sibling" means came from the same dispatch — PROVENANCE (fork point + creation time, see
+  // "Sibling" means came from the same dispatch — CREATION-BURST CLUSTERING with name-stem
+  // corroboration (see assignFamilies in src/discover.mjs). The family label is a stable,
+  // opaque identifier derived from the cluster's earliest creation time, not from a fork commit.
   // inferFamily/assignFamilies in discover.mjs), not a naming coincidence. `familyRule` says which
   // method actually produced this workstream's family, so a caller can see WHY two workstreams
   // are grouped (or ask holt to explain it), but the grouping itself is not hedged here: a sibling
@@ -1225,10 +1576,10 @@ export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups
     families.get(n.family).push(n.id);
   }
 
-  // A sibling edge means "same dispatch" — decided by provenance (fork point + creation time),
-  // not by naming (see assignFamilies/inferFamily in discover.mjs). `family` on the edge is the
-  // real grouping key; a reader who wants to know HOW it was decided reads `familyRule` off
-  // either endpoint's node (fork+creation-time, name-fallback:*, or user-override).
+  // A sibling edge means "same dispatch" — decided by creation-burst clustering with name-stem
+  // corroboration (see assignFamilies in discover.mjs). `family` on the edge is the real grouping
+  // key; a reader who wants to know HOW it was decided reads `familyRule` off either endpoint's
+  // node (creation-burst, name-fallback:*, or user-override).
   for (const [family, ids] of families) {
     if (ids.length < 2) continue;
     for (let i = 1; i < ids.length; i++) {
@@ -1276,6 +1627,37 @@ export async function analyze(scanResult, opts = {}) {
   const live = scanResult.workstreams.filter((w) => w.ok);
   const { dropped, limit } = discriminativeSymbols(live);
 
+  // ---- THE STASH, WHICH THIS REPORT'S OWN PREMISE MADE INVISIBLE ---------------------------
+  //
+  // WHY THE GUARD-SIDE FIX IS NOT SUFFICIENT ON ITS OWN, argued rather than assumed.
+  //
+  // The guard (src/agent.mjs) now reads the stash — but only when someone TYPES a stash verb.
+  // That covers `drop`/`clear`/`pop`, and those are not how a stash usually loses work. The
+  // ordinary way is forgetting, and this report is the instrument that decides whether there is
+  // anything to remember. Reproduced end to end: sweep staged-only content with `git stash push
+  // -u` and every answer holt gives goes quiet in the same instant — `counts.atRisk` drops to 0,
+  // `safe` marks the workstream safe:true, `gate` prints "✓ disposable", `rescue` reports
+  // "nothingToRescue". Each of those is separately TRUE about the worktree and collectively
+  // false about the repository, which now holds the only copy of real work in a commit that one
+  // reflog entry names.
+  //
+  // The product's whole claim is "holt tells you what exists nowhere else". A stash entry
+  // holding unreachable blobs is the purest instance of that, and it was the one instance the
+  // report could not see. Loss then arrives by routes the guard is not on at all: a `gc` after
+  // something else drops the ref, a re-clone, or deleting a repository directory precisely
+  // BECAUSE holt said nothing was at risk.
+  //
+  // A REPOSITORY-LEVEL SECTION, NEVER A SYNTHETIC WORKSTREAM. A stash is not a worktree: it has
+  // no path, no branch, no family, nothing to land and nothing to delete. Injecting a fake row
+  // into `unique`/`safe` would put a non-existent id in front of `gate`, `rescue`, `clean`, the
+  // landing plan and the graph, and every one of them would then be asked to act on it. So this
+  // sits beside those lists and is counted separately.
+  //
+  // COST: one reflog walk. A repository with no stash — the overwhelmingly common case — pays a
+  // single rev walk that fails immediately and returns `total: 0`. Per-entry reachability work
+  // happens only when entries exist.
+  const stash = await stashState(scanResult.root);
+
   return {
     base: scanResult.base,
     root: scanResult.root,
@@ -1290,7 +1672,13 @@ export async function analyze(scanResult, opts = {}) {
       duplicatePairs: dups.length,
       safeToDelete: safe.filter((s) => s.safe).length,
       atRisk: uniq.filter((u) => u.uncommittedOnlyCount > 0).length,
+      // COUNTED SEPARATELY FROM `atRisk`, on purpose. `atRisk` is "workstreams whose deletion
+      // loses work" and every consumer reads it that way; folding stash entries into it would
+      // make a number that drives worktree decisions move for a reason that has nothing to do
+      // with any worktree.
+      stashAtRisk: stash.atRisk.length,
     },
+    stash,
     unique: uniq,
     safe,
     collisions: cols,
@@ -1300,6 +1688,10 @@ export async function analyze(scanResult, opts = {}) {
     plan,
     graph,
     skipped: scanResult.skipped,
+    // The primary worktree when it was EXCLUDED from this scan: {id, path, dirtyFiles} —
+    // dirtyFiles null when even the status read failed. Surfaces exist to say what holt is not
+    // vouching for; see the comment at the collection site in scan.mjs.
+    primaryUnscanned: scanResult.primaryUnscanned ?? null,
     filtering: {
       rule: `a symbol carried by more than ${limit} of ${live.length} workstream(s) is treated as boilerplate and excluded from PAIR evidence only`,
       droppedCount: dropped.length,

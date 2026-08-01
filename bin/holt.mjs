@@ -23,7 +23,7 @@ import {
 } from '../src/render.mjs';
 import { renderHtml } from '../src/graph-html.mjs';
 import { renderClusters } from '../src/ascii-graph.mjs';
-import { assessCommand, buildBrief } from '../src/agent.mjs';
+import { assessCommand, buildBrief, cachedReport } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import { integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
 import { protect, unprotect, rescue, rescues, clean, discard, auto } from '../src/actions.mjs';
@@ -34,11 +34,39 @@ import { branchAudit } from '../src/branches.mjs';
 import { partitionPlan } from '../src/partition.mjs';
 import { readJournal, appendEvent } from '../src/journal.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
-import { git } from '../src/git.mjs';
+import { git, listTrackedFiles } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
 import { loadPolicy, loadPolicyFrom, evaluatePolicy } from '../src/team/policy.mjs';
 import { fleetScan } from '../src/team/fleet.mjs';
 import { loadConfig, ConfigError } from '../src/config.mjs';
+
+// Commands where a config error must NEVER kill the process. The principle is universal:
+// config tunes HEURISTICS (family grouping, maintenance nagging) — it never changes the
+// content-identity safety contract. A broken config file is a user error, and the right
+// response to a user error is a WARNING and defaults, not a dead guard.
+//
+// The split is NOT "safety-critical vs informational" — it is "can this command's failure
+// cause work to be lost or the guard to be bypassed?" If yes, config errors are non-fatal.
+// If no (pure display commands like status, graph, brief), config errors fail loudly so
+// the user knows their config is broken.
+//
+// Falls back to defaults for: every command that PROTECTS, GATES, RESCUES, or REMOVES work.
+// Fails loudly for: pure display/reporting commands.
+const CONFIG_NON_FATAL = new Set([
+  'hook',           // the guard itself — dying here leaves the agent unprotected
+  'gate',           // pre-destruction gate — dying here could let a destructive command through
+  'rescue',         // captures work before destruction
+  'doctor',         // health check
+  'context',        // sibling awareness — agent relies on this to avoid duplicate work
+  'protect',        // places locks — dying here leaves work unprotected
+  'unprotect',      // releases locks
+  'auto',           // auto-protect
+  'clean',          // removes worktrees (re-verifies; defaults are MORE conservative, not less)
+  'discard',        // discards paths
+  'verify',         // verifies workstream pairs
+  'rescued',        // lists rescues
+  'mcp',            // MCP server — agent relies on this for decisions
+]);
 
 const USAGE = `
 holt — know what your agents made, and don't lose any of it
@@ -101,7 +129,7 @@ AGENT INTEGRATION
   brief               plain-text sibling-workstream briefing for any agent
   mcp                 run as an MCP server over stdio
   hook <event>        hook entry point; reads the host event as JSON on stdin
-                      events: pre-tool-use · session-start · user-prompt-submit
+                      events: pre-tool-use · session-start · user-prompt-submit · stop · session-end
                       --host claude-code|cursor|devin|generic   --command <cmd>
                       --autoprotect: session-start also locks at-risk workstreams first
                       (holt integrate wires this — zero-touch protection at every session)
@@ -113,7 +141,7 @@ OPTIONS
                       high-volume and low-evidence; landing order always uses it)
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
   --base <ref>        compare against <ref>            (default: origin/HEAD, then main/master…)
-  --family-window <s> seconds within which co-forked workstreams count as one dispatch (default: 300)
+  --family-window <s> seconds within which workstreams created close together count as one dispatch (default: 3600)
   --cwd <path>        repository to inspect            (default: cwd)
   --no-symbols        skip symbol extraction (faster, file-level only)
   --strict-read-only  never write objects; committed deltas become APPROXIMATE
@@ -177,7 +205,13 @@ function parseArgs(argv) {
       case '-h': case '--help': opts.help = true; break;
       case '-v': case '-V': case '--version': opts.version = true; break;
       case '--base': opts.base = argv[++i]; break;
-      case '--family-window': opts.familyWindowMs = (Number(argv[++i]) || 300) * 1000; break;
+      case '--family-window': {
+        const s = Number(argv[++i]);
+        // `|| 300` swallowed 0 (a valid "no window" value) and NaN. A NaN or negative is a user
+        // error; 0 is a deliberate "every workstream is its own family". Help text says SECONDS.
+        opts.familyWindowMs = (Number.isFinite(s) && s >= 0 ? s : 3600) * 1000;
+        break;
+      }
       case '--cwd': opts.cwd = argv[++i]; break;
       case '--html': opts.html = argv[++i]; break;
       case '--host': opts.host = argv[++i]; break;
@@ -533,6 +567,55 @@ async function cmdHook(opts) {
     return;
   }
 
+  // STOP: fires when the agent finishes responding. This closes the "biggest cadence hole" —
+  // the moment an agent creates something irreplaceable and then stops, with no warning that
+  // the worktree holds the only copy.
+  //
+  // DESIGN: ADVISORY, NOT BLOCKING. A blocking stop hook fires after every turn in a long
+  // session, forcing the agent to respond to holt instead of just stopping — that disrupts
+  // the workflow and teaches the agent to skip holt's output. Instead, the stop hook injects
+  // context (like session-start) ONLY when the brief CHANGED during the response. If the
+  // agent just created something irreplaceable, that's a change worth mentioning. If nothing
+  // changed, holt stays silent — the agent already saw the brief at session start and on
+  // prompt submit, and repeating it on every stop is noise.
+  //
+  // MULTI-PROVIDER: this works with any host that supports a stop/post-response event.
+  // The context is injected via formatContext(), which handles each host's schema.
+  if (event === 'stop') {
+    try {
+      const brief = await buildBrief(cwd, {
+        onlyIfChanged: true,
+        familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
+      });
+      if (brief) {
+        out(JSON.stringify(formatContext(brief, { host: opts.host, eventName: 'Stop' })));
+      }
+    } catch {
+      // Best-effort — a scan failure must not disrupt the agent's stop.
+    }
+    return;
+  }
+
+  // SESSION_END: advisory-only. Cannot block. holt uses it for a final warning about at-risk
+  // work — this is precisely when someone tears down worktrees, and a last-word reminder is
+  // the cheapest possible intervention.
+  //
+  // MULTI-PROVIDER: works with any host that supports a session-end event. The warning goes
+  // to stderr, which most hosts surface to the user.
+  if (event === 'session-end') {
+    try {
+      const brief = await buildBrief(cwd, {
+        familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
+      });
+      if (brief) {
+        process.stderr.write(`holt: ${brief}\n`);
+      }
+    } catch {
+      // Best-effort — session end is not the time to fail.
+    }
+    return;
+  }
+
   process.stderr.write(paint('red', `holt hook: unknown event '${event}'\n`));
   process.exit(2);
 }
@@ -541,6 +624,7 @@ async function cmdBrief(opts) {
   const text = await buildBrief(opts.cwd, {
     familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
   });
+  process.stderr.write(`DEBUG brief: buildBrief returned ${text ? 'text' : 'null'}\n`);
   if (opts.json) return emitJson({ context: text });
   if (text) { out(text); return; }
 
@@ -559,7 +643,28 @@ async function cmdBrief(opts) {
     out('[holt] no other worktrees yet — holt compares this one against siblings created with '
       + '`git worktree add ../<name> <branch>`. Nothing to relate until then.');
   } else {
-    out('[holt] nothing to report — every sibling workstream is clean right now.');
+    // "CLEAN" IS A CLAIM, AND A NULL IS NOT EVIDENCE FOR IT. buildBrief() returns null when the
+    // siblings are genuinely clean — and ALSO when the scan threw, and when every sibling failed
+    // to scan. Adversarial review reproduced both failure shapes (an unreadable .git pointer, a
+    // missing base object) and this branch printed "every sibling workstream is clean right now"
+    // at exit 0 while `holt status` in the same repo, at the same moment, said
+    // "scanned 0/2 · 2 skipped". A confident clean bill on missing evidence is fail-open — the
+    // exact defect class this tool exists to catch — so the claim is only made after re-deriving
+    // the scan and seeing every workstream actually answer.
+    let report = null;
+    try { ({ report } = await cachedReport(opts.cwd, opts)); } catch { /* handled below */ }
+    const skipped = report ? report.counts.workstreams - report.counts.scanned : -1;
+    if (!report) {
+      out('[holt] could not scan this repository — holt cannot vouch for the siblings. '
+        + 'Run `holt status` for the error.');
+      process.exit(2);
+    } else if (skipped > 0) {
+      out(`[holt] ${skipped} of ${report.counts.workstreams} workstream(s) could not be scanned — `
+        + 'holt cannot vouch for them. Run `holt status` to see which, and why.');
+      process.exit(2);
+    } else {
+      out('[holt] nothing to report — every sibling workstream is clean right now.');
+    }
   }
 }
 
@@ -786,6 +891,11 @@ async function main() {
   // here, before any command runs — never fall back to defaults while pretending the config the
   // user wrote is in effect. Every command below gets whatever it declares (familyOverrides,
   // maintenanceFloor, maintenanceRatio) folded into `opts`, which every command already receives.
+  //
+  // EXCEPTION: safety-critical commands (hook, gate, rescue, doctor, context) must NEVER die on
+  // a config error. The guard dying because of a typo in .holtrc.json is a self-inflicted wound
+  // that leaves the agent unprotected — the exact opposite of what holt exists to prevent. These
+  // commands fall back to defaults with a warning to stderr instead of exiting.
   let configPath = null;
   try {
     const cfg = await loadConfig(opts.cwd);
@@ -793,11 +903,25 @@ async function main() {
     if (cfg.config.familyOverrides !== undefined) opts.familyOverrides = cfg.config.familyOverrides;
     if (cfg.config.maintenanceFloor !== undefined) opts.maintenanceFloor = cfg.config.maintenanceFloor;
     if (cfg.config.maintenanceRatio !== undefined) opts.maintenanceRatio = cfg.config.maintenanceRatio;
+    // Surface warnings (unknown keys) to stderr — loud but non-fatal.
+    for (const w of cfg.warnings) {
+      process.stderr.write(paint('yellow', `holt: ${w.message}\n`));
+    }
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
-    if (opts.json) { emitJson({ ok: false, code: 'bad-config', reason: e.message, path: e.path }); process.exit(2); }
-    process.stderr.write(paint('red', `holt: ${e.message}\n`));
-    process.exit(2);
+    if (CONFIG_NON_FATAL.has(cmd)) {
+      // Safety-critical commands fall back to defaults with a warning. The guard must not die.
+      if (opts.json) {
+        process.stderr.write(paint('yellow', `holt: config warning (using defaults): ${e.message}\n`));
+      } else {
+        process.stderr.write(paint('yellow', `holt: ${e.message} — using defaults, continuing\n`));
+      }
+    } else {
+      // Non-safety-critical commands fail loudly — the user should know their config is broken.
+      if (opts.json) { emitJson({ ok: false, code: 'bad-config', reason: e.message, path: e.path }); process.exit(2); }
+      process.stderr.write(paint('red', `holt: ${e.message}\n`));
+      process.exit(2);
+    }
   }
   opts.configPath = configPath;
   if (cmd === 'doctor') return cmdDoctor(opts);
@@ -833,8 +957,7 @@ async function main() {
   }
   if (cmd === 'partition') {
     const { report, scanned } = await buildReport(opts);
-    const ls = await git(['ls-files'], { cwd: scanned.root });
-    const plan = partitionPlan(report, ls.stdout.split('\n').filter(Boolean), { agents: opts.agents ?? 2 });
+    const plan = partitionPlan(report, await listTrackedFiles(scanned.root), { agents: opts.agents ?? 2 });
     if (opts.json) return emitJson(plan);
     out(paint('bold', `holt partition — ${plan.agents} agents`) + paint('grey', '  (advisory: a collision-free starting map, not a work plan)'));
     for (const b of plan.buckets) {

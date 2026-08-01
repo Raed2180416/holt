@@ -134,3 +134,126 @@ test('BRIEF: SessionStart is never suppressed — a new session has seen nothing
   assert.ok(a && a.includes('holt'), 'the fixture must produce a brief');
   assert.equal(b, a, 'a second session was told nothing because a previous session had been told');
 });
+
+/* --------------------------------------------------- Stop / SessionEnd hooks ---- */
+//
+// The Stop hook closes the "biggest cadence hole": an agent creates something irreplaceable
+// and then stops, with no warning that the worktree holds the only copy.
+//
+// DESIGN: ADVISORY, NOT BLOCKING. The stop hook injects context (like session-start) ONLY
+// when the brief CHANGED during the response. If nothing changed, holt stays silent — the
+// agent already saw the brief at session start and on prompt submit, and repeating it on
+// every stop is noise that teaches the agent to skip holt's output.
+//
+// SessionEnd is advisory-only — it cannot block, but it warns on stderr.
+
+test('STOP: a clean repo produces no output (silent, non-blocking, exit 0)', async (t) => {
+  const fx = await newRepo();
+  t.after(() => fx.cleanup());
+
+  const r = await sh(process.execPath,
+    [BIN, 'hook', 'stop', '--host', 'claude-code', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 0, `stop on a clean repo must exit 0, got exit ${r.code}. stderr: ${r.stderr}`);
+  // Nothing changed → nothing to say. No context injection.
+  assert.equal(r.stdout.trim(), '', 'stop on a clean repo should produce no stdout');
+});
+
+test('STOP: at-risk work injects context (advisory, non-blocking, exit 0)', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  // The standard fixture has worktrees with unique work. The stop hook should inject context
+  // (advisory) — NOT block the agent from stopping.
+  const { spawn } = await import('node:child_process');
+  const result = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, 'hook', 'stop', '--host', 'claude-code', '--cwd', fx.root], {
+      cwd: fx.root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (d) => stdout += d);
+    child.stderr.on('data', (d) => stderr += d);
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.stdin.write(JSON.stringify({ cwd: fx.root }));
+    child.stdin.end();
+  });
+
+  // Advisory: exit 0 (does not block the agent from stopping).
+  assert.equal(result.code, 0, `stop must not block (advisory), got exit ${result.code}. stderr: ${result.stderr}`);
+  // Context should be injected — the brief mentions at-risk work.
+  const ctx = contextOf(result.stdout);
+  assert.ok(ctx, 'stop should inject context when there is at-risk work');
+  assert.match(ctx, /holt/i, 'injected context should be a holt brief');
+});
+
+test('STOP: does not disrupt the agent on every turn (onlyIfChanged)', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  // First stop: injects context (first time seeing this state).
+  const { spawn } = await import('node:child_process');
+  const stop = () => new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, 'hook', 'stop', '--host', 'claude-code', '--cwd', fx.root], {
+      cwd: fx.root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (d) => stdout += d);
+    child.stderr.on('data', (d) => stderr += d);
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.stdin.write(JSON.stringify({ cwd: fx.root }));
+    child.stdin.end();
+  });
+
+  const first = await stop();
+  const ctx1 = contextOf(first.stdout);
+  assert.ok(ctx1, 'first stop should inject context');
+
+  // Second stop: nothing changed → silent. This is the key: holt does not repeat itself
+  // on every stop, which would teach the agent to skip its output.
+  const second = await stop();
+  const ctx2 = contextOf(second.stdout);
+  assert.equal(ctx2, null, 'second stop with no changes should be silent');
+});
+
+test('SESSION-END: at-risk work produces a warning on stderr (advisory, non-blocking)', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  const { spawn } = await import('node:child_process');
+  const result = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, 'hook', 'session-end', '--host', 'claude-code', '--cwd', fx.root], {
+      cwd: fx.root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (d) => stdout += d);
+    child.stderr.on('data', (d) => stderr += d);
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.stdin.write(JSON.stringify({ cwd: fx.root }));
+    child.stdin.end();
+  });
+
+  // SessionEnd is advisory — it should not block (exit 0) but should warn on stderr.
+  assert.equal(result.code, 0, `session-end must not block, got exit ${result.code}. stderr: ${result.stderr}`);
+  assert.ok(result.stderr.length > 0, 'session-end with at-risk work should warn on stderr');
+  assert.match(result.stderr, /holt/i, 'should mention holt in the warning');
+});
+
+test('SESSION-END: a clean repo produces no warning', async (t) => {
+  const fx = await newRepo();
+  t.after(() => fx.cleanup());
+
+  const { spawn } = await import('node:child_process');
+  const result = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, 'hook', 'session-end', '--host', 'claude-code', '--cwd', fx.root], {
+      cwd: fx.root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
+    });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', (d) => stdout += d);
+    child.stderr.on('data', (d) => stderr += d);
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.stdin.write(JSON.stringify({ cwd: fx.root }));
+    child.stdin.end();
+  });
+
+  assert.equal(result.code, 0, `session-end on clean repo must exit 0, got exit ${result.code}`);
+  assert.equal(result.stderr, '', 'session-end on a clean repo should produce no warning');
+});

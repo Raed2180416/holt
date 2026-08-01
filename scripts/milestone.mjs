@@ -20,6 +20,7 @@
  */
 
 import fs from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 
 export const THRESHOLDS = { stars: 500, weeklyDownloads: 1000 };
 
@@ -109,6 +110,6 @@ async function main() {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => { process.stderr.write(`${e.stack}\n`); process.exit(2); });
 }

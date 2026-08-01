@@ -33,7 +33,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import { git, catFileBatch, splitNul, pmap, resolveRef, GitRefused } from './git.mjs';
 import { resolveBackend, symbolsOnDisk, symbolsAtBase, diffSymbols, symbolKey } from './symbols.mjs';
-import { contentFingerprint, fingerprintKey } from './content-identity.mjs';
+import { pathContentKey } from './content-identity.mjs';
 
 const BASE_CANDIDATES = ['main', 'master', 'trunk', 'develop', 'default'];
 
@@ -425,6 +425,75 @@ const dirPattern = (name) =>
 const GENERATED = [...GENERATED_DIRS.map(dirPattern), ...GENERATED_FILES];
 
 export { GENERATED_DIRS };
+
+/**
+ * THE COMMAND THAT RECREATES A GENERATED DIR, AS EVIDENCE IT EXISTS.
+ *
+ * The comment block above GENERATED_DIRS states the rule this list has now violated three times
+ * (`vendor/`, then `logs/`+`tmp/`, now `build/`): "The rule is not 'does this look like noise',
+ * it is 'can a command in this repository recreate it'" — and nothing ever checked for the
+ * command. Reproduced end to end: a repo with NO build system, a hand-placed
+ * `build/only.js`, `gate` printing "✓ disposable", `clean --apply` removing the worktree, and
+ * `git fsck` finding nothing, because the content was never a git object. The directory's NAME
+ * was the entire verdict, and names are exactly what this product exists to distrust.
+ *
+ * So each conditional name earns disposal from the MANIFEST whose install/build step recreates
+ * it, checked per worktree root. `node_modules` is reproducible where package.json exists;
+ * `target` where Cargo.toml (or a JVM build file) does; a bare `build/` in a repo with no build
+ * system is just a directory somebody named build. `null` marks the unconditional entries —
+ * `.git` (structural), OS/IDE droppings — which are machine-managed wherever they appear.
+ *
+ * THE NEVER-WORSE HALF IS PINNED TOO: with the manifest present, everything here stays
+ * reclaimable — the monster fixture's worktree full of real build junk still cleans. Losing a
+ * rebuild costs minutes; the alternative costs the work.
+ */
+const JS_MANIFESTS = ['package.json'];
+const PY_MANIFESTS = ['pyproject.toml', 'setup.py', 'setup.cfg', 'requirements.txt', 'Pipfile'];
+const JVM_MANIFESTS = ['pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'];
+const GENERATOR_MANIFESTS = {
+  '.git': null,
+  '.AppleDouble': null,
+  '.idea': null,
+  node_modules: JS_MANIFESTS,
+  '.next': JS_MANIFESTS,
+  '.turbo': JS_MANIFESTS,
+  '.parcel-cache': JS_MANIFESTS,
+  dist: [...JS_MANIFESTS, ...PY_MANIFESTS],
+  build: [...JS_MANIFESTS, ...JVM_MANIFESTS, 'CMakeLists.txt', 'Makefile', 'meson.build'],
+  target: ['Cargo.toml', ...JVM_MANIFESTS],
+  coverage: [...JS_MANIFESTS, ...PY_MANIFESTS],
+  __pycache__: PY_MANIFESTS,
+  '.venv': PY_MANIFESTS,
+  venv: PY_MANIFESTS,
+  '.pytest_cache': PY_MANIFESTS,
+  '.mypy_cache': PY_MANIFESTS,
+  '.ruff_cache': PY_MANIFESTS,
+  '.tox': ['tox.ini', ...PY_MANIFESTS],
+  '.gradle': JVM_MANIFESTS,
+  '.terraform': ['*.tf'],
+};
+
+/**
+ * Which generated-dir names have their recreating command PRESENT in this worktree.
+ * One readdir of the worktree root answers every manifest question at once.
+ */
+export async function generatedEvidence(wtPath) {
+  let names = [];
+  try { names = await fs.readdir(wtPath); } catch { /* unreadable root: no evidence, keep all conditional dirs protected */ }
+  const present = new Set(names);
+  const anyTf = names.some((n) => n.endsWith('.tf'));
+  const active = new Set();
+  for (const [dir, manifests] of Object.entries(GENERATOR_MANIFESTS)) {
+    if (manifests === null) { active.add(dir); continue; }
+    if (manifests.some((m) => (m === '*.tf' ? anyTf : present.has(m)))) active.add(dir);
+  }
+  return active;
+}
+
+const UNCONDITIONAL_DIR_RES = Object.entries(GENERATOR_MANIFESTS)
+  .filter(([, m]) => m === null).map(([d]) => dirPattern(d));
+const CONDITIONAL_DIR_RE = new Map(Object.entries(GENERATOR_MANIFESTS)
+  .filter(([, m]) => m !== null).map(([d]) => [d, dirPattern(d)]));
 /**
  * Scratch-named directories, treated as noise ONLY when the repository has gitignored them.
  *
@@ -435,8 +504,23 @@ export { GENERATED_DIRS };
  */
 const SCRATCH_WHEN_IGNORED = /(^|\/)(tmp|temp|log|logs|\.cache)(\/|$)/;
 
-export function looksGenerated(p) {
-  return GENERATED.some((re) => re.test(p));
+/**
+ * @param {string} p
+ * @param {Set<string>} [activeDirs]  the generated-dir names whose recreating manifest exists in
+ *   the worktree under judgment (from generatedEvidence()). WITHOUT it, every name counts — the
+ *   pre-evidence behaviour, kept for callers with no worktree in hand. WITH it, a conditional
+ *   name matches only when its manifest was seen: `build/only.js` in a repo with no build system
+ *   is not noise, it is the only copy of somebody's work wearing a noisy name.
+ */
+export function looksGenerated(p, activeDirs) {
+  if (activeDirs === undefined) return GENERATED.some((re) => re.test(p));
+  if (GENERATED_FILES.some((re) => re.test(p))) return true;
+  if (UNCONDITIONAL_DIR_RES.some((re) => re.test(p))) return true;
+  for (const d of activeDirs) {
+    const re = CONDITIONAL_DIR_RE.get(d);
+    if (re && re.test(p)) return true;
+  }
+  return false;
 }
 
 /**
@@ -461,11 +545,22 @@ export function looksGenerated(p) {
  */
 export function atRiskFiles(ws) {
   if (!ws || !ws.ok) return [];
-  return [...new Set([
-    ...(ws.uncommitted?.files ?? []),
-    ...(ws.uncommitted?.untracked ?? []),
-    ...(ws.ignored?.files ?? []),
-  ])].filter(Boolean);
+  // THE FILE GATE'S AT-RISK SET IS UNCONDITIONAL ON GITIGNORED CONTENT.
+  //
+  // `contentAtRisk()` (analyze.mjs) reads `w.ignored.files` directly to feed the DISPOSABLE
+  // verdict, and there a gitignored `build/` with no build manifest correctly REFUSES — holt
+  // cannot verify it, and the owner's .gitignore entry is not proof the content is regenerable.
+  // But `atRiskFiles()` feeds the FILE GATE: "would `rm build/out.js` destroy the only copy?"
+  // A .gitignore entry declaring `build/` disposable IS the owner's answer to that question —
+  // `rm -rf node_modules` on a gitignored `node_modules/` must stay allowed, or the guard
+  // becomes the "safety that freezes the tool" the product exists not to be. So gitignored
+  // entries are filtered with the unconditional GENERATED list here, while the disposable
+  // verdict keeps the manifest-gated set from `contentAtRisk()`. The two answer different
+  // questions and are right to use different evidence.
+  const uncommitted = (ws.uncommitted?.files ?? []).filter(Boolean);
+  const untracked = (ws.uncommitted?.untracked ?? []).filter(Boolean);
+  const ignored = (ws.ignored?.files ?? []).filter((f) => Boolean(f) && !looksGenerated(f) && !SCRATCH_WHEN_IGNORED.test(f));
+  return [...new Set([...uncommitted, ...untracked, ...ignored])];
 }
 
 /**
@@ -483,7 +578,7 @@ export function atRiskFiles(ws) {
  *
  * @returns {Map<string,'uncommitted'|'untracked'|'gitignored'>} path -> which layer it is in
  */
-export function atRiskFromStatus(stdoutZ) {
+export function atRiskFromStatus(stdoutZ, activeDirs) {
   const out = new Map();
   const parts = String(stdoutZ ?? '').split('\0');
   for (let i = 0; i < parts.length; i++) {
@@ -494,10 +589,19 @@ export function atRiskFromStatus(stdoutZ) {
     if (!p) continue;
     // A rename entry is followed by its source path; consume it so it is not read as an entry.
     if (xy[0] === 'R' || xy[0] === 'C') i++;
-    if (looksGenerated(p)) continue;
-    if (xy === '??') out.set(p, 'untracked');
-    else if (xy === '!!') out.set(p, 'gitignored');
-    else out.set(p, 'uncommitted');
+    // THE MANIFEST GATE IS FOR UNTRACKED/UNCOMMITTED CONTENT, NOT GITIGNORED.
+    // A `!!` entry is gitignored — the .gitignore entry IS the provenance signal, so the
+    // unconditional GENERATED list (no activeDirs) is the right filter. An untracked `??`
+    // entry has no .gitignore declaration, so the manifest gate correctly applies: a
+    // `node_modules/` with no package.json might be a hand-copied dependency patch.
+    if (xy === '!!') {
+      if (looksGenerated(p) || SCRATCH_WHEN_IGNORED.test(p)) continue;
+      out.set(p, 'gitignored');
+    } else {
+      if (looksGenerated(p, activeDirs)) continue;
+      if (xy === '??') out.set(p, 'untracked');
+      else out.set(p, 'uncommitted');
+    }
   }
   return out;
 }
@@ -518,7 +622,7 @@ export function atRiskFromStatus(stdoutZ) {
  * What remains is content a human plausibly cares about, and its presence downgrades the verdict
  * from "provably disposable" to "holt cannot verify this".
  */
-async function ignoredContent(wtPath, { timeout }) {
+async function ignoredContent(wtPath, { timeout, activeDirs }) {
   const r = await git(['status', '--porcelain', '-z', '--ignored=matching', '--untracked-files=all'],
     { cwd: wtPath, timeout });
   if (r.code !== 0) return { files: [], how: 'ignored-probe-failed', error: r.stderr?.trim() };
@@ -539,7 +643,10 @@ async function ignoredContent(wtPath, { timeout }) {
     // directory is protected (the gauntlet's loss). Gitignored content in one is noise (the
     // monster's `.cache/blob.bin` and `logs/`, planted precisely so that a worktree full of build
     // junk is still reclaimable — without this, "safety" freezes the tool it is protecting).
-    if (!p || looksGenerated(p) || SCRATCH_WHEN_IGNORED.test(p)) continue;
+    // Evidence-aware: a generated-NAMED dir only counts as noise when the manifest that
+    // recreates it exists in this worktree. See GENERATOR_MANIFESTS — the third data-loss
+    // reproduction against this list, and the rule its own comment already stated.
+    if (!p || looksGenerated(p, activeDirs) || SCRATCH_WHEN_IGNORED.test(p)) continue;
     // A TRAILING SLASH IS A DIRECTORY, AND SKIPPING IT DESTROYED REAL DATA.
     //
     // When .gitignore names a directory (`secrets/`), git's --ignored=matching collapses the whole
@@ -594,6 +701,12 @@ async function scanFiles(ws, ctx) {
   result.head = headOid;
 
   try {
+    // Which generated-dir names have their recreating manifest in THIS worktree — one readdir,
+    // shared by every layer below and carried on the result for downstream consumers, so the
+    // scan and the guard cannot disagree about what counts as noise here.
+    const activeDirs = await generatedEvidence(ws.path);
+    result.generatedActive = [...activeDirs];
+
     const [committed, uncommitted, ignored] = await Promise.all([
       committedDelta(root, base.oid, headOid, { strictReadOnly, timeout }),
       // jj snapshots the working copy into `@` automatically, so under jj there IS no separate
@@ -606,7 +719,7 @@ async function scanFiles(ws, ctx) {
       // Ignored content cannot be analysed, but it CAN be destroyed — so it must be seen.
       ws.vcs === 'jj'
         ? Promise.resolve({ files: [], how: 'n/a (jj)' })
-        : ignoredContent(ws.path, { timeout }),
+        : ignoredContent(ws.path, { timeout, activeDirs }),
     ]);
 
     // FAIL-CLOSED ON INSTRUMENT FAILURE. Found by probing partial (blobless) clones: when
@@ -625,9 +738,30 @@ async function scanFiles(ws, ctx) {
       return result; // ok stays false -> UNKNOWN -> never safe, never cleaned
     }
 
-    const cFiles = committed.files.filter((f) => !looksGenerated(f));
-    const uFiles = uncommitted.files.filter((f) => !looksGenerated(f));
-    const uUntracked = (uncommitted.untracked ?? []).filter((f) => !looksGenerated(f));
+    // Evidence-aware on every layer: a generated NAME only earns the noise filter when the
+    // manifest that recreates it exists in this worktree (see GENERATOR_MANIFESTS). Without
+    // this, untracked `dist/handmade.js` in a repo with no build system was dropped from the
+    // at-risk set by its name alone — the same reasoning that destroyed logs/ content twice.
+    const cFiles = committed.files.filter((f) => !looksGenerated(f, activeDirs));
+    const uFiles = uncommitted.files.filter((f) => !looksGenerated(f, activeDirs));
+    const uUntracked = (uncommitted.untracked ?? []).filter((f) => !looksGenerated(f, activeDirs));
+
+    // THE SYMBOL-EXTRACTION SET IS UNCONDITIONAL, NOT MANIFEST-GATED.
+    //
+    // The manifest gate above protects at-risk FILES — a hand-placed `build/only.js` with no
+    // build system is the only copy of somebody's work, and the at-risk set must not lose it.
+    // But `touched` feeds SYMBOL EXTRACTION, and a generated-named directory is never source
+    // code worth extracting symbols from — even a hand-copied `node_modules` patch is a
+    // dependency, not authored work. ctags' own `--exclude=node_modules` only filters directory
+    // traversal, not explicit file paths (verified: passing `node_modules/pkg/index.js` as an
+    // explicit arg extracts its symbols despite `--exclude`). So `touched` is filtered with the
+    // unconditional GENERATED list (no activeDirs), keeping the symbol layer clean while the
+    // at-risk layers stay manifest-gated.
+    const touchedFiles = [...new Set([
+      ...committed.files.filter((f) => !looksGenerated(f)),
+      ...uFiles.filter((f) => !looksGenerated(f)),
+      ...uUntracked.filter((f) => !looksGenerated(f)),
+    ])].sort();
 
     // BASE CAN BE THE "LIVING SIBLING" TOO. Measured on the 50-language independent-oracle
     // benchmark: one worktree per repository whose entire committed delta is the SAME FILE(S)
@@ -671,7 +805,7 @@ async function scanFiles(ws, ctx) {
       how: ignored?.how ?? 'not-run',
       error: ignored?.error,
     };
-    result.touched = [...new Set([...cFiles, ...uFiles, ...uUntracked])].sort();
+    result.touched = touchedFiles;
     result.stats = {
       committedFiles: cFiles.length,
       uncommittedFiles: uFiles.length,
@@ -690,14 +824,19 @@ async function scanFiles(ws, ctx) {
     // not) is visible to the caller rather than forcing an all-or-nothing verdict. A file that
     // fails to read (race, permission, symlink loop) gets `null` — the safe direction, since it
     // can only make this file LESS likely to be matched, never falsely redundant.
+    //
+    // EVERY LAYER GOES THROUGH ONE READER, AND THAT READER NEVER FOLLOWS A SYMLINK. `result.touched`
+    // is committed + uncommitted + untracked, so the single loop below is the whole content-identity
+    // surface — there is no second, unfixed path for one of the layers. It used to be a bare
+    // `fs.readFile`, which follows symlinks and hashes the RESOLVED TARGET: two worktrees each
+    // committing an unrelated symlink to two DIFFERENT external files that happened to hold the same
+    // bytes fingerprinted identically, `safeToDelete` called each redundantWith the other, and
+    // `clean --apply` would have removed the only copy. `pathContentKey` (content-identity.mjs)
+    // lstats first and keys a symlink by its TARGET STRING — which is exactly the blob git stores
+    // for it — so identity is over what git tracks, not what the filesystem resolves.
     result.contentKeys = {};
     await pmap(result.touched, async (f) => {
-      try {
-        const buf = await fs.readFile(path.join(ws.path, f));
-        result.contentKeys[f] = fingerprintKey(contentFingerprint(buf));
-      } catch {
-        result.contentKeys[f] = null;
-      }
+      result.contentKeys[f] = await pathContentKey(path.join(ws.path, f));
     }, 6);
   } catch (err) {
     if (err instanceof GitRefused) throw err; // a refusal is a holt bug, never swallowed
@@ -730,6 +869,27 @@ export async function scan(disc, opts = {}) {
   };
 
   const targets = disc.workstreams.filter((w) => !w.isPrimary || opts.includePrimary);
+
+  // WHAT HOLT IS NOT AUDITING MUST STILL BE NAMED. The primary worktree is excluded from the
+  // scan by default — it is where the human lives, not a dispatched agent — but excluded is not
+  // the same as nonexistent. Adversarial review built the commonest first-run shape there is: one
+  // repository, no fan-out yet, uncommitted-only work sitting in the primary — and holt answered
+  // "Nothing unique anywhere. Every workstream is reproducible from base." That sentence is true
+  // of the zero workstreams scanned and false of the repository. One porcelain status call
+  // records whether the unscanned primary is dirty, so every surface can say what holt is NOT
+  // vouching for instead of implying it checked.
+  let primaryUnscanned = null;
+  const primary = disc.workstreams.find((w) => w.isPrimary);
+  if (primary && !opts.includePrimary) {
+    const st = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: primary.path })
+      .catch(() => null);
+    const entries = st && st.code === 0 ? st.stdout.split('\0').filter(Boolean).length : null;
+    primaryUnscanned = {
+      id: primary.id,
+      path: primary.path,
+      dirtyFiles: entries, // null = even the status read failed; never reported as "clean"
+    };
+  }
 
   // ---- Phase 1: file-level deltas -------------------------------------------------
   const scanned = await pmap(targets, (ws) => scanFiles(ws, ctx), opts.concurrency ?? 8);
@@ -768,6 +928,7 @@ export async function scan(disc, opts = {}) {
     backend,
     workstreams: scanned,
     skipped: scanned.filter((w) => !w.ok).map((w) => ({ id: w.id, reason: w.reason })),
+    primaryUnscanned,
     strictReadOnly: ctx.strictReadOnly,
   };
 }

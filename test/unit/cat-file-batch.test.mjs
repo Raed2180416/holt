@@ -121,3 +121,28 @@ test('catFileBatch: git cat-file --batch is on the SAFE allowlist (defense in de
   assert.equal(v.allowed, true);
   assert.equal(v.tier, 'SAFE');
 });
+
+test('catFileBatch: one onRecord rejection does not kill the rest of the batch (chunk-level catch)', async (t) => {
+  const fx = await newRepo('cat6');
+  t.after(() => fx.cleanup());
+  await fx.write('a.txt', 'AAA\n');
+  await fx.write('b.txt', 'BBB\n');
+  await fx.write('c.txt', 'CCC\n');
+  const head = await fx.commit('add a, b, c');
+
+  // The second record's callback rejects. Without a per-record catch in the caller, this
+  // rejection propagates through Promise.all(inFlight) inside catFileBatch and kills the
+  // entire batch — every other record is lost. The test proves the batch itself is resilient:
+  // catFileBatch resolves, and records before and after the failing one are still delivered.
+  const specs = [`${head}:a.txt`, `${head}:b.txt`, `${head}:c.txt`];
+  const got = new Map();
+  await assert.doesNotReject(
+    catFileBatch(specs, { cwd: fx.root }, (spec, content) => {
+      if (spec === `${head}:b.txt`) throw new Error('simulated per-record failure');
+      got.set(spec, content === null ? null : content.toString('utf8'));
+    }),
+    'a single onRecord rejection must not reject the whole batch',
+  );
+  assert.equal(got.get(`${head}:a.txt`), 'AAA\n', 'record before the failing one must still arrive');
+  assert.equal(got.get(`${head}:c.txt`), 'CCC\n', 'record after the failing one must still arrive');
+});

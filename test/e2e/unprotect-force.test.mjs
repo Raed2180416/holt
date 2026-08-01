@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { newRepo } from '../fixtures.mjs';
 import { readJournal } from '../../src/journal.mjs';
 import { protect } from '../../src/actions.mjs';
+import { samePathAsync } from '../../src/paths.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -45,22 +46,21 @@ function holt(args, cwd) {
 /**
  * Whether git itself still reports `wtPath` as locked (ground truth, independent of holt).
  *
- * Paths are compared segment-wise after separator and case folding, never by raw indexOf:
- * porcelain prints forward slashes while a Windows caller's path carries backslashes, so the
- * substring search found nothing, returned "not locked", and three of this file's tests failed
- * on windows-latest asserting a lock had been released that was in fact firmly in place — the
- * exact path-comparison class this repo has now hit seven times, this time in its own helper.
+ * Paths are compared through `samePathAsync` (canonical + case-folded), never by raw string
+ * equality: porcelain prints forward slashes while a Windows caller's path carries backslashes,
+ * and macOS tmpdir is a symlink to /private/var. The custom `norm()` this used to have only
+ * replaced separators and lowercased — it did not resolve symlinks or 8.3 short names, so it
+ * failed on macOS and Windows exactly as raw indexOf did before it. Using the same path
+ * comparison the rest of the codebase uses closes the class instead of re-instances it.
  */
 async function isLocked(root, wtPath) {
   const { execFile: ef } = await import('node:child_process');
   const out = await new Promise((resolve) => {
     ef('git', ['worktree', 'list', '--porcelain'], { cwd: root }, (_e, stdout) => resolve(String(stdout ?? '')));
   });
-  const norm = (p) => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-  const want = norm(wtPath);
   let inBlock = false;
   for (const line of out.split('\n')) {
-    if (line.startsWith('worktree ')) inBlock = norm(line.slice(9)) === want;
+    if (line.startsWith('worktree ')) inBlock = await samePathAsync(line.slice(9), wtPath);
     else if (inBlock && /^locked/.test(line)) return true;
   }
   return false;

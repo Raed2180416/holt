@@ -135,3 +135,37 @@ test('render: a dense tangle bounds its edge list and says how much it cut', () 
   // ANTI-VACUITY: every member must still be named even though most of their edges are not.
   for (const id of ids) assert.ok(text.includes(id), `member '${id}' must still be listed: ${text}`);
 });
+
+/**
+ * THE DEFECT THIS PINS: a flat edge cap (slice(0, MAX_EDGES)) could cut the ONLY edge connecting
+ * a member to the rest of the tangle. That member then appeared under ENTANGLED with no visible
+ * edge — it looked like decoration, and the "… and N more" footer did not name which members it
+ * hid edges for. The fix fills the cap in two passes: top-ranked edges first, then any remaining
+ * edges that are the sole visible connection for an uncovered member.
+ */
+test('render: a member whose only edge is beyond the cap still gets a visible connection', () => {
+  // Build a tangle with MAX_EDGES + a few extra members whose only edges are at the tail.
+  // 8 fully-connected members = 28 edges (well over the 16 cap). Then add 2 members each
+  // connected to only one existing member — their edges sort to the bottom (rank 2 = proven,
+  // same as the rest, but localeSort puts them after). Without the two-pass fill, their edges
+  // are cut and they appear with no visible connection.
+  const core = Array.from({ length: 8 }, (_, i) => `w${i}`);
+  const leaf = ['leaf-a', 'leaf-b'];
+  const ids = [...core, ...leaf];
+  const collisions = [];
+  for (let i = 0; i < core.length; i++) {
+    for (let j = i + 1; j < core.length; j++) collisions.push({ a: core[i], b: core[j], kind: 'proven' });
+  }
+  // Leaf members each have exactly one edge to a core member.
+  collisions.push({ a: 'leaf-a', b: 'w0', kind: 'proven' });
+  collisions.push({ a: 'leaf-b', b: 'w1', kind: 'proven' });
+
+  const text = renderClusters(report({ ids, collisions }));
+
+  // Every member must appear in at least one shown edge line — not just listed as a member.
+  for (const id of ids) {
+    assert.match(text, new RegExp(`${id} ──|── ${id}`),
+      `member '${id}' is listed under ENTANGLED but has no visible edge — the cap cut its only ` +
+      `connection and it reads as decoration: ${JSON.stringify(text)}`);
+  }
+});

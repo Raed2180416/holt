@@ -39,8 +39,9 @@ import { analyze, contextDigest } from '../analyze.mjs';
 import { landingOrder } from '../order.mjs';
 import { branchAudit } from '../branches.mjs';
 import { partitionPlan } from '../partition.mjs';
-import { git } from '../git.mjs';
+import { listTrackedFiles } from '../git.mjs';
 import { deepDuplicates } from '../deep.mjs';
+import { loadConfig, ConfigError } from '../config.mjs';
 
 /* --------------------------------------------------------------- caching ---- */
 
@@ -61,7 +62,27 @@ const cache = new Map();
  *   the per-workstream safety verdict never does.
  */
 async function getReport(cwd, opts = {}, { fresh = false } = {}) {
-  const key = `${cwd}::${JSON.stringify(opts)}`;
+  // MCP CONFIG PARITY: load .holtrc.json so the MCP server honours the same config the CLI
+  // does. Without this, an agent asking over MCP could be told to collapse a worktree that
+  // `holt gate` would refuse — telling the agent wrong is worse than not telling it.
+  // Config errors are non-fatal here (same as safety-critical CLI commands): fall back to
+  // defaults with a warning rather than leaving the agent with no answer at all.
+  let configOpts = { ...opts };
+  try {
+    const cfg = await loadConfig(cwd);
+    if (cfg.config.familyOverrides !== undefined) configOpts.familyOverrides = cfg.config.familyOverrides;
+    if (cfg.config.maintenanceFloor !== undefined) configOpts.maintenanceFloor = cfg.config.maintenanceFloor;
+    if (cfg.config.maintenanceRatio !== undefined) configOpts.maintenanceRatio = cfg.config.maintenanceRatio;
+  } catch (e) {
+    if (e instanceof ConfigError) {
+      // Non-fatal: use defaults, but surface the warning so the user knows.
+      process.stderr.write(`holt: config warning (MCP using defaults): ${e.message}\n`);
+    } else {
+      throw e;
+    }
+  }
+
+  const key = `${cwd}::${JSON.stringify(configOpts)}`;
   const now = Date.now();
   // Opportunistic eviction: this process lives for hours and every distinct opts combination
   // created an entry that was never removed. Sweep expired keys instead of growing forever.
@@ -72,10 +93,10 @@ async function getReport(cwd, opts = {}, { fresh = false } = {}) {
   if (!fresh && hit && now - hit.at < CACHE_TTL_MS) {
     return { ...hit.value, _ageMs: now - hit.at };
   }
-  const disc = await discover(cwd, opts);
+  const disc = await discover(cwd, configOpts);
   if (!disc.root) throw repoAbsenceError(disc, cwd);
-  const scanned = await scan(disc, opts);
-  const report = await analyze(scanned, opts);
+  const scanned = await scan(disc, configOpts);
+  const report = await analyze(scanned, configOpts);
   const value = { report, scanned };
   cache.set(key, { at: now, value });
   return { ...value, _ageMs: 0 };
@@ -303,8 +324,8 @@ async function handle(name, args) {
     case 'holt_partition': {
       const { report } = await getReport(cwd);
       const disc = await discover(cwd, {});
-      const ls = await git(['ls-files'], { cwd: disc.root ?? cwd });
-      return partitionPlan(report, ls.stdout.split('\n').filter(Boolean), { agents: Number(args?.agents) || 2 });
+      const files = await listTrackedFiles(disc.root ?? cwd);
+      return partitionPlan(report, files, { agents: Number(args?.agents) || 2 });
     }
 
     case 'holt_status': {
@@ -327,6 +348,13 @@ async function handle(name, args) {
         // exactly one survivor. Collapsing the two into one number invites "delete all N".
         disposableRedundant: report.safe.filter((s) => s.safe && s.redundantWith?.length).length || undefined,
         reviewQueue: `${r.total} workstreams -> drop ${r.dropped}, collapse ${r.collapsed} -> ${r.toReview} to review`,
+        // THE STASH, ON THE CHANNEL WHERE IT MATTERS MOST. This tool's own description says
+        // "Start here", and an agent that starts here in a repository whose work was just swept
+        // reads `atRisk: 0`, `disposable: N` and concludes the repository holds nothing it can
+        // lose. Every one of those numbers is true about worktrees and none of them can see a
+        // stash commit holding the only copy of real content. Repository-level and separately
+        // named, so it can never be mistaken for a workstream the agent could delete or land.
+        stashAtRisk: report.stash?.atRisk.length || undefined,
         topRisks: report.unique.filter((u) => u.uncommittedOnlyCount > 0).slice(0, 3).map(compactUnique),
         skipped: report.skipped.length
           ? { count: report.skipped.length, note: 'NOT counted as safe or clean', sample: report.skipped.slice(0, 3) }
@@ -338,10 +366,35 @@ async function handle(name, args) {
     case 'holt_at_risk': {
       const { report } = await getReport(cwd);
       const rows = report.unique.filter((u) => u.uniqueSymbolCount > 0 || u.uncommittedOnlyCount > 0);
+      // A STASH IS NOT A WORKSTREAM, so it is returned beside `workstreams` and never inside it.
+      // An agent handed a synthetic row would try to `holt_check_workstream` it, land it, or
+      // delete it — none of which exist for a stash entry. The action that makes it safe is
+      // different too, and is stated rather than implied.
+      const stash = report.stash?.atRisk ?? [];
+      const stashTruncated = report.stash?.truncated;
       return {
         total: rows.length,
         note: 'uncommittedOnly > 0 means the work exists ONLY as uncommitted changes — no git command can relate it',
         workstreams: rows.slice(0, limit).map(compactUnique),
+        stash: stash.length ? {
+          total: stash.length,
+          note: 'these entries hold content NO ref holds. No worktree shows this work, so deleting '
+            + 'worktrees will not lose it — `git stash drop`/`clear` will, irreversibly. '
+            + '`git stash apply` then commit, or holt_rescue, makes it reachable.',
+          entries: stash.slice(0, limit).map((e) => ({
+            selector: e.selector,
+            message: e.message,
+            uniqueFileCount: e.uniqueCount,
+            sample: e.unique.slice(0, 5).map((u) => ({ path: u.path, layer: u.layer })),
+            checked: e.checked,
+          })),
+          // LOUD BREAK: if holt stopped scanning at MAX_ENTRIES, entries beyond the cap were NOT
+          // checked. An agent acting on this response must know the picture is incomplete.
+          truncated: stashTruncated || undefined,
+          truncationWarning: stashTruncated
+            ? `holt scanned only the first 25 stash entries — there are more. Review the remaining entries manually before dropping anything.`
+            : undefined,
+        } : undefined,
       };
     }
 
@@ -414,9 +467,9 @@ async function handle(name, args) {
       return {
         workstream: d.workstream,
         family: d.family,
-        // How `family` was decided: 'fork+creation-time' (git provenance — the normal case),
-        // 'name-fallback:<pattern>' (provenance unavailable, fell back to directory/branch
-        // naming), or 'user-override' (an explicit human regex). See assignFamilies in
+        // How `family` was decided: 'creation-burst' (creation-time clustering — the normal
+        // case), 'name-fallback:<pattern>' (creation time unavailable, fell back to directory/
+        // branch naming), or 'user-override' (an explicit human regex). See assignFamilies in
         // discover.mjs.
         familyRule: d.familyRule,
         siblings: d.siblings,

@@ -161,6 +161,12 @@ async function main() {
     for (const L of LANGS) await write(root, `src/${L.ext}/mod_${i}.${L.ext}`, L.fn(`base_${L.ext}_${i}`, i));
   }
   await write(root, '.gitignore', 'secret-cache/\nnode_modules/\ndist/\nlogs/\n*.bin\n');
+  // A package.json is the manifest that recreates node_modules/ and dist/ — the repo gitignores
+  // both, so the manifest that proves they are regenerable belongs in the base. Without it the
+  // manifest-gated generated-dir filter (correctly) refuses to call a worktree carrying
+  // gitignored node_modules/ disposable, because holt cannot verify the content — and the
+  // monster's junk-heap worktrees are the exact case that filter exists to keep reclaimable.
+  await write(root, 'package.json', JSON.stringify({ name: 'monster', private: true }));
   await write(root, 'README.md', '# monster\n');
   await sh('git', ['add', '-A'], root);
   await sh('git', ['commit', '-q', '-m', 'base'], root);

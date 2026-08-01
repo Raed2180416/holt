@@ -112,7 +112,28 @@ export function renderClusters(report, paint = (_c, s) => s) {
     for (const g of tangles) {
       lines.push('');
       for (const id of g.members) lines.push(`    ${mark(id)} ${id}`);
+      // OVER-REFUSAL FIX: the old form was `g.edges.slice(0, MAX_EDGES_PER_TANGLE)` — a flat cap
+      // that could cut the ONLY edge connecting a member to the rest of the tangle, leaving it
+      // listed under ENTANGLED with no visible reason why. A member with no shown edge reads as
+      // decoration, and the "… and N more" footer does not name which members it hid edges for.
+      // Now the cap is filled in two passes: first the top-ranked edges (most actionable), then
+      // any remaining edges that are the sole visible connection for a member not yet covered —
+      // up to the same cap. No member appears in a tangle without at least one visible edge, as
+      // long as the tangle's edge count is within the cap.
       const shown = g.edges.slice(0, MAX_EDGES_PER_TANGLE);
+      if (g.edges.length > MAX_EDGES_PER_TANGLE) {
+        const covered = new Set();
+        for (const e of shown) { covered.add(e.a); covered.add(e.b); }
+        for (const e of g.edges.slice(MAX_EDGES_PER_TANGLE)) {
+          if (shown.length >= MAX_EDGES_PER_TANGLE) break;
+          // Add an edge if it introduces a member not yet covered by any shown edge.
+          if (!covered.has(e.a) || !covered.has(e.b)) {
+            shown.push(e);
+            covered.add(e.a);
+            covered.add(e.b);
+          }
+        }
+      }
       for (const e of shown) {
         lines.push(paint('grey', `      ${e.a} ── ${e.b}   ${e.why.join(', ')}`));
       }

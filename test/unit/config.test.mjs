@@ -108,16 +108,33 @@ test('config: top-level array instead of object -> throws', async (t) => {
   await assert.rejects(() => loadConfig(fx.root), ConfigError);
 });
 
-test('config: unknown key -> throws naming the offending key', async (t) => {
+test('config: unknown key -> warns (does not throw), config still loads', async (t) => {
   const fx = await newRepo('config-unknown-key');
   t.after(() => fx.cleanup());
   await fx.write(CONFIG_FILENAME, JSON.stringify({ totallyMadeUp: true }));
 
-  await assert.rejects(() => loadConfig(fx.root), (e) => {
-    assert.ok(e instanceof ConfigError);
-    assert.match(e.message, /totallyMadeUp/);
-    return true;
-  });
+  // Unknown keys produce a WARNING, not an error. The guard must not die on a typo or a
+  // future key holt doesn't know about yet. The config still loads (with defaults for the
+  // unknown key, which is ignored).
+  const result = await loadConfig(fx.root);
+  assert.equal(result.found, true);
+  assert.ok(result.warnings.length > 0, 'unknown key must produce a warning');
+  assert.match(result.warnings[0].message, /totallyMadeUp/);
+  assert.match(result.warnings[0].message, /ignored/);
+});
+
+test('config: $schema key is silently ignored (no warning, no error)', async (t) => {
+  const fx = await newRepo('config-schema-key');
+  t.after(() => fx.cleanup());
+  await fx.write(CONFIG_FILENAME, JSON.stringify({
+    $schema: 'https://example.com/holtrc.schema.json',
+    familyOverrides: ['test-.*'],
+  }));
+
+  const result = await loadConfig(fx.root);
+  assert.equal(result.found, true);
+  assert.equal(result.warnings.length, 0, '$schema must not produce a warning');
+  assert.deepEqual(result.config.familyOverrides, ['test-.*']);
 });
 
 test('config: familyOverrides not an array of strings -> throws', async (t) => {
