@@ -364,7 +364,38 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     const isCaptured = (f) => (f.endsWith('/')
       ? capturedFiles.some((c) => c.startsWith(f))
       : capturedSet.has(f));
-    const missing = files.filter((f) => !isCaptured(f));
+
+    // A GITLINK SATISFIES "THE PATH IS IN THE TREE" WITHOUT CAPTURING ANYTHING.
+    //
+    // `git add --all --force` cannot record a submodule's UNCOMMITTED work: the only thing it can
+    // write for a submodule is the gitlink, and the gitlink only moves when something is COMMITTED
+    // inside. So for a dirty submodule the rescue commit contains the same `160000 commit <sha>`
+    // it started with — the path IS present, capturedSet.has(f) is true, and verification passed
+    // while nothing whatsoever had been captured.
+    //
+    // Reproduced end to end: rescue returned {ok:true, verified:true, capturedFiles:1} for a
+    // submodule holding an untracked file; the rescue commit's diff contained no trace of it, and
+    // removing the worktree afterwards — which is exactly what rescue's own output invites — left
+    // the content in no git object in either repository. The comment above this function sets the
+    // standard it was failing: "a rescue that silently captured nothing is worse than no rescue
+    // at all, because it licenses a deletion."
+    //
+    // holt does not try to recurse and capture the submodule's state: a submodule is a separate
+    // repository with its own history, and quietly committing into it would be a mutation the
+    // user never asked for. It REFUSES instead, and names the command that does work.
+    const dirtySubmodules = [];
+    for (const f of files) {
+      const rel = f.replace(/\/$/, '');
+      const inTree = await git(['ls-tree', '-z', commit, '--', rel], { cwd: ws.path });
+      if (inTree.code !== 0 || !/^160000 /.test(inTree.stdout)) continue;   // not a gitlink
+      const sub = path.join(ws.path, rel);
+      const dirty = await git(['status', '--porcelain', '--untracked-files=all'], { cwd: sub })
+        .catch(() => ({ code: 1, stdout: '' }));
+      if (dirty.code === 0 && dirty.stdout.trim()) dirtySubmodules.push(rel);
+    }
+
+    const missing = files.filter((f) => !isCaptured(f))
+      .concat(dirtySubmodules.map((d) => `${d} (submodule with uncommitted work)`));
 
     if (missing.length) {
       return {
@@ -373,7 +404,9 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
         missing,
         addWarnings: added.code === 0 ? [] : added.stderr.split('\n').filter(Boolean).slice(0, 5),
         note: 'the worktree has NOT been released and nothing was deleted. '
-          + 'A nested git repository inside the worktree is the usual cause — commit or move it, '
+          + 'A nested git repository or a SUBMODULE holding uncommitted work is the usual cause: '
+          + 'git can only record a submodule\'s committed state, so its working-tree changes '
+          + 'cannot be captured from here. Commit inside the submodule (or move the work out), '
           + 'then rescue again.',
       };
     }

@@ -183,8 +183,30 @@ async function uncommittedDelta(wtPath, { timeout }) {
  * a name added to this list cannot be written with the wrong anchor, and the guard test named
  * 'at-risk set: every generated DIRECTORY is recognised bare' walks every name in every form.
  */
+/**
+ * THE RULE FOR THIS LIST, stated because getting it wrong destroys work.
+ *
+ * A directory belongs here only if its contents are REPRODUCIBLE BY A COMMAND from something else
+ * in the repository — `npm ci` rebuilds node_modules, `cargo build` rebuilds target, a bundler
+ * rebuilds dist. Losing them costs a rebuild. Nothing else qualifies, because everything on this
+ * list is INVISIBLE to gate, rescue, risk, clean and the pre-tool-use guard: a worktree whose only
+ * content sits here reads as byte-identical to an empty one.
+ *
+ * `vendor` WAS ON THIS LIST AND IS NOT REPRODUCIBLE. Go's `go mod vendor` regenerates it; a PHP
+ * project's composer vendor is regenerable; but hand-vendored and hand-PATCHED dependencies are
+ * the reason `vendor/` exists in most repositories that have one, and holt cannot tell which kind
+ * it is looking at. Reproduced end to end: a worktree whose only content was
+ * `vendor/patch.txt` reported "✓ disposable", `rescue` reported "nothingToRescue", the guard
+ * ALLOWED `git worktree remove --force`, and after the removal the content existed in no git
+ * object anywhere — permanently gone, with holt having said three times that there was nothing
+ * there. That is the single catastrophic output this product exists to prevent.
+ *
+ * When in doubt a directory does NOT belong here. The cost of leaving one off is that a worktree
+ * carrying only build output is not auto-reclaimed; the cost of putting one on wrongly is the
+ * paragraph above.
+ */
 const GENERATED_DIRS = [
-  'node_modules', '.git', 'target', 'dist', 'build', '__pycache__', '.venv', 'venv', 'vendor',
+  'node_modules', '.git', 'target', 'dist', 'build', '__pycache__', '.venv', 'venv',
   '.next', 'coverage', '.pytest_cache', '.AppleDouble', '.idea', '.cache', '.turbo',
   '.parcel-cache', '.gradle', '.terraform', 'tmp', 'temp', 'log', 'logs', '.tox',
   '.mypy_cache', '.ruff_cache',

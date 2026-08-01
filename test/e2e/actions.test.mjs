@@ -25,6 +25,7 @@ import { scan } from '../../src/scan.mjs';
 import { analyze, safeToDelete } from '../../src/analyze.mjs';
 import { classify } from '../../src/git.mjs';
 import { samePathAsync } from '../../src/paths.mjs';
+import { assessCommand } from '../../src/agent.mjs';
 
 function sh(cmd, args, cwd) {
   return new Promise((resolve) => {
@@ -916,4 +917,108 @@ test('DISCARD: a TRACKED file is reverted to HEAD, not deleted - and the edit st
   const back = await sh('git', ['show', `${r.commit}:src/base.js`], fx.root);
   assert.match(back.stdout, /EXPERIMENT/,
     `the thrown-away edit must be readable back out of the ref: ${JSON.stringify(back)}`);
+});
+
+
+/* ================================ the three catastrophic false negatives ==== */
+
+test('CATASTROPHIC: a hand-authored file under vendor/ is not invisible', async (t) => {
+  // FOUND BY AN ADVERSARIAL SWEEP AND REPRODUCED END TO END. `vendor` was on the GENERATED_DIRS
+  // list, which makes a path invisible to gate, rescue, risk, clean AND the pre-tool-use guard —
+  // a worktree whose only content sits there reads as byte-identical to an empty one.
+  //
+  // Observed before the fix: gate said "disposable", rescue said "nothingToRescue", the guard
+  // ALLOWED `git worktree remove --force`, and after the removal the content existed in no git
+  // object anywhere. Permanently gone, with holt having said three separate times that there was
+  // nothing there.
+  //
+  // The rule the list now states: a directory belongs there only if its contents are REPRODUCIBLE
+  // BY A COMMAND. `npm ci` rebuilds node_modules. Nothing reliably rebuilds a hand-patched
+  // vendor/, and holt cannot tell a vendored-and-patched tree from a generated one.
+  const fx = await newRepo('vendor-visible');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('vendored');
+  await fx.write('vendor/patched.js', 'export function HAND_PATCHED_ONLY_COPY() { return 1; }\n', wt);
+
+  const report = await inspect(fx.root);
+  const verdict = report.safe.find((s) => s.id === 'vendored');
+  assert.equal(verdict.safe, false,
+    `a worktree whose only content is a hand-edited vendor/ file is NOT disposable: ${JSON.stringify(verdict)}`);
+
+  const v = await assessCommand(`git worktree remove --force ${wt}`, fx.root);
+  assert.equal(v.decision, 'deny',
+    `the guard must refuse to lose it: ${JSON.stringify(v)}`);
+
+  // NEVER-WORSE: the directories that ARE reproducible must stay invisible, or every repository
+  // with a node_modules becomes permanently unclearable — the failure this list exists to prevent.
+  const fx2 = await newRepo('generated-still-invisible');
+  t.after(() => fx2.cleanup());
+  const wt2 = await fx2.worktree('built');
+  await fx2.write('node_modules/react/index.js', 'module.exports = 1;\n', wt2);
+  await fx2.write('dist/bundle.js', 'console.log(1);\n', wt2);
+  const r2 = await inspect(fx2.root);
+  assert.equal(r2.safe.find((s) => s.id === 'built')?.safe, true,
+    'a worktree holding only build output must still be reclaimable');
+});
+
+test('CATASTROPHIC: git stash drop/clear/pop are destructive, and the guard says so', async (t) => {
+  // The refusal message this guard prints literally reads "No commit, index entry or stash holds
+  // this content" — and nothing anywhere checked a stash. `git stash drop` was classified as
+  // NOTHING AT ALL (kind:null) and allowed; dropping made the stash commit unreachable at once.
+  //
+  // Removing the WORKTREE does not lose a stash: refs/stash is repository-wide and shared across
+  // worktrees. So the loss path is exactly these verbs, and they were the one part of it that was
+  // unguarded — while `reset --hard`, which is no more final, has been covered from the start.
+  const { classifyCommand } = await import('../../src/agent.mjs');
+
+  for (const cmd of ['git stash drop', 'git stash clear', 'git stash drop stash@{2}', 'git stash pop']) {
+    const v = classifyCommand(cmd);
+    assert.ok(v, `${cmd} destroys work and must be classified: got ${JSON.stringify(v)}`);
+    assert.match(v.kind, /stash/, `and named for what it is: ${JSON.stringify(v)}`);
+  }
+
+  // ANTI-VACUITY. Reading a stash is not destroying one; if these tripped, every developer
+  // inspecting their own stash would be interrupted, which is how a guard gets switched off.
+  for (const cmd of ['git stash list', 'git stash show', 'git stash show -p', 'git stash apply', 'git stash push -u -m wip']) {
+    assert.equal(classifyCommand(cmd), null, `${cmd} is not destructive`);
+  }
+});
+
+test('CATASTROPHIC: rescue REFUSES a dirty submodule instead of reporting it verified', async (t) => {
+  // `git add --all --force` cannot record a submodule's uncommitted work — the only thing it can
+  // write is the gitlink, and the gitlink moves only when something is COMMITTED inside. So for a
+  // dirty submodule the rescue commit contained the same `160000 commit <sha>` it started with:
+  // the path WAS in the tree, the containment check passed, and rescue reported
+  // {ok:true, verified:true, capturedFiles:1} having captured nothing at all.
+  //
+  // That is worse than no rescue, because its output invites the deletion that follows.
+  const fx = await newRepo('rescue-submodule');
+  t.after(() => fx.cleanup());
+
+  const sub = path.join(path.dirname(fx.root), 'subrepo');
+  await fs.mkdir(sub, { recursive: true });
+  await sh('git', ['init', '-q', '.'], sub);
+  await sh('git', ['config', 'user.email', 't@t'], sub);
+  await sh('git', ['config', 'user.name', 't'], sub);
+  await fs.writeFile(path.join(sub, 'f.txt'), 'v1\n');
+  await sh('git', ['add', '-A'], sub);
+  await sh('git', ['commit', '-qm', 'init'], sub);
+
+  const added = await sh('git',
+    ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'packages/core'], fx.root);
+  if (added.code !== 0) return t.skip(`submodule add unavailable: ${added.stderr.slice(0, 120)}`);
+  await fx.commit('add submodule');
+
+  const wt = await fx.worktree('withsub');
+  await sh('git', ['-c', 'protocol.file.allow=always', 'submodule', 'update', '-q', '--init'], wt);
+  // Uncommitted work INSIDE the submodule — the thing git cannot record from the superproject.
+  await fs.writeFile(path.join(wt, 'packages', 'core', 'only-copy.txt'), 'SUBMODULE_ONLY_COPY\n');
+
+  const r = await rescue(fx.root, 'withsub', {});
+  assert.equal(r.ok, false,
+    `a rescue that cannot capture the submodule's work must refuse, not report success: ${JSON.stringify(r)}`);
+  assert.match(String(r.error ?? ''), /INCOMPLETE/,
+    `and say what it could not capture: ${JSON.stringify(r)}`);
+  assert.match(String(r.note ?? ''), /submodule/i,
+    `and name the cause so the user can act: ${JSON.stringify(r)}`);
 });

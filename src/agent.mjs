@@ -161,6 +161,22 @@ const DESTRUCTIVE = [
   // without --staged) is the one that overwrites files, and a bare pathspec defaults to it.
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}restore\\s+(?:[^\\s;|&]+\\s+)*--worktree\\b`), kind: 'git restore --worktree (discards changes)', cwdTarget: true },
 
+  // ---- THE STASH, WHICH THIS GUARD ASSUMED IT ALREADY UNDERSTOOD ---------------------------
+  // The refusal message below this table literally reads "No commit, index entry or stash holds
+  // this content" — and nothing anywhere checked a stash. Reproduced end to end: work staged and
+  // then `git stash push -u` leaves the worktree byte-clean, so `gate` reported "✓ disposable",
+  // `rescue` reported "nothingToRescue", and `git stash drop` was classified as NOTHING AT ALL
+  // (kind:null) and allowed. Dropping it made the stash commit unreachable immediately.
+  //
+  // Removing the WORKTREE does not lose a stash — refs/stash is repository-wide and shared — so
+  // the loss path is exactly these verbs, and they were the one part of it left unguarded. They
+  // are as final as `reset --hard`, which has been in this table from the beginning.
+  //
+  // `pop` is included because it is `apply` plus `drop`: a pop that hits a conflict can leave the
+  // entry dropped with the content unapplied. `list`, `show` and `apply` are reads and stay out.
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+(?:drop|clear)\\b`), kind: 'git stash drop/clear (destroys stashed work)', cwdTarget: true, all: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+pop\\b`), kind: 'git stash pop (drops the entry even if applying fails)', cwdTarget: true, all: true },
+
   // ---- THE SAME ACTS, SPELLED FOR WINDOWS -------------------------------------------------
   // Every rule above is POSIX. On Windows the default shell of most agent hosts is PowerShell or
   // cmd, where the deletion an agent actually emits is `Remove-Item -Recurse -Force ../feature`
