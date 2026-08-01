@@ -1123,3 +1123,44 @@ test('GATE: a command MENTIONED in quotes or a heredoc is text, not a command', 
   const spaced = classifyCommand('rm -rf "wt/my worktree"');
   assert.ok(spaced, 'a quoted path is still a path');
 });
+
+
+test('FILE GATE: a target beginning with a glob does not become "everything"', async (t) => {
+  // REPRODUCED IN REAL USE, twice, while writing a commit message that mentioned shell
+  // metacharacters. `echo x > ?` was refused with "would destroy 7 file(s)", listing the whole
+  // gitignored set of the repository. Nothing there redirects to anything - the shell would create
+  // one file literally named `?`.
+  //
+  // globFreePrefix() returns '.' when the first segment is already a glob: a stand-in meaning "no
+  // prefix", not a prefix present in the string. The suffix was sliced by that stand-in's LENGTH,
+  // so it ate the first real character - `*.js` became `.js`, and a bare `?` became the empty
+  // string, which fell through to the `|| **` default and claimed every at-risk file in the tree.
+  //
+  // A target holt cannot resolve being reported as a target that hits everything is the loudest
+  // possible false positive, and precisely how a guard gets switched off.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  // Assessed from INSIDE a worktree that HOLDS at-risk content. Running it from the primary tree
+  // proved nothing: the primary is excluded from scanning, so there was no at-risk set for the
+  // broken matcher to over-claim and the test passed with the defect reinstated.
+  const wt = fx.wt('uniqueUncommitted');
+  const bare = await assessCommand('echo x > ?', wt);
+  assert.equal(bare.decision, 'allow',
+    `a bare glob names no identifiable file: ${JSON.stringify(bare.reason ?? '').slice(0, 300)}`);
+
+  // The shape that actually blocked a commit: metacharacters inside a quoted message.
+  const msg = await assessCommand('git commit -m "reserves < > ? | here"', wt);
+  assert.equal(msg.decision, 'allow',
+    `a commit message is not a redirect: ${JSON.stringify(msg.reason ?? '').slice(0, 300)}`);
+
+  // ANTI-VACUITY, and the half that stops this becoming a bypass. A real redirect at a real
+  // at-risk file must still be refused, and `rm -rf .` must still put the whole tree at stake.
+  const real = await assessCommand('echo clobbered > src/only_uncommitted.js', wt);
+  assert.equal(real.decision, 'deny',
+    `truncating a file that exists only on disk must still be refused: ${JSON.stringify(real)}`);
+
+  const wholeTree = await assessCommand('rm -rf .', wt);
+  assert.equal(wholeTree.decision, 'deny',
+    `deleting the worktree root must still be refused: ${JSON.stringify(wholeTree)}`);
+});

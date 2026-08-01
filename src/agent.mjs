@@ -892,8 +892,28 @@ async function assessFileTargets(targets, cwd, ctx) {
     }
 
     const relPrefix = path.relative(root, abs).split(path.sep).join('/');
-    const suffix = GLOBBY.test(t.raw) ? t.raw.slice(globFreePrefix(t.raw).length).replace(/^\/+/, '') : '';
+
+    // THE SUFFIX IS SLICED BY THE PREFIX'S REAL LENGTH, NOT BY ITS SUBSTITUTE'S.
+    //
+    // globFreePrefix() returns '.' when the FIRST segment is already a glob — a stand-in meaning
+    // "no prefix", not a prefix that exists in the string. Slicing `raw` by that stand-in's length
+    // therefore ate the first real character: `*.js` became `.js`, and a bare `?` became the empty
+    // string. Empty then fell through to the `|| '**'` default below, so the matcher claimed EVERY
+    // at-risk file in the worktree.
+    //
+    // Live consequence, reproduced: `echo x > ?` was refused with "would destroy 7 file(s)",
+    // listing the whole gitignored set of this repository. Nothing there redirects to anything —
+    // the shell would create one file literally named `?`. A target holt could not resolve was
+    // being reported as a target that hits everything, which is the loudest possible false
+    // positive and precisely how a guard gets switched off.
+    const gfp = globFreePrefix(t.raw);
+    const prefixLen = (gfp === '.' && !t.raw.startsWith('.')) ? 0 : gfp.length;
+    const suffix = GLOBBY.test(t.raw) ? t.raw.slice(prefixLen).replace(/^\/+/, '') : '';
     const rel = suffix ? `${relPrefix ? `${relPrefix}/` : ''}${suffix}` : relPrefix;
+
+    // '**' stays the default for a target that genuinely IS the worktree root — `rm -rf .` really
+    // does put everything at stake. It is reached only when the raw target resolved there with no
+    // glob left over, which is now a statement about the path rather than an artefact of slicing.
     items.push({ ...t, root, rel, matcher: pathMatcher(rel || '**') });
   }
   if (!items.length) return null;
