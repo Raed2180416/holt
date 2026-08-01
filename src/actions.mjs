@@ -21,7 +21,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, gitOk, pmap, authorEnv } from './git.mjs';
-import { discover } from './discover.mjs';
+import { discover, isHoltLock, unquotePorcelain } from './discover.mjs';
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
@@ -98,11 +98,51 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
     if (!dryRun) await appendEvent(cwd, { action: 'protect', id: s.id, path: ws.path, reason });
   }
 
+  // RECONCILE — protect is the one command that makes the lock set EQUAL the risk set, in both
+  // directions. A lock that outlives its justification is not a safety measure: it freezes the
+  // worktree permanently, `clean` can never reclaim it, and the only escape (`unprotect`) disarms
+  // every tree including the ones that still need protecting. Following holt's own quick-start on
+  // holt's own repository produced 20 locked worktrees, 18 of them holding nothing at all.
+  //
+  // Three independent conditions gate every release, and each is load-bearing:
+  //   - the verdict is `safe` — computed from CONTENT, since holt's own lock stopped counting
+  //     as a reason (see safeToDelete)
+  //   - confidence is 'measured' — never 'unverifiable' (gitignored or unreadable content) and
+  //     never 'unknown' (the scan failed). No evidence is not evidence of none.
+  //   - git itself still reports the lock as holt's. A lock somebody else placed is never
+  //     touched, whatever the verdict says.
+  const released = [];
+  for (const s of report.safe) {
+    if (!s.safe || s.confidence !== 'measured') continue;
+    const ws = report.graph.nodes.find((n) => n.id === s.id);
+    if (!ws?.path) continue;
+    const st = await lockState(ws.path, cwd);
+    if (!st.locked || !isHoltLock(st.reason)) continue;
+
+    if (!dryRun) {
+      const r = await git(['worktree', 'unlock', ws.path], { cwd, allowMutation: true });
+      if (r.code !== 0) {
+        actions.push({ id: s.id, path: ws.path, action: 'release-failed', reason: r.stderr.trim() });
+        continue;
+      }
+      // Journalled as an unprotect, flagged `stale` so an audit can tell an automatic
+      // reconciliation apart from a human deliberately dropping a guard.
+      await appendEvent(cwd, {
+        action: 'unprotect', id: s.id, path: ws.path,
+        reason: st.reason, stale: true, forced: false, foreignLock: false,
+      });
+    }
+    released.push({ id: s.id, path: ws.path, was: st.reason });
+    actions.push({ id: s.id, path: ws.path, action: dryRun ? 'would-release' : 'released', reason: st.reason });
+  }
+
   return {
     dryRun,
     protected: actions.filter((a) => a.action === 'locked' || a.action === 'would-lock').length,
     alreadyProtected: actions.filter((a) => a.action === 'already-locked').length,
-    failed: actions.filter((a) => a.action === 'failed').length,
+    released: released.length,
+    releasedDetail: released,
+    failed: actions.filter((a) => a.action === 'failed' || a.action === 'release-failed').length,
     // Never silently skip what we could not assess — that is the failure this tool exists for.
     unknown: unknown.map((u) => ({ id: u.id, why: u.reasons[0] })),
     actions,
@@ -133,7 +173,7 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
     if (!st.locked) continue;
     // Locks placed by something else are left alone: holt must not quietly disarm a protection
     // a human or another tool put there deliberately.
-    const foreign = !st.reason.startsWith(LOCK_PREFIX);
+    const foreign = !isHoltLock(st.reason);
     if (foreign && !force) {
       actions.push({ id: ws.id, action: 'skipped-foreign-lock', reason: st.reason });
       continue;
@@ -151,38 +191,6 @@ export async function unprotect(cwd, { id = null, force = false, ...opts } = {})
     }
   }
   return { actions, unlocked: actions.filter((a) => a.action === 'unlocked').length };
-}
-
-/**
- * Un-C-quote a porcelain value.
- *
- * MEASURED: when a lock reason contains a character git treats as special (newline, quote,
- * non-ASCII — and holt's own reasons embed symbol names, which can be non-ASCII), porcelain
- * emits it C-QUOTED: `locked "holt: …"`. Read naively, the quotes arrive in the string,
- * startsWith('holt:') fails, and unprotect classifies holt's OWN lock as foreign — leaving
- * `rescue --release` unable to release it. The quoting is also what keeps a reason containing
- * `\nworktree /etc/passwd` from corrupting the porcelain stream (verified live) — a feature to
- * decode, not a quirk.
- */
-function unquotePorcelain(s) {
-  if (!s.startsWith('"') || !s.endsWith('"') || s.length < 2) return s;
-  const body = s.slice(1, -1);
-  let out = '';
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
-    if (ch !== '\\') { out += ch; continue; }
-    const next = body[++i];
-    if (next === 'n') out += '\n';
-    else if (next === 't') out += '\t';
-    else if (next === '\\') out += '\\';
-    else if (next === '"') out += '"';
-    else if (/[0-7]/.test(next)) {
-      let oct = next;
-      while (oct.length < 3 && /[0-7]/.test(body[i + 1] ?? '')) oct += body[++i];
-      out += String.fromCharCode(parseInt(oct, 8));
-    } else out += next;
-  }
-  return out;
 }
 
 /** Read a worktree's lock state from the porcelain listing. */
@@ -470,6 +478,32 @@ export async function clean(cwd, { apply = false, branches = true, onBeforeRemov
     if (!still?.safe) {
       done.push({ ...p, action: 'skipped', why: `no longer disposable: ${still?.reasons?.[0] ?? 'unknown'}` });
       continue;
+    }
+
+    // A tree holt locked earlier can be genuinely disposable now — its lock is holt's own past
+    // verdict, not evidence (see safeToDelete). Release it here, immediately after the re-verify
+    // and immediately before the removal, so the window in which the guard is down is as short
+    // as it can be. `git worktree remove` refuses a locked tree, so without this the reclaim
+    // silently fails on every worktree protect ever touched.
+    //
+    // The foreign-lock check is a SECOND, structurally independent gate: a foreign lock already
+    // keeps the tree out of this plan by making the verdict unsafe, and it is repeated here
+    // because no single defect should be able to open both.
+    const lock = await lockState(p.path, cwd);
+    if (lock.locked) {
+      if (!isHoltLock(lock.reason)) {
+        done.push({ ...p, action: 'skipped', why: `locked by something other than holt: ${lock.reason}` });
+        continue;
+      }
+      const ul = await git(['worktree', 'unlock', p.path], { cwd, allowMutation: true });
+      if (ul.code !== 0) {
+        done.push({ ...p, action: 'failed', why: `could not release holt's own lock: ${ul.stderr.trim()}` });
+        continue;
+      }
+      await appendEvent(cwd, {
+        action: 'unprotect', id: p.id, path: p.path,
+        reason: lock.reason, stale: true, forced: false, foreignLock: false,
+      });
     }
 
     const rm = await git(['worktree', 'remove', p.path], { cwd, allowMutation: true });

@@ -25,6 +25,7 @@
 
 import { git, pmap, worktreeSnapshot } from './git.mjs';
 import { symbolKey } from './symbols.mjs';
+import { isHoltLock } from './discover.mjs';
 
 /* ------------------------------------------------------------------ helpers ---- */
 
@@ -275,7 +276,19 @@ export function safeToDelete(scanResult, unique = null) {
     const uncommittedCount = risk.layers.uncommitted.length + risk.layers.untracked.length;
     if (uncommittedCount > 0) reasons.push(`${uncommittedCount} uncommitted file(s)`);
     if (u && u.uniqueSymbolCount > 0) reasons.push(`${u.uniqueSymbolCount} symbol(s) found nowhere else`);
-    if (w.locked) reasons.push(`locked${w.lockReason ? `: ${w.lockReason}` : ''}`);
+    // A LOCK HOLT PLACED IS NOT EVIDENCE — IT IS HOLT'S OWN PAST VERDICT, RESTATED.
+    //
+    // Counting it here made it self-justifying: `protect` locked a worktree that genuinely held
+    // the only copy of something, the work later landed, and the verdict stayed "not disposable"
+    // forever because holt was reading back its own lock as the reason. `clean --apply` skipped
+    // it, `gate` exited 1, and the only escape was `unprotect`, which disarms EVERY tree —
+    // including the ones that still need it. That is "a gate that only refuses gets switched
+    // off", and following holt's own quick-start reproduced it: 20 locked, 18 holding nothing.
+    //
+    // A FOREIGN lock still blocks, and must: somebody else protected that tree deliberately and
+    // holt has no basis to overrule them. `protect` is what reconciles holt's own locks now.
+    const holtLocked = w.locked && isHoltLock(w.lockReason);
+    if (w.locked && !holtLocked) reasons.push(`locked${w.lockReason ? `: ${w.lockReason}` : ''}`);
 
     // GITIGNORED CONTENT DOWNGRADES THE VERDICT, it does not silently vanish from it.
     // git does not track ignored files, so holt cannot prove anything about them — but deleting
@@ -313,6 +326,9 @@ export function safeToDelete(scanResult, unique = null) {
       path: w.path,
       family: w.family,
       safe: reasons.length === 0,
+      // Surfaced so protect/clean/render can see a lock holt placed without it counting as a
+      // reason the worktree is undeletable. Absent when there is no holt lock.
+      holtLocked: holtLocked || undefined,
       // 'unverifiable' is distinct from 'measured': everything git CAN see is clean, but ignored
       // content means holt did not have the evidence to call it disposable.
       confidence: (ignoredCount > 0 || unmeasured.length > 0) && reasons.length === 1

@@ -16,6 +16,58 @@ import path from 'node:path';
 import { canonicalPath, foldCase } from './paths.mjs';
 
 /**
+ * The prefix every lock holt places carries, and the test for one.
+ *
+ * It lives HERE, beside the porcelain parser that reads lock reasons, rather than in actions.mjs,
+ * because three layers need it and one of them must not import the mutating layer. The safety
+ * verdict has to tell holt's OWN past verdict apart from a protection somebody else placed
+ * deliberately: counting the former as evidence made the lock self-justifying, so a worktree holt
+ * had ever locked stayed "not disposable" forever, citing the lock holt itself placed.
+ *
+ * A lock with no reason at all reads as FOREIGN, which is the conservative direction: holt only
+ * ever releases what it can prove it placed.
+ */
+export const HOLT_LOCK_PREFIX = 'holt:';
+export const isHoltLock = (reason) =>
+  typeof reason === 'string' && reason.startsWith(HOLT_LOCK_PREFIX);
+
+/**
+ * Un-C-quote a porcelain value.
+ *
+ * MEASURED: when a lock reason contains a character git treats as special (newline, quote,
+ * non-ASCII — and holt's own reasons embed symbol names, which can be non-ASCII), porcelain
+ * emits it C-QUOTED: `locked "holt: …"`. Read naively, the quotes arrive in the string,
+ * startsWith('holt:') fails, and holt's OWN lock is classified as foreign.
+ *
+ * IT LIVES HERE BECAUSE BOTH READERS OF THIS EVIDENCE NEED IT, and they drifted when it did not:
+ * actions.mjs decoded it in lockState(), while this file — which feeds the SAFETY VERDICT — kept
+ * the raw quoted string. isHoltLock() then saw a leading quote, called holt's own lock foreign,
+ * and the lock could never be reconciled for exactly the reasons holt writes most often. The quoting is also what keeps a reason containing
+ * `\nworktree /etc/passwd` from corrupting the porcelain stream (verified live) — a feature to
+ * decode, not a quirk.
+ */
+export function unquotePorcelain(s) {
+  if (!s.startsWith('"') || !s.endsWith('"') || s.length < 2) return s;
+  const body = s.slice(1, -1);
+  let out = '';
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch !== '\\') { out += ch; continue; }
+    const next = body[++i];
+    if (next === 'n') out += '\n';
+    else if (next === 't') out += '\t';
+    else if (next === '\\') out += '\\';
+    else if (next === '"') out += '"';
+    else if (/[0-7]/.test(next)) {
+      let oct = next;
+      while (oct.length < 3 && /[0-7]/.test(body[i + 1] ?? '')) oct += body[++i];
+      out += String.fromCharCode(parseInt(oct, 8));
+    } else out += next;
+  }
+  return out;
+}
+
+/**
  * Family inference.
  *
  * Agents fan out with generated names. Grouping them recovers "these 5 came from one
@@ -77,7 +129,7 @@ export function parseWorktreePorcelain(stdout) {
       else if (key === 'branch') cur.branch = val;
       else if (key === 'detached') cur.detached = true;
       else if (key === 'bare') cur.bare = true;
-      else if (key === 'locked') { cur.locked = true; cur.lockReason = val === true ? '' : val; }
+      else if (key === 'locked') { cur.locked = true; cur.lockReason = val === true ? '' : unquotePorcelain(val); }
       else if (key === 'prunable') { cur.prunable = true; cur.prunableReason = val === true ? '' : val; }
     }
   }

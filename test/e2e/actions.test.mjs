@@ -671,3 +671,129 @@ test('AUDIT: a rescue records path/branch/head so a recycled id stays distinguis
   assert.equal(ev.branch, 'audited-br', 'and its branch');
   assert.ok(ev.head, 'and its head, so two rescues under one id are never identical lines');
 });
+
+/* ------------------------------------------------- locks must converge, not ratchet ---- */
+
+/** Read the lock reason git itself holds for a worktree path, or null. */
+async function lockReasonOf(root, wtPath) {
+  const out = await new Promise((resolve) => {
+    execFile('git', ['worktree', 'list', '--porcelain'], { cwd: root }, (e, so) => resolve(so ?? ''));
+  });
+  let cur = null;
+  for (const line of out.split('\n')) {
+    if (line.startsWith('worktree ')) cur = line.slice(9);
+    else if (line.startsWith('locked') && cur === wtPath) return line.slice(6).trim();
+  }
+  return null;
+}
+
+test('PROTECT: holt releases its OWN lock once the work has landed — the tool must converge, not ratchet', async (t) => {
+  // A LOCK OUTLIVING ITS JUSTIFICATION FREEZES THE REPOSITORY.
+  //
+  // `protect` only ever added locks, and safeToDelete() counted holt's own lock as a REASON the
+  // worktree is not disposable — so the lock became self-justifying. Once holt locked a worktree
+  // it stayed "not safe" forever, citing the lock holt itself placed; `clean --apply` skipped it,
+  // and `git worktree remove` would have refused it anyway. The only escape was `unprotect`,
+  // which disarms EVERY tree including the ones that genuinely need it — precisely the "a gate
+  // that only refuses gets switched off" failure the README names.
+  //
+  // Measured on holt's own repository following holt's own quick-start: 20 worktrees locked,
+  // 18 of them holding nothing unique, none reclaimable.
+  //
+  // A foreign lock is different and is covered by the test below: somebody else deliberately
+  // protected that tree, and holt must not overrule them.
+  const fx = await newRepo('lock-reconcile');
+  t.after(() => fx.cleanup());
+
+  const wt = await fx.worktree('landing');
+  await fx.write('src/pending.js', 'export function PENDING_WORK() { return 1; }\n', wt);
+
+  // PRESENCE FIRST: it really does hold the only copy, and protect really does lock it.
+  const first = await protect(fx.root);
+  assert.ok(first.protected >= 1, `protect must lock work that exists nowhere else: ${JSON.stringify(first)}`);
+  const lockedReason = await lockReasonOf(fx.root, wt);
+  assert.match(lockedReason ?? '', /^holt:/, `git must hold holt's lock: ${JSON.stringify(lockedReason)}`);
+
+  // THE WORK LANDS — committed on its branch and merged into base. Nothing unique remains.
+  await fx.commit('land the pending work', wt);
+  await fx.git(['merge', '--no-ff', '-m', 'land it', 'wt/landing']);
+
+  // The verdict must now rest on CONTENT, not on holt's own past verdict.
+  const report = await inspect(fx.root);
+  const verdict = report.safe.find((s) => s.id === 'landing');
+  assert.ok(verdict, 'the worktree must still be assessed');
+  assert.equal(verdict.safe, true,
+    `nothing unique is left, so the only thing still calling it unsafe is holt's own lock: ${JSON.stringify(verdict.reasons)}`);
+
+  // protect is the reconciler: run it again and the lock set equals the risk set.
+  const second = await protect(fx.root);
+  assert.ok((second.released ?? 0) >= 1,
+    `protect must RELEASE a lock whose justification is gone: ${JSON.stringify(second)}`);
+  assert.equal(await lockReasonOf(fx.root, wt), null,
+    'the stale lock must actually be gone from git, not merely reported as released');
+
+  // …and the worktree is reclaimable again, which is the whole point.
+  const cleaned = await clean(fx.root, { apply: true });
+  assert.equal(cleaned.removed, 1, `the landed worktree must be reclaimable: ${JSON.stringify(cleaned)}`);
+});
+
+test('PROTECT: a lock placed by SOMEONE ELSE is never released and still blocks (never-worse)', async (t) => {
+  // The other half. Reconciliation must not become a licence to disarm protections holt did not
+  // place — a human or another tool locked that tree deliberately, and holt has no basis to
+  // overrule them. This is the assertion that keeps the fix above from being a fail-open.
+  const fx = await newRepo('foreign-lock');
+  t.after(() => fx.cleanup());
+
+  const wt = await fx.worktree('theirs');
+  // Deliberately EMPTY: by content alone this worktree is provably disposable, so the ONLY thing
+  // that can keep it safe from deletion is the foreign lock. If the lock stopped counting, this
+  // test goes red.
+  await fx.git(['worktree', 'lock', '--reason', 'release engineering: do not touch until 2.0', wt]);
+
+  const report = await inspect(fx.root);
+  const verdict = report.safe.find((s) => s.id === 'theirs');
+  assert.equal(verdict.safe, false,
+    `a foreign lock is a deliberate protection and must still block: ${JSON.stringify(verdict)}`);
+
+  const p = await protect(fx.root);
+  assert.equal((p.released ?? 0), 0, `protect must not release a lock it did not place: ${JSON.stringify(p)}`);
+  assert.match(await lockReasonOf(fx.root, wt) ?? '', /release engineering/,
+    'the foreign lock must survive untouched');
+
+  const cleaned = await clean(fx.root, { apply: true });
+  assert.equal(cleaned.removed, 0, `clean must not remove a worktree someone else locked: ${JSON.stringify(cleaned)}`);
+});
+
+test('PROTECT: a C-quoted lock reason is still holt’s own lock in the VERDICT, not only in unprotect', async (t) => {
+  // ONE EVIDENCE STREAM, TWO PARSERS, AND THEY DRIFTED.
+  //
+  // git C-quotes a porcelain lock reason the moment it contains a character git treats as special
+  // — and holt's own reasons embed SYMBOL NAMES, which are routinely non-ASCII. actions.mjs
+  // learned this the hard way and decodes it in lockState(); discover.mjs, which feeds the safety
+  // verdict, kept the raw quoted string. So isHoltLock() saw `"holt: …` (leading quote), called
+  // holt's own lock foreign, and the reconciliation added in this release could never fire for
+  // exactly the reasons holt writes most often. Fail-closed, but silently and permanently.
+  const fx = await newRepo('quoted-lock');
+  t.after(() => fx.cleanup());
+
+  const wt = await fx.worktree('accented');
+  // Deliberately EMPTY: by content this worktree is provably disposable, so the lock is the only
+  // thing that can hold it. A non-ASCII symbol name is what forces git to quote.
+  const reason = "holt: holds work found nowhere else (e.g. callable:crée_token). "
+    + "Run 'holt rescue accented' to preserve it, or 'holt risk' to inspect.";
+  await fx.git(['worktree', 'lock', '--reason', reason, wt]);
+
+  // FIXTURE VALIDITY: git must really be quoting, or this test proves nothing.
+  const porcelain = await fx.git(['worktree', 'list', '--porcelain']);
+  assert.match(porcelain, /locked "holt:/,
+    `the fixture is void unless git C-quotes the reason: ${JSON.stringify(porcelain)}`);
+
+  const report = await inspect(fx.root);
+  const verdict = report.safe.find((s) => s.id === 'accented');
+  assert.equal(verdict.safe, true,
+    `holt's own lock must be recognised through the quoting: ${JSON.stringify(verdict.reasons)}`);
+
+  const p = await protect(fx.root);
+  assert.ok((p.released ?? 0) >= 1, `it must be reconcilable like any other holt lock: ${JSON.stringify(p)}`);
+  assert.equal(await lockReasonOf(fx.root, wt), null, 'and the lock must actually be gone');
+});
