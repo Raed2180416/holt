@@ -33,10 +33,13 @@ runs:
         HOLT_IN_IGNORE: ${{ inputs.ignore }}
       run: |
         set -euo pipefail
-        # Prefer the published npm release (immutable once published); the pinned GitHub tag
-        # is the fallback. Neither is an unpinned branch, so a consumer's CI cannot be moved
-        # under it by a force-push to main.
-        npm install -g "holt@^0" >/dev/null 2>&1 || npm install -g "github:Raed2180416/holt#v0.2.0" >/dev/null 2>&1
+        # The pinned GitHub tag, and ONLY the pinned GitHub tag. This used to try `holt@^0` from
+        # the npm registry first and fall back here — but `holt` is not a name we own (it 404s
+        # today), so that ordering meant the day anyone registered it, every consumer's CI would
+        # silently start installing a stranger's package with our name on it. A 404 fallback is
+        # not a safe default when the thing being fallen back FROM is unclaimed.
+        # A tag is immutable to force-push, so a consumer's CI cannot be moved under it.
+        npm install -g "github:Raed2180416/holt#v0.3.0" >/dev/null 2>&1
         ARGS=()
         [ "$HOLT_IN_FAIL" = "true" ] && ARGS+=(--fail-on-unlanded)
         [ -n "$HOLT_IN_AGE" ] && ARGS+=(--max-age-days "$HOLT_IN_AGE")

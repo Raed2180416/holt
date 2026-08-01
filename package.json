@@ -1,6 +1,6 @@
 {
   "name": "holt",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "holt™ — know what your agents made, and don't lose any of it: what each worktree produced, which ones collide, which are safe to delete, and a guard that stops an agent deleting work that exists nowhere else.",
   "type": "module",
   "bin": {

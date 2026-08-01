@@ -13,11 +13,13 @@
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
 
 ```bash
-npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz
+npm install -g https://github.com/Raed2180416/holt/releases/download/v0.3.0/holt.tgz
 ```
 
-<sub>One command, no clone, no build — verified on a clean Ubuntu container. Not on the npm registry
-yet, so `npm install -g holt` lands with v1; the release tarball above is the path that works today.</sub>
+<sub>One command, no clone, no build — built, installed and driven against a real repository on
+Linux, macOS and Windows by CI before that file is attached. `holt` is not on the npm registry yet
+(`npm install -g holt` 404s), so the release tarball above is the path that works today; the URL is
+stable across releases.</sub>
 
 <!-- HOLT:SOCIAL-PROOF:BEGIN
 Social proof stays commented out until the numbers can carry it: 500 stars or 1,000 weekly
@@ -298,7 +300,7 @@ therefore to holt.
 ## Quick start
 
 ```console
-$ npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz
+$ npm install -g https://github.com/Raed2180416/holt/releases/download/v0.3.0/holt.tgz
 $ cd your-repo
 $ holt integrate     # wire every agent you use — this is the whole setup
 $ holt auto          # locks what would be lost; tells you what needs a decision

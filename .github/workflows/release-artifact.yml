@@ -120,8 +120,35 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with: { ref: '${{ github.event.inputs.tag || github.ref_name }}' }
       - uses: actions/download-artifact@v4
         with: { name: tarball }
+
+      # PUSHING A TAG DOES NOT CREATE A RELEASE. `gh release upload` on a tag with no release
+      # fails with "release not found", so the entire verified artifact would be built, proven on
+      # three platforms, and then dropped on the floor — the one step nothing here had ever
+      # exercised, because this workflow had never run at all.
+      #
+      # The body is the file checked into this repository, which the release-body gate already
+      # refuses to let drift from the README. Created as a draft would hide it; created here it is
+      # immediately visible and immediately checked by release.yml's `published` trigger.
+      - name: ensure the release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists — attaching to it"
+            exit 0
+          fi
+          BODY=".github/releases/$TAG.md"
+          test -f "$BODY" || { echo "::error::no release body at $BODY — refusing to publish a release with no install instructions"; exit 1; }
+          node scripts/check-release-body.mjs --tag "$TAG" --body-file "$BODY"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "holt ${TAG#v}" --notes-file "$BODY" --verify-tag
+
       - name: upload
         env:
           GH_TOKEN: ${{ github.token }}

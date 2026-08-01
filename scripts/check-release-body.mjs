@@ -111,6 +111,10 @@ function parseArgs(argv) {
     else if (argv[i] === '--tag') opts.tag = argv[++i];
     else if (argv[i] === '--body-file') opts.bodyFile = argv[++i];
     else if (argv[i] === '--repo') opts.repo = argv[++i];
+    // A GATE THAT IGNORES A MISSPELLED FLAG IS NOT A GATE. `--file` instead of `--body-file` fell
+    // through here silently, leaving bodyFile undefined, and the run died deep inside readFile
+    // with "path must be of type string" — a message that names neither the flag nor the fix.
+    else throw new Error(`unknown option ${JSON.stringify(argv[i])} (expected --all, --stdin, --tag, --body-file, --repo)`);
   }
   return opts;
 }

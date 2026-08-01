@@ -20,7 +20,13 @@ import path from 'node:path';
 import { checkReleaseBody, BODIES_DIR, repoSlug, ROOT } from '../../scripts/check-release-body.mjs';
 
 const SLUG = 'Raed2180416/holt';
-const TAG = 'v0.2.0';
+
+/**
+ * The tag under test is the one this working tree would publish — never a literal. A hardcoded tag
+ * here passes for exactly one release and then asserts agreement between the README and a body it
+ * has moved past, which is the same drift the file exists to catch, aimed backwards.
+ */
+const TAG = `v${JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8')).version}`;
 
 /** Verbatim, as published. Kept as the permanent record of what this gate exists to stop. */
 const FILLER = `**v0.2.0 — Developer Preview**
@@ -34,10 +40,12 @@ Improved repository and worktree analysis.
 Better handling of concurrent operations.
 Expanded automated test coverage across core workflows.`;
 
-const GOOD = `## holt 0.2.0
+/** Built from TAG so the accepted-shape fixture tracks the release under test, never a past one. */
+const VERSION = TAG.replace(/^v/, '');
+const GOOD = `## holt ${VERSION}
 
 \`\`\`bash
-npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz
+npm install -g https://github.com/Raed2180416/holt/releases/download/${TAG}/holt-${VERSION}.tgz
 \`\`\`
 `;
 
@@ -63,7 +71,8 @@ test('RELEASE BODY: an unfilled template is refused, not counted as an install c
 
 test('RELEASE BODY: an install command for a DIFFERENT release is refused', () => {
   // Worse than no command: it looks right and hands the reader the wrong version.
-  const wrong = GOOD.replace('v0.2.0/holt-0.2.0.tgz', 'v0.1.0/holt-0.1.0.tgz');
+  const wrong = GOOD.replace(`${TAG}/holt-${VERSION}.tgz`, 'v0.0.1/holt-0.0.1.tgz');
+  assert.notEqual(wrong, GOOD, 'the substitution did not apply — the assertion below is vacuous');
   const problems = checkReleaseBody(wrong, TAG, SLUG);
   assert.ok(problems.some((p) => /outside this release's own assets/.test(p)),
     `a v0.1.0 tarball was accepted as the install command for ${TAG}: ${JSON.stringify(problems)}`);
@@ -77,7 +86,8 @@ test('RELEASE BODY: absent evidence REFUSES — an empty body is not a passing b
 });
 
 test('RELEASE BODY: a body that never names its own version is filler by construction', () => {
-  const anon = GOOD.replaceAll('0.2.0', '0.9.9');
+  const anon = GOOD.replaceAll(VERSION, '0.9.9');
+  assert.notEqual(anon, GOOD, 'the substitution did not apply — the assertion below is vacuous');
   assert.ok(checkReleaseBody(anon, TAG, SLUG).some((p) => /never mentions/.test(p)),
     'a body that could describe any release was accepted');
 });
@@ -105,4 +115,19 @@ test('RELEASE BODY: the shipped install command is the one the README and CI use
   };
   assert.equal(commandIn(body), commandIn(readme),
     'the release body and the README advertise different install commands');
+});
+
+test('RELEASE BODY: the GitHub Action installs the version this tree publishes', async () => {
+  // action.yml pins a tag so a consumer's CI cannot be moved under it by a force-push. A pin is
+  // only safe while it is CURRENT: left behind, it silently serves every downstream consumer a
+  // release older than the one this repository claims to ship. Same drift, one surface over.
+  const action = await fs.readFile(path.join(ROOT, 'action.yml'), 'utf8');
+  const pins = [...action.matchAll(/github:Raed2180416\/holt#(v[\d.]+)/g)].map((m) => m[1]);
+  assert.ok(pins.length > 0, 'no pinned install found in action.yml — pattern drift, not agreement');
+  for (const pin of pins) {
+    assert.equal(pin, TAG, `action.yml installs ${pin} while this tree publishes ${TAG}`);
+  }
+  // The registry name is not ours. Falling back to it would hand consumers a stranger's package.
+  assert.ok(!/npm\s+install\s+-g\s+["']?holt[@"']/.test(action),
+    'action.yml installs the unclaimed npm name `holt` — an unowned name is not a safe fallback');
 });
