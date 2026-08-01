@@ -128,9 +128,21 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
+          # A SECOND COPY UNDER A STABLE NAME, so one install command works forever.
+          #
+          # The versioned asset is holt-<version>.tgz, which means the documented install URL has
+          # the version baked into it and `releases/latest/download/holt.tgz` — the obvious,
+          # clean, never-goes-stale URL — 404s. Caught by actually running the command from the
+          # website rather than reading it: the page shipped an install line that did not resolve,
+          # which is the first thing a new user would ever type.
+          #
+          # Uploading the same bytes twice costs nothing and makes
+          #   npm install -g https://github.com/<repo>/releases/latest/download/holt.tgz
+          # correct for every future release without anyone remembering to update a page.
+          cp "${{ needs.build.outputs.tarball }}" holt.tgz
           # --clobber so re-running after a fix replaces the asset rather than failing, and so the
           # attached file is always the one this run verified.
           gh release upload "$TAG" \
-            "${{ needs.build.outputs.tarball }}" SHA256SUMS \
+            "${{ needs.build.outputs.tarball }}" holt.tgz SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --clobber
-          echo "attached ${{ needs.build.outputs.tarball }} (sha256 ${{ needs.build.outputs.sha256 }})"
+          echo "attached ${{ needs.build.outputs.tarball }} + holt.tgz (sha256 ${{ needs.build.outputs.sha256 }})"
