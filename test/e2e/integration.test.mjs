@@ -1003,3 +1003,66 @@ test('FILE GATE: backslash keeps the meaning the RUNNING SHELL gives it (never-w
   const posix = resolveFileTargets('mv src/a.js /elsewhere/b.js').find((t) => t.dest);
   assert.equal(posix.dest, '/elsewhere/b.js', 'a POSIX destination is untouched');
 });
+
+test('WINDOWS GATE: the destructive vocabulary is not POSIX-only — PowerShell and cmd destroy work too', () => {
+  // THE GUARD SPOKE ONE SHELL. Every destructive pattern was written for a POSIX shell, so on
+  // Windows — where agent hosts run PowerShell or cmd by default — the entire file/worktree guard
+  // was blind. `rm -rf ../feature` was caught; `Remove-Item -Recurse -Force ../feature`, which is
+  // what an agent on Windows actually emits, returned null and was ALLOWED.
+  //
+  // That is not a cosmetic gap. git's worktree lock is defeated by neither: the lock stops
+  // `git worktree remove`, and the hook is the ONLY layer covering a filesystem delete. On
+  // Windows there was no layer at all, under a README that lists Windows as supported.
+  //
+  // Forward slashes throughout: PowerShell and cmd both accept them, and a backslash means
+  // something different to the POSIX tokenizer this test also runs under.
+  for (const cmd of [
+    'Remove-Item -Recurse -Force wt/task-03',
+    'Remove-Item -Path wt/task-03 -Recurse -Force',
+    'remove-item -recurse -force wt/task-03',      // PowerShell is case-insensitive
+    'ri -Recurse -Force wt/task-03',               // built-in alias
+    'rd /s /q wt/task-03',                         // cmd
+    'rmdir /s /q wt/task-03',
+  ]) {
+    const v = classifyCommand(cmd);
+    assert.ok(v, `not recognised as destructive at all: ${cmd}`);
+    assert.equal(v.target, 'wt/task-03', `wrong target extracted from '${cmd}': ${JSON.stringify(v)}`);
+  }
+
+  // ANTI-VACUITY: reading is not destroying. If the verb table degenerated to "match anything",
+  // these would trip and every Windows agent would be blocked from looking at its own files.
+  for (const cmd of ['Get-ChildItem wt/task-03', 'Get-Content wt/task-03/notes.md', 'dir wt/task-03']) {
+    assert.equal(classifyCommand(cmd), null, `reading must never be treated as destruction: ${cmd}`);
+  }
+});
+
+test('WINDOWS FILE GATE: per-file destruction has Windows spellings, and they carry the right role', () => {
+  // The file layer, same gap. `Clear-Content` and `Set-Content` are the in-place destroyers with
+  // no POSIX name at all in this table — they empty or overwrite a file that may hold the only
+  // copy of an agent's work, and neither was recognised.
+  const first = (cmd) => resolveFileTargets(cmd)[0];
+
+  for (const [cmd, role, raw] of [
+    ['Remove-Item wt/a/notes.md', 'delete', 'wt/a/notes.md'],
+    ['del wt/a/notes.md', 'delete', 'wt/a/notes.md'],
+    ['erase wt/a/notes.md', 'delete', 'wt/a/notes.md'],
+    ['Clear-Content wt/a/notes.md', 'truncate', 'wt/a/notes.md'],
+    ['Set-Content wt/a/notes.md -Value "gone"', 'truncate', 'wt/a/notes.md'],
+    ['Out-File -FilePath wt/a/notes.md', 'truncate', 'wt/a/notes.md'],
+    ['Move-Item wt/a/notes.md D:/elsewhere/notes.md', 'move-src', 'wt/a/notes.md'],
+  ]) {
+    const t = first(cmd);
+    assert.ok(t, `no file target resolved from: ${cmd}`);
+    assert.equal(t.raw, raw, `wrong path from '${cmd}': ${JSON.stringify(t)}`);
+    assert.equal(t.role, role, `wrong role from '${cmd}': ${JSON.stringify(t)}`);
+  }
+
+  // `-Value` takes a VALUE, not a path — it must never be resolved as a file to protect.
+  const setTargets = resolveFileTargets('Set-Content wt/a/notes.md -Value "gone"').map((t) => t.raw);
+  assert.ok(!setTargets.includes('gone'), `the -Value payload is not a path: ${JSON.stringify(setTargets)}`);
+
+  // ANTI-VACUITY: reads resolve to nothing.
+  for (const cmd of ['Get-Content wt/a/notes.md', 'Select-String -Path wt/a/notes.md -Pattern x']) {
+    assert.deepEqual(resolveFileTargets(cmd), [], `reading must resolve no destructive target: ${cmd}`);
+  }
+});

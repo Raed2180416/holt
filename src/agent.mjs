@@ -157,6 +157,39 @@ const DESTRUCTIVE = [
   // denying it was a false positive on an operation people run all day. `--worktree` (with or
   // without --staged) is the one that overwrites files, and a bare pathspec defaults to it.
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}restore\\s+(?:[^\\s;|&]+\\s+)*--worktree\\b`), kind: 'git restore --worktree (discards changes)', cwdTarget: true },
+
+  // ---- THE SAME ACTS, SPELLED FOR WINDOWS -------------------------------------------------
+  // Every rule above is POSIX. On Windows the default shell of most agent hosts is PowerShell or
+  // cmd, where the deletion an agent actually emits is `Remove-Item -Recurse -Force ../feature`
+  // or `rd /s /q ..\feature`. Neither contains the token `rm`, so the guard returned null and
+  // ALLOWED it — under a README that lists Windows as a supported platform.
+  //
+  // This is the layer that matters most there. git's lock stops `git worktree remove` and cannot
+  // stop a filesystem delete; the hook is the only thing that can, and on Windows it was blind.
+  //
+  // Case-insensitive because PowerShell is: `remove-item`, `Remove-Item` and `REMOVE-ITEM` are
+  // one command. The POSIX rules above stay case-SENSITIVE, because `RM` is not `rm` on a POSIX
+  // shell and matching it would be inventing a command the user never ran.
+  //
+  // The flag skip accepts both dialects — PowerShell `-Recurse`, cmd `/s` — and deliberately
+  // consumes `-Path`/`-LiteralPath` as a flag so the value that follows is read as the target.
+  // Breadth is safe here for the same reason it is safe for `rm`: the target is resolved against
+  // the real worktree list, and a path that is not a worktree finds nothing and is allowed.
+  {
+    re: /\b(?:Remove-Item|ri|rd|rmdir|erase)\b(?:\s+(?:\/[a-zA-Z]+|-[A-Za-z]+))*\s+(?<target>[^\s;|&]+)/i,
+    kind: 'Remove-Item / rd / rmdir (deletes the worktree directory)',
+  },
+  // `del` is separated only so its kind names the command the user typed.
+  {
+    re: /\bdel\b(?:\s+(?:\/[a-zA-Z]+|-[A-Za-z]+))*\s+(?<target>[^\s;|&]+)/i,
+    kind: 'del (deletes the path)',
+  },
+  // `robocopy <src> <dst> /MIR` mirrors, and mirroring DELETES whatever is in the destination
+  // that is not in the source. The destination is the second operand.
+  {
+    re: /\brobocopy\s+(?:[^\s;|&]+)\s+(?<target>[^\s;|&]+)(?=[\s\S]*\/(?:MIR|PURGE)\b)/i,
+    kind: 'robocopy /MIR (mirrors, deleting anything the source lacks)',
+  },
 ];
 
 export function classifyCommand(command) {
@@ -378,6 +411,60 @@ const FILE_VERBS = {
   dd: { role: 'dd', valueOpts: new Set() },
 };
 
+/**
+ * THE SAME TABLE, FOR THE SHELLS WINDOWS AGENTS ACTUALLY RUN.
+ *
+ * Looked up case-INSENSITIVELY, because PowerShell is: `clear-content` and `Clear-Content` are
+ * one command. The POSIX table above stays case-sensitive on purpose.
+ *
+ * `Clear-Content` and `Set-Content` deserve the attention: they are in-place destroyers with no
+ * entry in the POSIX table at all. Neither deletes a file, so nothing about the path changes and
+ * no `rm` appears anywhere — they simply replace the contents of a file that may hold the only
+ * copy of an agent's work. `Out-File` does the same through a redirect-shaped API.
+ *
+ * `-Path` and `-LiteralPath` are NOT listed as value-taking options anywhere here: dropping the
+ * flag and keeping its value is exactly right, because the value IS the target. `-Value`,
+ * `-Encoding` and friends are listed, because their values are payload, not paths.
+ */
+const PS_PATH_OPTS = ['-Path', '-LiteralPath', '-FilePath'];
+const PS_NOISE = new Set(['-Value', '-Encoding', '-Filter', '-Include', '-Exclude', '-Stream',
+  '-ErrorAction', '-WarningAction', '-InformationAction', '-ErrorVariable', '-OutVariable',
+  '-Width', '-Delimiter', '-NewName']);
+
+const WIN_FILE_VERBS = {
+  'remove-item': { role: 'delete', valueOpts: PS_NOISE },
+  ri: { role: 'delete', valueOpts: PS_NOISE },
+  del: { role: 'delete', valueOpts: PS_NOISE },
+  erase: { role: 'delete', valueOpts: PS_NOISE },
+  rd: { role: 'delete', valueOpts: PS_NOISE },
+  rmdir: { role: 'delete', valueOpts: PS_NOISE },
+  'clear-content': { role: 'truncate', valueOpts: PS_NOISE },
+  clc: { role: 'truncate', valueOpts: PS_NOISE },
+  'set-content': { role: 'truncate', valueOpts: PS_NOISE },
+  'out-file': { role: 'truncate', valueOpts: PS_NOISE },
+  // A move takes the work OUT of its worktree; the destination is clobbered. Same shape as `mv`.
+  'move-item': { role: 'move', valueOpts: new Set([...PS_NOISE, '-Destination']) },
+  mi: { role: 'move', valueOpts: new Set([...PS_NOISE, '-Destination']) },
+  move: { role: 'move', valueOpts: new Set([...PS_NOISE, '-Destination']) },
+  // A copy leaves the source alone and replaces the destination only.
+  'copy-item': { role: 'dest-only', valueOpts: new Set([...PS_NOISE, '-Destination']) },
+};
+
+/** cmd switches (`/s`, `/q`, `/f`) are flags, not paths — dropped like `-x` is. */
+const isWinSwitch = (t) => /^\/[a-zA-Z]+$/.test(t);
+
+/**
+ * Resolve a verb through the POSIX table first, then the Windows one.
+ *
+ * POSIX first and exact, so nothing about existing behaviour shifts; Windows second and folded,
+ * so PowerShell's case-insensitivity is honoured without making `RM` mean `rm`.
+ */
+function verbSpec(word) {
+  if (Object.hasOwn(FILE_VERBS, word)) return FILE_VERBS[word];
+  const w = word.toLowerCase();
+  return Object.hasOwn(WIN_FILE_VERBS, w) ? WIN_FILE_VERBS[w] : null;
+}
+
 /** Transparent prefixes: they change how a command runs, never what it destroys. */
 const WRAPPERS = new Set(['sudo', 'command', 'nohup', 'time', 'env', 'exec', 'nice', 'ionice', 'doas']);
 
@@ -518,6 +605,13 @@ export function lexSegments(command) {
   return segments;
 }
 
+/** The spelling of `opt` that appears in `valueOpts`, ignoring case. PowerShell params fold. */
+function canonOpt(opt, valueOpts) {
+  const lower = opt.toLowerCase();
+  for (const v of valueOpts) if (v.toLowerCase() === lower) return v;
+  return opt;
+}
+
 /** Positional operands of a verb: flags dropped, `--` honoured, value-taking options skipped. */
 function operandsOf(tokens, valueOpts) {
   const out = [];
@@ -526,9 +620,13 @@ function operandsOf(tokens, valueOpts) {
     const t = tokens[i];
     if (!after && t === '--') { after = true; continue; }
     if (!after && t.length > 1 && t.startsWith('-')) {
-      if (valueOpts.has(t)) i++;  // `-s 0`, `-t DIR` — the value is not a target
+      // Value-taking options are matched case-insensitively so PowerShell's `-value` and
+      // `-Value` behave alike; a POSIX short option is unaffected because it has no other case.
+      if (valueOpts.has(t) || valueOpts.has(canonOpt(t, valueOpts))) i++;
       continue;
     }
+    // cmd switches (`/s`, `/q`, `/f`) are flags in every sense that matters here.
+    if (!after && isWinSwitch(t)) continue;
     out.push(t);
   }
   return out;
@@ -601,7 +699,7 @@ export function resolveFileTargets(command) {
       continue;
     }
 
-    const spec = FILE_VERBS[w[0]];
+    const spec = verbSpec(w[0]);
     if (!spec) continue;
     const rest = w.slice(1);
     if (spec.skipIf?.some((f) => rest.includes(f))) continue;   // `tee -a` appends
