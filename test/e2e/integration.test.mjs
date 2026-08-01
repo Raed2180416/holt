@@ -546,6 +546,28 @@ test('COVERAGE: git -C redirects which worktree a path-less verb acts on', async
  * Every deny below has its allow twin, because a guard that denies ordinary file deletion is
  * uninstalled the same day. That is the harder half and it is asserted first.
  */
+/**
+ * Match a workstream to a directory the way the PRODUCT does — canonicalised, and case-folded on
+ * the platforms whose filesystems are case-insensitive.
+ *
+ * A raw `path.resolve()` comparison silently finds nothing on macOS (/var is a symlink to
+ * /private/var) and on Windows (8.3 short names), so a test using one does not fail loudly — it
+ * quietly measures an empty set and then asserts things about it. src/agent.mjs already learned
+ * this the expensive way: `rm -rf <worktree>` was ALLOWED on both platforms for the same reason.
+ */
+async function findWorkstreamByPath(workstreams, dir) {
+  const real = async (x) => {
+    const abs = path.resolve(x);
+    try { return await fs.realpath(abs); } catch { return abs; }
+  };
+  const fold = (x) => (process.platform === 'win32' || process.platform === 'darwin' ? x.toLowerCase() : x);
+  const want = fold(await real(dir));
+  for (const w of workstreams) {
+    if (w.path && fold(await real(w.path)) === want) return w;
+  }
+  return undefined;
+}
+
 async function fileRiskFixture() {
   const fx = await newRepo('file-risk');
   await fx.write('.gitignore', 'node_modules/\ndist/\ncoverage/\n*.log\n.env\nsecrets/\n');
@@ -611,7 +633,13 @@ test('FILE GATE: the verbs that destroy one file at a time are denied', async (t
   // PROVE THE INSTRUMENT SEES PRESENCE before trusting any refusal it produces: holt must
   // already be reporting these exact files as content nothing else holds.
   const { scanned } = await cachedReport(fx.root, { includePrimary: true });
-  const ws = scanned.workstreams.find((w) => path.resolve(w.path) === path.resolve(fx.root));
+  // CANONICAL comparison, for the same reason the product uses one: path.resolve() makes a path
+  // absolute but does NOT resolve symlinks. On macOS os.tmpdir() hands back /var/folders/... while
+  // git reports the real /private/var/folders/..., and on Windows a temp path arrives as an 8.3
+  // short name — so this lookup found nothing on both, atRiskFiles(undefined) returned nothing,
+  // and the test failed at its own PRECONDITION rather than testing anything. Linux has neither
+  // quirk, which is exactly why it was green there and only there.
+  const ws = await findWorkstreamByPath(scanned.workstreams, fx.root);
   const atRisk = new Set(atRiskFiles(ws));
   for (const f of ['src/only_here.js', 'notes.md', 'src/base.js']) {
     assert.ok(atRisk.has(f), `PRECONDITION: holt must already report ${f} as at risk — got ${[...atRisk]}`);
@@ -710,7 +738,13 @@ test('FILE GATE: the fast probe and scan.mjs agree on what is at risk', async (t
   t.after(() => fx.cleanup());
 
   const { scanned } = await cachedReport(fx.root, { includePrimary: true });
-  const ws = scanned.workstreams.find((w) => path.resolve(w.path) === path.resolve(fx.root));
+  // CANONICAL comparison, for the same reason the product uses one: path.resolve() makes a path
+  // absolute but does NOT resolve symlinks. On macOS os.tmpdir() hands back /var/folders/... while
+  // git reports the real /private/var/folders/..., and on Windows a temp path arrives as an 8.3
+  // short name — so this lookup found nothing on both, atRiskFiles(undefined) returned nothing,
+  // and the test failed at its own PRECONDITION rather than testing anything. Linux has neither
+  // quirk, which is exactly why it was green there and only there.
+  const ws = await findWorkstreamByPath(scanned.workstreams, fx.root);
   const computed = atRiskFiles(ws);
   assert.ok(computed.length >= 5, `the fixture must plant several at-risk files, got ${computed.length}`);
 
