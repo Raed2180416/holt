@@ -190,7 +190,18 @@ $ holt clean --apply                      # remove what provably holds nothing, 
 
 `rescue` **exits non-zero if the capture cannot be verified** — so `holt rescue X && git worktree remove X` stops before destroying anything. `clean` re-checks every worktree immediately before removal; a verdict computed seconds ago cannot authorise a deletion now.
 
-**Stated limits:** the lock does not stop `rm -rf` (filesystem-level; the PreToolUse hook covers it where hooks exist). `git worktree unlock` and `remove -f -f` defeat it — both are classified destructive and denied by the hook layer, with the same evidence-bearing message.
+**And a gate that only refuses gets switched off.** `holt discard <path>` is the escape hatch, and it
+is deliberately not a bypass: it captures the content to a verified ref *first*, then removes it —
+so the guard stays on and the loss does not. A capture that cannot be verified aborts having
+deleted nothing. A tracked file is *reverted* to HEAD rather than deleted, because that is what
+"throw away my edits" means, and `git checkout -- <path>` is itself refused. It is journalled, and
+it prints the command that brings the content back.
+
+The guard speaks Windows too. `Remove-Item -Recurse -Force`, `rd /s /q`, `del /f /q`, `Move-Item`,
+`Clear-Content` and `Set-Content` are classified exactly as their POSIX equivalents are — on
+Windows the hook is the *only* layer that can stop a filesystem delete, and it used to be blind.
+
+**Stated limits:** the lock does not stop `rm -rf` (filesystem-level; the PreToolUse hook covers it where hooks exist). `git worktree unlock` and `remove -f -f` defeat it — both are classified destructive and denied by the hook layer, with the same evidence-bearing message. And a pre-execution check cannot see through shell indirection — `$(echo rm)`, a variable-supplied verb, `eval` — so holt does not pretend it can: it returns **ask**, never a silent allow, for a command whose verb it could not read.
 
 ---
 
@@ -289,10 +300,27 @@ therefore to holt.
 ```console
 $ npm install -g https://github.com/Raed2180416/holt/releases/download/v0.2.0/holt-0.2.0.tgz
 $ cd your-repo
+$ holt integrate     # wire every agent you use — this is the whole setup
+$ holt auto          # locks what would be lost; tells you what needs a decision
+```
+
+`holt auto` is the autopilot, and the line it draws is deliberate:
+
+- **It does everything that cannot lose data, by itself.** Locking a worktree that holds the only
+  copy of something, and releasing a lock whose justification has expired, are both reversible —
+  if holt is wrong, nothing is destroyed.
+- **It never deletes.** `clean --apply` is gated on "provably disposable", and a verdict is only as
+  good as the scan behind it. holt was wrong about 8 of 10 worktrees on its own repository during
+  development. So the destructive half is handed to you with the evidence and the exact command,
+  never taken unilaterally.
+
+That is not caution for its own sake — it is what the A/B measured. Warning alone froze agents at
+0% cleanup; handing them a *permitted action* reached 73%.
+
+```console
 $ holt status        # the decision surface — 1–2 s
-$ holt protect       # lock what would be lost
-$ holt integrate     # wire your agents
 $ holt clean --apply # reclaim everything that provably holds nothing
+$ holt discard <path> # the escape hatch — captures to a verified ref, then removes
 ```
 
 
