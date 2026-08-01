@@ -322,6 +322,66 @@ const insideMasked = (regions, idx) => regions.some(([a, b]) => idx >= a && idx 
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'fish', 'pwsh', 'powershell']);
 const SUBSTITUTION = /[$`]/;
 
+/**
+ * INTERPRETERS THAT CARRY A PROGRAM INLINE.
+ *
+ * `node -e`, `python3 -c`, `perl -e` and their kin were completely invisible: the verb is ordinary
+ * and readable, so the indirection check cleared them, and the DESTRUCTIVE table never sees inside
+ * a quoted argument. Reproduced end to end with the loss verified —
+ *
+ *     node -e "require('fs').rmSync('../feature', {recursive:true, force:true})"
+ *     -> {"permissionDecision":"allow"}   then the worktree was gone, and with the file
+ *        untracked `git fsck --unreachable --full` returned NOTHING at all
+ *
+ * — and it contradicted this product's own README, which promises "ask, never a silent allow, for
+ * a command whose verb it could not read". The verb here is perfectly readable. The gap was never
+ * about the verb.
+ *
+ * The distinction that matters, and the reason this is not "holt must analyse every program":
+ * `npm run build` and `make clean` keep their code in a FILE, so holt cannot read it and does not
+ * pretend to — those stay allowed, exactly like any binary on PATH. An inline `-e`/`-c` payload is
+ * sitting in the very string being inspected. holt CAN read it, so not reading it was the defect.
+ *
+ * A destructive filesystem call inside that payload is therefore treated as what it is. Nothing
+ * else about these commands changes: `node -e "console.log(1)"` is still allowed, because
+ * refusing every inline script would be the over-broad guard that gets a tool uninstalled.
+ */
+const INTERPRETERS = new Set([
+  'node', 'nodejs', 'deno', 'bun', 'python', 'python2', 'python3', 'perl', 'ruby', 'php',
+]);
+const INLINE_CODE_FLAGS = new Set(['-e', '-c', '--eval', '-E', '--exec', '-p', '--print']);
+
+/**
+ * Destructive filesystem operations, as they appear inside an inline program rather than as a
+ * shell verb. Deliberately a small list of the calls that actually remove or truncate: this is a
+ * recogniser for the common case, not an attempt to understand arbitrary code.
+ */
+const INLINE_DESTRUCTIVE = [
+  { re: /\brmSync\s*\(|\brmdirSync\s*\(|\bunlinkSync\s*\(|\bfs\s*\.\s*(rm|rmdir|unlink)\s*\(/, what: 'a filesystem remove' },
+  { re: /\bshutil\s*\.\s*rmtree\s*\(|\bos\s*\.\s*(remove|unlink|rmdir)\s*\(/, what: 'a filesystem remove' },
+  // perl and ruby spell these with no namespace at all, which is how `perl -e "unlink('…')"`
+  // walked past a list that only knew the JS and Python forms.
+  { re: /\bunlink\s*\(|\brmtree\s*\(|\bremove_entry\s*\(|\bFileUtils\s*\.\s*rm_(rf|r|f)?\b/, what: 'a filesystem remove' },
+  { re: /\btruncateSync\s*\(|\bwriteFileSync\s*\(/, what: 'a filesystem overwrite' },
+  { re: /\bos\s*\.\s*system\s*\(|\bsubprocess\s*\.|\bchild_process\b|\bexecSync\s*\(/, what: 'a shelled-out command' },
+  { re: /\bFile\s*\.\s*delete\b|\bFileUtils\s*\.\s*rm/, what: 'a filesystem remove' },
+];
+
+/**
+ * EVERY quoted string inside an inline program, not the first one.
+ *
+ * Taking the first was wrong in the commonest spelling there is: in
+ * `require('fs').rmSync('../feature', …)` the first quoted string is `fs`, so the target resolved
+ * to a module name, found nothing, and the verdict fell back to ask. And in
+ * `os.system('rm -rf ../feature')` the quoted string is not a path at all — it is a whole shell
+ * command, which has to be recursed into rather than resolved as a filename.
+ *
+ * So: return them all, and let the caller try each as a command first and as a path second.
+ */
+function inlineStrings(code) {
+  return [...String(code).matchAll(/['"`]([^'"`\n]+)['"`]/g)].map((m) => m[1]);
+}
+
 export function indirectVerb(command) {
   // HEREDOC BODIES AND QUOTED STRINGS ARE DATA, and this check has to know that or it becomes the
   // very thing it was added to avoid. Caught immediately in real use: a `git commit -F` whose
@@ -389,6 +449,22 @@ export function indirectVerb(command) {
       const rewritten = [verb, ...w.slice(1)].join(' ');
       const inner = classifyCommand(rewritten);
       if (inner) return { kind: `${inner.kind} (via a variable)`, inner, innerCommand: rewritten };
+    }
+
+    // An interpreter's inline program is code holt can read, so it reads it. See INTERPRETERS.
+    if (INTERPRETERS.has(path.basename(verb).replace(/\.exe$/i, ''))) {
+      for (let i = 1; i < w.length; i++) {
+        if (!INLINE_CODE_FLAGS.has(w[i]) || !w[i + 1]) continue;
+        const code = w[i + 1];
+        for (const { re, what } of INLINE_DESTRUCTIVE) {
+          if (!re.test(code)) continue;
+          return {
+            kind: `${verb} ${w[i]} performing ${what}`,
+            inlineStrings: inlineStrings(code),
+          };
+        }
+      }
+      continue;   // an inline program with no destructive call is an ordinary program
     }
 
     // A shell invoked with -c carries its program as a literal string: read it.
@@ -1214,6 +1290,37 @@ async function assessWorktreeCommand(command, cwd, ctx) {
     // wrapper itself the bypass. Re-assess the inner string exactly as if it had been typed, so
     // the verdict carries the same per-file evidence.
     if (blind?.innerCommand) return assessWorktreeCommand(blind.innerCommand, cwd, ctx);
+
+    // An inline program that removes something names its target in the same string, so holt
+    // resolves it through the ordinary path and gives a real refusal that names the files:
+    // `node -e "require('fs').rmSync('../feature', …)"` is judged exactly as `rm -rf ../feature`.
+    if (blind?.inlineStrings) {
+      for (const str of blind.inlineStrings) {
+        // Each quoted string is either a shell command (`os.system('rm -rf x')`) or a path
+        // (`rmSync('../feature')`). Try it as a command first, then as a path — whichever resolves
+        // to something holt would refuse IS the refusal.
+        // BOTH GRANULARITIES, because an inline program removes files as readily as directories.
+        // `perl -e "unlink('../feature/only-here.txt')"` names a FILE inside a worktree, which the
+        // worktree layer cannot see by design — checking only that layer let it through.
+        const viaWorktree = async (c) => {
+          const wt = await assessWorktreeCommand(c, cwd, ctx);
+          if (wt && wt.decision !== 'allow') return wt;
+          const targets = resolveFileTargets(c);
+          return targets.length ? assessFileTargets(targets, cwd, ctx) : null;
+        };
+        const asCommand = classifyCommand(str) ? await viaWorktree(str) : null;
+        const resolved = asCommand && asCommand.decision !== 'allow'
+          ? asCommand
+          : await viaWorktree(`rm -rf ${str}`);
+        if (resolved && resolved.decision !== 'allow') {
+          return { ...resolved, kind: blind.kind, reason: `${resolved.reason}\n(seen inside ${blind.kind})` };
+        }
+      }
+      // NOTHING AT RISK, SO ALLOW — not ask. holt READ this program; it is not blind to it. Asking
+      // here would interrupt `node -e "require('fs').rmSync('./node_modules')"`, which is ordinary
+      // and harmless, and an over-broad guard is the one that gets uninstalled.
+      return null;
+    }
     if (blind) {
       return {
         decision: 'ask',

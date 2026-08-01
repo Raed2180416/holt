@@ -238,10 +238,38 @@ async function uncommittedDelta(wtPath, { timeout }) {
  */
 const GENERATED_DIRS = [
   'node_modules', '.git', 'target', 'dist', 'build', '__pycache__', '.venv', 'venv',
-  '.next', 'coverage', '.pytest_cache', '.AppleDouble', '.idea', '.cache', '.turbo',
-  '.parcel-cache', '.gradle', '.terraform', 'tmp', 'temp', 'log', 'logs', '.tox',
+  '.next', 'coverage', '.pytest_cache', '.AppleDouble', '.idea', '.turbo',
+  '.parcel-cache', '.gradle', '.terraform', '.tox',
   '.mypy_cache', '.ruff_cache',
 ];
+
+/*
+ * REMOVED, AND WHY — the rule above, applied to itself a second time.
+ *
+ * `tmp`, `temp`, `log`, `logs` and `.cache` were on this list and NONE of them is reproducible by
+ * a command. They are conventional scratch names, and conventional scratch is exactly where people
+ * put things that are not scratch. Both were reproduced end to end, with the loss verified rather
+ * than assumed:
+ *
+ *   a hand-written logs/incident-postmortem.md   -> gate said "✓ disposable", the hook said allow,
+ *                                                   `rm -rf` destroyed it, and `git fsck
+ *                                                   --unreachable` found nothing, because the
+ *                                                   content had never been a git object at all
+ *   services/billing/tmp/reconciliation-notes.txt -> same, and `holt rescue` — the documented
+ *                                                   escape hatch — returned nothingToRescue and
+ *                                                   exited 0, inviting the deletion
+ *
+ * `.log` came off GENERATED_FILES for the same reason and by the same evidence (a top-level
+ * decision.log was destroyed in the second reproduction).
+ *
+ * THE COST IS ACKNOWLEDGED: a worktree whose only content is a stray build log is no longer
+ * auto-reclaimed. That is the correct trade. A worktree carrying only node_modules or dist is
+ * still reclaimed, which is what keeps `clean` useful, and those two ARE reproducible — `npm ci`
+ * and a build rebuild them. Losing a rebuild costs minutes; the paragraph above costs the work.
+ *
+ * This is the second time this list has destroyed real data (the first was `vendor`). The rule is
+ * not "does this look like noise", it is "can a command in this repository recreate it".
+ */
 
 /**
  * Files, matched on their own terms.
@@ -255,6 +283,16 @@ const GENERATED_DIRS = [
  * repo, producing findings like `object:node_modules/@ts-morph/common` presented as unique work.
  */
 const GENERATED_FILES = [
+  // `*.log` STAYS, and the split from the directory names above is deliberate rather than
+  // inconsistent. A path SEGMENT named `logs` or `tmp` says nothing about provenance — people put
+  // postmortems in logs/ and drafts in tmp/, which is how a hand-written
+  // logs/incident-postmortem.md was destroyed. A file EXTENSION of `.log` is conventionally
+  // machine-written, and the never-worse test pins the cost of pretending otherwise: `rm app.log`
+  // became a refusal, which is daily friction on a daily action and exactly how a guard gets
+  // uninstalled.
+  //
+  // The residual risk is named rather than hidden: content deliberately saved as `notes.log` is
+  // invisible to holt. That is a worse trade to fix than to accept.
   /\.min\.(js|css)$/, /\.log$/,
   /(^|\/)\.DS_Store$/, /(^|\/)Thumbs\.db$/, /(^|\/)desktop\.ini$/,
   /\.lock$/, /(^|\/)package-lock\.json$/, /(^|\/)yarn\.lock$/, /(^|\/)pnpm-lock\.yaml$/,
@@ -269,6 +307,16 @@ const dirPattern = (name) =>
 const GENERATED = [...GENERATED_DIRS.map(dirPattern), ...GENERATED_FILES];
 
 export { GENERATED_DIRS };
+/**
+ * Scratch-named directories, treated as noise ONLY when the repository has gitignored them.
+ *
+ * These are deliberately NOT in GENERATED_DIRS. A path segment called `logs` or `tmp` proves
+ * nothing about what is inside it — that assumption destroyed a hand-written incident postmortem.
+ * But when the project's own .gitignore names the path, someone has stated it is not source, and
+ * that statement is evidence in a way the folder name never was. See ignoredContent().
+ */
+const SCRATCH_WHEN_IGNORED = /(^|\/)(tmp|temp|log|logs|\.cache)(\/|$)/;
+
 export function looksGenerated(p) {
   return GENERATED.some((re) => re.test(p));
 }
@@ -361,7 +409,19 @@ async function ignoredContent(wtPath, { timeout }) {
     if (!entry || entry.length < 4) continue;
     if (entry.slice(0, 2) !== '!!') continue;      // '!!' marks an ignored path
     const p = entry.slice(3);
-    if (!p || looksGenerated(p)) continue;
+    // THE PROJECT'S OWN .gitignore IS THE PROVENANCE SIGNAL — the directory NAME is not.
+    //
+    // `logs/`, `tmp/` and `.cache/` came off GENERATED_DIRS because a hand-written
+    // logs/incident-postmortem.md was reported disposable and destroyed. But that file was
+    // UNTRACKED — nobody had declared it disposable. A path the repository has explicitly
+    // gitignored is different in kind: someone wrote it down as not-source, and that is a far
+    // stronger statement than a folder happening to be called `logs`.
+    //
+    // So the two cases are separated rather than traded off. Untracked content in a scratch-named
+    // directory is protected (the gauntlet's loss). Gitignored content in one is noise (the
+    // monster's `.cache/blob.bin` and `logs/`, planted precisely so that a worktree full of build
+    // junk is still reclaimable — without this, "safety" freezes the tool it is protecting).
+    if (!p || looksGenerated(p) || SCRATCH_WHEN_IGNORED.test(p)) continue;
     // A TRAILING SLASH IS A DIRECTORY, AND SKIPPING IT DESTROYED REAL DATA.
     //
     // When .gitignore names a directory (`secrets/`), git's --ignored=matching collapses the whole

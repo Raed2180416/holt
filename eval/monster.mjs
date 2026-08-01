@@ -416,6 +416,10 @@ async function main() {
   console.log(`  gold50 symbol-layer detections: ${goldSeen}/${truth.gold50.size - goldUnsupported}`
     + (goldUnsupported ? `  (${goldUnsupported} skipped: no parser in this ctags)` : ''));
   console.log(`  diagnostic verdicts: ${errors.length === 0 ? 'ALL CORRECT' : errors.length + ' WRONG'}`);
+  // NAME THEM. A grader that reports "4 WRONG" and stops is a grader you cannot act on — the
+  // count tells you something broke and nothing about what, so the next step is always to go and
+  // re-instrument it. Printing the errors costs nothing and removes that step entirely.
+  for (const e of errors) console.log(`      ! ${e}`);
 
   /* ------------------------------------------------- the destructive loop ---- */
   const p = await protect(root, {});
