@@ -72,11 +72,20 @@ const importedModules = (source) => {
 
 /** Strip comments and string literals, so a URL in help text is not mistaken for code. */
 const codeOnly = (source) => source
-  .replace(/\/\*[\s\S]*?\*\//g, ' ')
+  // NEWLINE-PRESERVING. Collapsing a block comment to a single space also collapses its LINES,
+  // so every `${rel}:${i + 1}` this file reports after the first block comment pointed at
+  // unrelated code — the raw-comparison guard below named src/agent.mjs:371, a bare `{`, for an
+  // offence that lives at line 1380. A guard nobody can follow to the defect gets ignored.
+  .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
   .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ')
-  .replace(/`(?:\\[\s\S]|[^\\`])*`/g, '``')
-  .replace(/'(?:\\.|[^\\'])*'/g, "''")
-  .replace(/"(?:\\.|[^\\"])*"/g, '""');
+  // Template literals span lines too, for the same reason: keep the newlines, drop the content.
+  .replace(/`(?:\\[\s\S]|[^\\`])*`/g, (m) => '``' + m.replace(/[^\n]/g, ''))
+  // A quoted string cannot contain a raw newline in JavaScript, so the character class must
+  // exclude one. Without that exclusion an unpaired apostrophe — in a regex literal, in prose the
+  // comment stripper had already blanked — matched forward across 381 lines of src/agent.mjs and
+  // swallowed them whole, which is the other half of why this file's line numbers were fiction.
+  .replace(/'(?:\\.|[^\\'\n])*'/g, "''")
+  .replace(/"(?:\\.|[^\\"\n])*"/g, '""');
 
 async function sourceFiles(dir) {
   const out = [];
@@ -130,14 +139,37 @@ test('NO NETWORK: the check FIRES on a real network call — proven, not assumed
     ['required.mjs', 'const http = require("node:http");\nexport const go = () => http.get("x");\n'],
   ];
 
+  // EVERY ATTACK IS PLANTED TWICE: bare, and after a realistic PRELUDE.
+  //
+  // Bare one- and two-line probes are what this control used to plant, and they are the reason it
+  // reported green through a stripper that was deleting 43% of the codebase before the check ever
+  // read it — 7,660 of 17,651 lines of src/ and bin/, including 1,473 of bin/holt.mjs's 1,545.
+  // Nothing was stripped from a two-line file, so the guard fired every time and proved only that
+  // it works on inputs unlike the ones it grades. A control has to look like the thing.
+  //
+  // The prelude is exactly the three shapes that were swallowing lines: a JSDoc block comment, a
+  // multi-line template literal, and an unpaired apostrophe in prose.
+  const PRELUDE =
+    '/**\n'
+    + ' * A perfectly ordinary module header, several lines long, as every file in src/ has.\n'
+    + ' * It mentions the tool\'s behaviour, so it carries an unpaired apostrophe.\n'
+    + ' */\n'
+    + 'export const BANNER = `\n'
+    + '  a multi-line template literal\n'
+    + '  spanning several lines\n'
+    + '`;\n'
+    + '// a trailing line comment\n';
+
   for (const [name, source] of attacks) {
-    const probe = path.join(dir, 'probe');
-    await fs.rm(probe, { recursive: true, force: true });
-    await fs.mkdir(probe, { recursive: true });
-    await fs.writeFile(path.join(probe, name), source);
-    const findings = await networkFindings(probe);
-    assert.ok(findings.length > 0,
-      `the check did NOT fire on ${name} — it cannot be trusted to have found nothing in src/`);
+    for (const [shape, text] of [['bare', source], ['after a module prelude', PRELUDE + source]]) {
+      const probe = path.join(dir, 'probe');
+      await fs.rm(probe, { recursive: true, force: true });
+      await fs.mkdir(probe, { recursive: true });
+      await fs.writeFile(path.join(probe, name), text);
+      const findings = await networkFindings(probe);
+      assert.ok(findings.length > 0,
+        `the check did NOT fire on ${name} (${shape}) — it cannot be trusted to have found nothing in src/`);
+    }
   }
 });
 
@@ -192,6 +224,21 @@ test('PATHS: no source file compares paths without canonicalising them', async (
     // another); path.relative(ROOT, file) inside a test, where both come from the same walk, is
     // not - so the guard covers src/ and bin/, where every root arrives from git or the caller.
     { re: /path\.relative\(\s*[A-Za-z_$][\w$.]*\s*,/, what: 'path.relative(<uncanonicalised>, ...)' },
+    // FOURTH INSTANCE, AND IT WALKED STRAIGHT THROUGH THE THREE PATTERNS ABOVE. The shapes above
+    // all require `path.resolve(...)` to sit IMMEDIATELY beside the operator, so wrapping it in
+    // anything at all hid it: `foldCase(path.resolve(w.path)) === foldCase(root)` in src/agent.mjs
+    // was invisible here for the whole life of this guard, and the `?? … samePathSync(
+    // path.resolve(w.path), root)` written under it as a fallback was the byte-for-byte same
+    // comparison, so the lookup had no fallback at all. On macOS every deny message then reported
+    // `[seen by the guard, not by the last scan]` against files the scan had seen perfectly well.
+    //
+    // A guard whose pattern is "the mistake, spelled exactly one way" catches the instance and not
+    // the class. These two cover the wrapped forms.
+    { re: /\w+\(\s*path\.resolve\([^;]*\)\s*\)\s*===/, what: '<wrapper>(path.resolve(...)) === ...' },
+    // Spelled to survive an ALIAS. src/agent.mjs had `const samePath = samePathSync` and then
+    // `samePath(path.resolve(w.path), root)`; a pattern naming the imported symbol exactly would
+    // never have seen it. Any local renaming that still reads as a path comparison is covered.
+    { re: /same[Pp]ath\w*\(\s*path\.resolve\(/, what: 'samePath*(path.resolve(...), ...)' },
   ];
 
   const offences = [];
@@ -241,4 +288,59 @@ test('PATHS: canonicalPath resolves a path that does not exist yet', async (t) =
   assert.equal(path.dirname(existing), path.dirname(missing),
     'a destination that does not exist yet must canonicalise into the same directory as its ' +
     `siblings, or a rename reads as a move out of the worktree — got ${existing} vs ${missing}`);
+});
+
+test('STRIPPER: comment/string removal must not delete LINES from any source file', async () => {
+  // THE CONTRACT EVERY OTHER CHECK IN THIS FILE DEPENDS ON. codeOnly() blanks comments and string
+  // contents so a URL in help text is not read as a network call and a path in prose is not read
+  // as a comparison — but it did so by REPLACING multi-line spans with a single character. Line
+  // counts collapsed, so `${rel}:${i + 1}` pointed at unrelated code, and — far worse — whole
+  // regions of every file stopped being scanned at all. Measured on the tree that shipped:
+  // 7,660 of 17,651 lines invisible, 95% of bin/holt.mjs among them. Both the no-telemetry
+  // capability check and the raw-path-comparison guard were grading a little over half the code
+  // while reporting on all of it.
+  //
+  // Blanking must preserve the line structure exactly. This is the single assertion that keeps it
+  // true, and it is checked against the real codebase rather than a fixture, because the shapes
+  // that broke it — a JSDoc header, a multi-line template, an apostrophe in prose — are what real
+  // source is made of.
+  const offenders = [];
+  let checked = 0;
+  for (const root of [SRC, path.join(ROOT, 'bin')]) {
+    for (const file of await sourceFiles(root)) {
+      const raw = await fs.readFile(file, 'utf8');
+      const before = raw.split('\n').length;
+      const after = codeOnly(raw).split('\n').length;
+      checked++;
+      if (before !== after) {
+        offenders.push(`${path.relative(ROOT, file)}: ${before} lines in, ${after} out (${before - after} invisible)`);
+      }
+    }
+  }
+  assert.ok(checked > 20, `ANTI-VACUITY: this must have read the real source tree, only saw ${checked} files`);
+  assert.deepEqual(offenders, [],
+    'codeOnly() deleted lines, so every check in this file is reading a subset of the code and '
+    + 'reporting line numbers that do not exist:\n  ' + offenders.join('\n  '));
+});
+
+test('STRIPPER: ANTI-VACUITY — it still blanks what it is supposed to blank', async () => {
+  // The other half. A "stripper" that returned its input unchanged would pass the line-count
+  // contract above perfectly, and would then let a URL in help text read as a network call and a
+  // path inside a comment read as a raw comparison. Both directions are pinned.
+  const src = [
+    '/* a block',
+    '   comment mentioning fetch("https://evil.example") */',
+    'const help = "run holt at https://holt.dev";',
+    "const other = 'path.resolve(a) === b';",
+    'const tpl = `',
+    '  fetch("https://evil.example")',
+    '`;',
+    'export const real = 1;',
+  ].join('\n');
+  const out = codeOnly(src);
+  assert.equal(out.split('\n').length, src.split('\n').length, 'line count preserved');
+  assert.ok(!out.includes('evil.example'), `commented and templated URLs must be blanked: ${out}`);
+  assert.ok(!out.includes('holt.dev'), `string contents must be blanked: ${out}`);
+  assert.ok(!out.includes('path.resolve(a) === b'), `string contents must be blanked: ${out}`);
+  assert.ok(out.includes('export const real = 1;'), 'ANTI-VACUITY: real code must survive');
 });

@@ -25,7 +25,21 @@
     "strict": false,
     "noImplicitAny": false,
     "strictNullChecks": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "// types": [
+      "WITHOUT THIS THE CHECKER COULD NOT SEE NODE AT ALL, and the ratchet was measuring the",
+      "damage rather than the code. Every `import fs from 'node:fs/promises'` in src/ and bin/",
+      "failed to resolve — 133 diagnostics reading `Cannot find name 'node:fs/promises'` — so",
+      "every binding imported from a node: module was typed `never`, and the hundreds of",
+      "`Property 'x' does not exist on type 'never'` underneath were that one failure echoing",
+      "through the codebase. The gate was green (the ratchet only forbids GROWTH) while checking",
+      "almost nothing, and the debt it reported was mostly its own.",
+      "",
+      "Adding it drops the count 362 -> 229 without a line of product code changing, and the",
+      "remaining 229 are real. test/unit/typecheck-gate.test.mjs asserts TS2591 stays at zero, so",
+      "a checker that goes blind again fails the build instead of quietly reporting a number."
+    ],
+    "types": ["node"]
   },
   "include": ["src/**/*.mjs", "bin/**/*.mjs"],
   "exclude": ["node_modules", "test", "eval", "scripts"]

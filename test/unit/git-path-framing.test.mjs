@@ -49,6 +49,7 @@ import { execFile } from 'node:child_process';
 import { listTrackedFiles } from '../../src/git.mjs';
 import { parseWorktreePorcelain, discoverGitWorktrees } from '../../src/discover.mjs';
 import { partitionPlan } from '../../src/partition.mjs';
+import { samePathAsync } from '../../src/paths.mjs';
 import { newRepo } from '../fixtures.mjs';
 
 const NEWLINE_NAME = 'weird\nfile.js';
@@ -222,9 +223,20 @@ test('discoverGitWorktrees: a newline-named worktree DIRECTORY is reported at it
   const found = disc.workstreams.find((w) => w.branch === 'feat-weird');
 
   assert.ok(found, `the newline-named worktree must be discovered; got ${JSON.stringify(disc.workstreams.map((w) => w.path))}`);
+  // samePathAsync, not `path.resolve(a) === path.resolve(b)` — which is the exact hand-rolled
+  // comparison src/paths.mjs exists to replace, and which fails on macOS because os.tmpdir()
+  // hands out /var/folders/… while git reports the realpath /private/var/folders/…. The test was
+  // asserting a symlink, not a truncation, and went red on every macOS run for it.
+  assert.ok(
+    await samePathAsync(found.path, weirdPath),
+    'the reported path must be the real directory, not a prefix of it truncated at the newline: '
+    + `got ${JSON.stringify(found.path)}, want ${JSON.stringify(weirdPath)}`,
+  );
+  // ANTI-VACUITY for the comparison itself: samePathAsync must still be able to say NO, or the
+  // assertion above would pass against any path at all.
   assert.equal(
-    path.resolve(found.path), path.resolve(weirdPath),
-    'the reported path must be the real directory, not a prefix of it truncated at the newline',
+    await samePathAsync(found.path, path.join(fx.root, '..', 'wt', 'plainwt')), false,
+    'samePathAsync must distinguish two real, different worktrees',
   );
   // GRADE FROM THE FILESYSTEM: the path holt reports must actually be there. A truncated path
   // names a directory that does not exist, and every later operation aims at nothing.

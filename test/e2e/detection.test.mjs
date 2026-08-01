@@ -343,6 +343,102 @@ test('P3 PRECISION: whitespace inside a string literal is content, not layout', 
     `string-literal contents differ, so these are not the same code: ${JSON.stringify(dup)}`);
 });
 
+/**
+ * THE SAME PRECISION CLAIM, ON THE BACKEND MOST USERS ACTUALLY RUN.
+ *
+ * The test above resolves whatever backend the machine happens to have, so on a developer box
+ * with universal-ctags installed it exercises the ctags path and nothing else. It was green
+ * there for the whole life of the feature while failing on all three `core` CI jobs — the ones
+ * whose contract is NO optional backends — because the defect lives only on the regex fallback:
+ * that extractor reports the function AND the `const` inside it, and the body window was ended
+ * at the next reported symbol, so `renderBanner`'s "declared body" was its signature line alone.
+ * Two different functions with the same signature then agreed, and holt reported work as
+ * duplicated that was not.
+ *
+ * A green suite that depends on which tools the grader has installed is not evidence, so the
+ * backend is PINNED here. Both are asserted: whatever ctags does or does not report, the
+ * precision claim has to hold.
+ */
+for (const symbolBackend of ['regex', 'auto']) {
+  test(`P3 PRECISION (${symbolBackend} backend): a nested binding must not truncate the body to its signature`, async (t) => {
+    const fx = await newRepo(`literal-whitespace-${symbolBackend}`);
+    t.after(() => fx.cleanup());
+
+    await fx.worktree('orchid');
+    await fx.write('src/banner.js',
+      'export function renderBanner(name) {\n' +
+      '  const sep = "col   sep";\n' +
+      '  return sep + name;\n' +
+      '}\n',
+      fx.wt('orchid'));
+    await fx.commit('orchid renders a banner', fx.wt('orchid'));
+
+    await fx.worktree('quokka');
+    await fx.write('src/label.js',
+      'export function renderBanner(name) {\n' +
+      '  const sep = "col sep";\n' +
+      '  return sep + name;\n' +
+      '}\n',
+      fx.wt('quokka'));
+    await fx.commit('quokka renders a label', fx.wt('quokka'));
+
+    const opts = symbolBackend === 'auto' ? {} : { symbolBackend };
+    const { scanned, report } = await inspectFixture(fx, opts);
+
+    // ANTI-VACUITY. If the backend never reported the shared name there is no pair to reject and
+    // this test would pass by detecting nothing at all — which is exactly how the defect hid.
+    const orchid = scanned.workstreams.find((w) => w.id === 'orchid');
+    const quokka = scanned.workstreams.find((w) => w.id === 'quokka');
+    assert.ok(orchid.addedKeys.some((k) => k.endsWith(':renderBanner')), 'orchid must add renderBanner');
+    assert.ok(quokka.addedKeys.some((k) => k.endsWith(':renderBanner')), 'quokka must add renderBanner');
+
+    const dup = report.duplicates.find((d) => pairMatches(d, 'orchid', 'quokka'));
+    assert.equal(dup, undefined,
+      `[${scanned.backend.label}] string-literal contents differ, so these are not the same `
+      + `code: ${JSON.stringify(dup)}`);
+  });
+}
+
+/**
+ * THE OTHER DIRECTION OF THE SAME WINDOW FIX — the never-worse control.
+ *
+ * Widening the body window past a nested declaration must not cost recall: a genuine duplicate
+ * whose body happens to contain a `const` still has to be REPORTED. A "fix" that simply made
+ * every body unreadable would pass the precision test above and silently switch duplicate
+ * detection off; this one fails the moment it does.
+ */
+test('P3 RECALL (regex backend): a real duplicate whose body contains a binding is still found', async (t) => {
+  const fx = await newRepo('nested-binding-recall');
+  t.after(() => fx.cleanup());
+
+  await fx.worktree('orchid');
+  await fx.write('src/fmt.js',
+    'export function renderBanner(name) {\n' +
+    '  const sep = "col sep";\n' +
+    '  return sep + name;\n' +
+    '}\n',
+    fx.wt('orchid'));
+  await fx.commit('orchid renders a banner', fx.wt('orchid'));
+
+  // Same program, reformatted: tabs, and the signature/body re-wrapped.
+  await fx.worktree('quokka');
+  await fx.write('src/label.js',
+    'export function renderBanner(\n' +
+    '\tname\n' +
+    ') {\n' +
+    '\tconst sep = "col sep";\n' +
+    '\treturn sep + name;\n' +
+    '}\n',
+    fx.wt('quokka'));
+  await fx.commit('quokka renders a label', fx.wt('quokka'));
+
+  const { report } = await inspectFixture(fx, { symbolBackend: 'regex' });
+  const dup = report.duplicates.find((d) => pairMatches(d, 'orchid', 'quokka'));
+  assert.ok(dup, 'the same function reformatted is the same work and must still be reported');
+  assert.ok(dup.sharedSymbols.some((s) => s.endsWith(':renderBanner')),
+    `expected renderBanner as shared evidence, got: ${JSON.stringify(dup?.sharedSymbols)}`);
+});
+
 /* -------------------------------------------------- P6: safe to delete ---- */
 
 test('P6 PRESENCE: an untouched worktree is disposable; one holding work is not', async (t) => {

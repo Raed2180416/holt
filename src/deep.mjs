@@ -31,6 +31,7 @@ import { createRequire } from 'node:module';
 import { git, pmap } from './git.mjs';
 import { looksGenerated } from './scan.mjs';
 import { scratchDir } from './symbols.mjs';
+import { relativeWithinAsync } from './paths.mjs';
 
 /** Locate the jscpd binary: node_modules/.bin first, then PATH. */
 export async function detectJscpd() {
@@ -190,7 +191,8 @@ export async function deepDuplicates(scanResult, { minTokens = 50, minLines = 5,
     }
 
     // Attribute each clone to the two workstreams whose directories it spans.
-    const ownerOf = (p) => String(p).split(path.sep).filter(Boolean)[0] ?? null;
+    // Split on '/', because relativeWithinAsync returns POSIX separators on every platform.
+    const ownerOf = (p) => String(p).split('/').filter(Boolean)[0] ?? null;
     const byPair = new Map();
     const clones = report.duplicates ?? report.clones ?? [];
 
@@ -198,8 +200,19 @@ export async function deepDuplicates(scanResult, { minTokens = 50, minLines = 5,
       const aPath = c.firstFile?.name ?? c.firstFile?.path ?? c.first?.name;
       const bPath = c.secondFile?.name ?? c.secondFile?.path ?? c.second?.name;
       if (!aPath || !bPath) continue;
-      const aw = ownerOf(path.relative(tmpRoot, path.resolve(tmpRoot, aPath)));
-      const bw = ownerOf(path.relative(tmpRoot, path.resolve(tmpRoot, bPath)));
+      // relativeWithinAsync canonicalises BOTH sides. jscpd 5.0.14 reports paths relative to the
+      // cwd it was given, so the raw arithmetic happens to hold today — measured, not assumed —
+      // but it holds only for as long as that stays true: an absolute, realpath-resolved name
+      // from a future jscpd would make `path.relative` return `../../private/var/…` on macOS,
+      // ownerOf would answer `..` for BOTH sides, and every cross-workstream clone would be
+      // dropped by the `aw === bw` guard below. Silently: `--deep` would report zero clones and
+      // look like a clean repository. The canonical helper costs one realpath and removes the
+      // whole failure mode.
+      // eslint-disable-next-line no-await-in-loop -- one realpath per clone record, bounded by jscpd's report
+      const [aw, bw] = (await Promise.all([
+        relativeWithinAsync(tmpRoot, path.resolve(tmpRoot, aPath)),
+        relativeWithinAsync(tmpRoot, path.resolve(tmpRoot, bPath)),
+      ])).map(ownerOf);
       if (!aw || !bw || aw === bw) continue; // a clone inside ONE workstream is not our concern
 
       const key = aw < bw ? `${aw} ${bw}` : `${bw} ${aw}`;

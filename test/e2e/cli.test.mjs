@@ -490,13 +490,51 @@ test('FIRST RUN: `holt brief` never fabricates a clean bill when the scan could 
   assert.doesNotMatch(healthy.stdout, /clean right now/,
     'a repo with a dirty sibling must never read as clean');
 
-  // Break the sibling the way the refutation did: its .git pointer unreadable.
-  await fs.chmod(path.join(sib, '.git'), 0o000);
-  t.after(() => fs.chmod(path.join(sib, '.git'), 0o644).catch(() => {}));
-  const broken = await holt(['brief', '--cwd', fx.root], fx.root);
-  assert.doesNotMatch(broken.stdout, /clean right now/,
-    `a scan that could not answer must never print the clean bill: ${broken.stdout}`);
-  assert.match(broken.stdout + broken.stderr, /could not (be )?scan|cannot vouch/i,
-    `the brief must say it cannot vouch: ${broken.stdout} ${broken.stderr}`);
-  assert.notEqual(broken.code, 0, 'and it must not exit 0 while unable to vouch');
+  // Break the sibling. THE FAULT MUST BE REAL ON THIS PLATFORM: the original shape here was
+  // `chmod(sib/.git, 0o000)`, and Node's chmod on Windows only toggles the read-only bit — NTFS
+  // has no POSIX mode — so on every Windows run the pointer stayed readable, the scan answered
+  // normally, and this test asserted the product's response to a fault that was never injected.
+  // It failed for the right reason (the brief was correct; the fixture was not), which is the
+  // worst kind of red: it reads as a product defect on the one platform holt is least proven on.
+  //
+  // So the fault is a broken gitdir POINTER, which is real on every filesystem, and it is only
+  // asserted against after `holt status` confirms the workstream really did become unscannable.
+  const faults = [
+    ['the .git pointer names a gitdir that does not exist',
+      () => fs.writeFile(path.join(sib, '.git'), 'gitdir: /nonexistent/holt-broken-gitdir\n')],
+    ['the .git pointer is not parseable at all',
+      () => fs.writeFile(path.join(sib, '.git'), ' not a gitdir pointer at all\n')],
+  ];
+  if (process.platform !== 'win32') {
+    // Kept as an EXTRA shape where it is expressible, because an unreadable pointer and a
+    // pointer-to-nowhere reach the scan through different errno paths.
+    faults.push(['the .git pointer is unreadable', () => fs.chmod(path.join(sib, '.git'), 0o000)]);
+  }
+  const pointer = await fs.readFile(path.join(sib, '.git'));
+  t.after(async () => {
+    await fs.chmod(path.join(sib, '.git'), 0o644).catch(() => {});
+    await fs.writeFile(path.join(sib, '.git'), pointer).catch(() => {});
+  });
+
+  for (const [what, inject] of faults) {
+    await fs.chmod(path.join(sib, '.git'), 0o644).catch(() => {});
+    await fs.writeFile(path.join(sib, '.git'), pointer);
+    await inject();
+
+    // ANTI-VACUITY: prove the fault landed before grading the response to it.
+    const st = await holt(['status', '--json', '--cwd', fx.root], fx.root);
+    const scanned = JSON.parse(st.stdout);
+    assert.equal(scanned.counts.scanned, 0,
+      `${what}: the fault must actually make the workstream unscannable on this platform, `
+      + `got counts ${JSON.stringify(scanned.counts)}`);
+    assert.ok((scanned.skipped ?? []).some((w) => w.reason),
+      `${what}: and the skip must be named with a reason, got: ${JSON.stringify(scanned.skipped)}`);
+
+    const broken = await holt(['brief', '--cwd', fx.root], fx.root);
+    assert.doesNotMatch(broken.stdout, /clean right now/,
+      `${what}: a scan that could not answer must never print the clean bill: ${broken.stdout}`);
+    assert.match(broken.stdout + broken.stderr, /could not (be )?scan|cannot vouch/i,
+      `${what}: the brief must say it cannot vouch: ${broken.stdout} ${broken.stderr}`);
+    assert.notEqual(broken.code, 0, `${what}: and it must not exit 0 while unable to vouch`);
+  }
 });

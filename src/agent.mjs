@@ -31,7 +31,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   underOrEqualAsync, canonicalPath, foldCase, CASE_INSENSITIVE_FS,
-  samePathSync, underOrEqualSync, relativeWithinAsync,
+  samePathSync, underOrEqualSync, relativeWithinAsync, findByPath,
 } from './paths.mjs';
 import { discover, repoAbsenceError } from './discover.mjs';
 import { scan, atRiskFiles, atRiskFromStatus, generatedEvidence } from './scan.mjs';
@@ -1377,13 +1377,26 @@ async function assessFileTargets(targets, cwd, ctx) {
     ({ report, scanned } = await cachedReport(cwd, { includePrimary: true }));
   } catch { /* keep the direct file evidence; absence of the scan never downgrades a refusal */ }
 
-  const wsFor = (root) => scanned?.workstreams.find((w) => w.path && foldCase(path.resolve(w.path)) === foldCase(root))
-    ?? scanned?.workstreams.find((w) => w.path && samePath(path.resolve(w.path), root))
-    ?? null;
+  // findByPath, not two hand-rolled comparisons. What stood here was
+  //   foldCase(path.resolve(w.path)) === foldCase(root)
+  //   ?? samePathSync(path.resolve(w.path), root)
+  // — and samePathSync IS `foldCase(a) === foldCase(b)`, so the second clause was the first one
+  // spelled differently. The line read as a fast path with a careful fallback and was one
+  // comparison repeated, neither of which resolves a symlink. It also sat invisible to the
+  // raw-comparison guard for the whole life of that guard, because wrapping `path.resolve()` in
+  // anything at all defeated the patterns it grepped for. Both are fixed; this is the class's
+  // one correct spelling.
+  //
+  // Memoised because it is called once per hit and canonicalPath does real filesystem work.
+  const wsCache = new Map();
+  const wsFor = async (root) => {
+    if (!wsCache.has(root)) wsCache.set(root, await findByPath(scanned?.workstreams ?? [], root) ?? null);
+    return wsCache.get(root);
+  };
 
   const byWs = new Map();
   for (const h of hits) {
-    const ws = wsFor(h.root);
+    const ws = await wsFor(h.root);
     const id = ws?.id ?? path.basename(h.root);
     if (!byWs.has(id)) byWs.set(id, { id, ws, files: new Map() });
     byWs.get(id).files.set(h.file, h.layer);

@@ -1168,8 +1168,6 @@ async function readDeclaredBody(workstream, sym, boundariesByFile) {
   const text = await readWorktreeFile(workstream.path, sym.file);
   if (text === null) return null; // unreadable is UNKNOWN, not a mismatch — see the caller's fail-open comment
   const lines = text.split(/\r\n|\n/);
-  const start = sym.line - 1;
-  if (start < 0 || start >= lines.length) return null;
 
   if (!boundariesByFile.has(sym.file)) {
     const bounds = (workstream.added ?? [])
@@ -1178,8 +1176,60 @@ async function readDeclaredBody(workstream, sym, boundariesByFile) {
       .sort((x, y) => x - y);
     boundariesByFile.set(sym.file, bounds);
   }
-  const nextBoundary = boundariesByFile.get(sym.file).find((l) => l > sym.line);
-  const hardEnd = sym.line - 1 + MAX_BODY_WINDOW_LINES;
+  return declaredBodyFromLines(lines, sym.line, boundariesByFile.get(sym.file));
+}
+
+/**
+ * How wide a line's leading whitespace is, in columns, with tabs expanded to the conventional 8.
+ *
+ * Expanded rather than counted so a file that indents its body with one tab and its declaration
+ * with none still reads as deeper, and a file mixing four spaces with tabs — which every real
+ * codebase eventually contains — does not produce a nesting verdict that depends on which
+ * character happened to be used.
+ */
+function indentColumns(line) {
+  let col = 0;
+  for (const ch of line) {
+    if (ch === '\t') col += 8 - (col % 8);
+    else if (ch === ' ') col += 1;
+    else break;
+  }
+  return col;
+}
+
+/**
+ * The declared body a symbol spans, given the file's lines and every declaration line the same
+ * workstream added in that file. Pure, and exported for the same reason `layoutNormalisedBody`
+ * is: this window is where the duplicate gate's precision actually lives, and a worktree fixture
+ * can only reach it through whichever symbol backend the grading machine happens to have
+ * installed.
+ *
+ * A NESTED DECLARATION IS NOT A BOUNDARY. The window used to end at the next declaration line of
+ * any kind, and the regex fallback — the backend every user without ctags runs — reports the
+ * `const` inside a function as a declaration in its own right. So `function f(name) {` followed
+ * by `  const sep = …` had a "declared body" of exactly its signature line, and any two
+ * functions sharing a name and an arity compared as identical: holt reported work as duplicated
+ * that was not, on the degraded path, while the ctags path (which does not report that binding)
+ * stayed correct. That is the class — the boundary must be a SIBLING declaration, meaning one no
+ * deeper than the declaration being read; anything further indented is part of this body.
+ *
+ * Getting the width wrong in the other direction only ever costs recall: an over-wide window
+ * makes two bodies less likely to agree, which drops a name from the shared evidence, and a
+ * dropped name can never manufacture a duplicate. That asymmetry is why the cap stays.
+ *
+ * @param {string[]} lines      the file, split on newlines
+ * @param {number} symLine      1-based line the declaration starts on
+ * @param {number[]} declLines  1-based lines of every declaration added in this file, ascending
+ * @returns {string|null} the trimmed, comment-stripped body, or null when there is nothing to read
+ */
+export function declaredBodyFromLines(lines, symLine, declLines = []) {
+  const start = symLine - 1;
+  if (!Number.isInteger(start) || start < 0 || start >= lines.length) return null;
+
+  const ownIndent = indentColumns(lines[start]);
+  const nextBoundary = declLines.find(
+    (l) => l > symLine && l - 1 < lines.length && indentColumns(lines[l - 1]) <= ownIndent);
+  const hardEnd = start + MAX_BODY_WINDOW_LINES;
   const end = Math.min(nextBoundary ? nextBoundary - 1 : hardEnd, hardEnd, lines.length);
 
   const normalised = lines

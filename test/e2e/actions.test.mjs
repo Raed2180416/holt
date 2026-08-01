@@ -1734,9 +1734,18 @@ test('RECALL: a worktree whose ENTIRE committed delta is line-ending-only vs bas
     await fx.write('src/tool.sh', '#!/bin/sh\necho hi\n');
     await fx.commit('base: add tool.sh, not executable');
     const modeWt = await fx.worktree('mode-only');
-    await fs.chmod(path.join(fx.wt('mode-only'), 'src/tool.sh'), 0o755);
-    await fx.git(['add', 'src/tool.sh'], fx.wt('mode-only'));
+    // `git update-index --chmod=+x`, not fs.chmod: NTFS has no executable bit, so Node's chmod is
+    // a no-op there, `git add` staged nothing, and the commit below exited 1 with "nothing to
+    // commit" — the fixture failing to CREATE the case, reported as the detector failing to
+    // refuse it. git's index carries the mode independently of the filesystem, so this plants a
+    // real mode-only change on all three platforms.
+    await fx.git(['update-index', '--chmod=+x', 'src/tool.sh'], fx.wt('mode-only'));
     await fx.git(['commit', '-m', 'chmod +x, no content change'], fx.wt('mode-only'));
+    // ANTI-VACUITY: the commit must really be mode-only, or "must not be classified as
+    // line-ending noise" below is asserted against a case that was never planted.
+    const modeDiff = await fx.git(['show', '--raw', '--format=', 'HEAD'], fx.wt('mode-only'));
+    assert.match(modeDiff, /:100644 100755 /,
+      `the planted change must be a real 644->755 mode change, got: ${modeDiff}`);
     const vMode = (await inspect(fx.root)).safe.find((s) => s.id === 'mode-only');
     assert.equal(vMode.safe, false,
       `a mode-only change must not be classified as line-ending noise: ${JSON.stringify(vMode)}`);

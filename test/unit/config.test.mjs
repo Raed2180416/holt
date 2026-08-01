@@ -15,6 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { newRepo } from '../fixtures.mjs';
 import { loadConfig, ConfigError, CONFIG_FILENAME } from '../../src/config.mjs';
@@ -44,7 +45,10 @@ test('config: no file present -> found:false, empty config, does not throw', asy
 });
 
 test('config: not a git repository -> found:false, never throws', async (t) => {
-  const dir = await fs.mkdtemp(path.join(process.env.TMPDIR ?? '/tmp', 'holt-config-'));
+  // os.tmpdir(), not `TMPDIR ?? '/tmp'`: Windows sets TEMP/TMP and never TMPDIR, so the fallback
+  // resolved to a `\tmp` that does not exist and this test died with ENOENT on every Windows run
+  // — a portability defect in the fixture reported as a failure of the code under test.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-config-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }).catch(() => {}));
   const r = await loadConfig(dir);
   assert.equal(r.found, false);

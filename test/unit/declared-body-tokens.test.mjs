@@ -24,6 +24,11 @@
  *   3. tokens never fuse          — collapsing a run must not weld two identifiers into a third
  *   4. operator spacing is kept   — `a - -b` and `a--b` are different programs
  *   5. unsure means null          — and null means the STRICT verdict stands, never a match
+ *   6. the window is the body     — a NESTED declaration does not end it; a sibling does
+ *
+ * Rule 6 was added after the third regression in the same feature, and it is the one none of the
+ * others could have caught: the comparison was correct and the text handed to it was wrong. See
+ * the section-6 preamble.
  *
  * Rule 5 is the load-bearing one and the only one with no observable worktree shape: an unsure
  * lexer must cost RECALL and never PRECISION. Every "these agree" assertion below is therefore
@@ -34,7 +39,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { layoutNormalisedBody, declaredBodiesAgree } from '../../src/analyze.mjs';
+import { layoutNormalisedBody, declaredBodiesAgree, declaredBodyFromLines } from '../../src/analyze.mjs';
 
 /** The shape duplicates() caches per (workstream, symbol) and hands to declaredBodiesAgree. */
 const body = (text) => ({ text, tokens: layoutNormalisedBody(text) });
@@ -179,4 +184,116 @@ test('SAFETY: byte-identical bodies agree even when neither can be lexed', () =>
   assert.equal(layoutNormalisedBody(rust), null, 'ANTI-VACUITY: this body must really be un-lexable');
   assert.equal(declaredBodiesAgree(body(rust), body(rust)), true,
     'identical bytes are the same code whatever the lexer thinks');
+});
+
+/* ----------------------------------------- 6. the window the lexer is fed ---- */
+
+/**
+ * WHY THIS SECTION EXISTS. Everything above pins how two bodies are COMPARED. None of it can
+ * catch the defect that shipped: the bodies handed to the comparison were the wrong text. The
+ * window ended at the next declaration line of any kind, and the regex fallback — the extractor
+ * every user without universal-ctags runs — reports a `const` inside a function as a declaration.
+ * So a function's "declared body" was its signature line alone, two different functions sharing a
+ * name and an arity agreed, and holt reported duplicated work that did not exist. It was green on
+ * every machine with ctags installed and red on all three `core` CI jobs, whose contract is no
+ * optional backends, for the entire life of the feature.
+ *
+ * The window is therefore pinned here directly, at a granularity no worktree fixture can reach
+ * without also depending on which tools the grading machine has.
+ */
+
+const L = (s) => s.split('\n');
+
+test('WINDOW: a nested declaration is part of the body, not the end of it', () => {
+  const src = L([
+    'export function renderBanner(name) {',
+    '  const sep = "col   sep";',
+    '  return sep + name;',
+    '}',
+  ].join('\n'));
+  // What the regex fallback reports for this file: the function at 1, the binding at 2.
+  const body = declaredBodyFromLines(src, 1, [1, 2]);
+  assert.ok(body.includes('col   sep'),
+    `the binding's own line is inside the function body, got: ${JSON.stringify(body)}`);
+  assert.ok(body.includes('return sep + name;'), 'and so is everything after it');
+});
+
+test('WINDOW: ANTI-VACUITY — a SIBLING declaration still ends the body', () => {
+  // The half that proves the fix is a nesting rule and not "boundaries were switched off".
+  const src = L([
+    'function first() {',
+    '  return 1;',
+    '}',
+    'function second() {',
+    '  return 2;',
+    '}',
+  ].join('\n'));
+  const body = declaredBodyFromLines(src, 1, [1, 4]);
+  assert.ok(body.includes('return 1;'), 'the first function\'s own body is included');
+  assert.ok(!body.includes('return 2;'),
+    `the next same-level declaration must end the window, got: ${JSON.stringify(body)}`);
+});
+
+test('WINDOW: nesting is judged in columns, so tabs and spaces agree', () => {
+  const tabbed = L('function f() {\n\tconst x = 1;\n\treturn x;\n}');
+  const spaced = L('function f() {\n    const x = 1;\n    return x;\n}');
+  for (const [name, src] of [['tabs', tabbed], ['spaces', spaced]]) {
+    const body = declaredBodyFromLines(src, 1, [1, 2]);
+    assert.ok(body.includes('return x;'), `${name}: the nested binding must not truncate the body`);
+  }
+  // And the two really are the same program once layout is normalised — the point of the fix.
+  assert.equal(
+    layoutNormalisedBody(declaredBodyFromLines(tabbed, 1, [1, 2])),
+    layoutNormalisedBody(declaredBodyFromLines(spaced, 1, [1, 2])));
+});
+
+test('WINDOW: a method is nested inside its class but a sibling of the next method', () => {
+  const src = L([
+    'class Parser {',       // 1
+    '  parse(s) {',         // 2
+    '    return s;',        // 3
+    '  }',                  // 4
+    '  render(s) {',        // 5
+    '    return s + "!";',  // 6
+    '  }',                  // 7
+    '}',                    // 8
+  ].join('\n'));
+  const decls = [1, 2, 5];
+  const klass = declaredBodyFromLines(src, 1, decls);
+  assert.ok(klass.includes('return s + "!";'), 'the class body spans both of its methods');
+
+  const method = declaredBodyFromLines(src, 2, decls);
+  assert.ok(method.includes('return s;'), 'the method keeps its own body');
+  assert.ok(!method.includes('return s + "!";'),
+    `the next method is a sibling and must end the window, got: ${JSON.stringify(method)}`);
+});
+
+test('WINDOW: an off-side language nests by indentation with no braces at all', () => {
+  const src = L([
+    'def render(name):',      // 1
+    '    sep = "col   sep"',  // 2
+    '    return sep + name',  // 3
+    'def other():',           // 4
+    '    return 0',           // 5
+  ].join('\n'));
+  const body = declaredBodyFromLines(src, 1, [1, 2, 4]);
+  assert.ok(body.includes('col   sep'), 'the indented binding belongs to render');
+  assert.ok(!body.includes('return 0'), 'the next def is a sibling and ends the window');
+});
+
+test('WINDOW: the hard cap still bounds a body with no sibling after it', () => {
+  const src = L(['function f() {', ...Array.from({ length: 80 }, (_, i) => `  const v${i} = ${i};`), '}'].join('\n'));
+  const body = declaredBodyFromLines(src, 1, [1]);
+  assert.ok(body.split('\n').length <= 40, `window must stay capped, got ${body.split('\n').length} lines`);
+  assert.ok(body.includes('const v0 = 0;'), 'ANTI-VACUITY: the cap must not empty the body');
+});
+
+test('WINDOW: unreadable inputs are null, never an empty string that could match', () => {
+  // null is UNKNOWN and the caller fails open on it; '' would be a body that agrees with every
+  // other empty body, which is precisely the false duplicate this whole section exists to stop.
+  assert.equal(declaredBodyFromLines(L('a = 1'), 99, []), null, 'a line past the end is unreadable');
+  assert.equal(declaredBodyFromLines(L('a = 1'), 0, []), null, 'line numbers are 1-based');
+  assert.equal(declaredBodyFromLines(L('   \n   '), 1, []), null, 'a body of only blank lines is unknown');
+  assert.equal(declaredBodyFromLines(L('// just a comment'), 1, []), null,
+    'a body of only comments is unknown, not the empty match');
 });
