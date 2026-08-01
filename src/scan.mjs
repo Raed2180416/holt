@@ -313,10 +313,16 @@ async function scanFiles(ws, ctx) {
       files: uFiles, untracked: uUntracked, count: uFiles.length + uUntracked.length,
       how: uncommitted.how,
     };
+    // THE FULL LIST, NOT A SAMPLE. This used to be `.slice(0, 50)` while `count` stayed the true
+    // length — a list whose length disagreed with its own count. That is fine for a display
+    // sample and fatal for an action: `holt rescue` has to CAPTURE every one of these paths and
+    // then VERIFY each is in the resulting tree, and it cannot verify what it was never shown.
+    // Callers that print take their own sample (safeToDelete slices to 3 and 10).
     result.ignored = {
-      files: (ignored?.files ?? []).slice(0, 50),
+      files: ignored?.files ?? [],
       count: ignored?.files?.length ?? 0,
       how: ignored?.how ?? 'not-run',
+      error: ignored?.error,
     };
     result.touched = [...new Set([...cFiles, ...uFiles, ...uUntracked])].sort();
     result.stats = {

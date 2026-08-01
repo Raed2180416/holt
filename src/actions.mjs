@@ -24,7 +24,7 @@ import { git, gitOk, pmap, authorEnv } from './git.mjs';
 import { discover } from './discover.mjs';
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
-import { analyze, uniqueWork, safeToDelete } from './analyze.mjs';
+import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
 
 const LOCK_PREFIX = 'holt:';
 
@@ -226,9 +226,28 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
   }
   if (!ws.ok) return { ok: false, error: `'${id}' could not be scanned: ${ws.reason}` };
 
-  const files = [...new Set([...ws.uncommitted.files, ...ws.uncommitted.untracked])]
-    .filter(Boolean);
-  const committedDelta = ws.committed.count;
+  // THE SAME CONTENT COMPUTATION `gate` USES. rescue used to build its own set from the
+  // uncommitted layer alone, so a worktree whose only unique content was gitignored got
+  // "✗ HOLDS UNIQUE WORK, exit 1" from gate and "nothing to rescue, exit 0" from rescue — and
+  // exit 0 is what a `holt rescue X && git worktree remove X` chain acts on. Deriving the set
+  // here instead of in contentAtRisk() is what allowed the drift; it is not done here any more.
+  const risk = contentAtRisk(ws);
+  const files = risk.files;
+  const committedDelta = risk.committedCount;
+
+  // AN INSTRUMENT THAT FAILED IS NOT AN EMPTY WORKTREE. Both look like zero paths from here, and
+  // only one of them makes deletion safe — so a probe failure must produce a NAMED refusal with
+  // a non-zero exit, never the cheerful nothing-to-rescue that licenses the deletion.
+  if (risk.blind.length) {
+    return {
+      ok: false,
+      id,
+      error: `holt could not enumerate this worktree's content: ${risk.blind.join('; ')}`,
+      blind: risk.blind,
+      note: 'nothing was captured and nothing was released. holt cannot tell an empty worktree '
+        + 'from one it failed to look inside, so it refuses rather than report nothing-to-rescue.',
+    };
+  }
 
   if (files.length === 0 && committedDelta === 0) {
     return { ok: true, nothingToRescue: true, id, note: 'this worktree holds nothing base lacks' };
@@ -270,7 +289,9 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     const tree = treeR.stdout.trim();
 
     const msg = `holt rescue: ${id}\n\n`
-      + `Captured ${files.length} uncommitted/untracked file(s) and the worktree's committed state.\n`
+      + `Captured ${files.length} at-risk path(s) `
+      + `(${risk.layers.uncommitted.length} modified, ${risk.layers.untracked.length} untracked, `
+      + `${risk.layers.ignored.length} gitignored) and the worktree's committed state.\n`
       + `Restore with:  git checkout <this-ref> -- .   (see 'holt rescued')\n`;
     const commitR = await gitOk(
       ['commit-tree', tree, '-p', ws.head, '-m', msg],

@@ -22,7 +22,7 @@ import { newRepo } from '../fixtures.mjs';
 import { protect, unprotect, rescue, rescues, clean } from '../../src/actions.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
-import { analyze } from '../../src/analyze.mjs';
+import { analyze, safeToDelete } from '../../src/analyze.mjs';
 import { classify } from '../../src/git.mjs';
 
 function sh(cmd, args, cwd) {
@@ -268,6 +268,164 @@ test('RESCUE: rescues are discoverable months later', async (t) => {
   const list = await rescues(fx.root);
   assert.ok(list.some((r) => r.id === 'holder'), `rescue should be listed: ${JSON.stringify(list)}`);
   assert.match(list[0].ref, /^refs\/holt\/rescue\//);
+});
+
+/* ================================================ RESCUE <-> GATE PARITY ==== */
+
+/**
+ * ONE PRODUCT MUST NOT GIVE TWO ANSWERS TO "WOULD DELETING THIS LOSE WORK?".
+ *
+ * Reproduced: a worktree whose only unique content was gitignored got
+ *
+ *     holt gate w1    ->  "✗ w1: HOLDS UNIQUE WORK ... 2 gitignored file(s)"   exit 1
+ *     holt rescue w1  ->  "this worktree holds nothing base lacks"             exit 0
+ *
+ * because gate (safeToDelete) counted three layers — committed, uncommitted, gitignored — and
+ * rescue built its own set from two. Exit 0 is the one a `holt rescue X && git worktree remove X`
+ * chain acts on, so the disagreeing command was also the dangerous one.
+ *
+ * This test asserts the INVARIANT rather than the instance: across every worktree shape holt
+ * distinguishes, rescue may never report nothing-to-rescue for a worktree the gate refuses on a
+ * CONTENT ground. A lock is deliberately excluded — "locked" is a refusal about permission, not
+ * about content, and an empty-but-locked worktree genuinely has nothing to rescue.
+ */
+async function paritySubjects(fx) {
+  const disc = await discover(fx.root, {});
+  const scanned = await scan(disc, { symbols: false });
+  const report = await analyze(scanned, {});
+  return report.safe;
+}
+
+test('PARITY: rescue may never say nothing-to-rescue where gate refuses on content', async (t) => {
+  const fx = await newRepo('parity');
+  t.after(() => fx.cleanup());
+
+  // The ignore rules cover a FILE, a DIRECTORY, and recognisable build output — the three shapes
+  // git's `status --ignored=matching` reports differently.
+  await fx.write('.gitignore', 'notes.local\nsecrets/\nnode_modules/\n');
+  await fx.commit('ignore rules');
+
+  // --- shapes that MUST hold work ------------------------------------------------
+  const igFile = await fx.worktree('ig-file');
+  await fx.write('notes.local', 'an hour of hand-written notes\n', igFile);
+
+  const igDir = await fx.worktree('ig-dir');
+  await fx.write('secrets/prod.env', 'API_KEY=live-do-not-lose\n', igDir);
+
+  const unc = await fx.worktree('uncommitted');
+  await fx.write('src/wip.js', 'export function WIP_ONLY() {}\n', unc);
+
+  const com = await fx.worktree('committed');
+  await fx.write('src/landed.js', 'export function COMMITTED_ONLY() {}\n', com);
+  await fx.commit('committed-only work', com);
+
+  const mixed = await fx.worktree('mixed');
+  await fx.write('notes.local', 'notes\n', mixed);
+  await fx.write('src/also.js', 'export function ALSO() {}\n', mixed);
+
+  // --- shapes that MUST stay disposable (never-worse controls) --------------------
+  await fx.worktree('genuinely-empty');
+
+  const gen = await fx.worktree('generated-only');
+  await fx.write('node_modules/left-pad/index.js', 'module.exports = 1;\n', gen);
+
+  const lockedEmpty = await fx.worktree('locked-empty');
+  await sh('git', ['worktree', 'lock', '--reason', 'holt: parked', lockedEmpty], fx.root);
+  t.after(() => sh('git', ['worktree', 'unlock', lockedEmpty], fx.root));
+
+  const HOLDS_WORK = ['ig-file', 'ig-dir', 'uncommitted', 'committed', 'mixed'];
+  const HOLDS_NOTHING = ['genuinely-empty', 'generated-only', 'locked-empty'];
+
+  const verdicts = await paritySubjects(fx);
+  const byId = new Map(verdicts.map((v) => [v.id, v]));
+
+  // NON-VACUITY FIRST. If the gate stopped refusing, the invariant below would pass while
+  // proving nothing — the instrument has to be shown capable of detecting presence.
+  for (const id of HOLDS_WORK) {
+    assert.equal(byId.get(id)?.safe, false,
+      `gate must refuse '${id}' — without that this test is vacuous: ${JSON.stringify(byId.get(id))}`);
+  }
+
+  for (const v of verdicts) {
+    const r = await rescue(fx.root, v.id, { symbols: false });
+    // A lock is a refusal about permission, not content; everything else is content.
+    const contentReasons = v.reasons.filter(
+      (x) => !/^locked/.test(x) && !/^no committed delta/.test(x),
+    );
+
+    if (contentReasons.length > 0) {
+      assert.notEqual(r.nothingToRescue, true,
+        `THE DEFECT: gate refuses '${v.id}' (${contentReasons.join('; ')}) but rescue reports `
+        + `nothing to rescue and exits 0 — a script would delete it: ${JSON.stringify(r)}`);
+      assert.notEqual(r.ok === true && !r.commit, true,
+        `'${v.id}' must produce a real capture or an explicit refusal, never a silent ok`);
+    } else {
+      // The other direction, so the fix cannot be "refuse everything": a worktree the gate is
+      // happy with must still be cheap and quiet.
+      assert.equal(r.nothingToRescue, true,
+        `'${v.id}' holds nothing the gate can see, so rescue must say so and exit 0: `
+        + `${JSON.stringify(r)}`);
+      assert.equal(r.ok, true, `and it must exit 0: ${JSON.stringify(r)}`);
+    }
+  }
+
+  for (const id of HOLDS_NOTHING) {
+    const r = await rescue(fx.root, id, { symbols: false });
+    assert.equal(r.nothingToRescue, true,
+      `NEVER-WORSE: '${id}' genuinely holds nothing and must still exit 0 with nothing-to-rescue: `
+      + `${JSON.stringify(r)}`);
+  }
+});
+
+test('PARITY: the gitignored capture is REAL — read it back out of the ref', async (t) => {
+  const fx = await newRepo('parity-capture');
+  t.after(() => fx.cleanup());
+
+  await fx.write('.gitignore', 'notes.local\nsecrets/\n');
+  await fx.commit('ignore rules');
+
+  const wt = await fx.worktree('w1');
+  await fx.write('notes.local', 'an hour of hand-written notes\n', wt);
+  await fx.write('secrets/prod.env', 'API_KEY=live-do-not-lose\n', wt);
+
+  const r = await rescue(fx.root, 'w1', { symbols: false });
+  assert.equal(r.ok, true, `rescue must capture gitignored content, not refuse: ${r.error}`);
+  assert.equal(r.verified, true, 'and verify it before reporting success');
+
+  // A fix that merely stopped saying "nothing to rescue" would pass everything above. The only
+  // thing that proves the work is safe is reading it back out of the ref.
+  for (const [p, needle] of [['notes.local', /hand-written notes/], ['secrets/prod.env', /live-do-not-lose/]]) {
+    const show = await sh('git', ['show', `${r.commit}:${p}`], fx.root);
+    assert.equal(show.code, 0, `the captured ref must contain ${p}: ${show.stderr}`);
+    assert.match(show.stdout, needle, `and ${p}'s actual content`);
+  }
+});
+
+test('PARITY: a probe that FAILED is not an empty worktree — both sides must refuse', async () => {
+  // Imported DYNAMICALLY on purpose. A static import of a symbol the fix introduces makes this
+  // whole file fail to load when the fix is reverted, which turns every behavioural pin above
+  // into a module-resolution error — red for the wrong reason, and therefore proving nothing.
+  const { contentAtRisk } = await import('../../src/analyze.mjs');
+
+  // Blindness and emptiness are byte-identical from downstream: zero paths either way. Only one
+  // of them makes deletion safe. This is asserted on a synthetic scan result because a real git
+  // failure here cannot be provoked deterministically — the shape is what matters.
+  const blindWorkstream = {
+    id: 'blind', ok: true, path: '/nowhere',
+    committed: { files: [], count: 0, how: 'merge-tree' },
+    uncommitted: { files: [], untracked: [], count: 0, how: 'status+diff-HEAD' },
+    ignored: { files: [], count: 0, how: 'ignored-probe-failed', error: 'odb is unreadable' },
+  };
+
+  const risk = contentAtRisk(blindWorkstream);
+  assert.equal(risk.empty, false, 'a failed probe must never read as an empty worktree');
+  assert.equal(risk.blind.length, 1, 'and it must name which instrument went blind');
+  assert.match(risk.blind[0], /odb is unreadable/, 'so the user can act on it');
+
+  const [verdict] = safeToDelete({ workstreams: [blindWorkstream], strictReadOnly: false }, []);
+  assert.equal(verdict.safe, false,
+    'gate must not green-light a worktree it failed to look inside');
+  assert.match(verdict.reasons.join(' '), /probe failed/i, 'and must say why');
 });
 
 /* ============================================================ CLEAN ==== */

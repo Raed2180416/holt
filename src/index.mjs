@@ -10,7 +10,7 @@ export { discover, inferFamily, parseWorktreePorcelain } from './discover.mjs';
 export { scan, resolveBase, looksGenerated } from './scan.mjs';
 export {
   analyze, uniqueWork, safeToDelete, collisions, duplicates,
-  contextDigest, landingPlan, buildGraph, overlappingPairs,
+  contextDigest, landingPlan, buildGraph, overlappingPairs, contentAtRisk,
 } from './analyze.mjs';
 export { classify, git, GitRefused, GitFailed } from './git.mjs';
 export {
