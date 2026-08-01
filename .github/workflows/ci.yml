@@ -186,6 +186,10 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '22' }
       - run: npm ci
+      - name: every checked-in release body must carry an install command
+        # The gate lives here as well as on the release event so a body is caught in the PR that
+        # writes it, not at publish time when someone is already watching the Releases tab.
+        run: node scripts/check-release-body.mjs --all
       - name: pack and install globally from the tarball
         run: |
           npm pack

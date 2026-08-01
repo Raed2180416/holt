@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Security — `holt graph --html` was HTML-injectable.** Worktree paths, branch names, file
+  paths and symbol names were interpolated raw into the document, so a branch containing
+  `</script>` closed the script block and the rest of the page became attacker-authored markup.
+  Every value is now encoded for the sink it lands in, the page builds its SVG through DOM APIs
+  instead of `innerHTML`, and invisible/bidirectional control characters are neutralised at the
+  boundary. Names are no longer mangled to stay safe, either — the old renderer stripped
+  `< > &` out of visible labels.
+- Release bodies live in `.github/releases/` and are gated: a release whose body carries no
+  usable install command now fails CI instead of shipping.
+
 ## 0.2.0
 
 **Landing and enforcement.** The analysis layer became something you can act on.

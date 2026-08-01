@@ -11,9 +11,72 @@ import path from 'node:path';
  * emitting plain SVG, and the file has no external references of any kind.
  */
 
+/*
+ * ---------------------------------------------------------------- trust boundary ----
+ *
+ * EVERY string in this file is attacker-controlled. holt is pointed at repositories whose
+ * worktree directories, branch names, file paths and symbol names were written by agents and
+ * by pull requests, and its output is a file a human opens in a browser. `graph --html` used
+ * to interpolate all of it raw into a <script> block, so a branch named `x</script>...` closed
+ * the block and everything after it became markup.
+ *
+ * The rule is NOT "look for </script>". It is: a value is encoded for the SINK it lands in,
+ * and there are exactly three sinks in this document —
+ *
+ *   markup text and attributes   ->  HTML entities                       esc()
+ *   the <script> body            ->  JSON with markup-starting chars \u  jsonForScript()
+ *   the SVG the page builds      ->  DOM APIs, never string concat       svgEl()/textContent
+ *
+ * and one rule that runs BEFORE all three: invisible and bidirectional control characters are
+ * neutralised at the boundary, because they are not markup and therefore no encoding for any
+ * of the three sinks removes them.
+ */
+
+/**
+ * Characters with no glyph, stated as the Unicode CLASSES they belong to rather than as a
+ * hand-listed set of ranges — a list is a thing that goes stale as Unicode adds members.
+ *   Cc  the C0/C1 controls
+ *   Cf  the format characters, which is where the bidi overrides and isolates live: they
+ *       reorder the text AROUND them at render time (the trojan-source attack,
+ *       CVE-2021-42574), so a worktree can DISPLAY as a different worktree than the one
+ *       a human is about to delete. No encoding for any sink can make them visible.
+ *   Zl/Zp  U+2028 and U+2029, which are also literal line terminators in JS source.
+ */
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+
+/** Tab, newline and carriage return: the only three that are legitimate here (a collision
+ *  `why` string is multi-line) and inert in every sink. Named by code point so this stays a
+ *  property of the characters rather than a list of blessed spellings. */
+const PRINTABLE_CONTROLS = new Set([9, 10, 13]);
+
+function neutralize(s) {
+  return String(s ?? '').replace(INVISIBLE, (ch) => {
+    const cp = ch.codePointAt(0);
+    return PRINTABLE_CONTROLS.has(cp)
+      ? ch
+      : `<U+${cp.toString(16).toUpperCase().padStart(4, '0')}>`;
+  });
+}
+
+/** Markup sink: text nodes and attribute values alike. Runs after neutralize, so the visible
+ *  `<U+202E>` token it produces is itself entity-encoded rather than re-entering as markup. */
 function esc(s) {
-  return String(s).replace(/[&<>"']/g, (ch) =>
+  return neutralize(s).replace(/[&<>"']/g, (ch) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+}
+
+/**
+ * Script sink. JSON.stringify is NOT safe inside <script> and never was: it leaves `<`, `>`
+ * and `&` literal, so any string carrying `</script` ends the block. Escaping those three as
+ * \uXXXX makes it impossible for the serialised data to START a tag or an entity at all —
+ * a property of the encoding rather than a blacklist of one dangerous token — while parsing
+ * back to a byte-identical value. U+2028/U+2029 are escaped for the separate reason that they
+ * are literal line terminators in JS source; neutralize() has already replaced them, and this
+ * escape is the second, independent guard on the same character.
+ */
+function jsonForScript(value) {
+  return JSON.stringify(value, (_key, v) => (typeof v === 'string' ? neutralize(v) : v))
+    .replace(/[<>&\u2028\u2029]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 /**
@@ -84,17 +147,17 @@ export function renderHtml(report) {
   <h1>holt</h1>
   <span class="meta">${esc(report.root)}</span>
   <span class="meta">base ${esc(report.base.ref)} @ ${esc(report.base.oid.slice(0, 8))}</span>
-  <span class="meta">${report.counts.scanned}/${report.counts.workstreams} workstreams · ${report.counts.families} families</span>
+  <span class="meta">${esc(report.counts.scanned)}/${esc(report.counts.workstreams)} workstreams · ${esc(report.counts.families)} families</span>
 </header>
 <div class="wrap">
   <div id="stage"></div>
   <aside>
     <h2>Decisions</h2>
-    <div class="row"><span>At risk (uncommitted only)</span><b style="color:var(--risk)">${report.counts.atRisk}</b></div>
-    <div class="row"><span>Collisions</span><b style="color:var(--risk)">${report.counts.collisions}</b></div>
-    <div class="row"><span>Duplicate pairs</span><b style="color:var(--dup)">${report.counts.duplicatePairs}</b></div>
-    <div class="row"><span>Disposable</span><b style="color:var(--safe)">${report.counts.safeToDelete}</b></div>
-    <div class="row"><span>To review</span><b>${report.plan.reviewReduction.toReview}</b></div>
+    <div class="row"><span>At risk (uncommitted only)</span><b style="color:var(--risk)">${esc(report.counts.atRisk)}</b></div>
+    <div class="row"><span>Collisions</span><b style="color:var(--risk)">${esc(report.counts.collisions)}</b></div>
+    <div class="row"><span>Duplicate pairs</span><b style="color:var(--dup)">${esc(report.counts.duplicatePairs)}</b></div>
+    <div class="row"><span>Disposable</span><b style="color:var(--safe)">${esc(report.counts.safeToDelete)}</b></div>
+    <div class="row"><span>To review</span><b>${esc(report.plan.reviewReduction.toReview)}</b></div>
     <h2>Legend</h2>
     <div class="legend">
       <span><i style="background:var(--risk)"></i>at risk</span>
@@ -107,7 +170,7 @@ export function renderHtml(report) {
   </aside>
 </div>
 <script>
-const DATA = ${JSON.stringify(data)};
+const DATA = ${jsonForScript(data)};
 
 const stage = document.getElementById('stage');
 const detail = document.getElementById('detail');
@@ -176,27 +239,50 @@ function simulate(steps = 320) {
   }
 }
 
+// ---- rendering: DOM construction, never string concatenation.
+// The page is the THIRD sink for repository-controlled text, and it used to build markup by
+// concatenation and assign it to innerHTML — so a workstream id was parsed as markup inside the
+// browser even when the file on disk was well-formed. createElementNS + textContent make that
+// structurally impossible: a value set through them is data by construction, so there is no
+// escaping step here that a later edit could forget. It also stops the label being MANGLED —
+// the old code stripped < > & out of the visible name to stay safe, which quietly renamed the
+// worktree a human was reading.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgEl(name, attrs) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const key of Object.keys(attrs)) node.setAttribute(key, String(attrs[key]));
+  return node;
+}
+
 function draw() {
-  const svg = ['<svg width="' + W() + '" height="' + H() + '" viewBox="0 0 ' + W() + ' ' + H() + '">'];
+  const svg = svgEl('svg', { width: W(), height: H(), viewBox: '0 0 ' + W() + ' ' + H() });
   for (const e of edges) {
     const a = nodes[e.s], b = nodes[e.t], st = edgeStyle(e);
-    svg.push('<line x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1) +
-             '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) +
-             '" stroke="' + st.stroke + '" stroke-width="' + st.w +
-             '" opacity="' + st.o + '"' + (st.dash ? ' stroke-dasharray="' + st.dash + '"' : '') + '/>');
+    const attrs = {
+      x1: a.x.toFixed(1), y1: a.y.toFixed(1), x2: b.x.toFixed(1), y2: b.y.toFixed(1),
+      stroke: st.stroke, 'stroke-width': st.w, opacity: st.o,
+    };
+    if (st.dash) attrs['stroke-dasharray'] = st.dash;
+    svg.appendChild(svgEl('line', attrs));
   }
   nodes.forEach((n, i) => {
-    svg.push('<circle data-i="' + i + '" cx="' + n.x.toFixed(1) + '" cy="' + n.y.toFixed(1) +
-             '" r="' + n.r.toFixed(1) + '" fill="' + colorOf(n) +
-             '" stroke="var(--bg)" stroke-width="1.5"><title>' + n.id + '</title></circle>');
+    const circle = svgEl('circle', {
+      'data-i': i, cx: n.x.toFixed(1), cy: n.y.toFixed(1), r: n.r.toFixed(1),
+      fill: colorOf(n), stroke: 'var(--bg)', 'stroke-width': '1.5',
+    });
+    const tip = svgEl('title', {});
+    tip.textContent = n.id;
+    circle.appendChild(tip);
+    svg.appendChild(circle);
     if (n.r >= 9 || nodes.length <= 40) {
-      const label = n.id.length > 22 ? n.id.slice(0, 21) + '…' : n.id;
-      svg.push('<text x="' + n.x.toFixed(1) + '" y="' + (n.y + n.r + 10).toFixed(1) +
-               '" text-anchor="middle">' + label.replace(/[<>&]/g, '') + '</text>');
+      const label = svgEl('text', {
+        x: n.x.toFixed(1), y: (n.y + n.r + 10).toFixed(1), 'text-anchor': 'middle',
+      });
+      label.textContent = n.id.length > 22 ? n.id.slice(0, 21) + '…' : n.id;
+      svg.appendChild(label);
     }
   });
-  svg.push('</svg>');
-  stage.innerHTML = svg.join('');
+  stage.replaceChildren(svg);
 
   stage.querySelectorAll('circle').forEach(el => {
     el.addEventListener('click', () => {
