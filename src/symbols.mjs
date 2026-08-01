@@ -326,11 +326,38 @@ export async function languageCoverage(expected = []) {
  */
 const CONTAINER_KINDS = new Set(['package', 'namespace']);
 
+/**
+ * DATA LEAVES. A scalar sitting inside a document is a value, not an authored symbol.
+ *
+ * These are the kinds ctags emits for JSON/YAML/TOML content — `{"c": 1}` yields kind "number",
+ * `{"n": "x"}` yields "string". No programming language names a function "number" or a class
+ * "boolean", so filtering on the TAG'S OWN KIND cannot swallow real code, which is the property
+ * the rule it replaces did not have.
+ *
+ * Deliberately excludes `object` and `array`: Scala's `object` is a first-class code construct
+ * with the same kind name, and the repeated-metadata-key problem those would have caught
+ * (`generatedAt`, `head`, `$comment` appearing in every receipt file in a repo) is already solved
+ * measurably by the inverse-document-frequency filter in analyze.mjs — a blocklist was tried
+ * there and rejected in favour of IDF for exactly this reason.
+ */
+const DATA_LEAF_KINDS = new Set(['number', 'string', 'boolean', 'null']);
+
 function isNoise(tag) {
   if (!tag || typeof tag.name !== 'string') return true;
   if (CONTAINER_KINDS.has(String(tag.kind))) return true;
   if (tag.name.startsWith('anonymousObject')) return true;
-  if (typeof tag.scope === 'string' && tag.scope.includes('.')) return true;
+  // A DOTTED SCOPE USED TO MEAN "NOISE", AND IT MEANT "NAMESPACED".
+  //
+  // The rule was `tag.scope.includes('.') -> drop`, intended for values nested inside a document.
+  // A dotted scope is also exactly how ctags renders an ordinary namespace or package: C#'s
+  // `namespace Newtonsoft.Json`, Kotlin's `package kotlin.collections`, Clojure's
+  // `(ns clojure.string)`. So every symbol in virtually all real C#, Kotlin and Clojure was
+  // discarded — measured on real upstream files from Newtonsoft.Json, JetBrains/kotlin and
+  // clojure/clojure: bare ctags found 79, 105 and 22 tags; holt returned ZERO from each.
+  //
+  // It survived because holt's own language fixtures are bare one-liners that declare no
+  // namespace, which is what a manufactured test looks like and what real code never does.
+  if (DATA_LEAF_KINDS.has(String(tag.kind))) return true;
   if (tag.name.length < 2) return true;
   return false;
 }

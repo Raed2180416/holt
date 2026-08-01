@@ -318,3 +318,60 @@ test('PRECISION: a one-per-file module declaration IS work and must survive', as
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+
+test('SYMBOLS: a namespaced file is not silently emptied — real code declares a namespace', async (t) => {
+  // FOUND BY BENCHMARKING AGAINST REAL UPSTREAM FILES, and invisible to every fixture in this
+  // suite before it. isNoise() dropped any tag whose ctags-reported `scope` contained a dot,
+  // meaning to discard values nested inside a document. A dotted scope is ALSO exactly how ctags
+  // renders an ordinary namespace: C# `namespace Newtonsoft.Json`, Kotlin
+  // `package kotlin.collections`, Clojure `(ns clojure.string)`.
+  //
+  // Measured on real files from Newtonsoft.Json, JetBrains/kotlin and clojure/clojure: bare ctags
+  // found 79, 105 and 22 tags; holt returned ZERO from each. Every symbol in virtually all real
+  // code in those languages was discarded, silently, with no error anywhere - so collisions,
+  // duplicates and impact were blind on them.
+  //
+  // It survived because the language fixtures are BARE ONE-LINERS that declare no namespace.
+  // That is what a manufactured test looks like and what real code never does, which is why this
+  // fixture wraps every sample in the namespace form its language actually uses.
+  const { symbolsOnDisk, resolveBackend } = await import('../../src/symbols.mjs');
+  const backend = await resolveBackend();
+  if (!backend || backend.kind !== 'ctags') {
+    return t.skip('ctags unavailable - the regex fallback does not model scope at all');
+  }
+
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR ?? os.tmpdir(), 'holt-ns-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  const SAMPLES = [
+    ['A.cs', 'namespace Acme.Billing\n{\n    public static class HoltInvoice\n    {\n        public static string RenderHoltTotal(object v) { return null; }\n    }\n}\n',
+      ['HoltInvoice', 'RenderHoltTotal']],
+    ['B.kt', 'package com.acme.billing\n\nfun computeHoltDiscount(x: Int): Int = x\n',
+      ['computeHoltDiscount']],
+    ['C.clj', '(ns acme.billing.core)\n(defn holt-normalise [s] s)\n',
+      ['holt-normalise']],
+  ];
+
+  for (const [file, source] of SAMPLES) await fs.writeFile(path.join(dir, file), source);
+
+  const got = await symbolsOnDisk(dir, SAMPLES.map(([f]) => f), backend);
+
+  for (const [file, , expected] of SAMPLES) {
+    const names = (got.get(file) ?? []).map((s) => s.name);
+    for (const want of expected) {
+      assert.ok(names.includes(want),
+        `${file}: '${want}' is real authored work inside a namespace and must be extracted. ` +
+        `Got: ${JSON.stringify(names)}`);
+    }
+  }
+
+  // THE OTHER HALF - the noise the old rule was aiming at must still be filtered, or this fix
+  // trades a false negative for the false-positive flood the IDF filter was built to stop.
+  await fs.writeFile(path.join(dir, 'd.json'),
+    '{ "meta": { "generatedAt": "x", "head": "y", "nested": { "count": 1 } } }\n');
+  const json = await symbolsOnDisk(dir, ['d.json'], backend);
+  const jsonNames = (json.get('d.json') ?? []).map((s) => s.name);
+  assert.ok(!jsonNames.includes('generatedAt') && !jsonNames.includes('count'),
+    `document values are not authored symbols: ${JSON.stringify(jsonNames)}`);
+});
