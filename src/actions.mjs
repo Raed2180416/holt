@@ -510,11 +510,42 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
     await gitOk(['update-ref', '--create-reflog', baseRef, commit],
       { cwd: ws.path, allowMutation: true });
 
-    // Only now is anything removed.
+    // ONLY NOW IS ANYTHING TOUCHED — and what "discard" MEANS depends on what the path is.
+    //
+    // For an UNTRACKED path, discarding is deleting: nothing else holds it.
+    //
+    // For a TRACKED path with local modifications, deleting would be wrong and surprising. What
+    // a user means is "throw away my edits", and the standard way to say that — `git checkout --
+    // <path>` — is refused by holt's own guard for the correct reason: it destroys uncommitted
+    // work. Refusing that with no permitted alternative is the same hole `discard` was added to
+    // close, one level down; hit twice in real use while building this. So a tracked path is
+    // RESTORED from HEAD after its modified content is captured, and the file stays where it is.
     const removed = [];
+    const reverted = [];
     for (const r of resolved) {
-      await fs.rm(r.abs, { recursive: true, force: true });
-      removed.push(r.input);
+      const relPath = path.relative(ws.path, r.abs).split(path.sep).join('/');
+      const tracked = await git(['cat-file', '-e', `HEAD:${relPath}`], { cwd: ws.path });
+      if (tracked.code === 0) {
+        // The blob is read with plumbing and written with fs, NOT with `git checkout`.
+        // `git checkout -- <path>` is refused by the classifier's FIRST gate, which cannot be
+        // opened even with allowMutation — deliberately, because that gate is what stopped a
+        // mutation test from running a live `reset --hard` in this repository. holt does not get
+        // an exception to its own destructive-command rule; it reaches the same result through
+        // a read (`cat-file`) plus an ordinary file write, after the content is already captured.
+        const blob = await git(['cat-file', 'blob', `HEAD:${relPath}`], { cwd: ws.path });
+        if (blob.code !== 0) {
+          return {
+            ok: false, ref: baseRef, commit,
+            error: `captured, but could not read '${relPath}' from HEAD: ${blob.stderr.trim()}`,
+            note: 'NOTHING WAS CHANGED. The content is safe in the ref above.',
+          };
+        }
+        await fs.writeFile(r.abs, blob.stdout, 'utf8');
+        reverted.push(r.input);
+      } else {
+        await fs.rm(r.abs, { recursive: true, force: true });
+        removed.push(r.input);
+      }
     }
 
     await appendEvent(cwd, {
@@ -528,10 +559,14 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
       ref: baseRef,
       commit,
       discarded: removed,
+      reverted,
       verified: true,
       restore: `git checkout ${baseRef} -- .`,
       inspect: `git show ${commit} --stat`,
-      note: 'content captured and verified before removal; it is recoverable from the ref above.',
+      note: reverted.length
+        ? 'tracked path(s) were RESTORED from HEAD rather than deleted — the edits you threw away '
+          + 'are captured in the ref above and recoverable. Untracked path(s), if any, were removed.'
+        : 'content captured and verified before removal; it is recoverable from the ref above.',
     };
   } finally {
     await fs.rm(tmpIndex, { force: true }).catch(() => {});

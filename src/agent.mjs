@@ -192,10 +192,83 @@ const DESTRUCTIVE = [
   },
 ];
 
+/**
+ * The byte ranges of a command that are DATA, not command.
+ *
+ * The patterns above match the raw string, so anything that merely MENTIONS a destructive command
+ * was treated as that command. Measured in real use, three times in one session while writing this
+ * feature: a test whose COMMENT contained `git checkout -- <path>`, an `echo 'rm -rf wt/x'`, and a
+ * heredoc writing documentation about `rm`. Each was refused with an evidence-bearing message
+ * about work that was never in danger.
+ *
+ * That is not a cosmetic annoyance. It is the failure mode this project names repeatedly — a gate
+ * that fires on things a developer knows are harmless is a gate they switch off — and it hits
+ * hardest on exactly the people most likely to be writing about destructive commands: the ones
+ * documenting and testing them.
+ *
+ * Two kinds of region, and the rule is the same for both: a VERB inside them is text.
+ *   quotes    '…' and "…", honouring backslash escapes inside double quotes
+ *   heredocs  <<WORD, <<-WORD, <<'WORD' — the body up to the terminator line is a document being
+ *             written, not a script being run
+ *
+ * A quoted TARGET is deliberately still resolved: `rm -rf "wt/my worktree"` must be caught, so
+ * only the position of the VERB is tested, never the whole match.
+ */
+export function maskedRegions(command) {
+  const out = [];
+  const s = String(command);
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+
+    if (ch === "'" || ch === '"') {
+      const start = i;
+      const quote = ch;
+      i++;
+      while (i < s.length && s[i] !== quote) {
+        if (quote === '"' && s[i] === '\\') i++;
+        i++;
+      }
+      out.push([start, Math.min(i, s.length - 1)]);
+      i++;
+      continue;
+    }
+
+    if (ch === '<' && s[i + 1] === '<') {
+      const m = /^<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(s.slice(i));
+      if (m) {
+        const word = m[2];
+        const bodyStart = s.indexOf('\n', i + m[0].length);
+        if (bodyStart === -1) { i += m[0].length; continue; }
+        // The terminator is a line consisting only of the word (tabs allowed for <<-).
+        const term = new RegExp(`^[\\t ]*${word}[\\t ]*$`, 'm');
+        const rest = s.slice(bodyStart + 1);
+        const hit = term.exec(rest);
+        const end = hit ? bodyStart + 1 + hit.index + hit[0].length : s.length;
+        out.push([bodyStart, end]);
+        i = end;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out;
+}
+
+const insideMasked = (regions, idx) => regions.some(([a, b]) => idx >= a && idx <= b);
+
 export function classifyCommand(command) {
   if (typeof command !== 'string' || !command.trim()) return null;
+  const masked = maskedRegions(command);
   for (const { re, kind, all, cwdTarget } of DESTRUCTIVE) {
-    const m = command.match(re);
+    // Scan every occurrence, not just the first: `echo 'rm -rf a' && rm -rf b` must still be
+    // caught on the second one. Only a match whose VERB starts outside a data region counts.
+    const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let m = null;
+    for (let hit = scan.exec(command); hit; hit = scan.exec(command)) {
+      if (!insideMasked(masked, hit.index)) { m = hit; break; }
+      if (scan.lastIndex === hit.index) scan.lastIndex++;   // zero-width guard
+    }
     if (m) {
       return {
         kind,

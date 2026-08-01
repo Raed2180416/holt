@@ -885,3 +885,35 @@ test('DISCARD: a path outside this repository is refused rather than deleted', a
   assert.equal(r.ok, false, `discard must not reach outside the repository: ${JSON.stringify(r)}`);
   assert.equal(await fs.readFile(outside, 'utf8'), 'someone else\n', 'and must not have touched it');
 });
+
+
+test('DISCARD: a TRACKED file is reverted to HEAD, not deleted - and the edit stays recoverable', async (t) => {
+  // THE SAME HOLE, ONE LEVEL DOWN. Restoring a file from HEAD is the standard way to throw away
+  // local edits, and holt's guard refuses that pathspec form for the correct reason: it destroys
+  // uncommitted work. Refusing it with no permitted alternative is exactly the failure `discard`
+  // was added to close - and DELETING a tracked file would be a bizarre answer to "throw away my
+  // edits". Hit twice in real use while building this feature.
+  //
+  // The restore is done with plumbing (cat-file) plus a file write, never through the refused
+  // porcelain: holt does not grant itself an exception to its own destructive-command rule.
+  const fx = await newRepo('discard-tracked');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('edited');
+  await fx.write('src/base.js',
+    'export function baseline() { return 1; }\nexport function EXPERIMENT() { return 2; }\n', wt);
+
+  const r = await discard(fx.root, [path.join(wt, 'src/base.js')]);
+  assert.equal(r.ok, true, `discard must succeed: ${JSON.stringify(r)}`);
+  assert.deepEqual(r.reverted, [path.join(wt, 'src/base.js')], 'a tracked path is reverted, not removed');
+  assert.deepEqual(r.discarded, [], 'and nothing was deleted');
+
+  // The file still exists, at its committed content.
+  const now = await fs.readFile(path.join(wt, 'src/base.js'), 'utf8');
+  assert.equal(now, 'export function baseline() { return 1; }\n',
+    `the file must be restored to HEAD, not emptied or removed: ${JSON.stringify(now)}`);
+
+  // ...and the discarded EDIT is still recoverable, which is the whole difference from git.
+  const back = await sh('git', ['show', `${r.commit}:src/base.js`], fx.root);
+  assert.match(back.stdout, /EXPERIMENT/,
+    `the thrown-away edit must be readable back out of the ref: ${JSON.stringify(back)}`);
+});

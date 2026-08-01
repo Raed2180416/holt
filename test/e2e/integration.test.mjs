@@ -1083,3 +1083,43 @@ test('WINDOWS FILE GATE: per-file destruction has Windows spellings, and they ca
     assert.deepEqual(resolveFileTargets(cmd), [], `reading must resolve no destructive target: ${cmd}`);
   }
 });
+
+
+test('GATE: a command MENTIONED in quotes or a heredoc is text, not a command', () => {
+  // MEASURED IN REAL USE, three times in one session: a test whose COMMENT contained a git
+  // pathspec-checkout example, an `echo` of an rm example, and a heredoc writing documentation
+  // about rm. Each was refused with an evidence-bearing message about work that was never in
+  // danger, because the patterns matched the RAW command string.
+  //
+  // That is the failure this project names repeatedly - a gate that fires on things a developer
+  // knows are harmless is a gate they switch off - and it lands hardest on exactly the people
+  // most likely to be writing about destructive commands.
+  const heredoc = 'cat > notes.md <<EOF\nrm -rf wt/task-03\nEOF';
+  const quotedHeredoc = "cat > notes.md <<'EOF'\ngit worktree remove wt/x\nEOF";
+
+  for (const [cmd, why] of [
+    [heredoc, 'a heredoc body is a document being written, not a script being run'],
+    [quotedHeredoc, 'the same, with a quoted terminator'],
+    ["echo 'rm -rf wt/task-03'", 'a single-quoted mention'],
+    ['echo "git worktree remove wt/x"', 'a double-quoted mention'],
+    ["printf '%s' 'Remove-Item -Recurse -Force wt/x'", 'the Windows spelling, quoted'],
+  ]) {
+    assert.equal(classifyCommand(cmd), null, `${why}: ${JSON.stringify(cmd)}`);
+  }
+
+  // ANTI-VACUITY, and the half that keeps this from being a bypass. If quoting became a way to
+  // hide a command, every one of these would have to still be caught - so they are asserted.
+  for (const cmd of [
+    'rm -rf wt/task-03',
+    "echo 'about to clean' && rm -rf wt/task-03",
+    'cat > notes.md <<EOF\nsome docs\nEOF\nrm -rf wt/task-03',
+  ]) {
+    const v = classifyCommand(cmd);
+    assert.ok(v, `a REAL destructive command must still be caught: ${JSON.stringify(cmd)}`);
+    assert.equal(v.target, 'wt/task-03', `and its target extracted: ${JSON.stringify(v)}`);
+  }
+
+  // A quoted TARGET is still a target - only the VERB's position decides, never the whole match.
+  const spaced = classifyCommand('rm -rf "wt/my worktree"');
+  assert.ok(spaced, 'a quoted path is still a path');
+});
