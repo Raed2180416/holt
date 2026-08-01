@@ -41,6 +41,7 @@ import { branchAudit } from '../branches.mjs';
 import { partitionPlan } from '../partition.mjs';
 import { git } from '../git.mjs';
 import { deepDuplicates } from '../deep.mjs';
+import { resolveActor, setAmbientActor } from '../actor.mjs';
 
 /* --------------------------------------------------------------- caching ---- */
 
@@ -528,8 +529,25 @@ export function createServer() {
     })),
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
+
+    // WHO IS CALLING. Three of these tools mutate the repository, and until now they recorded a
+    // journal line with no caller at all — an MCP-driven `holt_clean` was indistinguishable from
+    // a human typing it.
+    //
+    // MEASURED (SDK 1.30.0): `initialize` carries `clientInfo {name, version}`, which
+    // `getClientVersion()` returns; `extra.sessionId` is TRANSPORT-supplied and is undefined
+    // over stdio, which is how holt runs. So the client is named but the session is not, and
+    // this is recorded as `inferred` rather than `reported`. Passing the undefined sessionId
+    // through as if it were an answer is the failure this avoids: a blank recorded as identity
+    // is worse than a blank recorded as unknown.
+    setAmbientActor(resolveActor({
+      mcpClient: server.getClientVersion() ?? null,
+      payload: extra?.sessionId ? { sessionId: extra.sessionId } : null,
+      via: 'mcp',
+    }));
+
     try {
       const result = await handle(name, args ?? {});
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };

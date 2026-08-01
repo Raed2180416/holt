@@ -20,6 +20,7 @@ import { discover } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze } from '../analyze.mjs';
 import { branchAudit } from '../branches.mjs';
+import { git } from '../git.mjs';
 import { checkEntitlement } from '../license.mjs';
 
 export class EntitlementError extends Error {
@@ -30,9 +31,23 @@ export class EntitlementError extends Error {
   }
 }
 
-/** Find git repositories under `roots`, bounded in depth so a home directory cannot be walked. */
+/**
+ * Find git repositories under `roots`, bounded in depth so a home directory cannot be walked.
+ *
+ * ONE REPOSITORY IS COUNTED ONCE, and that is not free. A linked worktree is a directory with
+ * its own `.git` (a file rather than a directory), so the walker finds `proj/` and
+ * `proj-worktrees/feature-x` and reports TWO repositories — which is exactly the layout holt
+ * exists for. Every per-repo total was then inflated by the number of worktrees parked under the
+ * fleet root, and a journal, which is shared by every worktree of a repository, was read once
+ * per worktree: the same refused `rm -rf` counted four times.
+ *
+ * git's own answer to "which repository is this" is the COMMON git dir, so that is what
+ * de-duplication keys on. It costs one `rev-parse` per candidate, which is nothing next to the
+ * full scan each candidate would otherwise trigger. Candidates git cannot answer for are kept
+ * (an unreadable repo must reach the scanner and be reported as a failure, never dropped here).
+ */
 export async function findRepos(roots, { maxDepth = 3 } = {}) {
-  const found = [];
+  const candidates = [];
   const seen = new Set();
 
   async function walk(dir, depth) {
@@ -42,7 +57,7 @@ export async function findRepos(roots, { maxDepth = 3 } = {}) {
     const isRepo = entries.some((e) => e.name === '.git');
     if (isRepo) {
       const real = path.resolve(dir);
-      if (!seen.has(real)) { seen.add(real); found.push(real); }
+      if (!seen.has(real)) { seen.add(real); candidates.push(real); }
       return; // never descend into a repository: its worktrees are holt's business, not the walker's
     }
     for (const e of entries) {
@@ -53,7 +68,20 @@ export async function findRepos(roots, { maxDepth = 3 } = {}) {
   }
 
   for (const r of roots) await walk(path.resolve(r), 0);
-  return found.sort();
+  candidates.sort();
+
+  const byCommonDir = new Map();
+  const out = [];
+  for (const dir of candidates) {
+    const r = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: dir })
+      .catch(() => null);
+    const common = (r && r.code === 0) ? r.stdout.trim() : null;
+    if (!common) { out.push(dir); continue; } // cannot tell -> keep it; the scanner will report why
+    if (byCommonDir.has(common)) continue;    // a linked worktree of one already listed
+    byCommonDir.set(common, dir);
+    out.push(dir);
+  }
+  return out;
 }
 
 /**

@@ -34,6 +34,8 @@ import { branchAudit } from '../src/branches.mjs';
 import { partitionPlan } from '../src/partition.mjs';
 import { readJournal, appendEvent } from '../src/journal.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
+import { resolveActor, setAmbientActor, actorLabel } from '../src/actor.mjs';
+import { forensics, renderForensics } from '../src/forensics.mjs';
 import { git } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
 import { loadPolicy, evaluatePolicy } from '../src/team/policy.mjs';
@@ -58,6 +60,10 @@ COMMANDS
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
   journal             audit trail of every protect / rescue / clean / branch-delete
                       --summary: the ROI view — losses prevented, hours saved
+  forensics [<id>]    which agent destroyed what, and when: created / wrote / attempted /
+                      BLOCKED / survived, attributed to the agent session that did it
+                      [--since <iso>] [--agent <id>]
+                      --fleet <dir>...: correlate one agent session across every repo  [team]
   fleet <dir>...      every repository under <dir>: where work sits unlanded   [team]
   license             activate | status | deactivate  (team/enterprise features)
   ci                  team gate for CI: fail a merge that abandons work
@@ -97,6 +103,10 @@ OPTIONS
   --all               collisions: also show bare file overlap (hidden by default: it is
                       high-volume and low-evidence; landing order always uses it)
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
+  --since <iso>       forensics: ignore events before this date
+  --agent <id>        forensics: only this agent's events
+  --session <id>      hook: the host's session id, when it cannot pipe its own event
+  --invocation <id>   hook: the host's per-call id
   --base <ref>        compare against <ref>            (default: origin/HEAD, then main/master…)
   --cwd <path>        repository to inspect            (default: cwd)
   --no-symbols        skip symbol extraction (faster, file-level only)
@@ -153,6 +163,11 @@ function parseArgs(argv) {
       case '--html': opts.html = argv[++i]; break;
       case '--host': opts.host = argv[++i]; break;
       case '--command': opts.command = argv[++i]; break;
+      case '--session': opts.session = argv[++i]; break;
+      case '--invocation': opts.invocation = argv[++i]; break;
+      case '--agent': opts.agent = argv[++i]; break;
+      case '--since': opts.since = argv[++i]; break;
+      case '--fleet': opts.fleet = true; break;
       case '--bin': opts.bin = argv[++i]; break;
       case '--concurrency': opts.concurrency = Number(argv[++i]) || 8; break;
       default:
@@ -388,6 +403,16 @@ async function cmdHook(opts) {
   let payload = {};
   if (raw.trim()) { try { payload = JSON.parse(raw); } catch { payload = {}; } }
 
+  // Hosts that cannot pipe their event to holt (the OpenCode plugin calls the CLI with flags)
+  // hand identity over on the command line instead. Merged UNDER the payload: a host that sent
+  // its own event always outranks a flag, because the payload is the host speaking and the flag
+  // is a generated integration repeating what it was told.
+  if (opts.session && !payload.session_id && !payload.sessionID) payload.sessionID = opts.session;
+  if (opts.invocation && !payload.tool_use_id && !payload.callID) payload.callID = opts.invocation;
+
+  const actor = resolveActor({ payload, host: opts.host, via: 'hook' });
+  setAmbientActor(actor);
+
   const cwd = payload.cwd || opts.cwd;
 
   if (event === 'pre-tool-use') {
@@ -403,13 +428,26 @@ async function cmdHook(opts) {
     }
 
     const verdict = await assessCommand(command, cwd);
-    // Record a prevented loss, so `holt journal --summary` can show the champion a real number:
-    // "N destructive commands refused." Best-effort — logging must never delay or alter the hook.
-    if (verdict.decision === 'deny') {
+
+    // RECORD THE ATTEMPT, NOT ONLY THE COMPLETION.
+    //
+    // A refused `rm -rf` is the single most valuable line in an incident review — it is the
+    // moment an agent tried to destroy something and was stopped — and holt kept only the
+    // barest version of it: no targets, no actor, and nothing at all for an `ask`.
+    //
+    // `ask` matters MORE than deny, not less. `deny` means holt stopped it. `ask` means holt
+    // could not verify what the command would destroy and handed the decision back to the host,
+    // which may well have proceeded. That is exactly the line a reviewer needs and it was
+    // discarded, leaving a timeline in which the destruction has no antecedent.
+    if (verdict.decision === 'deny' || verdict.decision === 'ask') {
       await appendEvent(cwd, {
-        action: 'blocked', command: String(command).slice(0, 200),
-        reason: verdict.reason ?? null, kind: verdict.kind ?? null,
-      }).catch(() => {});
+        action: verdict.decision === 'deny' ? 'blocked' : 'unverified',
+        command: String(command).slice(0, 200),
+        reason: verdict.reason ?? null,
+        kind: verdict.kind ?? null,
+        targets: Array.isArray(verdict.targets) ? verdict.targets : [],
+        tool: toolName ?? null,
+      }, { actor }).catch(() => {});
     }
     out(JSON.stringify(formatVerdict(verdict, { host: opts.host, eventName: 'PreToolUse' })));
     process.exit(verdict.decision === 'deny' ? 1 : verdict.decision === 'ask' ? 2 : 0);
@@ -607,6 +645,14 @@ async function main() {
   }
 
   const cmd = opts._[0] ?? 'status';
+
+  // WHO IS RUNNING THIS, resolved once for the whole process, before any command can record an
+  // event. `holt clean` invoked by an agent and `holt clean` typed by a human are the same
+  // command and produce the same journal line unless identity is established here — and the
+  // agent case is the one an incident review is about. Resolution reads the environment only;
+  // when the environment says nothing the actor is `unknown`, never a stand-in.
+  setAmbientActor(resolveActor({ host: opts.host, via: 'cli' }));
+
   if (opts.help || cmd === 'help') { out(USAGE); return; }
   // Every packaged CLI is expected to answer this, and holt answered none of the four spellings
   // people try. A bug report that cannot say which version produced it is not actionable.
@@ -846,6 +892,7 @@ async function main() {
       const b = s.breakdown;
       out('');
       out(`    ${paint('bold', String(b.destructiveCommandsBlocked).padStart(4))}  destructive command(s) refused`);
+      out(`    ${paint('bold', String(b.attemptsHoltCouldNotVerify).padStart(4))}  attempt(s) holt could NOT verify — the host decided (not counted as prevented)`);
       out(`    ${paint('bold', String(b.workstreamsRescued).padStart(4))}  workstream(s) rescued to a verifiable ref`);
       out(`    ${paint('bold', String(b.workstreamsProtected).padStart(4))}  workstream(s) protected (holding work found nowhere else)`);
       out(`    ${paint('bold', String(b.worktreesReclaimed).padStart(4))}  disposable worktree(s) reclaimed`);
@@ -882,8 +929,57 @@ async function main() {
     for (const e of events) {
       if (e.corrupt) { out(`  ${paint('red', 'corrupt line:')} ${e.corrupt.slice(0, 80)}`); continue; }
       const what = [e.id ?? e.name, e.ref, e.evidence ?? e.reason].filter(Boolean).join('  ');
-      out(`  ${paint('grey', e.at)}  ${paint('bold', e.action)}  ${what}`);
+      out(`  ${paint('grey', e.at)}  ${paint('bold', e.action)}  ${paint('grey', actorLabel(e.actor))}  ${what}`);
     }
+    out(paint('grey', '\n  `holt forensics <workstream>` reconstructs one workstream\'s full timeline, attributed.'));
+    return;
+  }
+  if (cmd === 'forensics') {
+    // FLEET CORRELATION IS THE PAID HALF. One repository's timeline below is the user's own
+    // data and is free; joining a session across many repositories is the thing a single repo
+    // cannot compute and a team pays for.
+    if (opts.fleet) {
+      const ent = checkEntitlement('forensics-fleet');
+      if (!ent.entitled) {
+        if (opts.json) { emitJson({ ok: false, entitlement: ent }); process.exit(3); }
+        process.stderr.write(paint('yellow', `holt forensics --fleet: ${ent.reason}\n`)
+          + paint('grey', `  ${ent.fix}\n`)
+          + paint('grey', '  Single-repository forensics is free: run `holt forensics <workstream>` without --fleet.\n'));
+        process.exit(3);
+      }
+      const { fleetForensics } = await import('../src/team/forensics-fleet.mjs');
+      const roots = opts._.slice(1);
+      if (!roots.length) roots.push(opts.cwd);
+      const f = await fleetForensics(roots, { maxDepth: opts.maxDepth ?? 3, since: opts.since ?? null, agent: opts.agent ?? null });
+      if (opts.json) return emitJson(f);
+      out(paint('bold', `holt forensics — fleet: ${f.repositories} repositories, ${f.totals.sessions} identified agent session(s)`));
+      out(paint('grey', `  ${f.roots.join(' ')}`));
+      out(`\n  ${paint('bold', 'TOTALS')}  ${f.totals.events} events · ${paint(f.totals.blocked ? 'red' : 'grey', `${f.totals.blocked} refused`)} · ${f.totals.destroyed} removed · ${f.totals.crossRepoSessions} session(s) spanning >1 repo · ${f.totals.unattributedEvents} unattributed`);
+      if (f.refusedThenDestroyed.length) {
+        out(`\n  ${paint('red', 'REFUSED IN ONE PLACE, DESTRUCTIVE IN ANOTHER')}`);
+        for (const r of f.refusedThenDestroyed.slice(0, 10)) {
+          out(`    ${paint('bold', r.agent)} ${paint('grey', String(r.session).slice(0, 16))}`);
+          out(paint('grey', `      blocked in: ${r.blockedIn.join(', ') || '—'}  ·  removed in: ${r.destroyedIn.join(', ') || '—'}`));
+          out(paint(r.differentRepo ? 'red' : 'grey', `      ${r.why}`));
+        }
+      }
+      out(`\n  ${paint('bold', 'SESSIONS')}`);
+      for (const s of f.sessions.slice(0, 20)) {
+        out(`    ${paint('bold', s.agent)}${s.agentVersion ? paint('grey', ` ${s.agentVersion}`) : ''} ${paint('grey', String(s.session).slice(0, 16))}  ${s.repoCount} repo(s)`);
+        out(paint('grey', `      ${s.events} events · ${s.blocked} refused · ${s.couldNotVerify} unverified · ${s.destroyed} removed  [${s.repos.map((p) => p.name).slice(0, 6).join(', ')}]`));
+      }
+      if (f.failures.length) {
+        out(`\n  ${paint('red', 'COULD NOT READ')} ${paint('grey', '(not clean — unknown)')}`);
+        for (const x of f.failures) out(`    ${x.repo}  ${paint('grey', x.error)}`);
+      }
+      out(`\n  ${paint('grey', f.note)}\n`);
+      return;
+    }
+    const f = await forensics(opts.cwd, {
+      ...opts, id: opts._[1] ?? null, since: opts.since ?? null, agent: opts.agent ?? null,
+    });
+    if (opts.json) return emitJson(f);
+    out(renderForensics(f, paint));
     return;
   }
   if (cmd === 'protect') return void cmdAction(await protect(opts.cwd, opts));

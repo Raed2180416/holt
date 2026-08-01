@@ -68,6 +68,11 @@ export const FEATURE_TIER = {
   // What a TEAM pays for is managing this centrally, across repos, with policy and a paper trail.
   'policy-file': 'team',      // .holt/policy.json — policy as code, richer rules than flags
   fleet: 'team',              // multi-repo aggregation
+  // `holt forensics <workstream>` — one repository's own timeline — is FREE, for the same
+  // reason `journal` is: it is the user's own data and they already own the file. What is
+  // priced is the JOIN: correlating one agent SESSION across every repository in a fleet, which
+  // a single-repo tool cannot compute at all because the evidence lives in N separate journals.
+  'forensics-fleet': 'team',
 };
 
 /**

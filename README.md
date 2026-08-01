@@ -156,6 +156,7 @@ And the v0.2 stack that turns the analysis into motion:
 | partition | how N agents should split the repo *before* they collide | `holt partition --agents 3` — disjoint buckets, each observed hotspot gets one owner |
 | branches | the other graveyard: branches nobody dares delete | `holt branches [--apply]` — content-landed squash merges detected; `--apply` uses `-d`, never `-D` |
 | journal | who deleted what, months later, with the evidence | `holt journal` — append-only audit of every protect / rescue / clean / branch-delete |
+| forensics | **which agent destroyed what, and when** — the question asked after an incident | `holt forensics <workstream>` — created / wrote / attempted / **BLOCKED** / survived, each line bound to the agent session that produced it |
 
 Plus the two layers nobody else has:
 
@@ -311,10 +312,25 @@ headcount:
 |---|---|---|---|
 | Every command, every language, MCP, hooks, TUI | ✓ | ✓ | ✓ |
 | CI gate for a repository | ✓ | ✓ | ✓ |
+| Forensics for one repository — who destroyed what, and when | ✓ | ✓ | ✓ |
+| Audit journal + export (JSON/CSV) | ✓ | ✓ | ✓ |
 | Policy as code (`.holt/policy.json`) | | ✓ | ✓ |
 | Fleet view across every repository | | ✓ | ✓ |
-| Audit export (JSON/CSV + webhook sink) | | ✓ | ✓ |
+| Cross-repo correlation of one agent session (`forensics --fleet`) | | ✓ | ✓ |
 | SSO / SAML / SCIM, self-hosted & air-gapped licensing, SLA | | | ✓ |
+
+Two rows in that table are free on purpose, and the reasoning is the same for both: **one
+repository's journal and its timeline are your own data**, sitting in a file you already own, and
+`holt journal --json` prints all of it. A gate there would be a gate in name only. What is priced
+is the thing a single repository *cannot compute* — one agent session does not stay in one repo,
+so correlating its trail across a fleet means joining N separate journals. That join is what
+surfaces the finding neither repository can see alone: *this session was refused in repo A and
+completed a destructive action in repo B.*
+
+> An earlier version of this table listed a **webhook audit sink** as a paid feature. It does not
+> exist — it is in `FEATURE_ROADMAP`, which grants nothing at any tier — and it has been removed
+> from the table rather than left to imply otherwise. A test asserts every priced feature has a
+> real `checkEntitlement` call site, so this cannot drift back.
 
 **Why per-repo, not per-seat:** your risk scales with how many repositories have agents fanning
 into worktrees, not with how many people you employ. A 3-dev team running 40 agent-repos carries
