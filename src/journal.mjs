@@ -352,18 +352,28 @@ export async function verifyJournal(cwd, { trustedKeys = [] } = {}) {
     };
   }
   if (cp.size !== chained.length) {
+    const removed = cp.size > chained.length;
     const at = Math.min(cp.size, chained.length);
+    const e = chained[at] ?? null;
     return {
       ...common, ok: false, code: 'checkpoint-size-mismatch',
-      reason: cp.size > chained.length
+      reason: removed
         ? `the checkpoint pins ${cp.size} entries but only ${chained.length} remain — ${cp.size - chained.length} record(s) were REMOVED from the end of the log`
         : `the checkpoint pins ${cp.size} entries but ${chained.length} are present — ${chained.length - cp.size} record(s) were appended without updating the checkpoint`,
-      broken: {
-        index: legacy + at, line: legacy + at + 1,
-        seq: cp.size, at: chained[at]?.at ?? null, action: chained[at]?.action ?? null,
-        actor: chained[at]?.actor ?? null,
-        reason: 'first entry outside what the checkpoint pins',
-      },
+      // When the tail was REMOVED there is no entry left to describe, and printing a row of
+      // nulls beside the words "first broken entry" reads as a parse failure rather than as a
+      // deletion. FOUND IN A LIVE RUN. Say what is missing instead.
+      broken: removed
+        ? {
+          index: legacy + at, line: legacy + at + 1, seq: chained.length, at: null,
+          action: null, actor: null, missing: cp.size - chained.length,
+          reason: `records ${chained.length}..${cp.size - 1} are GONE — the log ends where the checkpoint says it should continue`,
+        }
+        : {
+          index: legacy + at, line: legacy + at + 1,
+          seq: e?.seq ?? null, at: e?.at ?? null, action: e?.action ?? null, actor: e?.actor ?? null,
+          reason: 'first entry the checkpoint does not cover',
+        },
     };
   }
   if (!cp.root.equals(root ?? Buffer.alloc(0))) {

@@ -23,7 +23,7 @@
  * hostile value and asserts the record count does not change.
  */
 
-import { canonicalJson } from './attest.mjs';
+import { canonicalJson, entryLeaf } from './attest.mjs';
 
 export const OCSF_VERSION = '1.7.0';
 export const ECS_VERSION = '8.11.0';
@@ -189,8 +189,17 @@ export function toCef(e, { repo = null, product = 'holt', vendor = 'Contrare', v
     outcome: m.outcome,
     reason: e.reason ?? (Array.isArray(e.evidence) ? e.evidence.join('; ') : e.evidence) ?? m.label,
   };
+  // A csNLabel with no csN beside it is a broken CEF record — the label names a field that is
+  // not there, and some parsers reject the line outright. FOUND IN A LIVE RUN: cs4Label appeared
+  // alone whenever the entry hash was absent. Drop label and value together, always.
+  const present = (k, v) => {
+    if (v === '' || v === null || v === undefined) return false;
+    const m = /^(cs\d|cn\d)Label$/.exec(k);
+    if (m) { const pair = ext[m[1]]; return pair !== '' && pair !== null && pair !== undefined; }
+    return true;
+  };
   const extension = Object.entries(ext)
-    .filter(([, v]) => v !== '' && v !== null && v !== undefined)
+    .filter(([k, v]) => present(k, v))
     .map(([k, v]) => `${k}=${cefValue(v)}`)
     .join(' ');
   return [
@@ -262,7 +271,13 @@ export function exportJournal(events, format, {
     ? { verified: verification.ok, code: verification.code, root: verification.root }
     : { verified: null, code: 'not-checked', root: null };
 
-  const list = events.filter((e) => e && e.corrupt === undefined);
+  // Attach each record's RFC 6962 leaf hash. It is the record's content address, so it becomes
+  // the id every format carries (OCSF metadata.uid, ECS event.id, CEF cs4) — which is what lets a
+  // SIEM de-duplicate a re-ingested log instead of doubling every count, and what joins a record
+  // in Splunk back to an offline `holt journal --prove` proof. It is derived, never stored, so
+  // computing it here is the only place it can come from.
+  const list = events.filter((e) => e && e.corrupt === undefined)
+    .map((e) => (typeof e.seq === 'number' ? { ...e, leaf: entryLeaf(e).toString('hex') } : e));
 
   if (fmt === 'intoto') {
     return `${JSON.stringify(toInToto(verification ?? {}, { repo, version }), null, 2)}\n`;

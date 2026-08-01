@@ -878,9 +878,14 @@ async function main() {
           + `${v.checkpoint.signed ? ` signed by ${v.checkpoint.signers.join(', ')} (${v.checkpoint.signatureValid ? 'valid' : 'UNVERIFIED'})` : ' unsigned'}`)}`);
       }
       if (v.broken) {
-        out(`\n  ${paint('red', 'first broken entry:')}`);
-        out(`    line ${v.broken.line} · seq ${v.broken.seq ?? '—'} · ${v.broken.at ?? 'no timestamp'} · ${paint('bold', v.broken.action ?? 'unknown action')}`);
-        if (v.broken.actor) out(`    ${paint('grey', `recorded actor: ${formatActor(v.broken.actor)}`)}`);
+        // A deleted tail has no entry left to print; a row of nulls under the words "first
+        // broken entry" reads as a parse failure rather than as the deletion it is.
+        out(`\n  ${paint('red', v.broken.missing ? `${v.broken.missing} record(s) MISSING from the end:` : 'first broken entry:')}`);
+        if (v.broken.missing) out(`    after line ${v.broken.line - 1} (seq ${v.broken.seq - 1})`);
+        else {
+          out(`    line ${v.broken.line} · seq ${v.broken.seq ?? '—'} · ${v.broken.at ?? 'no timestamp'} · ${paint('bold', v.broken.action ?? 'unknown action')}`);
+          if (v.broken.actor) out(`    ${paint('grey', `recorded actor: ${formatActor(v.broken.actor)}`)}`);
+        }
         out(`    ${paint('grey', v.broken.reason)}`);
       }
       out('');

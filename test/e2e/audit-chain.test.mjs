@@ -31,6 +31,7 @@ import {
 import { protect, unprotect } from '../../src/actions.mjs';
 import { summarizeJournal } from '../../src/roi.mjs';
 import { parseCheckpoint, verifyNote, formatCheckpoint, merkleRoot, entryLeaf } from '../../src/attest.mjs';
+import { exportJournal } from '../../src/siem.mjs';
 import { sinkExport, EntitlementError } from '../../src/team/audit-sink.mjs';
 import { fleetAudit } from '../../src/team/fleet.mjs';
 
@@ -170,6 +171,16 @@ test('TAMPER (truncate the tail): the chain alone CANNOT see it — the checkpoi
   assert.match(v.reason, /REMOVED from the end/);
   assert.equal(v.checkpoint.size, 5);
   assert.equal(v.chained, 3);
+
+  // FOUND IN A LIVE RUN: a deleted tail has no entry left to describe, and the report printed
+  // "first broken entry: seq 2 · no timestamp · unknown action" — a row of nulls that reads as a
+  // parse failure rather than as the deletion it is. It must say what is MISSING.
+  assert.equal(v.broken.missing, 2, 'the report does not say how many records are gone');
+  assert.equal(v.broken.action, null);
+  assert.match(v.broken.reason, /are GONE/);
+  const cli = await holt(['journal', '--verify', '--cwd', fx.root], fx.root);
+  assert.match(cli.stdout, /2 record\(s\) MISSING from the end/);
+  assert.doesNotMatch(cli.stdout, /unknown action/, 'the truncation report still prints a phantom entry');
 });
 
 test('TAMPER (insert a fabricated record): caught even when the forger recomputes the chain', async () => {
@@ -579,10 +590,34 @@ test('PAID: the sink REFUSES a journal that does not verify, and writes nothing'
   lines[0] = JSON.stringify(doctored);
   await writeLines(journal, lines);
 
+  // Pinned on the SINK's own message, not merely on the code. FOUND BY THE RED PROOF: there are
+  // two independent gates here — the sink's, and exportJournal's — and both raise EINTEGRITY with
+  // "does not verify". Asserting only that let the sink's own gate be deleted with the test still
+  // green, because the second one caught it. Defence in depth is good; a test that cannot tell
+  // which layer is doing the work is not.
   await assert.rejects(() => sinkExport(fx.root, { to: dest, ...PAID }),
-    (e) => e.code === 'EINTEGRITY' && /does not verify/.test(e.message),
+    (e) => e.code === 'EINTEGRITY' && /audit sink REFUSED/.test(e.message),
     'a rewritten log was shipped into a SIEM, laundering the tampering');
   assert.equal(await fs.access(dest).then(() => true, () => false), false, 'the refused sink still wrote records');
+});
+
+test('PAID: BOTH gates are live — the sink refuses first, and the encoder refuses independently', async () => {
+  // The layer the red proof exposed: prove each gate can refuse ON ITS OWN, so deleting either
+  // one is a detectable regression rather than a silent loss of redundancy.
+  const fx = await repoWithJournal(3, 'sinkdepth');
+  const { checkpoint } = await journalPaths(fx.root);
+  await fs.rm(checkpoint);
+  const v = await verifyJournal(fx.root);
+  assert.equal(v.ok, false);
+
+  // Gate 2 alone: the encoder, called directly with a failed verification.
+  const events = await readJournal(fx.root);
+  assert.throws(() => exportJournal(events, 'ocsf', { verification: v }),
+    (e) => e.code === 'EINTEGRITY', 'the encoder does not refuse a failed verification on its own');
+
+  // Gate 1 alone: the sink, which must refuse before it reaches the encoder at all.
+  await assert.rejects(() => sinkExport(fx.root, { to: path.join(path.dirname(fx.root), 's.ndjson'), ...PAID }),
+    (e) => /audit sink REFUSED/.test(e.message), 'the sink delegated its refusal to the encoder');
 });
 
 test('PAID: a rewrite BEHIND the cursor is caught — the property a plain tail cannot give you', async () => {

@@ -91,6 +91,34 @@ test('CEF:0 header has exactly seven pipe-delimited fields before the extension'
   assert.match(line, /cs1Label=holtSession cs1=sess-1/);
 });
 
+test('FOUND IN A LIVE RUN: no CEF label may appear without its value beside it', () => {
+  // cs4Label=holtEntryHash was emitted alone whenever the entry hash was absent. A label naming
+  // a field that is not present is a broken CEF record, and some parsers reject the line.
+  const line = toCef({ at: '2026-08-01T10:00:00.000Z', actor, action: 'protect' });
+  for (const m of line.matchAll(/\b(cs\d|cn\d)Label=/g)) {
+    assert.match(line, new RegExp(`\\b${m[1]}=[^ ]`), `${m[1]}Label was emitted with no ${m[1]} value`);
+  }
+  // And every value that IS emitted must have its label, or the field is unnamed.
+  for (const m of line.matchAll(/\b(cs\d|cn\d)=/g)) {
+    assert.match(line, new RegExp(`\\b${m[1]}Label=`), `${m[1]} was emitted with no label`);
+  }
+});
+
+test('every exported record carries its RFC 6962 leaf hash as the de-duplication id', () => {
+  // The hash is DERIVED, never stored, so if the export does not compute it the id silently
+  // degrades to something non-unique — and a SIEM re-ingesting the log doubles every count.
+  const chained = EVENTS.map(({ leaf, ...rest }) => rest); // strip the pre-set ids
+  const ocsf = exportJournal(chained, 'ocsf', { verification: OK }).trim().split('\n').map((l) => JSON.parse(l));
+  const ids = ocsf.map((d) => d.metadata.uid);
+  assert.equal(new Set(ids).size, 3, 'exported ids are not unique per record');
+  for (const id of ids) assert.match(id, /^[0-9a-f]{64}$/, `id is not a SHA-256 digest: ${id}`);
+
+  const ecs = exportJournal(chained, 'ecs', { verification: OK }).trim().split('\n').map((l) => JSON.parse(l));
+  assert.deepEqual(ecs.map((d) => d.event.id), ids, 'ECS and OCSF disagree about a record id');
+  const cef = exportJournal(chained, 'cef', { verification: OK }).trim().split('\n');
+  for (const [i, l] of cef.entries()) assert.ok(l.includes(`cs4=${ids[i]}`), 'CEF carries no entry hash');
+});
+
 /* ------------------------------------------------------- THE INJECTION TEST ---- */
 
 test('ATTACK: a hostile value cannot forge an extra record in ANY line-oriented format', () => {
