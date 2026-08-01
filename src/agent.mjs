@@ -1157,8 +1157,44 @@ export async function buildBrief(cwd = process.cwd()) {
     );
   }
 
+  // MAINTENANCE PRESSURE — the half nobody was told about.
+  //
+  // holt already auto-PROTECTS at session start (`hook session-start --autoprotect`), so the
+  // dangerous direction is covered without anyone asking. Nothing ever said the opposite thing:
+  // that the repository is silting up. Disposable worktrees accumulate quietly — every one is a
+  // checkout on disk, a branch in the list, and another row in every scan — and the moment anyone
+  // notices is usually the moment someone starts deleting by hand, which is the exact behaviour
+  // that loses work and the reason this product exists.
+  //
+  // So the accumulation is surfaced BEFORE it becomes a cleanup task, with the deterministic
+  // command that resolves it. It is deliberately not an automatic deletion: `clean --apply` is
+  // destructive, and a tool that silently deletes on a threshold nobody set is the opposite of
+  // this product's promise. The user gets the signal and a one-line action.
+  //
+  // The threshold is a RATIO plus a floor, not a raw count. Ten disposable worktrees out of ten
+  // is a repository that needs sweeping; ten out of two hundred is a busy Tuesday. The floor stops
+  // a three-worktree repo nagging about one empty tree.
+  const disposable = report.safe.filter((x) => x.safe).length;
+  const total = report.counts.workstreams || 0;
+  if (disposable >= MAINTENANCE_FLOOR && disposable / Math.max(1, total) >= MAINTENANCE_RATIO) {
+    lines.push(
+      `MAINTENANCE: ${disposable} of ${total} workstream(s) are provably disposable — they hold ` +
+      'nothing base lacks. `holt clean --apply` removes exactly those and nothing else, ' +
+      're-verifying each one immediately before it goes.',
+    );
+  }
+
   if (lines.length === 0) return null;
 
   return `[holt — parallel workstream state]\n${lines.join('\n')}\n` +
     '(Before deleting ANY worktree run: holt gate <id> — exit 0 disposable, 1 holds unique work, 2 unknown.)';
 }
+
+/**
+ * When accumulation becomes worth mentioning.
+ *
+ * Exported so the threshold is testable and visible rather than two magic numbers buried in a
+ * string, and so a future config surface has one place to override.
+ */
+export const MAINTENANCE_FLOOR = 5;
+export const MAINTENANCE_RATIO = 0.3;

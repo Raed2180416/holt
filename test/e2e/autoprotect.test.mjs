@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { standardFixture } from '../fixtures.mjs';
+import { standardFixture, newRepo } from '../fixtures.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -54,4 +54,53 @@ test('AUTOPROTECT: without the flag, session-start locks nothing (opt-in stays e
   assert.equal(r.code, 0);
   const after = await sh('git', ['worktree', 'list', '--porcelain'], fx.root);
   assert.ok(!after.stdout.includes('locked'), 'no flag, no mutation — the read-only default holds');
+});
+
+
+test('MAINTENANCE: accumulation is surfaced before it becomes a hand-cleanup task', async (t) => {
+  // THE HALF NOBODY WAS TOLD ABOUT. holt already auto-PROTECTS at session start, so the dangerous
+  // direction was covered without anyone asking. Nothing ever said the opposite thing: that the
+  // repository is silting up. Disposable worktrees accumulate quietly, and the moment anyone
+  // notices is usually the moment someone starts deleting by hand - which is the exact behaviour
+  // that loses work and the reason this product exists.
+  //
+  // Deliberately a SIGNAL, not an automatic deletion. `clean --apply` is destructive, and a tool
+  // that silently deletes on a threshold nobody set is the opposite of this product's promise.
+  const { buildBrief, MAINTENANCE_FLOOR } = await import('../../src/agent.mjs');
+
+  const fx = await newRepo('maintenance');
+  t.after(() => fx.cleanup());
+
+  // Enough empty worktrees to clear both the floor AND the ratio.
+  for (let i = 0; i < MAINTENANCE_FLOOR + 2; i++) await fx.worktree('spent-' + i);
+
+  const brief = await buildBrief(fx.root);
+  assert.ok(brief, 'a repository this messy must produce a brief at all');
+  assert.match(brief, /MAINTENANCE:/,
+    `accumulation must be surfaced: ${brief}`);
+  assert.match(brief, /holt clean --apply/,
+    'the signal is worthless without the command that resolves it');
+});
+
+test('MAINTENANCE: a tidy repository is NOT nagged (never-worse)', async (t) => {
+  // The half that keeps the signal worth reading. A maintenance banner on every session, in every
+  // repository, is noise that trains people to ignore the line above it - which is the at-risk
+  // line. The threshold is a ratio plus a floor for exactly this reason: ten disposable out of ten
+  // is a repository that needs sweeping, ten out of two hundred is a busy Tuesday, and one empty
+  // tree in a three-worktree repo is nothing at all.
+  const { buildBrief } = await import('../../src/agent.mjs');
+
+  const fx = await newRepo('maintenance-tidy');
+  t.after(() => fx.cleanup());
+
+  // Two worktrees, both holding real work: nothing is disposable, so nothing to sweep.
+  for (const name of ['busy-a', 'busy-b']) {
+    await fx.worktree(name);
+    await fx.write('src/' + name + '.js',
+      'export function ' + name.replace('-', '_') + '() { return 1; }\n', fx.wt(name));
+  }
+
+  const brief = await buildBrief(fx.root);
+  assert.ok(!brief || !/MAINTENANCE:/.test(brief),
+    `a repository with nothing disposable must not be nagged: ${brief}`);
 });
