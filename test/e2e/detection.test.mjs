@@ -484,48 +484,60 @@ test('P1 PRECISION: two worktrees on the IDENTICAL commit are a duplicate, never
   assert.ok(dup, `the pair must still be REPORTED, as the duplicate it is: ${JSON.stringify(report.duplicates)}`);
 });
 
-test('P0 PRECISION: a symlinked node_modules is not "work found nowhere else"', async (t) => {
-  // THE FORM GIT PRINTS DECIDED THE VERDICT. A linked dependency tree — what pnpm creates, and
-  // what every worktree in holt's own repository carries — is reported by git as the bare entry
-  // `?? node_modules`, because `.gitignore`'s `node_modules/` matches directories and a symlink
-  // is not one. holt's own GENERATED filter had the identical trailing-slash bug, so the entry
-  // survived into the at-risk set and the worktree was declared to hold the only copy of work.
+test('P0 PRECISION: a bare generated entry is not "work found nowhere else"', async (t) => {
+  // THE FORM GIT PRINTS DECIDED THE VERDICT. holt's GENERATED filter anchored every directory on
+  // a trailing slash, so it matched `node_modules/react/index.js` and never the BARE entry
+  // `node_modules`. Git prints the bare form whenever what it found is not a directory it can
+  // descend into. The entry survived into the at-risk set and the worktree was declared to hold
+  // the only copy of work: measured on holt's own repository, `holt gate` exited 1 (HOLDS UNIQUE
+  // WORK) and `protect` locked the tree with the reason "holds work found nowhere else" — for a
+  // 29-byte pointer at content that lives elsewhere and survives the deletion untouched.
   //
-  // Consequence, measured: `holt gate` exited 1 (HOLDS UNIQUE WORK) and `protect` locked the tree
-  // with the reason "holds work found nowhere else" — for a 29-byte pointer at content that lives
-  // in the primary worktree and survives the deletion untouched.
-  const fx = await newRepo('linked-deps');
+  // TWO WORKTREES, because the mechanism that produces the bare entry is PLATFORM-DEPENDENT and
+  // the property is not:
+  //   bare-entry — a plain file of that name. Produces `?? node_modules` on every platform, so
+  //                the exact regression is pinned everywhere, including windows-latest.
+  //   linked     — the real-world case: a symlink (POSIX) or junction (Windows). CI proved these
+  //                differ — git descends into a Windows junction and `.gitignore`'s
+  //                `node_modules/` then matches it, so nothing is reported at all. Both outcomes
+  //                are correct; what must hold on every platform is holt's VERDICT, so that is
+  //                what is asserted here while `bare-entry` above pins the git output shape.
+  const fx = await newRepo('generated-bare-entry');
   t.after(() => fx.cleanup());
   await fx.write('.gitignore', 'node_modules/\n');
   await fx.commit('ignore dependencies the way every JS repo does');
 
-  const wt = await fx.worktree('linked');
   const realDeps = path.join(fx.root, 'node_modules');
   await fsp.mkdir(realDeps, { recursive: true });
   await fsp.writeFile(path.join(realDeps, 'index.js'), 'module.exports = 1;\n');
 
-  // Prefer the real-world mechanism. Where the platform refuses to create symlinks (Windows
-  // without developer mode), a plain file of that name produces the IDENTICAL bare `?? entry`
-  // that the verdict turned on — same property, whichever form the platform allows.
-  let form = 'symlink';
+  const bare = await fx.worktree('bare-entry');
+  await fsp.writeFile(path.join(bare, 'node_modules'), 'not a directory\n');
+
+  const linked = await fx.worktree('linked');
   try {
-    await fsp.symlink(realDeps, path.join(wt, 'node_modules'), 'junction');
+    await fsp.symlink(realDeps, path.join(linked, 'node_modules'), 'junction');
   } catch {
-    form = 'file';
-    await fsp.writeFile(path.join(wt, 'node_modules'), 'not a directory\n');
+    // A platform that refuses both symlinks and junctions still has the `bare-entry` worktree,
+    // which is the one carrying the regression pin.
+    await fsp.writeFile(path.join(linked, 'node_modules'), 'not a directory\n');
   }
-  const porcelain = await fx.git(['status', '--porcelain'], wt);
-  assert.match(porcelain, /^\?\? node_modules$/m,
-    `the fixture is void unless git reports the BARE entry (${form}): ${JSON.stringify(porcelain)}`);
+
+  // FIXTURE VALIDITY, portable: git must really report the bare entry for the plain-file form.
+  const porcelain = (await fx.git(['status', '--porcelain'], bare)).trim();
+  assert.equal(porcelain, '?? node_modules',
+    `the fixture is void unless git reports the BARE entry: ${JSON.stringify(porcelain)}`);
 
   const { report } = await inspectFixture(fx);
-  const row = report.unique.find((u) => u.id === 'linked');
-  assert.ok(row, 'the worktree must still be scanned');
-  assert.deepEqual(row.pathsByLayer.untracked, [],
-    `a linked dependency tree is not unique work: ${JSON.stringify(row.pathsByLayer)}`);
-  assert.notEqual(row.verdict, 'unique-work-uncommitted',
-    `nothing here exists only in this worktree: ${JSON.stringify(row)}`);
-  const safe = report.safe.find((s) => s.id === 'linked');
-  assert.equal(safe?.safe, true,
-    `an empty worktree carrying only linked dependencies is disposable: ${JSON.stringify(safe)}`);
+  for (const id of ['bare-entry', 'linked']) {
+    const row = report.unique.find((u) => u.id === id);
+    assert.ok(row, `the worktree '${id}' must still be scanned`);
+    assert.deepEqual(row.pathsByLayer.untracked, [],
+      `a dependency tree is not unique work (${id}): ${JSON.stringify(row.pathsByLayer)}`);
+    assert.notEqual(row.verdict, 'unique-work-uncommitted',
+      `nothing in '${id}' exists only there: ${JSON.stringify(row)}`);
+    const safe = report.safe.find((s) => s.id === id);
+    assert.equal(safe?.safe, true,
+      `an empty worktree carrying only dependencies is disposable (${id}): ${JSON.stringify(safe)}`);
+  }
 });
