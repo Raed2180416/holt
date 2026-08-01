@@ -25,6 +25,10 @@ export function summarizeJournal(events, { now = null } = {}) {
   const rescued = count('rescue');                  // unique work captured to a verifiable ref
   const cleaned = count('clean-remove') + count('removed'); // disposable worktrees reclaimed
   const branchesDeleted = count('branch-delete');
+  // Protections RELEASED, reported beside protections applied. A safety tally that shows only
+  // the guards it put up, never the ones taken down, overstates the standing protection — the
+  // same one-sided record the journal itself had while `unprotect` went unwritten.
+  const released = count('unprotect');
 
   // "Prevented losses" = the events that stood between work and deletion: a refused destructive
   // command, or a verified rescue that let a locked tree be removed safely.
@@ -44,6 +48,7 @@ export function summarizeJournal(events, { now = null } = {}) {
       workstreamsRescued: rescued,
       worktreesReclaimed: cleaned,
       branchesDeleted,
+      protectionsReleased: released,
     },
     // A conservative, clearly-labelled estimate — never presented as measured fact.
     estimatedHoursSaved: Math.round((preventedLosses * HOURS_PER_PREVENTED_LOSS

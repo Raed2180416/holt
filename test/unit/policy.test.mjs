@@ -102,6 +102,54 @@ test('policy: protected-paths also sees UNCOMMITTED worktree work, which is the 
   assert.match(res.violations[0].message, /UNCOMMITTED/);
 });
 
+/**
+ * THE SHAPE THE SCANNER ACTUALLY PRODUCES.
+ *
+ * The test above passes a hand-built `{path}`, and that is the only shape the rule ever saw. What
+ * `uniqueWork()` really emits is `pathsByLayer` (file paths) plus `byLayer` SYMBOLS whose path
+ * field is `file` and whose `key` is a `kind:name` identity. The rule read `x.path ?? x.key`, so
+ * on every real repository it matched globs against strings like `callable:deployProductionCluster`
+ * and could not fire. A green build from a rule that never ran is the worst outcome a policy
+ * engine has, so the production shape is pinned here as well as end-to-end in test/e2e/team.
+ */
+test('POLICY MUST FIRE on the shape uniqueWork() really emits, not just a hand-built one', () => {
+  const report = {
+    unique: [{
+      id: 'agent-1',
+      pathsByLayer: {
+        committed: ['docs/readme.md'],
+        uncommitted: ['infra/terraform/main.tf'],
+        untracked: ['infra/secrets.env'],   // no parser sees inside it: NO symbol is ever produced
+      },
+      byLayer: {
+        committed: [],
+        uncommitted: [{ name: 'prod', kind: 'resource', file: 'infra/terraform/main.tf', key: 'other:prod' }],
+        untracked: [],
+      },
+    }],
+  };
+  const res = evaluatePolicy({ rules: [{ id: 'prot', type: 'protected-paths', paths: ['infra/**'] }] },
+    { audit: { unlanded: [], unknown: [] }, report });
+  assert.equal(res.ok, false, 'a policy that should fail must not pass');
+  assert.deepEqual(res.violations[0].evidence, ['infra/secrets.env', 'infra/terraform/main.tf'],
+    'evidence must be PATHS, including the file no parser can read inside');
+});
+
+test('POLICY NEVER-WORSE: a symbol identity is not a path and can never satisfy a path glob', () => {
+  const report = {
+    unique: [{
+      id: 'agent-1',
+      pathsByLayer: { committed: [], uncommitted: ['src/app.js'], untracked: [] },
+      byLayer: { committed: [], uncommitted: [{ name: 'chargeCard', file: 'src/app.js', key: 'callable:chargeCard' }], untracked: [] },
+    }],
+  };
+  for (const paths of [['callable*'], ['callable/**'], ['**chargeCard']]) {
+    const res = evaluatePolicy({ rules: [{ id: 'k', type: 'protected-paths', paths }] },
+      { audit: { unlanded: [], unknown: [] }, report });
+    assert.equal(res.ok, true, `a glob shaped like a symbol key must match nothing: ${paths[0]}`);
+  }
+});
+
 test('policy: require-classified turns an instrument failure into a build failure', () => {
   const res = evaluatePolicy({ rules: [{ id: 'rc', type: 'require-classified' }] }, { audit: AUDIT });
   assert.equal(res.ok, false);

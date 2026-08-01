@@ -257,6 +257,51 @@ const MUTATIONS = [
     tests: ['test/unit/policy.test.mjs'],
   },
   {
+    id: 'policy-reads-symbol-keys',
+    defect: 'protected-paths matches globs against symbol IDENTITIES again (callable:foo), so the '
+      + 'rule silently passes on every real repository — a green build from a rule that never ran',
+    file: 'src/team/policy.mjs',
+    find: "        const files = pathsCarriedBy(u, ['uncommitted', 'untracked']);",
+    replace: "        const files = [...(u.byLayer?.uncommitted ?? []), ...(u.byLayer?.untracked ?? [])]\n"
+      + "          .map((x) => x.path ?? x.key ?? '').filter(Boolean);",
+    tests: ['test/e2e/team.test.mjs', 'test/unit/policy.test.mjs'],
+  },
+  {
+    id: 'fleet-counts-worktrees',
+    defect: 'the fleet keys repositories by directory path again, so every linked worktree counts '
+      + 'as another repository and every total it reports is inflated',
+    file: 'src/team/fleet.mjs',
+    find: '    const id = await repoIdentity(p);',
+    replace: '    const id = null; // mutated: no repository identity, one row per directory',
+    tests: ['test/e2e/team.test.mjs'],
+  },
+  {
+    id: 'unprotect-unjournalled',
+    defect: 'releasing protection leaves no audit line, so the journal asserts a safer state than '
+      + 'the repository is in — a hole exactly where the risky action is',
+    file: 'src/actions.mjs',
+    find: '    if (r.code === 0) {',
+    replace: '    if (false) {',
+    tests: ['test/e2e/team.test.mjs'],
+  },
+  {
+    id: 'journal-anonymous',
+    defect: 'journal entries lose their actor, so an audit trail records what and when but never who',
+    file: 'src/journal.mjs',
+    find: '    const line = { at: new Date().toISOString(), actor: actorOf({ env }), ...event };',
+    replace: '    const line = { at: new Date().toISOString(), ...event };',
+    tests: ['test/e2e/team.test.mjs'],
+  },
+  {
+    id: 'actor-invented',
+    defect: 'an absent identity is guessed at instead of recorded as unknown — a fabricated actor '
+      + 'in an audit log is indistinguishable from a real one',
+    file: 'src/journal.mjs',
+    find: "    source: override ? 'HOLT_ACTOR' : (agent?.source ?? 'unknown'),",
+    replace: "    source: override ? 'HOLT_ACTOR' : (agent?.source ?? 'probably-a-human'),",
+    tests: ['test/unit/journal.test.mjs'],
+  },
+  {
     id: 'webhook-signature-blind',
     defect: 'Stripe webhook signatures are not checked — anyone can POST an event and mint a license',
     file: 'server/index.mjs',

@@ -54,6 +54,38 @@ export function globToRegExp(glob) {
 
 const matchesAny = (value, globs) => (globs ?? []).some((g) => globToRegExp(g).test(value));
 
+/**
+ * THE PATHS A WORKSTREAM IS CARRYING — the input every path-shaped rule must read.
+ *
+ * A path rule matched against something that is not a path cannot fire, and it cannot say so:
+ * it reports a clean build, which is the worst possible failure for a policy engine. That is
+ * exactly what happened here. `report.unique[].byLayer` holds SYMBOLS, whose path field is
+ * `file`; the rule read `x.path ?? x.key`, `path` does not exist on a symbol, and `key` is a
+ * `kind:name` identity like `callable:deployProductionCluster`. No repository glob can ever match
+ * one, so `protected-paths` passed every real repository it was ever pointed at.
+ *
+ * Reading `file` instead would still not be enough, and that is the general rule worth stating:
+ * THE SYMBOL LAYER CANNOT REPRESENT PATH RISK. A file no parser understands (`infra/*.env`, a
+ * CSV, a design asset) yields no symbol at all, and a symbol two workstreams share is not unique
+ * so it never reaches `byLayer` either. So the file layer is the primary source and the symbol
+ * layer is only a fallback — and in the fallback a symbol's real path field is read, never its
+ * identity key. Hand-built callers that supply `{path}` keep working unchanged.
+ */
+function pathsCarriedBy(u, layers) {
+  const out = new Set();
+  for (const layer of layers) {
+    for (const p of u?.pathsByLayer?.[layer] ?? []) {
+      if (typeof p === 'string' && p) out.add(p);
+    }
+    for (const s of u?.byLayer?.[layer] ?? []) {
+      const p = typeof s === 'string' ? s : (s?.file ?? s?.path);
+      if (typeof p === 'string' && p) out.add(p);
+    }
+  }
+  // Sorted, so the evidence a reviewer is shown is the same on every run and across machines.
+  return [...out].sort();
+}
+
 /** Load and validate. Returns {found:false} when absent — absence is not an error. */
 export async function loadPolicy(root) {
   for (const rel of POLICY_PATHS) {
@@ -148,8 +180,7 @@ export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {
       }
       // Worktrees count too: uncommitted work under a protected path is the riskiest of all.
       for (const u of report?.unique ?? []) {
-        const files = [...(u.byLayer?.uncommitted ?? []), ...(u.byLayer?.untracked ?? [])]
-          .map((x) => x.path ?? x.key ?? '').filter(Boolean);
+        const files = pathsCarriedBy(u, ['uncommitted', 'untracked']);
         const hits = files.filter((f) => matchesAny(f, rule.paths));
         if (hits.length) {
           violations.push({
