@@ -189,6 +189,69 @@ export function looksGenerated(p) {
   return GENERATED.some((re) => re.test(p));
 }
 
+/**
+ * THE AT-RISK FILE SET, in one place.
+ *
+ * The files in a scanned workstream whose content exists ONLY on disk: nothing in git holds them,
+ * so removing or emptying the file destroys the only copy. Three layers, and the reason each is
+ * in and `committed` is out:
+ *
+ *   uncommitted.files      tracked, modified — the MODIFICATION exists nowhere else
+ *   uncommitted.untracked  untracked        — the whole file exists nowhere else
+ *   ignored.files          gitignored       — git cannot see it, so holt cannot prove anything
+ *                                             about it, and `clean --apply` already learned what
+ *                                             deleting it costs
+ *   committed.files        EXCLUDED         — a commit holds the content; `rm` of one is
+ *                                             recoverable, so denying it would be pure noise
+ *
+ * Every layer here has already been filtered through looksGenerated() by scanFiles(), which is
+ * why node_modules/, dist/, build/, coverage/, *.log, logs/, tmp/ and lockfiles can never appear
+ * in it — the never-worse property of anything that intersects with this set is inherited, not
+ * re-implemented.
+ */
+export function atRiskFiles(ws) {
+  if (!ws || !ws.ok) return [];
+  return [...new Set([
+    ...(ws.uncommitted?.files ?? []),
+    ...(ws.uncommitted?.untracked ?? []),
+    ...(ws.ignored?.files ?? []),
+  ])].filter(Boolean);
+}
+
+/**
+ * The same set, read straight from one `git status --porcelain=v1 -z --untracked-files=all
+ * --ignored=matching` run instead of from a completed scan.
+ *
+ * WHY BOTH EXIST. atRiskFiles() is the authority and carries the full analysis with it, but
+ * producing it costs a scan. A pre-tool hook runs in the agent's critical path on every single
+ * shell command, so the guard needs a way to answer "is this path even interesting?" for the
+ * common case — `rm -rf node_modules` — without paying for one. This parses the identical
+ * evidence with the identical looksGenerated() filter, so the two cannot drift apart on what
+ * counts as at risk — and the test named 'FILE GATE: the fast probe and scan.mjs agree on what
+ * is at risk' walks every file atRiskFiles() reports and asserts the guard refuses to lose it,
+ * because a probe that saw LESS than the scan would silently re-open the hole.
+ *
+ * @returns {Map<string,'uncommitted'|'untracked'|'gitignored'>} path -> which layer it is in
+ */
+export function atRiskFromStatus(stdoutZ) {
+  const out = new Map();
+  const parts = String(stdoutZ ?? '').split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (!entry || entry.length < 4) continue;
+    const xy = entry.slice(0, 2);
+    const p = entry.slice(3);
+    if (!p) continue;
+    // A rename entry is followed by its source path; consume it so it is not read as an entry.
+    if (xy[0] === 'R' || xy[0] === 'C') i++;
+    if (looksGenerated(p)) continue;
+    if (xy === '??') out.set(p, 'untracked');
+    else if (xy === '!!') out.set(p, 'gitignored');
+    else out.set(p, 'uncommitted');
+  }
+  return out;
+}
+
 
 /**
  * Gitignored content a worktree is carrying.
