@@ -124,3 +124,20 @@ export const underOrEqualSync = (child, parent) => {
   const q = foldCase(parent);
   return c === q || c.startsWith(q.endsWith(path.sep) ? q : q + path.sep);
 };
+
+/**
+ * Like relativeWithinAsync, but the FINAL component is never followed.
+ *
+ * canonicalPath resolves symlinks all the way down, which is exactly right when you are asking
+ * "is this path inside that worktree" and exactly wrong when you are asking "which entry did the
+ * user name". `holt discard link.txt` on a symlink resolved to the link's TARGET, captured the
+ * target, and wrote the target's committed content back over it — destroying the target's
+ * uncommitted work while leaving the symlink the user actually named untouched.
+ *
+ * So the directory is canonicalised (which is what fixes /var vs /private/var) and the basename
+ * is appended verbatim (which is what preserves the identity of the thing named).
+ */
+export async function relativeLinkAwareAsync(root, abs) {
+  const [r, dir] = await Promise.all([canonicalPath(root), canonicalPath(path.dirname(abs))]);
+  return path.relative(r, path.join(dir, path.basename(abs))).split(path.sep).join('/');
+}

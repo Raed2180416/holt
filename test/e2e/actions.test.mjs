@@ -1022,3 +1022,47 @@ test('CATASTROPHIC: rescue REFUSES a dirty submodule instead of reporting it ver
   assert.match(String(r.note ?? ''), /submodule/i,
     `and name the cause so the user can act: ${JSON.stringify(r)}`);
 });
+
+
+test('CATASTROPHIC: discard never follows a symlink into another file', async (t) => {
+  // FOUND BY AN ADVERSARIAL SWEEP, in code written the same day. `discard` canonicalised the path
+  // it was given, which resolves a symlink all the way to its TARGET, and the tracked-file branch
+  // then wrote the target's committed bytes back to it. Reproduced end to end: `holt discard
+  // link.txt` restored real.txt to its committed content, destroying real.txt's uncommitted work,
+  // and left link.txt — the entry actually named — sitting there untouched.
+  //
+  // Two different questions were being answered with one helper: "is this path inside that
+  // worktree" wants symlinks resolved; "which entry did the user name" must not resolve the final
+  // component. relativeLinkAwareAsync canonicalises the directory and appends the basename
+  // verbatim, so the /var-vs-/private/var class stays fixed without following the link.
+  const fx = await newRepo('discard-symlink');
+  t.after(() => fx.cleanup());
+  await fx.write('real.txt', 'committed content\n');
+  await fx.commit('base');
+
+  const wt = await fx.worktree('linked');
+  await fs.writeFile(path.join(wt, 'real.txt'), 'UNCOMMITTED_ONLY_COPY\n');
+  try {
+    await fs.symlink('real.txt', path.join(wt, 'link.txt'));
+  } catch {
+    return t.skip('this platform will not create a symlink here');
+  }
+
+  const r = await discard(fx.root, [path.join(wt, 'link.txt')]);
+  assert.equal(r.ok, true, `discarding the link must succeed: ${JSON.stringify(r)}`);
+
+  // THE ASSERTION THAT MATTERS: a different file's uncommitted work still exists.
+  assert.equal(await fs.readFile(path.join(wt, 'real.txt'), 'utf8'), 'UNCOMMITTED_ONLY_COPY\n',
+    'discarding a symlink must not touch what it points at');
+
+  // ...and the entry the user actually named is the one that went.
+  await assert.rejects(() => fs.lstat(path.join(wt, 'link.txt')),
+    'the symlink itself should have been removed');
+
+  // NEVER-WORSE: an ordinary tracked file must still REVERT rather than be deleted.
+  await fs.writeFile(path.join(wt, 'real.txt'), 'edited again\n');
+  const r2 = await discard(fx.root, [path.join(wt, 'real.txt')]);
+  assert.equal(r2.ok, true, JSON.stringify(r2));
+  assert.deepEqual(r2.discarded, [], 'a tracked file is reverted, not deleted');
+  assert.equal(await fs.readFile(path.join(wt, 'real.txt'), 'utf8'), 'committed content\n');
+});

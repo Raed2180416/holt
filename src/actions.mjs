@@ -22,7 +22,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, gitOk, pmap, authorEnv } from './git.mjs';
 import { discover, isHoltLock, unquotePorcelain } from './discover.mjs';
-import { underOrEqualAsync, relativeWithinAsync, canonicalPath, samePathSync } from './paths.mjs';
+import {
+  underOrEqualAsync, relativeWithinAsync, relativeLinkAwareAsync, canonicalPath, samePathSync,
+} from './paths.mjs';
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
@@ -481,14 +483,18 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
   const resolved = [];
   for (const p of list) {
     const abs = path.resolve(cwd, p);
+    // lstat, NOT stat: stat follows the link and answers about its target. Which entry the user
+    // named is the whole question here.
+    let st;
     try {
-      await fs.stat(abs);
+      st = await fs.lstat(abs);
     } catch {
       return { ok: false, error: `no such path: ${p}` };
     }
+    const isSymlink = st.isSymbolicLink();
     const owner = await findOwningWorktree(abs, disc);
     if (!owner) return { ok: false, error: `'${p}' is not inside a worktree of this repository` };
-    resolved.push({ input: p, abs, owner });
+    resolved.push({ input: p, abs, owner, isSymlink });
   }
   const owners = [...new Set(resolved.map((r) => r.owner.path))];
   if (owners.length > 1) {
@@ -496,7 +502,7 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
   }
 
   const ws = resolved[0].owner;
-  const rel = await Promise.all(resolved.map((r) => relativeWithinAsync(ws.path, r.abs)));
+  const rel = await Promise.all(resolved.map((r) => relativeLinkAwareAsync(ws.path, r.abs)));
 
   if (dryRun) {
     return { ok: true, dryRun: true, worktree: ws.id, paths: rel, note: 'nothing was captured or removed' };
@@ -559,9 +565,15 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
     const removed = [];
     const reverted = [];
     for (const r of resolved) {
-      const relPath = await relativeWithinAsync(ws.path, r.abs);
+      const relPath = await relativeLinkAwareAsync(ws.path, r.abs);
       const tracked = await git(['cat-file', '-e', `HEAD:${relPath}`], { cwd: ws.path });
-      if (tracked.code === 0) {
+      // A SYMLINK IS NEVER FOLLOWED. Reverting a tracked path writes its committed bytes back to
+      // the named path — and writing to a symlink writes THROUGH it. Reproduced: `holt discard
+      // link.txt` restored the committed content of link.txt's TARGET over the target, destroying
+      // the target's uncommitted work, while the symlink the user named was left in place. The
+      // link itself is content (a pointer), so it is captured and removed like any untracked
+      // entry; fs.rm on a symlink unlinks the link and never touches what it points at.
+      if (tracked.code === 0 && !r.isSymlink) {
         // The blob is read with plumbing and written with fs, NOT with `git checkout`.
         // `git checkout -- <path>` is refused by the classifier's FIRST gate, which cannot be
         // opened even with allowMutation — deliberately, because that gate is what stopped a
