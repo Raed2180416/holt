@@ -476,7 +476,14 @@ export function renderContext(digest) {
     return c('red', `holt: ${digest.error}`) + '\n' + c('grey', `known: ${digest.known.join(', ')}`);
   }
   const out = [];
-  out.push(c('bold', `CONTEXT for ${digest.workstream}`) + c('grey', `  (family ${digest.family} — ${digest.familyRule})`));
+  // Translate the family rule into a human-readable hint. "creation-burst" means workstreams
+  // created close together in time; "name-fallback" means grouped by name stem; "user-override"
+  // means the user's .holtrc.json set it explicitly.
+  const ruleHint = digest.familyRule === 'creation-burst' ? 'created close together'
+    : digest.familyRule === 'user-override' ? 'grouped by .holtrc.json'
+    : digest.familyRule === 'name-fallback' ? 'grouped by name stem'
+    : digest.familyRule;
+  out.push(c('bold', `CONTEXT for ${digest.workstream}`) + c('grey', `  (sibling group: ${ruleHint})`));
   out.push('');
   if (digest.siblings.length) out.push(c('grey', `  siblings: ${digest.siblings.join(', ')}`), '');
   for (const a of digest.advice) out.push(`  ${c('yellow', '!')} ${a}`);
