@@ -209,7 +209,11 @@ test('HTML INJECTION: a hostile worktree path and branch name cannot break out o
   // is that SOME name is not plain, not that a fixed string is present.
   assert.ok(data.nodes.some((n) => /[^A-Za-z0-9._-]/.test(n.id)),
     `no hostile character survived into any name, so nothing is being tested: ${ids}`);
-  assert.match(branches, /onload=HOLT_XSS\(\)>/, 'the hostile branch did not survive into the payload');
+  // Same platform rule as the names above: a branch is a loose REF, which is a FILE on disk, so
+  // Windows trims it exactly as it trims a directory. What must hold everywhere is that the branch
+  // holt reports is the one git actually created.
+  assert.ok(data.nodes.every((n) => n.branch === null || branches.includes(n.branch)),
+    `every worktree's real branch must arrive in the payload: ${branches}`);
   assert.match(ids, /img src=x/, 'the hostile directory name did not survive into the payload');
 
   // The override is neutralised rather than passed through: it carries no glyph, so no encoding
@@ -328,8 +332,14 @@ test('HTML INJECTION: the page builds its SVG as DOM, so a hostile id cannot bec
   assert.ok(circles.length >= 2,
     `expected at least 2 circles, got ${circles.length} — the page rendered nothing, so nothing below is being tested`);
   const texts = created.filter((e) => e.tagName === 'title' || e.tagName === 'text').map((e) => e.text);
-  assert.ok(texts.some((t2) => /img src=x/.test(t2)),
-    'the hostile id never reached the page as text — the assertion above proved nothing');
+  // ANTI-VACUITY, platform-aware. The id is a directory basename, so Windows strips the characters
+  // it will not allow in one. What proves the assertion above was not vacuous is that the id
+  // reached the page AS TEXT and still carries something a naive renderer would have parsed.
+  const hostileIds = created.filter((e) => e.tagName === 'circle')
+    .flatMap((c) => c.children.filter((k) => k.tagName === 'title').map((k) => k.text));
+  assert.ok(hostileIds.length >= 2, `ids must reach the page as text: ${JSON.stringify(hostileIds)}`);
+  assert.ok(hostileIds.some((t2) => /[^A-Za-z0-9._\/\\-]/.test(t2)),
+    `no hostile character survived into any id, so the assertion above proved nothing: ${JSON.stringify(hostileIds)}`);
   for (const el of created) {
     for (const v of Object.values(el.attrs)) {
       assert.ok(!/HOLT_XSS|<|>/.test(v), `repository data landed in an attribute: ${v}`);

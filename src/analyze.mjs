@@ -419,8 +419,30 @@ export async function collisions(scanResult, opts = {}) {
       // full working state becomes a real commit (see worktreeSnapshot) and merge-tree answers
       // for real. Snapshots are computed once per worktree and reused across every pair.
       const [aSide, bSide] = await Promise.all([sideOf(a), sideOf(b)]);
+
+      // IDENTICAL STATE IS DECIDED BEFORE THE EXPENSIVE CALL, NOT AFTER IT.
+      //
+      // This check already existed, twenty lines further down — after merge-tree had run. That
+      // ordering is what made a many-worktree scan super-linear, and it was measured rather than
+      // guessed: overlappingPairs() produces C(N,2) pairs when N worktrees touch the same files,
+      // which is the ordinary fan-out shape, and merge-tree was invoked once for EVERY pair
+      // unconditionally. At N=800 that is roughly 320,000 subprocesses to answer a question whose
+      // answer is "these are byte-identical" — and it is not gated by --no-symbols, which is why
+      // that flag recovered almost nothing at scale.
+      //
+      // Merging a tree with itself cannot conflict, so the answer is known without asking. The
+      // cheap comparison is one cached rev-parse per SIDE (N of them), not one merge per PAIR.
+      let identicalState = false;
+      if (aSide && bSide) {
+        if (aSide === bSide) identicalState = true;
+        else {
+          const [aTree, bTree] = await Promise.all([treeOf(aSide), treeOf(bSide)]);
+          identicalState = Boolean(aTree) && aTree === bTree;
+        }
+      }
+
       let proven = null;
-      if (!scanResult.strictReadOnly && aSide && bSide) {
+      if (!identicalState && !scanResult.strictReadOnly && aSide && bSide) {
         const mt = await git(['merge-tree', '--write-tree', aSide, bSide], {
           cwd: scanResult.root, timeout,
         });
@@ -460,15 +482,8 @@ export async function collisions(scanResult, opts = {}) {
       // structurally cannot see — holt's own differentiator. It is reported as what it is,
       // separately from a textual conflict, and it still entangles landing order (see
       // CONFLICT_KINDS in order.mjs).
-      let identicalState = false;
-      if (aSide && bSide) {
-        if (aSide === bSide) identicalState = true;
-        else {
-          const [aTree, bTree] = await Promise.all([treeOf(aSide), treeOf(bSide)]);
-          identicalState = Boolean(aTree) && aTree === bTree;
-        }
-      }
-
+      // identicalState was decided above, BEFORE merge-tree ran — see the note there for why the
+      // ordering is the whole point rather than a tidy-up.
       let severity;
       let kind;
       if (proven === true) { kind = 'proven'; severity = 'high'; }

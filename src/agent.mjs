@@ -365,8 +365,20 @@ export function indirectVerb(command) {
         if (indirectVerb(w[i + 1])) return { kind: `nested indirection inside ${verb} -c` };
         continue;
       }
-      // A shell reading from a pipe or stdin runs code holt never saw.
-      return { kind: `${verb} executing input holt cannot see` };
+      // A SHELL GIVEN A SCRIPT FILE IS JUST A PROGRAM, and holt does not pretend otherwise.
+      //
+      // `bash build.sh` is no more opaque than `npm run build`, `make clean` or any binary on
+      // PATH — holt cannot read inside ANY of them, and flagging this one because the word "bash"
+      // appears would interrupt an enormous amount of ordinary work while doing nothing for
+      // safety. Caught by dogfooding: this check refused `bash perf-check.sh` moments after it
+      // landed, which is precisely how a guard earns its way off a machine.
+      //
+      // What DOES stay flagged is a shell with no program at all — `… | sh`, `sh < file` — where
+      // the code is being assembled by the very command under inspection. That is indirection;
+      // running a script somebody wrote is not.
+      const hasScript = w.slice(1).some((t) => !t.startsWith('-'));
+      if (!hasScript) return { kind: `${verb} executing input holt cannot see` };
+      continue;
     }
   }
   return null;
