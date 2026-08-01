@@ -22,7 +22,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, gitOk, pmap, authorEnv } from './git.mjs';
 import { discover, isHoltLock, unquotePorcelain } from './discover.mjs';
-import { underOrEqualAsync } from './paths.mjs';
+import { underOrEqualAsync, relativeWithinAsync } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
@@ -460,7 +460,7 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
   }
 
   const ws = resolved[0].owner;
-  const rel = resolved.map((r) => path.relative(ws.path, r.abs).split(path.sep).join('/'));
+  const rel = await Promise.all(resolved.map((r) => relativeWithinAsync(ws.path, r.abs)));
 
   if (dryRun) {
     return { ok: true, dryRun: true, worktree: ws.id, paths: rel, note: 'nothing was captured or removed' };
@@ -523,7 +523,7 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
     const removed = [];
     const reverted = [];
     for (const r of resolved) {
-      const relPath = path.relative(ws.path, r.abs).split(path.sep).join('/');
+      const relPath = await relativeWithinAsync(ws.path, r.abs);
       const tracked = await git(['cat-file', '-e', `HEAD:${relPath}`], { cwd: ws.path });
       if (tracked.code === 0) {
         // The blob is read with plumbing and written with fs, NOT with `git checkout`.

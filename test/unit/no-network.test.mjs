@@ -179,6 +179,19 @@ test('PATHS: no source file compares paths without canonicalising them', async (
     { re: /===\s*path\.resolve\(/, what: '... === path.resolve(...)' },
     { re: /\.startsWith\(\s*path\.resolve\(/, what: '.startsWith(path.resolve(...))' },
     { re: /path\.resolve\([^)]*\)\.startsWith\(/, what: 'path.resolve(...).startsWith(...)' },
+    // path.relative IS THE SAME BUG WITHOUT A COMPARISON OPERATOR, which is exactly why it slipped
+    // past this guard. It is arithmetic on two strings, so it is as wrong as `===` when the sides
+    // came from different sources - and they routinely do: git reports a worktree at
+    // /private/var/folders/... on macOS while mkdtemp handed the caller /var/folders/..., and
+    // path.relative dutifully returned `../../../../../../../var/folders/...`. That string went to
+    // `git add`, which indexed nothing, and `holt discard` refused every capture on macOS and
+    // Windows while passing on Linux. Third instance of this class in one session.
+    //
+    // relativeWithinAsync() in src/paths.mjs canonicalises both sides first. A path.relative whose
+    // FIRST argument is a variable is the hazardous shape (a root from one source, a target from
+    // another); path.relative(ROOT, file) inside a test, where both come from the same walk, is
+    // not - so the guard covers src/ and bin/, where every root arrives from git or the caller.
+    { re: /path\.relative\(\s*[A-Za-z_$][\w$.]*\s*,/, what: 'path.relative(<uncanonicalised>, ...)' },
   ];
 
   const offences = [];
@@ -195,7 +208,8 @@ test('PATHS: no source file compares paths without canonicalising them', async (
     }
   }
   assert.deepEqual(offences, [],
-    'use canonicalPath / samePathAsync / underOrEqualAsync / findByPath from src/paths.mjs — a raw ' +
+    'use canonicalPath / samePathAsync / underOrEqualAsync / findByPath / relativeWithinAsync from ' +
+    'src/paths.mjs — a raw ' +
     'path.resolve() comparison silently finds nothing on macOS and Windows:\n  ' + offences.join('\n  '));
 });
 

@@ -85,3 +85,23 @@ export async function findByPath(items, dir, key = 'path') {
   }
   return undefined;
 }
+
+/**
+ * The path of `abs` relative to `root`, with BOTH SIDES CANONICALISED FIRST.
+ *
+ * `path.relative` is arithmetic on strings, so it is exactly as wrong as a raw comparison when the
+ * two sides came from different sources — and they routinely do here: git reports a worktree at
+ * /private/var/folders/... on macOS while mkdtemp handed the caller /var/folders/..., and
+ * path.relative dutifully produced `../../../../../../../var/folders/...`. That string was then
+ * handed to `git add`, which indexed nothing, and the operation refused with "not captured".
+ *
+ * It is the same class the rest of this module exists to close, and the guard test did not catch
+ * it because path.relative is not a COMPARISON — which is why this helper exists rather than a
+ * note telling the next person to remember.
+ *
+ * Returns POSIX-separated, because every consumer hands the result to git.
+ */
+export async function relativeWithinAsync(root, abs) {
+  const [a, b] = await Promise.all([canonicalPath(root), canonicalPath(abs)]);
+  return path.relative(a, b).split(path.sep).join('/');
+}
