@@ -27,3 +27,7 @@ crush.json
 # The operator launch runbook names where the licence signing key lives. .npmignore is not
 # access control — it stays out of the public repository entirely.
 LAUNCH-RUNBOOK.md
+
+# Private session handoff — names unmerged branches, buyer verdicts and pricing decisions.
+# Mirrored to ~/.holt-work/. Must not be published.
+HANDOFF.md
