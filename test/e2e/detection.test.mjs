@@ -9,6 +9,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import fsp from 'node:fs/promises';
 import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
@@ -410,4 +412,120 @@ test('P1 PRECISION: sharing a file is not a conflict when the edits actually mer
   const visible = report.collisions.find((c) => pairMatches(c, 'top', 'bottom'));
   assert.equal(visible, undefined,
     'a pair git proves merges cleanly must not appear in the default collision report');
+});
+
+test('P1 PRECISION: a pair git PROVES merges cleanly is not a conflict, even when both added the same symbol', async (t) => {
+  // THE PROOF MUST BEAT THE HEURISTIC IN BOTH DIRECTIONS.
+  //
+  // The severity ladder consulted `proven === false` only AFTER the shared-symbol heuristic, so
+  // git answering "these merge cleanly" was discarded whenever the sides happened to share an
+  // added symbol — and sharing an added symbol is the single most common way two agents touch one
+  // registry. Measured on holt's own repository: all 22 pairs git had PROVEN clean were reported
+  // as collisions anyway, 10 of them HIGH. The doc comment three lines above the ladder already
+  // said "this is git's own answer, not a heuristic".
+  //
+  // The pre-existing precision test could not catch it: its fixture edits a symbol-free .txt, so
+  // sharedSymbols is empty and it never reaches the branch that was wrong.
+  const fx = await newRepo('clean-but-shared-symbol');
+  t.after(() => fx.cleanup());
+  const filler = Array.from({ length: 40 }, (_, i) => `export const pad${i} = ${i};`).join('\n');
+  await fx.write('config/registry.mjs', `${filler}\n`);
+  await fx.commit('a registry with room at both ends');
+
+  const a = await fx.worktree('reg-top');
+  const b = await fx.worktree('reg-bottom');
+  // The registry-hotspot signature: both register the SAME handler, far enough apart in the file
+  // that git merges them without a murmur. Uncommitted, which is where agents actually leave it.
+  await fx.write('config/registry.mjs',
+    `export function sharedHandler() { return 'top'; }\n${filler}\n`, fx.wt('reg-top'));
+  await fx.write('config/registry.mjs',
+    `${filler}\nexport function sharedHandler() { return 'bottom'; }\n`, fx.wt('reg-bottom'));
+
+  const { report } = await inspectFixture(fx);
+  const hit = (report.collisionsAll ?? report.collisions).find((c) => pairMatches(c, 'reg-top', 'reg-bottom'));
+  assert.ok(hit, 'the pair must still be related — this test is about the VERDICT, not about hiding it');
+  assert.ok(hit.sharedSymbols.length > 0,
+    `the fixture is void unless both sides really added the same symbol: ${JSON.stringify(hit.sharedSymbols)}`);
+  assert.equal(hit.mergeTreeConflict, false,
+    `the fixture is void unless git really proved these merge cleanly: ${JSON.stringify(hit)}`);
+  assert.notEqual(hit.severity, 'high',
+    `git proved this merges cleanly, so HIGH is a false positive: ${JSON.stringify(hit)}`);
+  assert.notEqual(hit.kind, 'predicted',
+    `'predicted' claims merge-tree could not see the sides; it saw them and said clean: ${JSON.stringify(hit)}`);
+  assert.match(hit.why, /merge/i, 'the reason must state what git actually proved');
+});
+
+test('P1 PRECISION: two worktrees on the IDENTICAL commit are a duplicate, never a collision', async (t) => {
+  // Six pairs in holt's own repository sit on the same commit — the ordinary result of checking
+  // one branch out twice to review it. Their trees are byte-identical, so merging them is a no-op
+  // and no conflict is reachable in principle. holt reported them HIGH, quoting 247 shared
+  // symbols: it had compared each side against BASE and found, correctly, that they added the
+  // same things — which is the definition of a duplicate, and `duplicates` already says so.
+  const fx = await newRepo('same-commit-twice');
+  t.after(() => fx.cleanup());
+
+  const a = await fx.worktree('twin-a');
+  await fx.write('src/feature.js', 'export function twinFeature() { return 42; }\n', fx.wt('twin-a'));
+  const sha = await fx.commit('the work, committed once', fx.wt('twin-a'));
+
+  // The same commit, checked out a second time — no new work of any kind.
+  const bPath = `${fx.wt('twin-a')}-mirror`;
+  await fx.git(['worktree', 'add', '--detach', bPath, sha]);
+
+  const { report } = await inspectFixture(fx);
+  const all = report.collisionsAll ?? report.collisions;
+  const hit = all.find((c) => pairMatches(c, 'twin-a', 'twin-a-mirror'));
+  assert.equal(hit, undefined,
+    `two checkouts of one commit cannot conflict; reporting it is a false positive: ${JSON.stringify(hit)}`);
+
+  // ANTI-VACUITY: the pair must be visible to holt at all, or this asserts nothing. It is a
+  // duplicate, and that is exactly what the duplicate layer is for.
+  const dup = report.duplicates.find((d) => pairMatches(d, 'twin-a', 'twin-a-mirror'));
+  assert.ok(dup, `the pair must still be REPORTED, as the duplicate it is: ${JSON.stringify(report.duplicates)}`);
+});
+
+test('P0 PRECISION: a symlinked node_modules is not "work found nowhere else"', async (t) => {
+  // THE FORM GIT PRINTS DECIDED THE VERDICT. A linked dependency tree — what pnpm creates, and
+  // what every worktree in holt's own repository carries — is reported by git as the bare entry
+  // `?? node_modules`, because `.gitignore`'s `node_modules/` matches directories and a symlink
+  // is not one. holt's own GENERATED filter had the identical trailing-slash bug, so the entry
+  // survived into the at-risk set and the worktree was declared to hold the only copy of work.
+  //
+  // Consequence, measured: `holt gate` exited 1 (HOLDS UNIQUE WORK) and `protect` locked the tree
+  // with the reason "holds work found nowhere else" — for a 29-byte pointer at content that lives
+  // in the primary worktree and survives the deletion untouched.
+  const fx = await newRepo('linked-deps');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', 'node_modules/\n');
+  await fx.commit('ignore dependencies the way every JS repo does');
+
+  const wt = await fx.worktree('linked');
+  const realDeps = path.join(fx.root, 'node_modules');
+  await fsp.mkdir(realDeps, { recursive: true });
+  await fsp.writeFile(path.join(realDeps, 'index.js'), 'module.exports = 1;\n');
+
+  // Prefer the real-world mechanism. Where the platform refuses to create symlinks (Windows
+  // without developer mode), a plain file of that name produces the IDENTICAL bare `?? entry`
+  // that the verdict turned on — same property, whichever form the platform allows.
+  let form = 'symlink';
+  try {
+    await fsp.symlink(realDeps, path.join(wt, 'node_modules'), 'junction');
+  } catch {
+    form = 'file';
+    await fsp.writeFile(path.join(wt, 'node_modules'), 'not a directory\n');
+  }
+  const porcelain = await fx.git(['status', '--porcelain'], wt);
+  assert.match(porcelain, /^\?\? node_modules$/m,
+    `the fixture is void unless git reports the BARE entry (${form}): ${JSON.stringify(porcelain)}`);
+
+  const { report } = await inspectFixture(fx);
+  const row = report.unique.find((u) => u.id === 'linked');
+  assert.ok(row, 'the worktree must still be scanned');
+  assert.deepEqual(row.pathsByLayer.untracked, [],
+    `a linked dependency tree is not unique work: ${JSON.stringify(row.pathsByLayer)}`);
+  assert.notEqual(row.verdict, 'unique-work-uncommitted',
+    `nothing here exists only in this worktree: ${JSON.stringify(row)}`);
+  const safe = report.safe.find((s) => s.id === 'linked');
+  assert.equal(safe?.safe, true,
+    `an empty worktree carrying only linked dependencies is disposable: ${JSON.stringify(safe)}`);
 });

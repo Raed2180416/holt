@@ -166,25 +166,56 @@ async function uncommittedDelta(wtPath, { timeout }) {
   return { files, untracked, how: 'status+diff-HEAD' };
 }
 
-/** Paths that are noise in every repo. Small and conservative on purpose. */
-const GENERATED = [
-  /(^|\/)node_modules\//, /(^|\/)\.git\//, /(^|\/)target\//, /(^|\/)dist\//, /(^|\/)build\//,
-  /(^|\/)__pycache__\//, /(^|\/)\.venv\//, /(^|\/)venv\//, /(^|\/)vendor\//,
-  /(^|\/)\.next\//, /(^|\/)coverage\//, /\.min\.(js|css)$/, /(^|\/)\.pytest_cache\//,
-  // OS and editor droppings, and plainly regenerable output. Without these, a single .DS_Store —
-  // created by merely opening a folder in Finder — would make every worktree on a Mac
-  // permanently unclearable, which is the "safety that freezes the tool" failure mode.
-  /(^|\/)\.DS_Store$/, /(^|\/)Thumbs\.db$/, /(^|\/)desktop\.ini$/, /(^|\/)\.AppleDouble\//,
-  /(^|\/)\.idea\//, /(^|\/)\.cache\//, /(^|\/)\.turbo\//, /(^|\/)\.parcel-cache\//,
-  /(^|\/)\.gradle\//, /(^|\/)\.terraform\//, /(^|\/)tmp\//, /(^|\/)temp\//,
-  /(^|\/)logs?\//, /\.log$/, /(^|\/)\.tox\//, /(^|\/)\.mypy_cache\//, /(^|\/)\.ruff_cache\//,
-  // Dependency manifests. A lockfile records what a resolver decided, not what an agent wrote.
-  // Left in, they contribute thousands of package-name "symbols" — measured on a real repo,
-  // producing findings like `object:node_modules/@ts-morph/common` presented as unique work.
+/**
+ * Paths that are noise in every repo. Small and conservative on purpose.
+ *
+ * DIRECTORIES ARE DECLARED AS NAMES, NOT AS HAND-WRITTEN REGEXES, because the anchor is where
+ * the bug was. Every entry here used to read `(^|\/)node_modules\//` — anchored on a trailing
+ * slash, so it matched paths INSIDE the directory and never the directory entry itself. Git
+ * prints the bare entry whenever what it found is not a directory it can descend into: a SYMLINK
+ * (`node_modules -> ../../node_modules`, what pnpm and every linked monorepo produce) or a plain
+ * file of that name. `.gitignore` carries the identical trailing-slash rule, so `node_modules/`
+ * does not match the symlink either, git reports it untracked, and holt counted a 29-byte pointer
+ * as work found nowhere else. Measured on holt's own repository: 8 of 10 worktrees were reported
+ * "AT RISK — delete these and the work is gone" on that basis alone.
+ *
+ * Compiling the anchor in ONE place makes the mistake unavailable rather than merely corrected —
+ * a name added to this list cannot be written with the wrong anchor, and the guard test named
+ * 'at-risk set: every generated DIRECTORY is recognised bare' walks every name in every form.
+ */
+const GENERATED_DIRS = [
+  'node_modules', '.git', 'target', 'dist', 'build', '__pycache__', '.venv', 'venv', 'vendor',
+  '.next', 'coverage', '.pytest_cache', '.AppleDouble', '.idea', '.cache', '.turbo',
+  '.parcel-cache', '.gradle', '.terraform', 'tmp', 'temp', 'log', 'logs', '.tox',
+  '.mypy_cache', '.ruff_cache',
+];
+
+/**
+ * Files, matched on their own terms.
+ *
+ * OS and editor droppings, and plainly regenerable output. Without these, a single .DS_Store —
+ * created by merely opening a folder in Finder — would make every worktree on a Mac permanently
+ * unclearable, which is the "safety that freezes the tool" failure mode.
+ *
+ * Dependency manifests are here too. A lockfile records what a resolver decided, not what an
+ * agent wrote. Left in, they contribute thousands of package-name "symbols" — measured on a real
+ * repo, producing findings like `object:node_modules/@ts-morph/common` presented as unique work.
+ */
+const GENERATED_FILES = [
+  /\.min\.(js|css)$/, /\.log$/,
+  /(^|\/)\.DS_Store$/, /(^|\/)Thumbs\.db$/, /(^|\/)desktop\.ini$/,
   /\.lock$/, /(^|\/)package-lock\.json$/, /(^|\/)yarn\.lock$/, /(^|\/)pnpm-lock\.yaml$/,
   /(^|\/)Cargo\.lock$/, /(^|\/)poetry\.lock$/, /(^|\/)composer\.lock$/, /(^|\/)Gemfile\.lock$/,
   /(^|\/)go\.sum$/, /(^|\/)Pipfile\.lock$/, /(^|\/)gradle\.lockfile$/, /(^|\/)packages\.lock\.json$/,
 ];
+
+/** A directory matches as the entry ITSELF (`x`, `a/x`) and as everything under it (`x/y`). */
+const dirPattern = (name) =>
+  new RegExp(`(^|/)${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(/|$)`);
+
+const GENERATED = [...GENERATED_DIRS.map(dirPattern), ...GENERATED_FILES];
+
+export { GENERATED_DIRS };
 export function looksGenerated(p) {
   return GENERATED.some((re) => re.test(p));
 }

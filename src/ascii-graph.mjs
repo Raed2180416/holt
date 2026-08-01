@@ -29,8 +29,15 @@ export function clusters(report) {
     adj.get(a).get(b).add(why);
     adj.get(b).get(a).add(why);
   };
+  const EDGE_WHY = {
+    proven: 'conflict',
+    predicted: 'likely conflict',
+    // Merges cleanly, and both sides define the same symbol — a real relationship, and not one
+    // to draw as a conflict when git has proven the text merges.
+    'semantic-overlap': 'same symbol, merges cleanly',
+  };
   for (const c of report.collisions ?? []) {
-    if (c.kind === 'proven' || c.kind === 'predicted') link(c.a, c.b, c.kind === 'proven' ? 'conflict' : 'likely conflict');
+    if (EDGE_WHY[c.kind]) link(c.a, c.b, EDGE_WHY[c.kind]);
   }
   for (const d of report.duplicates ?? []) link(d.a, d.b, 'duplicate work');
 

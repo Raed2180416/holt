@@ -362,6 +362,25 @@ export async function collisions(scanResult, opts = {}) {
     return snapCache.get(w.id);
   };
 
+  // TREE IDENTITY, cached per side — N lookups, not N².
+  //
+  // Two worktrees whose FULL state hashes to one tree cannot conflict: merging a tree with itself
+  // is a no-op, and no evidence can make that false. This is the ordinary result of checking one
+  // branch out twice to review it — six such pairs exist in holt's own repository, and each was
+  // reported HIGH, quoting 247 shared symbols. Those symbols are real, and they are what a
+  // DUPLICATE looks like: each side was compared against BASE, and both added the same things
+  // because they ARE the same thing. `duplicates` already reports the pair, correctly, at 100%.
+  const treeCache = new Map();
+  const treeOf = (side) => {
+    if (!side) return Promise.resolve(null);
+    if (!treeCache.has(side)) {
+      treeCache.set(side, git(['rev-parse', `${side}^{tree}`], { cwd: scanResult.root, timeout })
+        .then((r) => (r.code === 0 ? r.stdout.trim() : null))
+        .catch(() => null));
+    }
+    return treeCache.get(side);
+  };
+
   const results = await pmap(
     pairs,
     async (p) => {
@@ -405,14 +424,42 @@ export async function collisions(scanResult, opts = {}) {
       // Evidence is: git proved a conflict, OR both sides added the same discriminative symbol.
       // Bare file overlap is downgraded to 'low' and excluded from the default report — still
       // available via --all, because it is not nothing, it is just not actionable on its own.
+      // A PROOF BEATS A PREDICTION IN BOTH DIRECTIONS.
+      //
+      // `proven === false` used to be consulted only AFTER the shared-symbol heuristic, so git
+      // answering "these merge cleanly" was discarded whenever the sides shared an added symbol —
+      // and sharing an added symbol is the single commonest way two agents touch one registry.
+      // Measured on holt's own repository: all 22 pairs git had PROVEN clean were reported as
+      // collisions anyway, 10 of them HIGH. The comment at the top of this function already said
+      // "this is git's own answer, not a heuristic"; the ladder only honoured it when the answer
+      // was yes.
+      //
+      // Proven-clean-but-shares-a-symbol is NOT silenced, because it is not nothing: two agents
+      // each adding `sharedHandler` to one file at far-apart lines merges without a murmur and
+      // produces a duplicate declaration. That is precisely the semantic overlap byte comparison
+      // structurally cannot see — holt's own differentiator. It is reported as what it is,
+      // separately from a textual conflict, and it still entangles landing order (see
+      // CONFLICT_KINDS in order.mjs).
+      let identicalState = false;
+      if (aSide && bSide) {
+        if (aSide === bSide) identicalState = true;
+        else {
+          const [aTree, bTree] = await Promise.all([treeOf(aSide), treeOf(bSide)]);
+          identicalState = Boolean(aTree) && aTree === bTree;
+        }
+      }
+
       let severity;
       let kind;
       if (proven === true) { kind = 'proven'; severity = 'high'; }
-      else if (sharedSymbols.length > 0) {
+      else if (identicalState) { kind = 'identical'; severity = 'none'; }
+      else if (proven === false) {
+        kind = sharedSymbols.length > 0 ? 'semantic-overlap' : 'proven-clean';
+        severity = sharedSymbols.length > 0 ? 'medium' : 'none';
+      } else if (sharedSymbols.length > 0) {
         kind = 'predicted';
         severity = uncommittedInvolved ? 'high' : 'medium';
-      } else if (proven === false) { kind = 'proven-clean'; severity = 'none'; }
-      else { kind = 'co-located'; severity = 'low'; }
+      } else { kind = 'co-located'; severity = 'low'; }
 
       return {
         a: a.id, b: b.id,
@@ -426,10 +473,16 @@ export async function collisions(scanResult, opts = {}) {
         mergeTreeConflict: proven,
         why:
           proven === true ? 'git merge-tree reports a real conflict between these two worktrees, including their uncommitted work'
-            : sharedSymbols.length > 0
-              ? `both added the same symbol(s): ${sharedSymbols.slice(0, 3).join(', ')}${sharedSymbols.length > 3 ? '…' : ''}` +
-                (uncommittedInvolved ? ' — at least one side is uncommitted' : '')
-              : `co-located in ${p.files.length} shared file(s), no symbol-level overlap`,
+            : identicalState ? 'byte-identical state — one commit checked out twice, so the merge is a no-op; reported as the duplicate it is'
+              : proven === false
+                ? `git merge-tree proves these MERGE CLEANLY` +
+                  (sharedSymbols.length > 0
+                    ? `, but both define ${sharedSymbols.slice(0, 3).join(', ')}${sharedSymbols.length > 3 ? '…' : ''} — a semantic overlap, not a textual conflict`
+                    : '')
+                : sharedSymbols.length > 0
+                  ? `both added the same symbol(s): ${sharedSymbols.slice(0, 3).join(', ')}${sharedSymbols.length > 3 ? '…' : ''}` +
+                    ' — merge-tree could not be run, so this is predicted, not proven'
+                  : `co-located in ${p.files.length} shared file(s), no symbol-level overlap`,
       };
     },
     concurrency,

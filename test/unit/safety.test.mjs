@@ -17,7 +17,7 @@ import { execFile } from 'node:child_process';
 import { classify, git, GitRefused } from '../../src/git.mjs';
 import { standardFixture } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
-import { scan } from '../../src/scan.mjs';
+import { scan, looksGenerated, GENERATED_DIRS } from '../../src/scan.mjs';
 import { analyze } from '../../src/analyze.mjs';
 
 /* ------------------------------------------------------------- classifier ---- */
@@ -277,5 +277,47 @@ test('e2e: git refs and HEADs are untouched by a scan', async (t) => {
   assert.equal(await fx.git(['for-each-ref', '--format=%(refname) %(objectname)']), refsBefore, 'refs changed');
   for (const [name, p] of fx.worktrees) {
     assert.equal(await fx.git(['rev-parse', 'HEAD'], p), headsBefore[name], `HEAD of ${name} changed`);
+  }
+});
+
+/* --------------------------------------------- the generated-path class ---- */
+
+/**
+ * THE AT-RISK SET MUST NOT DEPEND ON WHETHER GIT PRINTED A TRAILING SLASH.
+ *
+ * Every directory in the GENERATED list was written as `(^|\/)name\//` — anchored on a trailing
+ * slash, so it matched `node_modules/react/index.js` but never the bare entry `node_modules`.
+ * Git prints the bare form whenever the entry is not a directory it can descend into: a SYMLINK
+ * (`node_modules -> ../../node_modules`, what pnpm and every linked monorepo produce), or a plain
+ * file of that name. `.gitignore` has the identical trailing-slash rule — `node_modules/` does not
+ * match a symlink — so git reports it untracked and holt counted it as work found nowhere else.
+ *
+ * Measured on holt's own repository: 8 of 10 worktrees were reported "AT RISK — delete these and
+ * the work is gone" on the strength of one symlink, and `holt gate` exited 1 (holds unique work)
+ * for every one of them.
+ *
+ * This asserts the property for EVERY directory name in the list rather than for node_modules,
+ * because a per-instance fix leaves the same hole open for dist, target, build, coverage and the
+ * twenty others that were written the same way.
+ */
+test('at-risk set: every generated DIRECTORY is recognised bare, not only with a trailing slash', () => {
+  // Read from the source of truth, so a directory added later is covered without editing this
+  // test — the drift that let the original list grow to 26 entries all carrying the same bug.
+  const dirs = GENERATED_DIRS;
+  assert.ok(dirs.length >= 20, `the list must not have silently emptied: ${dirs.length} entries`);
+  const missed = [];
+  for (const d of dirs) {
+    for (const form of [d, `${d}/`, `${d}/inner.js`, `pkg/${d}`, `pkg/${d}/inner.js`]) {
+      if (!looksGenerated(form)) missed.push(form);
+    }
+  }
+  assert.deepEqual(missed, [],
+    `these forms of a generated directory were classified as unique work at risk:\n  ${missed.join('\n  ')}`);
+
+  // ANTI-VACUITY. If the matcher ever became "return true", the loop above would pass forever.
+  for (const real of ['src/agent.mjs', 'README.md', 'src/team/policy.mjs', 'lib/distance.js',
+    'src/building.rs', 'temperature.py', 'catalogue.md', 'src/vendors.ts']) {
+    assert.equal(looksGenerated(real), false,
+      `'${real}' is real work and must never be filtered out of the at-risk set`);
   }
 });

@@ -16,7 +16,11 @@
  * or agent landing knows exactly which merges to watch.
  */
 
-const CONFLICT_KINDS = new Set(['proven', 'predicted']);
+// 'semantic-overlap' is a pair git PROVED merges cleanly whose sides nonetheless define the same
+// symbol. It entangles landing order exactly as a predicted conflict does: the text merges, and
+// the result is a duplicate declaration. Excluding it — as 'proven-clean' is excluded — would
+// sequence the two in parallel and break the landing on the case holt exists to catch.
+const CONFLICT_KINDS = new Set(['proven', 'predicted', 'semantic-overlap']);
 
 /**
  * @param {object} report - the analyze() report (uses .safe, .unique, .collisions, .duplicates)
