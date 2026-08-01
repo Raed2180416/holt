@@ -1,0 +1,136 @@
+name: release artifact
+
+# THE ONE THING A USER ACTUALLY RECEIVES WAS THE ONLY THING NOTHING CHECKED.
+#
+# The published v0.2.0 tarball — the file the README's headline install command points at — was
+# built by hand and attached by hand. Nothing tied it to the repository state, so it drifted 74
+# commits behind main while still being the advertised install, and it shipped without
+# src/paths.mjs, src/toolchain.mjs, bin/install-ctags.mjs and 12 of the 14 language gap packs.
+# Every test in the suite runs against the SOURCE TREE, where those files are present.
+#
+# `release body` (release.yml) checks the release TEXT. This job checks the BINARY: it is built
+# from the tagged commit by CI, installed globally on Linux, macOS and Windows, and driven against
+# a real git repository with planted work before it may be attached. A tarball that installs and
+# prints its version is not evidence that it works; a tarball that finds the work that was planted
+# is.
+#
+# Nothing is uploaded unless all three platforms pass, so an artifact that cannot do the job
+# cannot become the advertised download.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and verify, e.g. v0.3.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+
+  build:
+    name: build the tarball from the tag
+    runs-on: ubuntu-latest
+    outputs:
+      tarball: ${{ steps.pack.outputs.name }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+
+      # The packaged file list is asserted at COMMIT time by test/unit/package-contents.test.mjs
+      # (every module the shipped code imports must be inside the tarball, and every language pack
+      # must ship). Running it here as well means a release cannot be cut from a commit where that
+      # guard was failing.
+      - name: what ships must be able to run
+        run: node --test test/unit/package-contents.test.mjs
+
+      - name: pack
+        id: pack
+        run: |
+          set -euo pipefail
+          NAME=$(npm pack --silent)
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          SHA=$(sha256sum "$NAME" | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          # The checksum is published so a user can verify the download they were told to install.
+          printf '%s  %s\n' "$SHA" "$NAME" > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: |
+            ${{ steps.pack.outputs.name }}
+            SHA256SUMS
+          if-no-files-found: error
+
+  verify:
+    name: the tarball installs and WORKS on ${{ matrix.os }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - uses: actions/download-artifact@v4
+        with: { name: tarball }
+
+      - name: the checksum must match what was built
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS
+          else shasum -a 256 -c SHA256SUMS; fi
+
+      # Installed GLOBALLY, exactly as the README tells a user to. On Windows this exercises the
+      # npm-generated .cmd/.ps1 shim rather than the script itself, which is the path a real user
+      # takes and the one the suite never touched.
+      - name: install it the way the README says to
+        shell: bash
+        run: npm install -g "./${{ needs.build.outputs.tarball }}"
+
+      - name: it must actually do the job, not merely start
+        shell: bash
+        run: node scripts/smoke-installed.mjs --bin holt
+
+      # Degradation is a published promise: without ctags/enry/jscpd holt must fall back LOUDLY
+      # rather than silently returning nothing. Checked on the shipped artifact, not the source.
+      - name: it reports its own environment honestly
+        shell: bash
+        run: holt doctor --json
+
+  attach:
+    name: attach the verified artifact to the release
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: tarball }
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # --clobber so re-running after a fix replaces the asset rather than failing, and so the
+          # attached file is always the one this run verified.
+          gh release upload "$TAG" \
+            "${{ needs.build.outputs.tarball }}" SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "attached ${{ needs.build.outputs.tarball }} (sha256 ${{ needs.build.outputs.sha256 }})"

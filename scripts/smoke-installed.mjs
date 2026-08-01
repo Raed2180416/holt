@@ -89,9 +89,16 @@ async function main() {
   else bad('--version reports the packaged version', `exit ${version.code}: ${version.stdout || version.stderr}`);
 
   // -------------------------------------------------------------------------- doctor ----
+  // Same lesson as `gate` below: an exit code alone cannot tell a report from a crash, and
+  // doctor's whole job is to SAY what is present. So the output has to contain the report.
   const doctor = await run(BIN, ['doctor'], repo);
-  if (doctor.code === 0 || doctor.code === 1) ok('doctor runs and reports its environment');
-  else bad('doctor runs', `exit ${doctor.code}: ${(doctor.stderr || doctor.stdout).slice(0, 400)}`);
+  const doctorSaid = `${doctor.stdout}${doctor.stderr}`;
+  if ((doctor.code === 0 || doctor.code === 1) && /symbol backend/i.test(doctorSaid)) {
+    ok('doctor runs and reports its environment');
+  } else {
+    bad('doctor runs and reports its environment',
+      `exit ${doctor.code}: ${doctorSaid.slice(0, 300) || '(nothing)'}`);
+  }
 
   // ------------------------------------------------------- the actual product answer ----
   // THE POINT OF THIS FILE. A tarball that starts is not a tarball that works: this asserts holt
@@ -117,9 +124,21 @@ async function main() {
 
   // ------------------------------------------------------------- the machine contract ----
   // `gate` is what scripts and pre-delete hooks chain on, so its EXIT CODE is the product.
+  // THE EXIT CODE ALONE IS NOT ENOUGH, and this check caught its own weakness. Run against a
+  // deliberately broken tarball (src/paths.mjs removed, the real v0.2.0 defect), `gate` exited 1
+  // because that is what node returns for an uncaught exception — and an exit-code-only assertion
+  // read that crash as "correctly refused". Fail-closed, so nothing was in danger, but the check
+  // was reporting a working guard on a build that could not load at all.
+  //
+  // So the VERDICT must be present too. A crash cannot print it.
   const gatePrecious = await run(BIN, ['gate', 'wt-precious'], repo);
-  if (gatePrecious.code === 1) ok('gate exits 1 on a worktree holding unique work');
-  else bad('gate exits 1 on a worktree holding unique work', `got exit ${gatePrecious.code}`);
+  const said = `${gatePrecious.stdout}${gatePrecious.stderr}`;
+  if (gatePrecious.code === 1 && /HOLDS UNIQUE WORK/i.test(said)) {
+    ok('gate exits 1 AND says why, on a worktree holding unique work');
+  } else {
+    bad('gate exits 1 AND says why, on a worktree holding unique work',
+      `exit ${gatePrecious.code}, output: ${said.slice(0, 300) || '(nothing)'}`);
+  }
 
   const gateEmpty = await run(BIN, ['gate', 'wt-empty'], repo);
   if (gateEmpty.code === 0) ok('gate exits 0 on a provably disposable worktree');
@@ -129,8 +148,13 @@ async function main() {
   // The quiet failure mode: the gap packs are data files, so their absence throws nothing and
   // simply makes a published language claim untrue.
   const status = await run(BIN, ['status'], repo);
-  if (status.code === 0 || status.code === 1) ok('status runs against a real repository');
-  else bad('status runs against a real repository', `exit ${status.code}: ${(status.stderr || status.stdout).slice(0, 400)}`);
+  const statusSaid = `${status.stdout}${status.stderr}`;
+  if ((status.code === 0 || status.code === 1) && /wt-precious/.test(statusSaid)) {
+    ok('status runs and names the worktrees it found');
+  } else {
+    bad('status runs and names the worktrees it found',
+      `exit ${status.code}: ${statusSaid.slice(0, 300) || '(nothing)'}`);
+  }
 
   await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});
   return report();
