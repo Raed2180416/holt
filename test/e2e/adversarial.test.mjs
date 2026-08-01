@@ -19,7 +19,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { newRepo, standardFixture } from '../fixtures.mjs';
+import { newRepo, standardFixture, creatableNames } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze } from '../../src/analyze.mjs';
@@ -82,7 +82,9 @@ test('ADVERSARIAL: filenames with spaces, quotes, unicode and dashes', async (t)
   t.after(() => fx.cleanup());
 
   const wt = await fx.worktree('hostile');
-  const nasty = [
+  // Windows reserves `" * : < > ? |` in a filename, so the set is filtered to what THIS platform
+  // can actually create — the reserved ones are asserted unrepresentable below instead.
+  const nasty = creatableNames([
     'a file with spaces.js',
     "quote'single.js",
     'quote"double.js',
@@ -92,7 +94,8 @@ test('ADVERSARIAL: filenames with spaces, quotes, unicode and dashes', async (t)
     'semi;colon.js',
     'dollar$sign.js',
     'paren(then).js',
-  ];
+  ]);
+  assert.ok(nasty.length >= 6, `only ${nasty.length} hostile names are creatable here — the fixture is too thin to prove anything`);
   for (const n of nasty) {
     await fx.write(n, `export function fn_${n.replace(/\W/g, '_')}() {}\n`, wt);
   }

@@ -215,6 +215,19 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install universal-ctags -y --no-progress
 
+      # enry is not a nicety here. `.fs` is F# OR Forth, `.m` is Objective-C OR MATLAB, `.h` is C
+      # OR C++ OR Objective-C — extension mapping cannot decide, and ctags picks one. Without enry
+      # the F# corpus case resolved as Forth and yielded nothing, which is what this job caught on
+      # macOS and Windows the first time it ran. Content-based detection is what makes the
+      # language claim true, so the platforms that assert it must have it.
+      - uses: actions/setup-go@v5
+        with: { go-version: 'stable' }
+      - name: install enry (content-based language detection)
+        shell: bash
+        run: |
+          go install github.com/go-enry/enry@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
       - run: npm ci
       - name: what this platform actually has
         run: node bin/holt.mjs doctor

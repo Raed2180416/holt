@@ -196,3 +196,28 @@ export async function emptyFixture() {
   await fx.worktree('quiet-2');
   return fx;
 }
+
+/**
+ * A HOSTILE NAME IS PLATFORM-DEPENDENT, and pretending otherwise is what made four security
+ * tests and the adversarial-filename test fail on Windows the first time they ever ran there.
+ *
+ * Windows reserves `" * : < > ? |` in a path component; POSIX allows every byte except `/` and
+ * NUL. So `quote"double.js` is a perfectly ordinary hostile filename on Linux and macOS and is
+ * simply UNCREATABLE on Windows — the fixture failed with ENOENT before holt was ever asked
+ * anything, which reads as a product failure and is not one.
+ *
+ * The property under test is "holt handles whatever the filesystem can hand it". That set differs
+ * per platform, so the fixture asks for the platform's set rather than asserting one platform's
+ * set everywhere. Nothing is skipped: `winReserved` is asserted separately to be genuinely
+ * unrepresentable, which is why holt never has to handle it there.
+ */
+export const WIN_RESERVED_CHARS = /["*:<>?|]/;
+
+export const creatableNames = (names) => (process.platform === 'win32'
+  ? names.filter((n) => !WIN_RESERVED_CHARS.test(n))
+  : names);
+
+/** A path component built from `parts`, dropping any piece this platform cannot represent. */
+export const creatableComponent = (parts) => parts
+  .filter((piece) => process.platform !== 'win32' || !WIN_RESERVED_CHARS.test(piece))
+  .join('');

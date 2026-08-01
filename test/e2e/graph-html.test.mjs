@@ -28,7 +28,7 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { renderHtml } from '../../src/graph-html.mjs';
 import { inspect } from '../../src/index.mjs';
-import { newRepo, standardFixture } from '../fixtures.mjs';
+import { newRepo, standardFixture, creatableComponent } from '../fixtures.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -132,14 +132,20 @@ async function hostileRepo() {
   const wtRoot = path.join(fx.root, '..', 'wt');
   await fs.mkdir(wtRoot, { recursive: true });
 
-  // `</script>` arrives via nested directories, exactly as a real checkout would create it.
-  const viaPath = path.join(wtRoot, 'evil</script>x');
+  // DIRECTORY NAMES ARE LIMITED BY THE FILESYSTEM, the payload fields are not. Windows reserves
+  // `" * : < > ? |` in a path component, so the hostile DIRECTORY name is built from the pieces
+  // this platform can represent while the BRANCH names below keep the full payload — a branch
+  // name is a git ref, not a path component, so every platform can carry the whole thing. The
+  // injection property is therefore still exercised in full on Windows, through the field that
+  // can actually hold it.
+  const viaPath = path.join(wtRoot, creatableComponent(['evil', '</script>', 'x']) || 'evil-x');
   await fs.mkdir(path.dirname(viaPath), { recursive: true });
   await fx.git(['worktree', 'add', '-q', '-b', 'agent/</script><svg/onload=HOLT_XSS()>', viaPath, 'main']);
   await fs.writeFile(path.join(viaPath, 'only.js'), 'export function HOSTILE_PATH_ONLY() {}\n');
 
   // Quotes, angle brackets and a right-to-left override in a single directory component.
-  const viaName = path.join(wtRoot, `a"><img src=x onerror=HOLT_XSS()>${RLO}gnp.js`);
+  const viaName = path.join(wtRoot,
+    creatableComponent(['a', '"', '><img src=x onerror=HOLT_XSS()>', RLO, 'gnp.js']) || `a${RLO}gnp.js`);
   await fx.git(['worktree', 'add', '-q', '-b', 'agent/quoted"name', viaName, 'main']);
   await fs.writeFile(path.join(viaName, 'other.js'), 'export function HOSTILE_NAME_ONLY() {}\n');
 
