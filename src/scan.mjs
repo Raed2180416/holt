@@ -31,8 +31,9 @@
 
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { git, splitNul, pmap, resolveRef, GitRefused } from './git.mjs';
+import { git, catFileBatch, splitNul, pmap, resolveRef, GitRefused } from './git.mjs';
 import { resolveBackend, symbolsOnDisk, symbolsAtBase, diffSymbols, symbolKey } from './symbols.mjs';
+import { contentFingerprint, fingerprintKey } from './content-identity.mjs';
 
 const BASE_CANDIDATES = ['main', 'master', 'trunk', 'develop', 'default'];
 
@@ -168,6 +169,123 @@ export async function committedDelta(root, baseOid, headOid, { strictReadOnly, t
     conflicted: mt.code === 1,
     mergedTree: tree,
   };
+}
+
+/**
+ * Normalise CRLF and lone CR to LF, at the byte level. Never applied to binary content — see
+ * `lineEndingOnlyVsBase` below, which decides binary-ness with git's own instrument BEFORE this
+ * ever runs on a file's bytes.
+ */
+function normalizeEol(buf) {
+  const out = Buffer.alloc(buf.length);
+  let j = 0;
+  for (let i = 0; i < buf.length; i++) {
+    const b = buf[i];
+    if (b === 0x0d) {
+      out[j++] = 0x0a;
+      if (buf[i + 1] === 0x0a) i++; // CRLF collapses to one LF, not two
+    } else {
+      out[j++] = b;
+    }
+  }
+  return out.subarray(0, j);
+}
+
+/**
+ * Parse `git diff --raw --no-renames -z`'s output into path -> {oldMode, newMode, status}.
+ * Format, repeated per changed file: `:<oldmode> <newmode> <oldsha> <newsha> <status>\0<path>\0`.
+ */
+function parseRawDiff(stdout) {
+  const parts = splitNul(stdout);
+  const byPath = new Map();
+  for (let i = 0; i + 1 < parts.length; i += 2) {
+    const meta = /^:(\d+) (\d+) [0-9a-f]+ [0-9a-f]+ ([A-Z])/.exec(parts[i]);
+    if (!meta) continue; // unparseable entry — simply absent from the map, which fails closed
+    byPath.set(parts[i + 1], { oldMode: meta[1], newMode: meta[2], status: meta[3] });
+  }
+  return byPath;
+}
+
+/** Parse `git diff --numstat -z`'s output into path -> {binary: boolean}. */
+function parseNumstat(stdout) {
+  const byPath = new Map();
+  for (const rec of splitNul(stdout)) {
+    const [added, deleted, ...rest] = rec.split('\t');
+    const p = rest.join('\t'); // a path could itself contain a tab
+    if (!p) continue;
+    byPath.set(p, { binary: added === '-' || deleted === '-' });
+  }
+  return byPath;
+}
+
+/**
+ * Is the WHOLE committed delta line-ending noise — every file identical to base once CRLF/CR is
+ * normalised, and nothing else different?
+ *
+ * MEASURED, on the 50-language independent-oracle benchmark: 50 of 150 disposable misses were
+ * one worktree per repository whose entire committed delta was the SAME FILE(S), re-saved with
+ * CRLF line endings. `merge-tree` correctly reports "base lacks this exact tree" — a CRLF byte
+ * and an LF byte are different bytes to git — but base holds the identical TEXT, so nothing here
+ * is work a human or agent produced. This is `redundantWith`'s sibling-redundancy reasoning
+ * (src/analyze.mjs) applied to base itself instead of a living worktree.
+ *
+ * A CONJUNCTION, not a majority vote, over every file in `files`: any ONE that this cannot prove
+ * is line-ending-only disqualifies the ENTIRE workstream. Disqualifying cases:
+ *   - missing from base or from `tree` (an add, a delete, or either half of a rename —
+ *     `--no-renames` forces a rename's two halves to read as plain add/delete, rather than
+ *     depending on this repo's diff.renames config)
+ *   - a file-mode change (chmod +x with byte-identical content is still "another kind of change")
+ *   - BINARY CONTENT — never normalised. `--numstat` is git's OWN binary call, the same
+ *     instrument that decides whether to write a binary patch, so this defers to git rather than
+ *     re-deriving a heuristic. A `.png` that happens to contain the byte pair 0x0D 0x0A is not a
+ *     line ending, and treating it as one could call a real image change "nothing base lacks".
+ *   - a git failure or unparseable output on any instrument — refusing is FAIL-CLOSED: an
+ *     unproven file counts as a real change, never as line-ending noise.
+ *
+ * THREE GIT PROCESSES TOTAL, regardless of file count — one `--raw` (status+mode), one
+ * `--numstat` (binary), one `catFileBatch` (content) — not three per file. A per-file loop here
+ * would repeat exactly the spawn-per-file cost `catFileBatch` (see its doc comment in git.mjs)
+ * was built to eliminate, for a check that runs on every workstream in every scan.
+ *
+ * Deliberately narrow to the instruments that can actually prove it: only runs when `committed`
+ * came from a clean (non-conflicted) `merge-tree`, so there is one unambiguous merged tree to
+ * compare files against. `strictReadOnly`'s three-dot approximation has no merged tree and is
+ * already labelled approximate everywhere it surfaces — this does not try to extend it.
+ */
+async function lineEndingOnlyVsBase(root, baseOid, committed, files, { timeout }) {
+  if (committed.how !== 'merge-tree' || committed.conflicted || !committed.mergedTree) return false;
+  if (files.length === 0) return false;
+  const tree = committed.mergedTree;
+
+  const [raw, num] = await Promise.all([
+    git(['diff', '--raw', '--no-renames', '-z', baseOid, tree, '--', ...files], { cwd: root, timeout }),
+    git(['diff', '--numstat', '-z', baseOid, tree, '--', ...files], { cwd: root, timeout }),
+  ]);
+  if (raw.code !== 0 || num.code !== 0) return false;
+  const statuses = parseRawDiff(raw.stdout);
+  const stats = parseNumstat(num.stdout);
+
+  for (const f of files) {
+    const st = statuses.get(f);
+    if (!st || st.status !== 'M' || st.oldMode !== st.newMode) return false;
+    const ns = stats.get(f);
+    if (!ns || ns.binary) return false;
+  }
+
+  // Content comparison, batched: one `git cat-file --batch` process for every base/tree blob
+  // this workstream needs, instead of `files.length * 2` separate `git show` spawns.
+  const specs = files.flatMap((f) => [`${baseOid}:${f}`, `${tree}:${f}`]);
+  const blobs = new Map();
+  await catFileBatch(specs, { cwd: root, timeout }, (spec, content) => {
+    blobs.set(spec, content);
+  });
+  for (const f of files) {
+    const baseBlob = blobs.get(`${baseOid}:${f}`);
+    const headBlob = blobs.get(`${tree}:${f}`);
+    if (!baseBlob || !headBlob) return false; // missing content — refuse, don't guess
+    if (!normalizeEol(baseBlob).equals(normalizeEol(headBlob))) return false;
+  }
+  return true;
 }
 
 /** UNCOMMITTED delta: the layer no git relationship command can see. */
@@ -511,6 +629,15 @@ async function scanFiles(ws, ctx) {
     const uFiles = uncommitted.files.filter((f) => !looksGenerated(f));
     const uUntracked = (uncommitted.untracked ?? []).filter((f) => !looksGenerated(f));
 
+    // BASE CAN BE THE "LIVING SIBLING" TOO. Measured on the 50-language independent-oracle
+    // benchmark: one worktree per repository whose entire committed delta is the SAME FILE(S)
+    // re-saved with CRLF line endings — merge-tree correctly says "base lacks this exact tree",
+    // but base holds the identical text, so this holds no unique content. See
+    // lineEndingOnlyVsBase()'s doc comment for the exact, conjunctive definition.
+    const lineEndingOnlyVsBaseFlag = await lineEndingOnlyVsBase(
+      root, base.oid, committed, cFiles, { timeout },
+    );
+
     result.ok = true;
     result.committed = {
       files: cFiles, count: cFiles.length, how: committed.how,
@@ -523,6 +650,11 @@ async function scanFiles(ws, ctx) {
       // disposable recall from 0.40 to 1.00. File LISTS cannot answer it: two worktrees can touch
       // the same paths with different content, or different paths with the same content.
       mergedTree: committed.mergedTree ?? null,
+      // See lineEndingOnlyVsBase() above: true only when the ENTIRE committed delta disappears
+      // once CRLF/CR line endings are normalised against base. Consumed by src/analyze.mjs's
+      // safeToDelete(), which is what actually turns it into a safe:true + redundantWith:['base']
+      // verdict — this field is raw instrument output, not a verdict.
+      lineEndingOnlyVsBase: lineEndingOnlyVsBaseFlag,
     };
     result.uncommitted = {
       files: uFiles, untracked: uUntracked, count: uFiles.length + uUntracked.length,
@@ -546,6 +678,27 @@ async function scanFiles(ws, ctx) {
       untrackedFiles: uUntracked.length,
       addedSymbols: 0,
     };
+
+    // CONTENT IDENTITY, PER FILE — what `safeToDelete` needs to prove "a living sibling holds
+    // this exact work" when the sibling holds it at a DIFFERENT PATH or in a different
+    // indentation style. mergedTree (above) only catches the whole worktree matching another
+    // byte-for-byte at the SAME paths; it cannot see the far more common case of one new file
+    // renamed and reindented. See content-identity.mjs for what "identity" means here and why it
+    // cannot be fooled by two unrelated files sharing a name or a shape.
+    //
+    // Keyed by path so a partial match (one of two committed files has a twin, the other does
+    // not) is visible to the caller rather than forcing an all-or-nothing verdict. A file that
+    // fails to read (race, permission, symlink loop) gets `null` — the safe direction, since it
+    // can only make this file LESS likely to be matched, never falsely redundant.
+    result.contentKeys = {};
+    await pmap(result.touched, async (f) => {
+      try {
+        const buf = await fs.readFile(path.join(ws.path, f));
+        result.contentKeys[f] = fingerprintKey(contentFingerprint(buf));
+      } catch {
+        result.contentKeys[f] = null;
+      }
+    }, 6);
   } catch (err) {
     if (err instanceof GitRefused) throw err; // a refusal is a holt bug, never swallowed
     result.reason = `scan error: ${err.message}`;
@@ -561,7 +714,12 @@ async function scanFiles(ws, ctx) {
  * @param {object} opts  {base, strictReadOnly, concurrency, timeout, symbols, includePrimary}
  */
 export async function scan(disc, opts = {}) {
-  if (!disc.root) throw new Error('holt: not a git repository');
+  if (!disc.root) {
+    throw new Error(disc.bare
+      ? 'holt: this is a bare repository (no working tree) — holt compares file content across '
+        + 'worktrees and needs at least one checkout; run it from a normal clone instead'
+      : 'holt: not a git repository');
+  }
 
   const base = await resolveBase(disc.root, opts.base);
   const ctx = {

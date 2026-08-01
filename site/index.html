@@ -374,6 +374,7 @@ holt integrate</div>
           <li>Automatic protection</li>
           <li>Full history of what changed</li>
         </ul>
+        <a class="btn btn-ghost" href="#install" style="margin-top:20px">Get started</a>
       </div>
       <div class="price featured">
         <h3>Team</h3>
@@ -385,6 +386,16 @@ holt integrate</div>
           <li>One view of every project at once</li>
           <li>Checks built into your pipeline</li>
         </ul>
+        <!--
+          data-checkout carries the __HOLT_API__ placeholder. pages.yml substitutes it with the
+          live license-service origin at deploy time (LAUNCH-RUNBOOK.md section 5); the inline
+          script below only ever rewrites href AWAY from the fallback, and only once that
+          substitution has actually happened — so until HOLT_API_URL is configured, this button
+          takes a visitor to a channel a human actually reads, never to a dead __HOLT_API__ URL.
+        -->
+        <a class="btn btn-primary" id="cta-team" style="margin-top:20px"
+           href="https://github.com/Raed2180416/holt/issues/new?title=holt+Team+plan"
+           data-checkout="__HOLT_API__/checkout?plan=team">Start a Team plan</a>
       </div>
       <div class="price">
         <h3>Enterprise</h3>
@@ -396,6 +407,8 @@ holt integrate</div>
           <li>Runs fully offline</li>
           <li>Priority support</li>
         </ul>
+        <a class="btn btn-ghost" style="margin-top:20px"
+           href="https://github.com/Raed2180416/holt/issues/new?title=holt+Enterprise+inquiry">Talk to us</a>
       </div>
     </div>
     <p style="margin-top:24px">
@@ -437,6 +450,18 @@ holt integrate</div>
     root.setAttribute('data-theme', next);
     try { localStorage.setItem('holt-theme', next); } catch (e) { /* ignore */ }
   });
+
+  // The "Start a Team plan" button ships pointed at a channel a human reads (opening a GitHub
+  // issue) and only ever moves AWAY from that fallback — never toward a literal, un-substituted
+  // __HOLT_API__ URL. pages.yml replaces the data-checkout placeholder with the real license
+  // service origin at deploy time; if that substitution never happened (no HOLT_API_URL
+  // configured yet, or this file was opened directly from disk), data-checkout still contains
+  // the placeholder text and the honest fallback stays exactly as shipped.
+  var teamCta = document.getElementById('cta-team');
+  if (teamCta) {
+    var checkoutUrl = teamCta.getAttribute('data-checkout') || '';
+    if (/^https?:\/\//.test(checkoutUrl)) teamCta.href = checkoutUrl;
+  }
 })();
 </script>
 </body>

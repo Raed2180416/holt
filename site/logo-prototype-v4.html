@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contrare Research — Mark System v4</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{
+    background: #0c0d11; color: #c8cad3;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    min-height: 100vh; padding: 80px 24px 120px;
+  }
+  .wrap{ max-width: 1100px; margin: 0 auto; }
+  h1{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 32px; font-weight: 500; letter-spacing: -0.035em;
+    margin-bottom: 10px; color: #e8eaf0;
+  }
+  .sub{ font-size: 15px; color: #6a6e7a; line-height: 1.55; max-width: 620px; margin-bottom: 64px; }
+
+  .section-label{
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #4a4d5a;
+    margin: 56px 0 24px; padding-bottom: 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .mark-card{
+    background: #131419; border-radius: 14px; padding: 40px 36px; margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+    display: grid; grid-template-columns: 120px 1fr; gap: 36px; align-items: center;
+  }
+  .mark-display{ display: flex; align-items: center; justify-content: center; width: 120px; height: 120px; }
+  .mark-label{
+    font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #4a4d5a; margin-bottom: 8px;
+  }
+  .mark-name{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 22px; font-weight: 600; letter-spacing: -0.025em; margin-bottom: 12px;
+  }
+  .mark-desc{ font-size: 13.5px; line-height: 1.55; color: #83868f; max-width: 520px; }
+
+  .violet{ color: #a78bfa; }
+  .blue{ color: #60a5fa; }
+  .amber{ color: #fbbf24; }
+  .gold{ color: #f59e0b; }
+
+  .blind-test{
+    background: #131419; border-radius: 14px; padding: 40px 36px; margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+  }
+  .blind-test-title{
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #4a4d5a; margin-bottom: 24px;
+  }
+  .blind-grid{
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 24px;
+  }
+  .blind-cell{
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+    padding: 24px 12px; background: #0c0d11; border-radius: 10px;
+  }
+  .blind-cell .mark-display{ width: 64px; height: 64px; }
+  .blind-q{ font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #4a4d5a; }
+
+  .size-row{
+    display: flex; align-items: flex-end; gap: 32px;
+    background: #131419; border-radius: 14px; padding: 32px 36px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+  }
+  .size-col{ display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .size-tag{ font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: #4a4d5a; }
+
+  .wordmark-row{
+    background: #131419; border-radius: 14px; padding: 36px; margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+    display: flex; flex-wrap: wrap; gap: 48px; align-items: center;
+  }
+  .wordmark-item{ display: flex; align-items: center; gap: 12px; }
+  .wordmark-text{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 19px; font-weight: 600; letter-spacing: -0.025em; color: #e8eaf0;
+  }
+  .wordmark-text .light{ font-weight: 400; color: #6a6e7a; }
+
+  .on-light{
+    background: #f5f4f1; border-radius: 14px; padding: 36px; margin-bottom: 20px;
+    display: flex; flex-wrap: wrap; gap: 48px; align-items: center;
+  }
+  .on-light .wordmark-text{ color: #1a1b22; }
+  .on-light .wordmark-text .light{ color: #8a8c95; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>v4 — Three new marks, Medes stays</h1>
+  <p class="sub">ARC is now literally an arc — the name made geometric. Contrare is a square split and offset — the halves disagree. CLIDE is a solid block with a command chevron cut from it — CLI inside IDE. Medes unchanged.</p>
+
+  <!-- BLIND TEST -->
+  <div class="section-label">Blind test</div>
+  <div class="blind-test">
+    <div class="blind-test-title">No labels. Can you identify each?</div>
+    <div class="blind-grid">
+      <!-- Contrare: offset halves -->
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <rect x="4" y="8" width="20" height="14" rx="2" fill="#a78bfa"/>
+            <rect x="24" y="26" width="20" height="14" rx="2" fill="#a78bfa"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+      <!-- ARC: bold arc -->
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <path d="M 38 38 A 18 18 0 1 1 38 10" fill="none" stroke="#a78bfa" stroke-width="7" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+      <!-- CLIDE: block with chevron cut -->
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <path d="M 8 8 L 32 8 L 40 24 L 32 40 L 8 40 Z" fill="#60a5fa"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+      <!-- Medes: stacked layers (unchanged) -->
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <rect x="8" y="30" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.4"/>
+            <rect x="12" y="20" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+            <rect x="16" y="10" width="28" height="10" rx="2" fill="#fbbf24"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+      <!-- Holt: lock shackle (unchanged) -->
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+            <rect x="10" y="34" width="28" height="8" rx="2" fill="#f59e0b"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ CONTRARE RESEARCH ============ -->
+  <div class="section-label">Contrare Research — offset halves</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <rect x="4" y="8" width="20" height="14" rx="2" fill="#a78bfa"/>
+        <rect x="24" y="26" width="20" height="14" rx="2" fill="#a78bfa"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Umbrella · Institute</div>
+      <div class="mark-name violet">Contrare Research</div>
+      <div class="mark-desc">A square split in half — the top shifts left, the bottom shifts right. The halves disagree. The form is against itself: two parts of the same shape that refuse to align. That tension IS the mark. You can draw it from memory: two offset bars. It reads as a fault line, a tectonic shift, a structure under contrarian stress.</div>
+    </div>
+  </div>
+
+  <!-- ============ ARC ============ -->
+  <div class="section-label">ARC — the arc</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <path d="M 38 38 A 18 18 0 1 1 38 10" fill="none" stroke="#a78bfa" stroke-width="7" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Research core</div>
+      <div class="mark-name violet">ARC</div>
+      <div class="mark-desc">A bold arc — 270 degrees of a thick ring, with a gap at the top right. The name made geometric. An arc is a curve, a trajectory, a path through space. The gap is the opening — where the research extends, where the work continues. It's the most literal mark in the system and that's its strength: you see it and you see ARC. Nobody else owns a thick arc.</div>
+    </div>
+  </div>
+
+  <!-- ============ CLIDE ============ -->
+  <div class="section-label">CLIDE — block with chevron cut</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <path d="M 8 8 L 32 8 L 40 24 L 32 40 L 8 40 Z" fill="#60a5fa"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Interface · Tool</div>
+      <div class="mark-name blue">CLIDE</div>
+      <div class="mark-desc">A solid block with a bold chevron cut from its right side. The block is the interface — the IDE, the window, the container. The chevron is the command prompt — the CLI, the instruction, the thing you type. One form, two meanings: the command eating into the interface, the CLI inside the IDE. The chevron gives the block direction and energy — it's not static, it's a tool in motion.</div>
+    </div>
+  </div>
+
+  <!-- ============ MEDES (unchanged) ============ -->
+  <div class="section-label">Medes — stacked layers (unchanged)</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <rect x="8" y="30" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.4"/>
+        <rect x="12" y="20" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+        <rect x="16" y="10" width="28" height="10" rx="2" fill="#fbbf24"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Reader · Knowledge</div>
+      <div class="mark-name amber">Medes</div>
+      <div class="mark-desc">Three stacked layers, each offset up and to the right. Pages with depth — or recursive tooltip layers, each revealing the one beneath. Knowledge that unfolds downward. The one you approved.</div>
+    </div>
+  </div>
+
+  <!-- ============ HOLT (unchanged) ============ -->
+  <div class="section-label">Holt — lock shackle (unchanged)</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+        <rect x="10" y="34" width="28" height="8" rx="2" fill="#f59e0b"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Guardrail · Safety</div>
+      <div class="mark-name gold">Holt</div>
+      <div class="mark-desc">A lock shackle on a solid base. Protection, immediately. The thickest stroke in the system — safety should look solid.</div>
+    </div>
+  </div>
+
+  <!-- ============ SIZE TEST ============ -->
+  <div class="section-label">Size test — 16 / 24 / 32 / 48 / 64 px</div>
+  <div class="size-row">
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="16" height="16">
+        <rect x="4" y="8" width="20" height="14" rx="2" fill="#a78bfa"/>
+        <rect x="24" y="26" width="20" height="14" rx="2" fill="#a78bfa"/>
+      </svg>
+      <span class="size-tag">16</span>
+    </div>
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="24" height="24">
+        <path d="M 38 38 A 18 18 0 1 1 38 10" fill="none" stroke="#a78bfa" stroke-width="7" stroke-linecap="round"/>
+      </svg>
+      <span class="size-tag">24</span>
+    </div>
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="32" height="32">
+        <path d="M 8 8 L 32 8 L 40 24 L 32 40 L 8 40 Z" fill="#60a5fa"/>
+      </svg>
+      <span class="size-tag">32</span>
+    </div>
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="48" height="48">
+        <rect x="8" y="30" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.4"/>
+        <rect x="12" y="20" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+        <rect x="16" y="10" width="28" height="10" rx="2" fill="#fbbf24"/>
+      </svg>
+      <span class="size-tag">48</span>
+    </div>
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="64" height="64">
+        <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+        <rect x="10" y="34" width="28" height="8" rx="2" fill="#f59e0b"/>
+      </svg>
+      <span class="size-tag">64</span>
+    </div>
+  </div>
+
+  <!-- ============ WORDMARK — DARK ============ -->
+  <div class="section-label">Wordmark — dark</div>
+  <div class="wordmark-row">
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <rect x="4" y="8" width="20" height="14" rx="2" fill="#a78bfa"/>
+        <rect x="24" y="26" width="20" height="14" rx="2" fill="#a78bfa"/>
+      </svg>
+      <span class="wordmark-text">Contrare <span class="light">Research</span></span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 38 38 A 18 18 0 1 1 38 10" fill="none" stroke="#a78bfa" stroke-width="7" stroke-linecap="round"/>
+      </svg>
+      <span class="wordmark-text">ARC</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 8 8 L 32 8 L 40 24 L 32 40 L 8 40 Z" fill="#60a5fa"/>
+      </svg>
+      <span class="wordmark-text">CLIDE</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <rect x="8" y="30" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.4"/>
+        <rect x="12" y="20" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+        <rect x="16" y="10" width="28" height="10" rx="2" fill="#fbbf24"/>
+      </svg>
+      <span class="wordmark-text">Medes</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+        <rect x="10" y="34" width="28" height="8" rx="2" fill="#f59e0b"/>
+      </svg>
+      <span class="wordmark-text">Holt</span>
+    </div>
+  </div>
+
+  <!-- ============ WORDMARK — LIGHT ============ -->
+  <div class="section-label">Wordmark — light</div>
+  <div class="on-light">
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <rect x="4" y="8" width="20" height="14" rx="2" fill="#7c3aed"/>
+        <rect x="24" y="26" width="20" height="14" rx="2" fill="#7c3aed"/>
+      </svg>
+      <span class="wordmark-text">Contrare <span class="light">Research</span></span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 38 38 A 18 18 0 1 1 38 10" fill="none" stroke="#7c3aed" stroke-width="7" stroke-linecap="round"/>
+      </svg>
+      <span class="wordmark-text">ARC</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 8 8 L 32 8 L 40 24 L 32 40 L 8 40 Z" fill="#2563eb"/>
+      </svg>
+      <span class="wordmark-text">CLIDE</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <rect x="8" y="30" width="28" height="10" rx="2" fill="#d97706" opacity="0.4"/>
+        <rect x="12" y="20" width="28" height="10" rx="2" fill="#d97706" opacity="0.7"/>
+        <rect x="16" y="10" width="28" height="10" rx="2" fill="#d97706"/>
+      </svg>
+      <span class="wordmark-text">Medes</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#d97706" stroke-width="5" stroke-linecap="round"/>
+        <rect x="10" y="34" width="28" height="8" rx="2" fill="#d97706"/>
+      </svg>
+      <span class="wordmark-text">Holt</span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

@@ -244,12 +244,16 @@ test('ATTACK: coincidental common names must not fabricate duplicates', async (t
   const dup = report.duplicates.find((d) =>
     (d.a === 'team-a-1' && d.b === 'team-b-1') || (d.a === 'team-b-1' && d.b === 'team-a-1'));
 
-  if (dup) {
-    // If reported at all, it must be weak — one shared generic name out of several symbols.
-    assert.ok(dup.similarity < 0.5,
-      `ATTACK SUCCEEDED: unrelated work reported as ${(dup.similarity * 100).toFixed(0)}% similar ` +
-      `on shared symbols ${dup.sharedSymbols.join(', ')}`);
-  }
+  // A name match is not content evidence: `handler` here is one coincidence, not one piece of
+  // shared work, and the two declarations do different things. Symbol-identity now confirms
+  // the declared BODIES actually agree before counting a name as shared, so this must not be
+  // reported as duplicate work at all — not even hedged behind a low similarity score. A tool
+  // that reports the coincidence "weakly" instead of not at all is still telling the user two
+  // workstreams built the same thing when they did not; hedging the wrong answer is not the
+  // same as fixing it.
+  assert.equal(dup, undefined,
+    `ATTACK SUCCEEDED: unrelated work reported as duplicate: ${JSON.stringify(dup)}`);
+
   // Both hold real, distinct work regardless.
   mustNotBeSafe(report, 'team-a-1', 'coincidental name overlap');
   mustNotBeSafe(report, 'team-b-1', 'coincidental name overlap');
@@ -444,7 +448,7 @@ test('ATTACK: a symbol extraction that FAILED must not read as "no symbols"', as
   // This asserts the DISTINCTION at the extraction layer, where it is deterministic. The
   // downstream refusal is asserted by the verdict test below.
   const { ctagsBatch, resolveBackend } = await import('../../src/symbols.mjs');
-  if ((await resolveBackend()).kind !== 'ctags') return;
+  if ((await resolveBackend()).kind !== 'ctags') return t.skip('ctags unavailable — ctagsBatch timeout-failure reporting is a ctags-specific mechanism');
 
   const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-unmeasured-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
@@ -461,6 +465,33 @@ test('ATTACK: a symbol extraction that FAILED must not read as "no symbols"', as
   assert.deepEqual(timedOut.failed, ['real.js'],
     'a failed extraction must name the files it could not read — returning [] makes it ' +
     'indistinguishable from a file that genuinely has no symbols');
+});
+
+test('ATTACK: a file too large to tag reads as "no symbols" instead of "not measured"', async (t) => {
+  // SAME CLASS AS THE TIMEOUT ABOVE, different trigger. `tagWorthy()` (symbols.mjs) refuses to
+  // hand a file over MAX_TAG_FILE_BYTES (2 MiB) to ctags — a deliberate policy skip, not a
+  // demonstrated absence of symbols (see the doc comment on MAX_TAG_FILE_BYTES: "beyond this the
+  // tags cost more than they inform"). MEASURED: before this was named, such a file came back
+  // from ctagsBatch as `[]` with an EMPTY `.failed` — byte-identical to a file that genuinely has
+  // no symbols, and to a file that failed for any other reason. A real, unique, committed symbol
+  // sitting in a merely-large file (a big generated-but-hand-edited SQL file, a vendored bundle
+  // someone patched, a large data module) would vanish from every downstream count silently.
+  const { ctagsBatch, resolveBackend } = await import('../../src/symbols.mjs');
+  if ((await resolveBackend()).kind !== 'ctags') return t.skip('ctags unavailable — the oversized-file size-cap policy is a ctags-specific mechanism');
+
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-oversized-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  const TWO_MIB = 2 * 1024 * 1024;
+  const padding = `// ${'x'.repeat(TWO_MIB)}\n`; // pure comment padding, well past the cap
+  await fs.writeFile(path.join(dir, 'big.js'), `${padding}export function REAL_SYMBOL_HERE() {}\n`);
+
+  const found = await ctagsBatch(dir, ['big.js'], { timeout: 60_000 });
+  assert.deepEqual(found.get('big.js'), [],
+    'PRECONDITION: the file must actually exceed the size cap and be skipped, not parsed');
+  assert.deepEqual(found.failed, ['big.js'],
+    'a file skipped for being too large to tag must be named in .failed — returning [] with an ' +
+    'empty .failed makes it indistinguishable from a file that genuinely has no symbols');
 });
 
 test('ATTACK: a workstream whose symbols could not be read is NOT called disposable', async (t) => {
@@ -490,4 +521,94 @@ test('ATTACK: a workstream whose symbols could not be read is NOT called disposa
   assert.match(JSON.stringify(dv), /could not read symbols/,
     'and the refusal must say WHY, so the user knows it is a measurement gap, not a finding');
   assert.ok(v, 'sanity: the fixture produced a verdict at all');
+});
+
+test('ATTACK: `holt risk`\'s uniqueSymbolCount must not claim to be a measurement when it isn\'t one', async (t) => {
+  // safeToDelete() already refuses to call an unreadable workstream disposable (test above) — but
+  // `uniqueWork()` is a SEPARATE function feeding a SEPARATE report (`holt risk`, and the `--json`
+  // `unique` array any script can key on), and until this was wired it had no idea `symbolsUnmeasured`
+  // existed. A workstream whose only committed file tripped the ctags backend (NUL byte, oversized
+  // file, timeout — see the ctagsBatch tests above) would show `uniqueSymbolCount: 0` there with
+  // NOTHING distinguishing "measured, holds nothing" from "could not look" — the exact silent-zero
+  // shape this file exists to catch, one function over from where it was already fixed.
+  const fx = await newRepo('unmeasured-report');
+  t.after(() => fx.cleanup());
+  await fx.write('base.txt', 'base\n');
+  await fx.commit('base');
+  const wt = await fx.worktree('reportgap');
+  await fx.write('work.js', 'export function ONLY_COPY_HERE() {}\n', wt);
+  await fx.commit('add work.js', wt);
+
+  const { analyze } = await import('../../src/analyze.mjs');
+  const { scan } = await import('../../src/scan.mjs');
+  const { discover } = await import('../../src/discover.mjs');
+  const scanned = await scan(await discover(fx.root, {}), {});
+  for (const w of scanned.workstreams) {
+    if (w.id.endsWith('reportgap')) { w.symbolsUnmeasured = ['work.js']; w.added = []; w.addedKeys = []; }
+  }
+  const degraded = await analyze(scanned, {});
+  const u = degraded.unique.find((x) => x.id.endsWith('reportgap'));
+  assert.ok(u, 'sanity: the fixture produced a unique-work row at all');
+  assert.equal(u.symbolsUnmeasuredCount, 1,
+    `uniqueWork() must surface the unmeasured count, not just safeToDelete(): ${JSON.stringify(u)}`);
+  assert.deepEqual(u.symbolsUnmeasuredFiles, ['work.js'],
+    'and it must name the file, the same way safeToDelete already does');
+});
+
+test('ATTACK: an oversized file with a PROVEN byte twin must not veto redundancy', async (t) => {
+  // THE COLLISION OF TWO CORRECT FIXES. Marking oversized files as unmeasured (the test above) is
+  // right: a policy skip must never read as "no symbols". Refusing disposal on unmeasured files
+  // (two tests above) is also right: holt could not look. But compose them over a file whose
+  // exact bytes PROVABLY live in another worktree — content identity already answered the
+  // question symbols were going to ask, with a strictly stronger instrument — and the two
+  // correct refusals stack into one wrong one: `gate` printing "HOLDS UNIQUE WORK" about a
+  // worktree whose own report simultaneously says redundantWith:[sibling]. A tool contradicting
+  // itself in public, in the over-refusing direction.
+  //
+  // The rule this pins: a symbol-measurement failure only blocks the verdict for files content
+  // identity has NOT already covered. Byte identity subsumes anything symbols could establish.
+  const fx = await newRepo('oversized-twin');
+  t.after(() => fx.cleanup());
+  await fx.write('base.txt', 'base\n');
+  await fx.commit('base');
+
+  // Well past MAX_TAG_FILE_BYTES (2 MiB), with a real symbol so the skip is not vacuous, and
+  // committed at DIFFERENT paths so whole-tree identity cannot be what passes this test.
+  const TWO_MIB = 2 * 1024 * 1024;
+  const bigBody = `// ${'x'.repeat(TWO_MIB)}\nexport function BURIED_IN_LARGE_FILE() {}\n`;
+
+  const a = await fx.worktree('big-a');
+  await fx.write('feat/alpha/huge.js', bigBody, a);
+  await fx.commit('huge at alpha path', a);
+
+  const b = await fx.worktree('big-b');
+  await fx.write('feat/beta/huge.js', bigBody, b);
+  await fx.commit('huge at beta path', b);
+
+  const report = await inspect(fx.root);
+  const va = verdict(report, 'big-a');
+  const vb = verdict(report, 'big-b');
+  assert.ok(va && vb, 'sanity: both worktrees produced verdicts');
+
+  for (const [v, sibling] of [[va, 'big-b'], [vb, 'big-a']]) {
+    assert.equal(v.safe, true,
+      `byte-identical content in a living sibling must make this disposable, got: ${JSON.stringify(v)}`);
+    assert.ok((v.redundantWith ?? []).some((id) => id.endsWith(sibling)),
+      `the verdict must NAME the sibling holding the twin: ${JSON.stringify(v.redundantWith)}`);
+    assert.equal(v.confidence, 'measured',
+      `content identity IS a measurement — 'unverifiable' here is the over-refusal this test exists to catch: ${JSON.stringify(v)}`);
+    assert.doesNotMatch(JSON.stringify(v.reasons), /could not read symbols/,
+      'a proven byte twin must not be reported as a symbol-measurement gap');
+  }
+
+  // AND THE REFUSAL MUST SURVIVE where content identity does NOT cover the file: the same
+  // oversized file alone in one worktree, twin nowhere, must still refuse — otherwise this fix
+  // just deleted the protection instead of scoping it.
+  const lone = await fx.worktree('big-lone');
+  await fx.write('feat/gamma/huge.js', `// ${'y'.repeat(TWO_MIB)}\nexport function DIFFERENT_LARGE() {}\n`, lone);
+  await fx.commit('unique huge file', lone);
+  const report2 = await inspect(fx.root);
+  const vl = verdict(report2, 'big-lone');
+  assert.equal(vl.safe, false,
+    `an oversized file with NO twin must still refuse disposal: ${JSON.stringify(vl)}`);
 });

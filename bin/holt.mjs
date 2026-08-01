@@ -11,7 +11,7 @@ import process from 'node:process';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { discover } from '../src/discover.mjs';
+import { discover, repoAbsenceError } from '../src/discover.mjs';
 import { scan } from '../src/scan.mjs';
 import { analyze, contextDigest } from '../src/analyze.mjs';
 import { deepDuplicates, detectJscpd } from '../src/deep.mjs';
@@ -25,7 +25,7 @@ import { renderHtml } from '../src/graph-html.mjs';
 import { renderClusters } from '../src/ascii-graph.mjs';
 import { assessCommand, buildBrief } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
-import { integrate, detectHosts, hostsReport, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
+import { integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
 import { protect, unprotect, rescue, rescues, clean, discard, auto } from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
@@ -38,6 +38,7 @@ import { git } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
 import { loadPolicy, loadPolicyFrom, evaluatePolicy } from '../src/team/policy.mjs';
 import { fleetScan } from '../src/team/fleet.mjs';
+import { loadConfig, ConfigError } from '../src/config.mjs';
 
 const USAGE = `
 holt — know what your agents made, and don't lose any of it
@@ -92,6 +93,11 @@ ACTING  (these MUTATE the repo; everything above is read-only)
 AGENT INTEGRATION
   hosts               coverage matrix: every known agent host + the strength holt gives it
   integrate           wire holt into every agent found here (AGENTS.md + MCP + hooks)
+                      re-run any time — upgrade-safe: reconciles entries from any prior version
+                      in place and reports what it changed, rather than only adding  [--remove]
+  uninstall           the other half of integrate: remove every hook/MCP entry holt wrote here
+                      (alias for integrate --remove) — run BEFORE removing the holt package, or
+                      every agent wired to it is left pointing at a binary that is gone
   brief               plain-text sibling-workstream briefing for any agent
   mcp                 run as an MCP server over stdio
   hook <event>        hook entry point; reads the host event as JSON on stdin
@@ -107,6 +113,7 @@ OPTIONS
                       high-volume and low-evidence; landing order always uses it)
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
   --base <ref>        compare against <ref>            (default: origin/HEAD, then main/master…)
+  --family-window <s> seconds within which co-forked workstreams count as one dispatch (default: 300)
   --cwd <path>        repository to inspect            (default: cwd)
   --no-symbols        skip symbol extraction (faster, file-level only)
   --strict-read-only  never write objects; committed deltas become APPROXIMATE
@@ -116,12 +123,18 @@ OPTIONS
   --html <file>       graph: write an interactive HTML graph
   --global            integrate: ALSO add holt to user-level editor configs.
                       Default is project scope — nothing outside the repo is touched.
+  --remove            integrate: remove everything holt wrote here instead of installing it
+                      (same as holt uninstall)
   --force             unprotect: also release a lock holt did not place
                       (needs --reason or --yes; without one, refused before anything changes)
   --reason <text>     unprotect --force: why the override is happening — journalled verbatim
   --yes, -y           confirm an action non-interactively (unprotect --force; doctor --install)
   -h, --help          this
   -v, --version       print the version and exit
+
+CONFIG (optional — see README.md#configuration)
+  .holtrc.json        in the repository root: familyOverrides, maintenanceFloor, maintenanceRatio
+                      absent is fine; present-and-invalid is a hard error (exit 2), never silent
 `;
 
 function parseArgs(argv) {
@@ -164,11 +177,13 @@ function parseArgs(argv) {
       case '-h': case '--help': opts.help = true; break;
       case '-v': case '-V': case '--version': opts.version = true; break;
       case '--base': opts.base = argv[++i]; break;
+      case '--family-window': opts.familyWindowMs = (Number(argv[++i]) || 300) * 1000; break;
       case '--cwd': opts.cwd = argv[++i]; break;
       case '--html': opts.html = argv[++i]; break;
       case '--host': opts.host = argv[++i]; break;
       case '--command': opts.command = argv[++i]; break;
       case '--bin': opts.bin = argv[++i]; break;
+      case '--remove': opts.remove = true; break;
       case '--concurrency': opts.concurrency = Number(argv[++i]) || 8; break;
       default:
         if (a.startsWith('--')) throw new Error(`unknown option: ${a}`);
@@ -196,7 +211,8 @@ function emitJson(v) { out(JSON.stringify(v, null, 2)); }
 async function buildReport(opts) {
   const disc = await discover(opts.cwd, opts);
   if (!disc.root) {
-    process.stderr.write(paint('red', `holt: not a git repository (searched from ${opts.cwd})\n`));
+    const { message } = repoAbsenceError(disc, opts.cwd);
+    process.stderr.write(paint('red', `holt: ${message}\n`));
     process.exit(2);
   }
   const scanned = await scan(disc, opts);
@@ -230,6 +246,7 @@ async function cmdDoctor(opts) {
   const info = {
     node: process.version,
     repo: disc.root ?? null,
+    bare: !!disc.bare,
     vcs: disc.vcs,
     workstreams: disc.workstreams.length,
     jj: disc.jj?.available ? 'available' : `unavailable (${disc.jj?.reason ?? 'not probed'})`,
@@ -246,7 +263,7 @@ async function cmdDoctor(opts) {
   out(paint('bold', 'holt doctor'));
   out('');
   out(`  node              ${info.node}`);
-  out(`  repository        ${info.repo ?? paint('red', 'not a git repository')}`);
+  out(`  repository        ${info.repo ?? paint('red', info.bare ? 'bare repository (no working tree) — holt needs a checkout' : 'not a git repository')}`);
   out(`  workstreams       ${info.workstreams}`);
   out(`  jj backend        ${info.jj}`);
   out(`  symbol backend    ${ctags.available ? paint('green', info.symbolBackend) : paint('yellow', info.symbolBackend)}`);
@@ -316,6 +333,40 @@ async function cmdDoctor(opts) {
 async function runInstall(missing, pkgs, opts) {
   if (!missing.length) { out(paint('green', '  nothing to install — every optional backend is present')); return; }
 
+  let remaining = missing;
+
+  // ctags has a NO-SUDO path: a pinned, checksum-verified static build holt fetches into its own
+  // directory (see src/toolchain.mjs / bin/install-ctags.mjs) — the exact mechanism `holt setup`
+  // already offers. Before this, `doctor --install` went straight to the system package manager,
+  // which on Linux/most CI needs sudo — so a locked-down machine WITH apt/dnf/pacman present but
+  // no sudo rights (precisely the case the portable path exists for) hit a password prompt it was
+  // never going to satisfy, with no mention that a path needing neither existed one flag away.
+  if (remaining.includes('ctags')) {
+    const { portableTarget, holtBinDir } = await import('../src/toolchain.mjs');
+    const target = portableTarget();
+    if (target) {
+      out(paint('bold', '  ctags has a no-sudo option:'));
+      out(paint('grey', `    a private copy into ${holtBinDir()} — no sudo, nothing system-wide, pinned release, checksum verified`));
+      const go = opts.yes || await confirm('  install it now?');
+      if (go) {
+        const { installPortableCtags } = await import('./install-ctags.mjs');
+        const { resetToolchainProbes } = await import('../src/symbols.mjs');
+        const r = await installPortableCtags((m) => out(paint('grey', `    ${m}`)));
+        if (r.ok) {
+          out(`  ${paint('green', 'ok')}  installed universal-ctags ${r.version}`);
+          resetToolchainProbes();
+          remaining = remaining.filter((m) => m !== 'ctags');
+        } else {
+          out(`  ${paint('yellow', '--')}  ${r.reason}`);
+          out(paint('grey', '    falling back to the system package manager for ctags.'));
+        }
+      }
+      out('');
+    }
+  }
+
+  if (!remaining.length) { out(paint('green', '  nothing left to install — the no-sudo path covered it.')); return; }
+
   const detect = async (bin) => new Promise((r) => {
     execFile('sh', ['-c', `command -v ${bin}`], { timeout: 4000 }, (e) => r(!e));
   });
@@ -327,12 +378,12 @@ async function runInstall(missing, pkgs, opts) {
   }
   if (!mgr) {
     out(paint('yellow', '  no supported package manager found on PATH.'));
-    out(paint('grey', '  Install universal-ctags manually — holt keeps working without it, with reduced language coverage.'));
+    out(paint('grey', `  Install ${remaining.join(' / ')} manually — holt keeps working without it, with reduced coverage.`));
     return;
   }
 
-  const names = missing.map((m) => pkgs[m][mgr]).filter(Boolean);
-  const unavailable = missing.filter((m) => !pkgs[m][mgr]);
+  const names = remaining.map((m) => pkgs[m][mgr]).filter(Boolean);
+  const unavailable = remaining.filter((m) => !pkgs[m][mgr]);
   if (!names.length) {
     out(paint('yellow', `  ${mgr} has no package for: ${unavailable.join(', ')}`));
     if (unavailable.includes('enry')) out(paint('grey', '  enry: go install github.com/go-enry/enry@latest'));
@@ -467,7 +518,10 @@ async function cmdHook(opts) {
     // it burns context on every prompt of a long session. So the per-prompt brief speaks only
     // when what it would say has CHANGED (with a periodic refresh so a compacted session is not
     // left permanently unaware). SessionStart always speaks: a new session has seen nothing.
-    const brief = await buildBrief(cwd, { onlyIfChanged: event === 'user-prompt-submit' });
+    const brief = await buildBrief(cwd, {
+      onlyIfChanged: event === 'user-prompt-submit',
+      familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
+    });
 
     // `'' + null` is the string "null", and this line used to hand exactly that to the agent as
     // its workstream briefing whenever there was nothing to report.
@@ -484,9 +538,29 @@ async function cmdHook(opts) {
 }
 
 async function cmdBrief(opts) {
-  const text = await buildBrief(opts.cwd);
+  const text = await buildBrief(opts.cwd, {
+    familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
+  });
   if (opts.json) return emitJson({ context: text });
-  out(text ?? '[holt] no parallel workstream findings.');
+  if (text) { out(text); return; }
+
+  // buildBrief() returns null for three very different situations — no repo at all, a repo
+  // nobody has fanned out yet (the overwhelmingly common first run), and a repo with siblings
+  // that genuinely have nothing to report — and collapsing all three into one fixed sentence
+  // means the ONE case that is actually informative ("nothing to report") reads identically to
+  // the two where holt could not check anything at all. A human running `holt brief` directly
+  // (as opposed to the hook, which is right to stay silent) deserves to know which is true.
+  const disc = await discover(opts.cwd, opts).catch(() => null);
+  if (!disc?.root) {
+    out(disc?.bare
+      ? '[holt] this is a bare repository (no working tree) — nothing to brief.'
+      : '[holt] not a git repository here — nothing to brief.');
+  } else if (disc.workstreams.filter((w) => !w.isPrimary).length === 0) {
+    out('[holt] no other worktrees yet — holt compares this one against siblings created with '
+      + '`git worktree add ../<name> <branch>`. Nothing to relate until then.');
+  } else {
+    out('[holt] nothing to report — every sibling workstream is clean right now.');
+  }
 }
 
 
@@ -517,6 +591,19 @@ async function cmdSetup(opts) {
   out('');
   out(paint('bold', 'holt setup') + paint('grey', '  — backends, agent wiring, and what is at risk right now'));
   out('');
+
+  // Fail fast, before printing sections this directory cannot back up. Without this check, a
+  // `holt setup` typo'd into the wrong directory printed the FULL backends section and the FULL
+  // agent-wiring section, then reached step 3's buildReport() — which calls process.exit(2)
+  // directly, bypassing the try/catch around it — and died mid-sentence with no indication of
+  // what to do next. The very first command a new user is told to run must not do that.
+  const early = await discover(opts.cwd, opts);
+  if (!early.root) {
+    const { message } = repoAbsenceError(early, opts.cwd || process.cwd());
+    process.stderr.write(paint('red', `holt: ${message}\n`));
+    out(paint('grey', '  `holt setup` configures an existing repository — cd into one and re-run.'));
+    process.exit(2);
+  }
 
   // ---- 1. backends -------------------------------------------------------------------------
   out(paint('bold', '  1. analysis backends'));
@@ -611,11 +698,38 @@ async function confirm(question) {
 async function cmdIntegrate(opts) {
   const disc = await discover(opts.cwd, opts);
   if (!disc.root) {
-    process.stderr.write(paint('red', `holt: not a git repository (${opts.cwd})\n`));
+    const { message } = repoAbsenceError(disc, opts.cwd);
+    process.stderr.write(paint('red', `holt: ${message}\n`));
     process.exit(2);
   }
 
   const scope = opts.global ? 'all' : 'project';
+
+  // The other half of integrate: reverse everything holt wrote here. `npm uninstall -g holt`
+  // only removes the package — it does not touch the hooks/MCP entries wired into every repo
+  // integrate ever ran in, which would otherwise fail on every tool call forever.
+  if (opts.remove) {
+    const results = await uninstall(disc.root, { scope });
+    if (opts.json) return emitJson({ scope, results });
+
+    out(paint('bold', 'holt uninstall') + paint('grey', `  (${scope} scope)`));
+    out('');
+    if (!results.length) {
+      out(paint('grey', '  nothing to remove — no holt integration found in this repository.'));
+    }
+    for (const r of results) {
+      const left = /left in place/.test(r.action);
+      const mark = left ? paint('grey', '·') : paint('green', '✓');
+      const label = r.host ? `${r.host}${r.scope ? ` [${r.scope}]` : ''} ` : '';
+      out(`  ${mark} ${(r.adapter + '            ').slice(0, 12)} ${label}${paint('grey', r.action)}`);
+      out(paint('grey', `      ${r.path}`));
+    }
+    out('');
+    out(paint('grey', "  Only holt's own entries were touched — anything else in these files was left as-is."));
+    out('');
+    return;
+  }
+
   const { detected, results } = await integrate(disc.root, { bin: opts.bin, scope });
   if (opts.json) return emitJson({ detected, scope, results });
 
@@ -666,9 +780,34 @@ async function main() {
     await runStdioServer(opts);
     return;
   }
+
+  // Project config (`.holtrc.json`, see src/config.mjs) is entirely optional — most repositories
+  // will never have one. But a file that EXISTS and fails to parse or validate must fail LOUDLY,
+  // here, before any command runs — never fall back to defaults while pretending the config the
+  // user wrote is in effect. Every command below gets whatever it declares (familyOverrides,
+  // maintenanceFloor, maintenanceRatio) folded into `opts`, which every command already receives.
+  let configPath = null;
+  try {
+    const cfg = await loadConfig(opts.cwd);
+    configPath = cfg.path;
+    if (cfg.config.familyOverrides !== undefined) opts.familyOverrides = cfg.config.familyOverrides;
+    if (cfg.config.maintenanceFloor !== undefined) opts.maintenanceFloor = cfg.config.maintenanceFloor;
+    if (cfg.config.maintenanceRatio !== undefined) opts.maintenanceRatio = cfg.config.maintenanceRatio;
+  } catch (e) {
+    if (!(e instanceof ConfigError)) throw e;
+    if (opts.json) { emitJson({ ok: false, code: 'bad-config', reason: e.message, path: e.path }); process.exit(2); }
+    process.stderr.write(paint('red', `holt: ${e.message}\n`));
+    process.exit(2);
+  }
+  opts.configPath = configPath;
   if (cmd === 'doctor') return cmdDoctor(opts);
   if (cmd === 'hook') return cmdHook(opts);
-  if (cmd === 'tui') return runTui(opts.cwd, { snapshot: opts.snapshot, columns: opts.columns, rows: opts.rowsOpt });
+  if (cmd === 'tui') {
+    return runTui(opts.cwd, {
+      snapshot: opts.snapshot, columns: opts.columns, rows: opts.rowsOpt,
+      familyOverrides: opts.familyOverrides,
+    });
+  }
 
   // The MUTATING commands, dispatched before buildReport() because each runs its own assessment.
   // These were once implemented, exported and covered by 19 passing tests while `holt protect`
@@ -1051,6 +1190,9 @@ async function main() {
   }
   if (cmd === 'setup') return cmdSetup(opts);
   if (cmd === 'integrate') return cmdIntegrate(opts);
+  // The other half of `integrate`. An alias for `integrate --remove`, not a separate code path,
+  // so the two can never drift apart on what counts as "holt's own".
+  if (cmd === 'uninstall') return cmdIntegrate({ ...opts, remove: true });
 
   const { report, scanned } = await buildReport(opts);
 
@@ -1175,6 +1317,7 @@ async function main() {
 const EXPECTED_STATE = [
   /could not determine a base ref/i,
   /not a git repository/i,
+  /is a bare repository/i,
   /no usable base to compare against/i,
 ];
 

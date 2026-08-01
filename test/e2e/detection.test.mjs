@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
-import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
+import { standardFixture, emptyFixture, newRepo, backdateWorktreeCreation } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze, contextDigest } from '../../src/analyze.mjs';
@@ -88,6 +88,65 @@ test('P0: a symbol present in TWO workstreams is not unique to either', async (t
   }
 });
 
+/**
+ * MEASURED (bench50, 50-language corpus, `unique` question): 100 of 156 recall misses were the
+ * SAME planted case repeated once per language — two workstreams that each add a symbol under the
+ * IDENTICAL declared name, in a DIFFERENT file with COMPLETELY DIFFERENT content (the corpus's
+ * `wt-unique` / `wt-symbol-dup` pair, purpose-built to test exactly this boundary). Before this
+ * fix, `uniqueWork()`'s ownership map was keyed on symbol NAME alone: the instant two live
+ * workstreams both declared something called, say, `CsClass_nul`, BOTH lost their entire
+ * `uniqueSymbolCount` — verdict `committed-delta-no-unique-symbols` for two workstreams that, by
+ * the independent oracle's own content-identity definition, each hold committed work found
+ * nowhere else. This is not limited to the adversarial fixture: any two agents independently
+ * naming a class or function the same thing (`Handler`, `Config`, `parse`) would trip the same
+ * false negative on the tool whose entire purpose is "tell me what would be lost".
+ *
+ * The fix reuses content-identity.mjs (already load-bearing for `safeToDelete`'s file-level
+ * redundancy check): a name collision only downgrades a symbol from "unique" when the FILE it
+ * lives in also has a content-identity twin in the colliding workstream. A name match that is not
+ * also a content match is not the same work — see the P0 test directly above, which pins that a
+ * GENUINE content duplicate (byte-identical bodies) must still be excluded from both sides.
+ */
+test('P0 PRECISION: a symbol name collision across DIFFERENT content is unique to BOTH sides', async (t) => {
+  const fx = await newRepo('name-collision');
+  t.after(() => fx.cleanup());
+
+  await fx.worktree('finch');
+  await fx.write('src/tax.js',
+    'export class Handler {\n  computeTax(order) {\n    return order.subtotal * 1.08;\n  }\n}\n',
+    fx.wt('finch'));
+  await fx.commit('finch builds a tax handler', fx.wt('finch'));
+
+  await fx.worktree('marlin');
+  await fx.write('src/sanitize.js',
+    'export class Handler {\n  cleanInput(name) {\n    return name.trim().toLowerCase();\n  }\n}\n',
+    fx.wt('marlin'));
+  await fx.commit('marlin builds an unrelated input handler', fx.wt('marlin'));
+
+  const { report, scanned } = await inspectFixture(fx);
+  const finch = byId(report.unique, 'finch');
+  const marlin = byId(report.unique, 'marlin');
+  const nameKey = 'callable:Handler';
+
+  // ANTI-VACUITY: symbol-identity must actually see the name collision, or this test proves
+  // nothing about the fix — it would pass identically against code that never had the bug.
+  const finchScan = scanned.workstreams.find((w) => w.id === 'finch');
+  const marlinScan = scanned.workstreams.find((w) => w.id === 'marlin');
+  assert.ok(finchScan.addedKeys.includes(nameKey), 'finch must add a symbol named Handler');
+  assert.ok(marlinScan.addedKeys.includes(nameKey), 'marlin must add a symbol named Handler');
+
+  assert.equal(finch.verdict, 'unique-work-committed',
+    `finch holds a real, differently-bodied declaration and must be unique-work-committed, got ` +
+    `${finch.verdict} (uniqueSymbols: ${JSON.stringify(finch.uniqueSymbols)})`);
+  assert.equal(marlin.verdict, 'unique-work-committed',
+    `marlin holds a real, differently-bodied declaration and must be unique-work-committed, got ` +
+    `${marlin.verdict} (uniqueSymbols: ${JSON.stringify(marlin.uniqueSymbols)})`);
+  assert.ok(finch.uniqueSymbols.includes(nameKey),
+    `finch's Handler must count as unique despite the name collision: ${JSON.stringify(finch.uniqueSymbols)}`);
+  assert.ok(marlin.uniqueSymbols.includes(nameKey),
+    `marlin's Handler must count as unique despite the name collision: ${JSON.stringify(marlin.uniqueSymbols)}`);
+});
+
 /* ------------------------------------------------------- P1: collisions ---- */
 
 test('P1 PRESENCE: a real registry conflict is detected AND proven by merge-tree', async (t) => {
@@ -129,6 +188,53 @@ test('P3 PRESENCE: two dispatches building the same symbol are detected as dupli
     `expected shared symbol ${truth.duplicateSymbol}, got: ${dup.sharedSymbols.join(', ')}`);
   assert.equal(dup.sameFamily, false, 'these are separate dispatches');
   assert.equal(dup.classification, 'cross-dispatch-waste');
+});
+
+/**
+ * MEASURED (bench50, 50-language corpus): every one of the 50 duplicate false positives
+ * scored against the independent oracle is the SAME planted case repeated once per language —
+ * two workstreams sharing 100% of their (identical) declared symbols where the pair differs
+ * only in bytes the oracle cannot attribute to either declaration. Symbol-name identity alone
+ * cannot distinguish that shape from THIS one: two agents who independently pick a common,
+ * undiscriminating name (`process`, `handler`, `validate`, ...) for two functions that do
+ * different things. `discriminativeSymbols()` only drops a name shared by a large FRACTION of
+ * live workstreams (>25%, floor 3) — with a two- or three-way fan-out, a name shared by every
+ * side of the fan-out never crosses that floor, so it survives as "discriminative" evidence
+ * even though it is really just a coincidence. The fix is not naming this symbol as boilerplate
+ * (no list generalises); it is refusing to call two occurrences "shared" unless their actual
+ * declared bodies agree, which a genuine duplicate's do and a name coincidence's do not.
+ */
+test('P3 PRECISION: two workstreams that coincidentally pick the same name for unrelated work are not duplicates', async (t) => {
+  const fx = await newRepo('coincidental-name');
+  t.after(() => fx.cleanup());
+
+  await fx.worktree('orchid');
+  await fx.write('src/tax.js',
+    'export function process(order) {\n  return order.subtotal * 1.08;\n}\n', fx.wt('orchid'));
+  await fx.commit('orchid computes tax', fx.wt('orchid'));
+
+  await fx.worktree('quokka');
+  await fx.write('src/sanitize.js',
+    'export function process(name) {\n  return name.trim().toLowerCase();\n}\n', fx.wt('quokka'));
+  await fx.commit('quokka sanitizes input', fx.wt('quokka'));
+
+  const { scanned, report } = await inspectFixture(fx);
+  const orchid = scanned.workstreams.find((w) => w.id === 'orchid');
+  const quokka = scanned.workstreams.find((w) => w.id === 'quokka');
+  // Family comes from git provenance (fork point + creation time), not from naming — see
+  // discover.mjs's assignFamilies. orchid and quokka really were forked from the same commit and
+  // created together in this fixture, so they honestly ARE one family; that fact is irrelevant to
+  // this test, which is about duplicate detection using CONTENT (declared body), not about
+  // family. Asserting on family here would test the wrong layer.
+  assert.equal(orchid.familyRule, 'fork+creation-time', 'the fixture must have real provenance to assign a family from');
+
+  // ANTI-VACUITY: symbol-identity must actually see the coincidence, or this test proves nothing.
+  assert.ok(orchid.addedKeys.some((k) => k.endsWith(':process')), 'orchid must add a symbol named process');
+  assert.ok(quokka.addedKeys.some((k) => k.endsWith(':process')), 'quokka must add a symbol named process');
+
+  const dup = report.duplicates.find((d) => pairMatches(d, 'orchid', 'quokka'));
+  assert.equal(dup, undefined,
+    `two unrelated functions that happen to share a name must not be reported as duplicate work: ${JSON.stringify(dup)}`);
 });
 
 /* -------------------------------------------------- P6: safe to delete ---- */
@@ -228,92 +334,243 @@ test('P2: an unknown workstream id is an explicit error, not an empty digest', a
   assert.ok(Array.isArray(digest.known) && digest.known.length > 0, 'should list what IS known');
 });
 
-/* ---------------------------------------------- P2/family: names can lie ---- */
+/* ---------------------------------------------- P2/family: provenance, not naming ---- */
 
 /**
- * FAMILY IS A NAME MATCH, NOT CONTENT EVIDENCE. `inferFamily` (src/discover.mjs) groups
- * workstreams by directory/branch NAMING PATTERN alone — the doc comment on it says as much
- * ("the single most likely thing to be wrong"). Two fixtures prove the two ways that lies:
+ * FAMILY COMES FROM GIT PROVENANCE — fork point (`git merge-base`) plus creation time — NOT
+ * FROM NAMING. See assignFamilies/inferFamily in src/discover.mjs for the full design. Naming
+ * lies in both directions, and this fixture proves both:
  *
- *   auth-1 / auth-2   names look like a fan-out (numeric-suffix pattern -> family "auth"),
- *                     but touch ENTIRELY DISJOINT files and symbols. Zero content in common.
- *   alpha  / zebra    names share no pattern at all (two singleton families), but touch the
- *                     SAME file with the IDENTICAL added symbol — real content evidence of a
- *                     relationship the naming heuristic cannot see.
+ *   auth-1 / auth-2   NAME says one family (numeric-suffix pattern -> "auth" under the OLD,
+ *                     deleted, name-only heuristic). HISTORY says two: auth-2 forks from a
+ *                     commit that only exists because an unrelated commit landed on main AFTER
+ *                     auth-1 was created, and the two were created four days apart. Real
+ *                     dispatches do not straddle an intervening unrelated commit and a
+ *                     four-day gap — this is two independent efforts that happened to pick
+ *                     similar names.
  *
- * Content must dominate when it disagrees with the name: a same-family pair with no shared file
- * or symbol must NOT be reported as a confirmed "sibling", and a cross-family pair that really
- * does duplicate content must still be found by the (name-blind) symbol-overlap detector.
+ *   alpha / zebra / quux   NAME says three singletons (no pattern matches any of them — the OLD
+ *                     heuristic would never have grouped these). HISTORY says one: all three
+ *                     fork from the identical commit and are created within seconds of each
+ *                     other — exactly what a real fan-out dispatch looks like.
+ *
+ * Creation time is backdated with fs.utimes on the worktree's private `gitdir` file — the exact
+ * file creationTimeMs() in discover.mjs reads as its PRIMARY signal (verified empirically there
+ * to track worktree-creation to the second) — a plain filesystem call, not a git command, so the
+ * fixture exercises production's real code path without an actual four-day wait.
+ *
+ * The downstream consequence (why any of this matters): a duplicate pair WITHIN the real
+ * fan-out (alpha/zebra, sharing FANOUT_SHARED_SYMBOL) must classify as 'expected-fanout'; a
+ * duplicate pair ACROSS the two unrelated efforts (auth-1/auth-2, sharing SHARED_TASK_SYMBOL)
+ * must classify as 'cross-dispatch-waste' — the reverse of what the deleted name-only heuristic
+ * would have said for both pairs.
  */
-async function lyingNamesFixture() {
-  const fx = await newRepo('lying-names');
+async function provenanceFixture() {
+  const fx = await newRepo('provenance');
 
   await fx.worktree('auth-1');
   await fx.write('src/auth1_only.js', 'export function AUTH1_ONLY_SYMBOL() { return "one"; }\n', fx.wt('auth-1'));
-  await fx.commit('auth-1 adds its own thing', fx.wt('auth-1'));
+  await fx.write('src/shared_task.js', 'export function SHARED_TASK_SYMBOL() { return 42; }\n', fx.wt('auth-1'));
+  await fx.commit('auth-1 builds its own thing, and (independently) the shared task', fx.wt('auth-1'));
+  await backdateWorktreeCreation(fx.wt('auth-1'), 4 * 24 * 60 * 60 * 1000);
+
+  // A real, unrelated commit lands on main BETWEEN the two dispatches — auth-2 forks from a
+  // commit auth-1's history never saw. A single fan-out never straddles an intervening commit.
+  await fx.write('CHANGELOG.md', '## an unrelated release, days later\n');
+  await fx.commit('an unrelated commit lands on main between the two independent efforts');
 
   await fx.worktree('auth-2');
   await fx.write('src/auth2_only.js', 'export function AUTH2_ONLY_SYMBOL() { return "two"; }\n', fx.wt('auth-2'));
-  await fx.commit('auth-2 adds a totally different thing', fx.wt('auth-2'));
+  await fx.write('src/shared_task.js', 'export function SHARED_TASK_SYMBOL() { return 42; }\n', fx.wt('auth-2'));
+  await fx.commit('auth-2 independently builds a different thing, and the identical shared task', fx.wt('auth-2'));
+  // auth-2 keeps its real (current) creation time — four days after auth-1's backdated one.
+
+  // Yet another unrelated commit, so the fan-out below forks from a THIRD commit — distinct
+  // from both auth-1's and auth-2's — rather than accidentally sharing auth-2's fork point.
+  await fx.write('NOTES.md', '## more unrelated history, before the real fan-out\n');
+  await fx.commit('another unrelated commit precedes the actual fan-out dispatch');
 
   await fx.worktree('alpha');
-  await fx.write('src/shared_logic.js', 'export function SHARED_TASK_SYMBOL() { return 42; }\n', fx.wt('alpha'));
-  await fx.commit('alpha implements the task', fx.wt('alpha'));
+  await fx.write('src/fanout_alpha.js', 'export function FANOUT_SHARED_SYMBOL() { return 7; }\n', fx.wt('alpha'));
+  await fx.commit('alpha implements the fan-out task', fx.wt('alpha'));
 
   await fx.worktree('zebra');
-  await fx.write('src/shared_logic.js', 'export function SHARED_TASK_SYMBOL() { return 42; }\n', fx.wt('zebra'));
-  await fx.commit('zebra implements the identical task', fx.wt('zebra'));
+  await fx.write('src/fanout_zebra.js', 'export function FANOUT_SHARED_SYMBOL() { return 7; }\n', fx.wt('zebra'));
+  await fx.commit('zebra implements the identical fan-out task', fx.wt('zebra'));
+
+  await fx.worktree('quux');
+  await fx.write('src/fanout_quux.js', 'export function QUUX_ONLY_SYMBOL() { return 9; }\n', fx.wt('quux'));
+  await fx.commit('quux takes a third, disjoint slice of the same fan-out', fx.wt('quux'));
 
   return fx;
 }
 
-test('FAMILY PRESENCE: a fan-out-shaped name pattern IS grouped into one family', async (t) => {
-  const fx = await lyingNamesFixture();
+test('FAMILY PROVENANCE, presence: a real fan-out (same fork point, created together) is grouped, despite three unrelated-looking names', async (t) => {
+  const fx = await provenanceFixture();
+  t.after(() => fx.cleanup());
+
+  const { scanned } = await inspectFixture(fx);
+  const alpha = scanned.workstreams.find((w) => w.id === 'alpha');
+  const zebra = scanned.workstreams.find((w) => w.id === 'zebra');
+  const quux = scanned.workstreams.find((w) => w.id === 'quux');
+
+  assert.equal(alpha.familyRule, 'fork+creation-time', 'the fixture must have real provenance, not a name fallback');
+  assert.equal(alpha.family, zebra.family,
+    `alpha and zebra forked from the same commit within seconds of each other and must be one family, got ${alpha.family} / ${zebra.family}`);
+  assert.equal(alpha.family, quux.family,
+    `quux is part of the same fan-out and must share the family, got ${alpha.family} / ${quux.family}`);
+});
+
+test('FAMILY PROVENANCE, the lie naming tells: a numeric-suffix name pair forked from DIFFERENT commits, days apart, is NOT one family', async (t) => {
+  const fx = await provenanceFixture();
   t.after(() => fx.cleanup());
 
   const { scanned } = await inspectFixture(fx);
   const auth1 = scanned.workstreams.find((w) => w.id === 'auth-1');
   const auth2 = scanned.workstreams.find((w) => w.id === 'auth-2');
-  assert.equal(auth1.family, 'auth');
-  assert.equal(auth2.family, 'auth');
-  assert.equal(auth1.familyRule, 'numeric-suffix');
+
+  // ANTI-VACUITY: under the OLD (deleted) name-only heuristic, 'auth-1' and 'auth-2' matched the
+  // numeric-suffix pattern and were BOTH forced into family 'auth' — the exact wrong answer this
+  // test exists to catch. Confirm the naming pattern really would have matched, so a passing test
+  // proves the fix rather than an accident of naming.
+  assert.notEqual(auth1.id.match(/^(.*?)-\d+$/)?.[1], undefined, 'fixture invalid: auth-1 must match the numeric-suffix pattern');
+
+  assert.equal(auth1.familyRule, 'fork+creation-time', 'the fixture must have real provenance, not a name fallback');
+  assert.equal(auth2.familyRule, 'fork+creation-time', 'the fixture must have real provenance, not a name fallback');
+  assert.notEqual(auth1.family, auth2.family,
+    `different fork commits, four days apart: provenance must keep these separate, got ${auth1.family} / ${auth2.family}`);
 });
 
-test('FAMILY LIE #1: same-name-pattern workstreams with disjoint content are NOT a confirmed sibling', async (t) => {
-  const fx = await lyingNamesFixture();
+test('FAMILY CONSEQUENCE: duplicate work inside the real fan-out is expected-fanout; across the two unrelated efforts is cross-dispatch-waste', async (t) => {
+  const fx = await provenanceFixture();
   t.after(() => fx.cleanup());
 
   const { scanned, report } = await inspectFixture(fx);
-  const digest = contextDigest(scanned, 'auth-1');
 
-  assert.equal(digest.ok, true);
-  assert.deepEqual(digest.siblings, [], 'auth-2 shares nothing with auth-1: not a confirmed sibling');
-  assert.deepEqual(digest.unconfirmedSiblings, ['auth-2'],
-    'the name match must still be reported, but labelled as unconfirmed rather than fact');
+  // BEFORE (the deleted name-only heuristic) would have gotten BOTH of these backwards:
+  // auth-1/auth-2 named like a fan-out -> 'expected-fanout' (wrong: two unrelated efforts);
+  // alpha/zebra shared no naming pattern -> 'cross-dispatch-waste' (wrong: one real fan-out).
+  // AFTER (provenance) gets both right.
+  const authDup = report.duplicates.find((d) => pairMatches(d, 'auth-1', 'auth-2'));
+  assert.ok(authDup, 'auth-1/auth-2 share SHARED_TASK_SYMBOL and must be found as duplicate work');
+  assert.equal(authDup.sameFamily, false, 'they forked from different commits four days apart');
+  assert.equal(authDup.classification, 'cross-dispatch-waste',
+    `two unrelated efforts duplicating work is waste, got ${JSON.stringify(authDup)}`);
 
-  // The graph's sibling edge exists (the names DO match) but must say so is unproven.
-  const edge = report.graph.edges.find((e) => e.type === 'sibling'
-    && ((e.source === 'auth-1' && e.target === 'auth-2') || (e.source === 'auth-2' && e.target === 'auth-1')));
-  assert.ok(edge, 'a sibling edge is still drawn for the name match');
-  assert.equal(edge.corroborated, false, 'zero shared content: the edge must be marked unconfirmed');
-});
+  const fanoutDup = report.duplicates.find((d) => pairMatches(d, 'alpha', 'zebra'));
+  assert.ok(fanoutDup, 'alpha/zebra share FANOUT_SHARED_SYMBOL and must be found as duplicate work');
+  assert.equal(fanoutDup.sameFamily, true, 'they forked from the identical commit, created together');
+  assert.equal(fanoutDup.classification, 'expected-fanout',
+    `siblings from one dispatch duplicating work is expected, got ${JSON.stringify(fanoutDup)}`);
 
-test('FAMILY LIE #2: content-identical workstreams are still found as duplicates despite unrelated names', async (t) => {
-  const fx = await lyingNamesFixture();
-  t.after(() => fx.cleanup());
-
-  const { scanned, report } = await inspectFixture(fx);
-  const alpha = scanned.workstreams.find((w) => w.id === 'alpha');
-  const zebra = scanned.workstreams.find((w) => w.id === 'zebra');
-  assert.notEqual(alpha.family, zebra.family, 'alpha and zebra do not match any naming pattern');
-
-  const dup = report.duplicates.find((d) => pairMatches(d, 'alpha', 'zebra'));
-  assert.ok(dup, 'alpha/zebra must be found as duplicates by CONTENT even though their names disagree');
-  assert.equal(dup.similarity, 1, 'they added the identical symbol set');
-
+  // The context digest agrees: alpha is told about its real sibling zebra, and about quux (same
+  // family, no shared content) — but NOT about auth-1/auth-2, which are a different family.
   const digest = contextDigest(scanned, 'alpha');
-  const built = digest.duplicatedSymbols.find((d) => d.workstream === 'zebra');
-  assert.ok(built, 'the context digest must name zebra as already having built the same symbol');
+  assert.ok(digest.siblings.includes('zebra'), `alpha's siblings must include zebra: ${digest.siblings}`);
+  assert.ok(digest.siblings.includes('quux'), `alpha's siblings must include quux: ${digest.siblings}`);
+  assert.ok(!digest.siblings.includes('auth-1') && !digest.siblings.includes('auth-2'),
+    `alpha's siblings must not include the unrelated auth pair: ${digest.siblings}`);
+});
+
+test('FAMILY BOUNDARY: a genuine fan-out staggered by 20 minutes stays ONE family', async (t) => {
+  // THE REFUTATION FIXTURE, verbatim. Adversarial review built a real single dispatch — two
+  // worktrees forked from the IDENTICAL commit, zero intervening commits — whose only oddity was
+  // a 20-minute gap between the two `git worktree add` calls: a human reviewing between spawns,
+  // a rate-limited API, CI provisioning in waves. The first provenance implementation's 5-minute
+  // window split them, and the duplicate between them flipped from 'expected-fanout' to a
+  // confidently wrong 'cross-dispatch-waste'. A window is a guess about orchestration speed;
+  // this pins that ordinary staggering never pays for that guess.
+  const fx = await newRepo('staggered-dispatch');
+  t.after(() => fx.cleanup());
+
+  // Deliberately UNSTEMMED names (no shared prefix, no numeric suffix): a stemmed pair would be
+  // rescued by the corroboration step at ANY window, making this test vacuous about the window
+  // itself — verified by running it against the refuted 5-minute constant and watching it stay
+  // green until the names lost their stem. The stem path has its own test below; this one pins
+  // the window alone.
+  await fx.worktree('karl');
+  await fx.write('src/karl.js', 'export function STAGGERED_SHARED() { return 3; }\n', fx.wt('karl'));
+  await fx.commit('first half of the staggered dispatch', fx.wt('karl'));
+  // 20 minutes older than mira — inside the widened window, far outside the refuted 5-minute one.
+  await backdateWorktreeCreation(fx.wt('karl'), 20 * 60 * 1000);
+
+  await fx.worktree('mira');
+  await fx.write('src/mira.js', 'export function STAGGERED_SHARED() { return 3; }\n', fx.wt('mira'));
+  await fx.commit('second half, twenty minutes later, same fork point', fx.wt('mira'));
+
+  const { scanned, report } = await inspectFixture(fx);
+  const one = scanned.workstreams.find((w) => w.id === 'karl');
+  const two = scanned.workstreams.find((w) => w.id === 'mira');
+  assert.equal(one.familyRule, 'fork+creation-time', 'must be a provenance answer, not a name fallback');
+  assert.equal(one.family, two.family,
+    `same fork point, 20-minute stagger: one dispatch, got ${one.family} / ${two.family}`);
+
+  const dup = report.duplicates.find((d) => pairMatches(d, 'karl', 'mira'));
+  assert.ok(dup, 'the pair shares STAGGERED_SHARED and must be found as duplicate work');
+  assert.equal(dup.classification, 'expected-fanout',
+    `a staggered dispatch duplicating its own work is expected, got ${JSON.stringify(dup)}`);
+});
+
+test('FAMILY BOUNDARY: a naming stem bridges time-clusters of the SAME fork point, and only the same fork point', async (t) => {
+  // The corroboration step: when the timer says "two dispatches" but provenance already put both
+  // on ONE fork commit and the names carry one fan-out stem (auth-1/auth-2), two independent
+  // witnesses outvote the timer. The control matters more than the positive: the same stem must
+  // bridge NOTHING across different fork points — otherwise this reintroduces name-derived
+  // grouping through the back door, which is the exact heuristic provenance replaced.
+  const fx = await newRepo('stem-bridge');
+  t.after(() => fx.cleanup());
+
+  await fx.worktree('auth-1');
+  await fx.write('src/a1.js', 'export function STEM_A1() { return 1; }\n', fx.wt('auth-1'));
+  await fx.commit('first, backdated past any window', fx.wt('auth-1'));
+  await backdateWorktreeCreation(fx.wt('auth-1'), 3 * 60 * 60 * 1000); // 3h — outside even 60min
+
+  await fx.worktree('auth-2');
+  await fx.write('src/a2.js', 'export function STEM_A2() { return 2; }\n', fx.wt('auth-2'));
+  await fx.commit('second, three hours later, SAME fork point, same stem', fx.wt('auth-2'));
+
+  // Control: same stem, DIFFERENT fork point (an intervening commit separates them).
+  await fx.write('WALL.md', 'an intervening commit — the next worktree forks from a different commit\n');
+  await fx.commit('intervening commit on main');
+  await fx.worktree('auth-3');
+  await fx.write('src/a3.js', 'export function STEM_A3() { return 3; }\n', fx.wt('auth-3'));
+  await fx.commit('same stem, different fork point — must NOT be bridged', fx.wt('auth-3'));
+
+  const { scanned } = await inspectFixture(fx);
+  const byId = Object.fromEntries(scanned.workstreams.map((w) => [w.id, w]));
+  assert.equal(byId['auth-1'].family, byId['auth-2'].family,
+    'same fork point + same stem: the stem bridges the 3-hour gap');
+  assert.notEqual(byId['auth-2'].family, byId['auth-3'].family,
+    'different fork points: the stem must bridge NOTHING — this is what keeps names from becoming the primary signal again');
+});
+
+test('FAMILY BOUNDARY: the primary worktree is never swept into a dispatch family', async (t) => {
+  // Found live by adversarial review: the repo root's reflog-derived "creation time" fell inside
+  // a dispatch's clustering window and the PRIMARY worktree — which was never dispatched and has
+  // no dispatch-mates by definition — joined the family. The old naming heuristic could
+  // essentially never produce this (roots are not named `agent-3`), so it was a regression
+  // introduced by provenance, not a pre-existing miss.
+  const fx = await newRepo('primary-excluded');
+  t.after(() => fx.cleanup());
+
+  await fx.worktree('agent-1');
+  await fx.write('src/w1.js', 'export function PRIM_W1() { return 1; }\n', fx.wt('agent-1'));
+  await fx.commit('dispatched work', fx.wt('agent-1'));
+  await fx.worktree('agent-2');
+  await fx.write('src/w2.js', 'export function PRIM_W2() { return 2; }\n', fx.wt('agent-2'));
+  await fx.commit('more dispatched work', fx.wt('agent-2'));
+
+  const { scanned } = await inspectFixture(fx, { includePrimary: true });
+  const primary = scanned.workstreams.find((w) => w.isPrimary);
+  const agents = scanned.workstreams.filter((w) => !w.isPrimary && w.id.startsWith('agent-'));
+  assert.ok(primary, 'the fixture must scan the primary worktree or this test proves nothing');
+  assert.equal(agents.length, 2, 'both dispatched worktrees must be present');
+  assert.equal(primary.familyRule, 'primary-worktree', `got ${primary.familyRule}`);
+  for (const a of agents) {
+    assert.notEqual(primary.family, a.family,
+      `the repository root is not a dispatch-mate of ${a.id}: ${primary.family}`);
+  }
+  assert.equal(agents[0].family, agents[1].family, 'the real dispatch still groups normally');
 });
 
 /* ------------------------------------------------------- P5: landing plan ---- */
@@ -426,6 +683,35 @@ test('SAFETY: a worktree carrying gitignored content is NEVER "provably nothing 
   assert.equal(s.confidence, 'unverifiable', 'and the confidence must say WHY it is not measured');
   assert.match(s.reasons.join(' '), /gitignored/, 'the reason must name the cause');
   assert.match(s.reasons.join(' '), /\.env/, 'and name the actual file, so the user can judge');
+});
+
+/**
+ * MEASURED (bench50, 50-language corpus, `unique` question): 50 of 156 recall misses were
+ * `wt-ignored` — a worktree whose ONLY content is a gitignored file, in every one of the 50
+ * languages. `uniqueWork()` (`risk --json`'s `unique[]`, P0 "what would be lost") builds its file
+ * count from `w.uncommitted` only, which NEVER includes the ignored layer — so the verdict came
+ * back `nothing-unique` for a worktree the very next command, `safeToDelete`, correctly refuses to
+ * call disposable (see the test directly above). Two commands disagreeing about whether the exact
+ * same content is "nothing" or "unverifiable" is the specific failure `contentAtRisk()`'s doc
+ * comment already names for gate vs rescue — this is the same disagreement, one layer over, in
+ * the report that is supposed to say what is irreplaceable.
+ */
+test('P0 SAFETY: a worktree carrying ONLY gitignored content is reported as holding unique work', async (t) => {
+  const fx = await newRepo('ignored-unique');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', 'secret/\n');
+  await fx.commit('add gitignore');
+
+  const wt = await fx.worktree('secret-keeper');
+  await fx.write('secret/only.py', 'def secret_only_fn():\n    return 42\n', wt);
+
+  const { report } = await inspectFixture(fx);
+  const u = byId(report.unique, 'secret-keeper');
+  assert.ok(u, 'secret-keeper missing from the unique-work report');
+  assert.notEqual(u.verdict, 'nothing-unique',
+    `a worktree whose only content is gitignored must not be reported as holding nothing unique: ${JSON.stringify(u)}`);
+  assert.ok(u.uncommittedOnlyCount > 0,
+    `gitignored-only content is invisible to git and must count as at-risk: ${JSON.stringify(u)}`);
 });
 
 test('SAFETY: recognisable build output does NOT block cleanup — the gate must stay usable', async (t) => {

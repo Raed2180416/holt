@@ -40,6 +40,26 @@ function run(cmd, args, cwd) {
   });
 }
 
+/**
+ * Backdate a worktree's private `gitdir` metadata file, so discover.mjs's creationTimeMs()
+ * (src/discover.mjs) reads the worktree as created `msAgo` milliseconds ago instead of now.
+ *
+ * This is the EXACT file production reads as its primary family-provenance creation-time signal
+ * — a plain filesystem timestamp, not a git command — so a fixture that needs two workstreams to
+ * have REALISTICALLY separated creation times (to keep them out of the same family, or to prove
+ * they are in it) uses this instead of an actual multi-day wait or a `sleep`.
+ *
+ * Takes a worktree PATH directly (not a Fixture), so it works equally for `Fixture.wt(name)`
+ * paths and for worktrees created by hand against an arbitrary repository (see
+ * test/e2e/real-repos.test.mjs, which does not use the Fixture class at all).
+ */
+export async function backdateWorktreeCreation(worktreePath, msAgo) {
+  const gitDirRaw = (await run('git', ['rev-parse', '--git-dir'], worktreePath)).trim();
+  const gitDirAbs = path.isAbsolute(gitDirRaw) ? gitDirRaw : path.join(worktreePath, gitDirRaw);
+  const when = new Date(Date.now() - msAgo);
+  await fs.utimes(path.join(gitDirAbs, 'gitdir'), when, when);
+}
+
 export class Fixture {
   constructor(root) {
     this.root = root;
@@ -129,12 +149,21 @@ export async function standardFixture() {
   await fx.commit('add committed-only symbol', fx.wt('uniqueCommitted'));
 
   // --- P3: two different dispatches building the same thing ----------------------
-  // Names deliberately lack a shared prefix so family inference keeps them apart.
+  // Family comes from git provenance (fork point + creation time; see assignFamilies in
+  // discover.mjs), not from naming. So these two are given genuinely DIFFERENT provenance — a
+  // real commit lands on main between them, giving beta-1 a later fork point than alpha-1 — not
+  // merely names that avoid the old naming heuristic.
   await fx.worktree('alpha-1');
   await fx.write('src/dup_a.js',
     'export function SHARED_DUP_SYMBOL(x) {\n  const acc = [];\n  for (const item of x) { acc.push(item * 2); }\n  return acc;\n}\n',
     fx.wt('alpha-1'));
   await fx.commit('alpha implements shared', fx.wt('alpha-1'));
+
+  // Separates alpha-1's fork point from everything created after it, so beta-1 (and everything
+  // else below) is provably a different dispatch rather than accidentally sharing alpha-1's fork
+  // commit.
+  await fx.write('NOTES.md', '## unrelated history between the two dispatches\n');
+  await fx.commit('an unrelated commit separates the two independent dispatches');
 
   await fx.worktree('beta-1');
   await fx.write('src/dup_b.js',

@@ -17,7 +17,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git } from '../git.mjs';
-import { discover } from '../discover.mjs';
+import { discover, repoAbsenceError } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze } from '../analyze.mjs';
 import { branchAudit } from '../branches.mjs';
@@ -133,7 +133,7 @@ export async function fleetScan(roots, { concurrency = 4, maxDepth = 3, env = pr
       const root = repos[cursor++];
       try {
         const disc = await discover(root, opts);
-        if (!disc.root) { failures.push({ repo: root, error: 'not a git repository' }); continue; }
+        if (!disc.root) { failures.push({ repo: root, error: repoAbsenceError(disc, root).message }); continue; }
         const scanned = await scan(disc, opts);
         const report = await analyze(scanned, opts);
         let branches = null;

@@ -297,6 +297,32 @@ therefore to holt.
 - **P4 in general remains unsolved.** `verify` decides a *specific suspected pair* empirically; it does not certify compatibility, and the wording is asserted by test.
 - **Scan time is super-linear in worktree count, and file count is worse.** Correctness holds at real scale (800/800 on redis), but a repository the size of the Linux kernel is not usable with symbol extraction today — `--no-symbols` is the working answer there. Measured, with the exact reproduction, in BENCHMARKS §1. The mechanism behind the worktree-count growth is not yet identified.
 
+## Configuration
+
+Optional, and most repositories will never need it. Drop a `.holtrc.json` in the repository root
+(the **main** worktree — one config per project, not per worktree) to override two heuristics:
+
+```json
+{
+  "familyOverrides": ["^(shard-\\d+)-.*$"],
+  "maintenanceFloor": 8,
+  "maintenanceRatio": 0.4
+}
+```
+
+| Key | Type | Default | What it changes |
+|---|---|---|---|
+| `familyOverrides` | array of regex strings | `[]` | How worktree names are grouped into "the same dispatch" for sibling/duplicate reporting (`inferFamily` in `src/discover.mjs`), for a fan-out naming scheme holt's built-in patterns don't recognise. A match here is trusted directly (`familyRule: 'user-override'`), same as it always was for a caller that supplied it in code — this file is only a new way to reach that existing knob. |
+| `maintenanceFloor` | non-negative integer | `5` | Minimum disposable-worktree count before `holt`'s agent brief nags about running `holt clean --apply`. |
+| `maintenanceRatio` | number, `0`–`1` | `0.3` | Minimum disposable-fraction-of-total before the same nag fires. |
+
+No file, or a file with any subset of these keys, is fine. **An unparseable or invalid file is a
+hard error** — `holt` exits 2 with the exact reason (bad JSON, unknown key, wrong type, invalid
+regex) rather than silently falling back to defaults; a config you believe is active is never
+quietly discarded. Nothing in this file can make a "safe to delete" verdict less accurate: both
+keys tune display/nagging heuristics, never the content-identity comparison in `src/analyze.mjs`
+that actually decides what counts as unique work. See `src/config.mjs`.
+
 ## Quick start
 
 ```console

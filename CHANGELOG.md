@@ -1,16 +1,145 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
-- **Security — `holt graph --html` was HTML-injectable.** Worktree paths, branch names, file
-  paths and symbol names were interpolated raw into the document, so a branch containing
-  `</script>` closed the script block and the rest of the page became attacker-authored markup.
-  Every value is now encoded for the sink it lands in, the page builds its SVG through DOM APIs
-  instead of `innerHTML`, and invisible/bidirectional control characters are neutralised at the
-  boundary. Names are no longer mangled to stay safe, either — the old renderer stripped
-  `< > &` out of visible labels.
-- Release bodies live in `.github/releases/` and are gated: a release whose body carries no
-  usable install command now fails CI instead of shipping.
+**The guard closes the gaps that actually lose work, the product gets an escape hatch and an
+autopilot, and the things that check reality get checked themselves.** 110+ commits since 0.2.0;
+grouped here by what a user would notice, not by commit.
+
+**New commands**
+
+- `holt auto` — the autopilot. Does everything reversible without being asked (locks at-risk
+  worktrees, releases locks whose justification has expired) and hands the destructive half over
+  *with* the evidence and the exact command. It never deletes — being wrong about a lock costs
+  nothing, being wrong about a deletion is final.
+- `holt discard <path>...` — the guard's escape hatch, because a gate that only refuses gets
+  switched off. Captures content to a verified ref *before* removing it, so the guard stays on and
+  the loss does not; a capture that cannot be verified aborts having deleted nothing; a tracked
+  file is reverted to HEAD rather than deleted (`git checkout -- <path>` is itself refused); a
+  symlink target is resolved rather than followed, so discarding a link can no longer destroy a
+  different file's work.
+
+**The destructive-command guard: Windows, shell indirection, and file-level destruction**
+
+- Every guard pattern was written for a POSIX shell and returned "allowed" for the Windows verbs
+  most agent hosts actually emit. `Remove-Item -Recurse -Force`, `rd /s /q`, `del /f /q`,
+  `Move-Item`, `Clear-Content` and `Set-Content` are now classified exactly as their POSIX
+  equivalents, at both worktree and file granularity — `Clear-Content`/`Set-Content` are in-place
+  destroyers with no POSIX analogue at all (nothing deleted, no path changed, content gone).
+- A verb supplied indirectly — `$(echo rm)`, backticks, a variable, `eval "rm -rf ..."`, a
+  base64-decoded pipeline into `sh` — used to defeat the guard entirely, because every rule matched
+  literal text. holt cannot resolve an indirected verb without executing it, so it no longer
+  pretends to: an unreadable verb now returns `ask`, never a silent allow. A shell's own `-c`
+  argument *is* code holt can read, so `sh -c "rm -rf ../feature"` is unwrapped and assessed as if
+  typed, rather than let the wrapper itself become the bypass.
+- Renaming or moving a file inside a worktree was wrongly **denied** on macOS and Windows (a path
+  comparison bug, not a safety feature); a target holt could not resolve was reported as hitting
+  everything rather than as unknown; a Windows path could be mangled into a relative one, letting
+  work move *out of* its worktree undetected; holt's own lock could self-justify and freeze the
+  repository permanently. All fixed and pinned by cross-platform tests, after 24 of 39 test files
+  were found to have never actually run on macOS or Windows in CI.
+- `unprotect --force` no longer refuses the ordinary case: the escape hatch for overriding a lock
+  holt did *not* place used to fire on the mere presence of `--force`, so `holt unprotect --force`
+  against holt's own locks was refused with a message asserting something untrue of that
+  invocation. It now counts the foreign locks first and demands `--reason` or `--yes` only when
+  there is actually something foreign to override.
+
+**Analysis correctness**
+
+- **Redundancy-aware disposal.** Scored for the first time against an independent oracle (50
+  languages, 900 worktrees, 18,000 claims): disposable-worktree recall was 0.40 — 150 of 250
+  genuinely disposable worktrees were refused with "unknown" because base lacked the files, missing
+  that a *living sibling* held the identical merged-tree content. Recall goes 0.40 → 1.00 with
+  precision held at 1.00. `gate` (the machine contract a script chains `&& rm -rf` on) still refuses
+  a redundant worktree by name, since authorising every member of a redundant set would authorise
+  deleting all of them; only `clean --apply`, which re-verifies immediately before each removal, may
+  act on the extra recall.
+- `holt partition` bucketed top-level directories by tracked-file weight and used the collision list
+  only to look up one hotspot's owner — it never traversed the graph, so buckets could still
+  conflict *across* buckets, the one property that made the output actionable. Now union-find over
+  a mixed workstream/directory token space, proven on a path graph (A–B conflict, B–C conflict, A–C
+  clean) and a 200-trial seeded property test against an independent union-find.
+- Collisions are now proven against what is actually in the worktree, not only what was committed,
+  through one shared computation rather than two consumers pricing false positives and false
+  negatives differently.
+- A repeated `package` clause was counted as authored work in every false positive in one corpus;
+  fixed at the source of symbol identity rather than filtered per-caller.
+
+**Agent integration**
+
+- **Eight previously-advertised host MCP configs now actually get written**, including holt's first
+  TOML writer (Codex CLI's `config.toml`, a line-oriented textual merge that preserves every setting
+  holt doesn't understand): Codex, Amp, Factory, Junie, Zed, Warp, Kilo, Roo. `hosts.mjs` and the
+  files `holt integrate` writes are now derived from one manifest instead of two hand-maintained
+  tables that drifted, so a host cannot claim `mcp: true` while going unwired again. Cursor now gets
+  a deterministic deny hook via its published `beforeShellExecution` schema.
+- **Five corrected host claims**, each checked against the host's own primary source rather than
+  restated: Cline ships no project-scoped MCP config file at all (only a user-level one, at the
+  path Cline actually reads); Copilot CLI does not read VS Code's `.vscode/mcp.json` (confirmed two
+  different files); Goose's config field is `cmd:`, not `command:`; Amazon Q's CLI is local with a
+  documented MCP config, not cloud-only; and a docs-derived adapter no longer prints the same
+  "BLOCKING" label as one verified live against the real host.
+- **The per-prompt session brief is change-triggered**, not re-injected byte-identical on every
+  message — it used to resend the same paragraph on every `UserPromptSubmit`, and a `'' + null`
+  bug handed every clean-repo session the literal string `"null"` as its briefing. It now fires
+  again only when the brief text changes, bounded so 20 unchanged prompts still earn one repeat (a
+  compacted session has lost the brief and should not be left permanently uninformed); a new
+  session is never suppressed.
+- holt already locks at-risk worktrees at every session start without being asked; nothing ever
+  said the *opposite* — that disposable worktrees are silently accumulating. The brief now names it
+  (a ratio-plus-floor threshold on provably-disposable workstreams) with `holt clean --apply` as the
+  one command that resolves it — a signal, deliberately never an automatic deletion.
+- `holt journal` write failures are now surfaced through the result object instead of swallowed:
+  with the journal directory unwritable, `holt protect --json` used to report `"protected": 1` and
+  say nothing about the audit record that didn't happen. The lock still happens; the user is now
+  told the record didn't.
+- `rescue()` and `discard()` no longer share one fixed-path scratch index per worktree. holt runs
+  from agent hooks, so concurrent invocations are the normal case, and two of them could build a
+  scratch index from the wrong tree — a wrong tree in a capture path means captured work that is
+  not the work. The index is now unique per invocation.
+
+**Team / Enterprise**
+
+- The policy gate (`.holt/policy.json`) could be handed rules from the very branch under review;
+  fixed so policy is always read from a trusted ref.
+- `holt fleet` no longer double-counts worktrees shared between repositories; `--protected-paths`
+  in policy is now enforced instead of inert; `unprotect` leaves an audit trail for every override,
+  including forced ones.
+
+**Security**
+
+- **`holt graph --html` was HTML-injectable.** Worktree paths, branch names, file paths and symbol
+  names were interpolated raw into the document, so a branch containing `</script>` closed the
+  script block and the rest of the page became attacker-authored markup. Every value is now encoded
+  for the sink it lands in, the page builds its SVG through DOM APIs instead of `innerHTML`, and
+  invisible/bidirectional control characters are neutralised at the boundary. Names are no longer
+  mangled to stay safe, either — the old renderer used to strip `< > &` out of visible labels.
+- A repository could name a file such that it was interpolated into a `ctags` option, and the deny
+  hook exited the wrong code on a failed probe; both closed.
+
+**Release integrity**
+
+- **The install command every artifact printed had been broken for 107 commits.** The tarball the
+  README, the site and the release page all pointed at was built and attached by hand for v0.2.0,
+  drifted up to 107 commits behind main, and shipped without several source modules and 12 of 14
+  language gap packs — a person following the documented install got
+  `holt: unknown command 'discard'` from a page that had just told them to run it. The tarball is
+  now built and attached by CI from the tagged commit: every relative import reachable from the
+  shipped entry points and every `.ctags` pack on disk is asserted present at commit time (derived
+  from the code, not a list), and the artifact is installed globally and driven against a real
+  repository with planted work on Linux, macOS and Windows before it can become the download.
+  Release bodies live in `.github/releases/` and are gated the same way: a body with no usable
+  install command fails CI instead of shipping.
+- **A static-analysis ratchet.** 20,749 lines had shipped with no linter, type checker, lint script
+  or gate. `node scripts/typecheck.mjs` now runs `checkJs` over JSDoc — deliberately not a
+  TypeScript migration, because holt has no build step and the published tarball must stay the
+  exact source a reviewer read — and the diagnostic count is ratcheted: it may only go down, never
+  up.
+- The full test suite, not just a subset, now runs in CI on Linux, macOS and Windows; a wave of
+  assertions that only ever held on one platform (POSIX symlink semantics, path separators, a
+  hostile filename that is platform-dependent) is fixed.
+- The site was rewritten: light mode, plainer language, an honest checkout CTA, a readable A/B
+  table that no longer scrolls sideways on a phone, and duplicate nav removed.
 
 ## 0.2.0
 

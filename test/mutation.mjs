@@ -401,6 +401,24 @@ const MUTATIONS = [
     replace: '  if (false) {',
     tests: ['test/unit/safety.test.mjs'],
   },
+  {
+    id: 'stash-sweep-uncovered',
+    defect: 'the pathspec exemption swallows EVERY stash push, not only scoped ones — bare `git stash` '
+      + 'goes back to an unconditional allow, the exact incident this rule exists to stop',
+    file: 'src/agent.mjs',
+    find: '    unless: (c) => stashHasPathspec(c),',
+    replace: '    unless: () => true, // mutated: stash sweep rule never fires',
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'stash-ask-cap-removed',
+    defect: '`git stash pop` (the recovery action) goes back to a flat deny, and a bare sweeping '
+      + '`git stash` on dirty work escalates from ask to deny — over-refusal replacing the honest answer',
+    file: 'src/agent.mjs',
+    find: "  if (hit.verdict === 'ask') {",
+    replace: '  if (false) {',
+    tests: ['test/e2e/integration.test.mjs'],
+  },
 ];
 
 function run(cmd, args, cwd, timeout = 600_000) {

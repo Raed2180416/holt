@@ -197,6 +197,183 @@ broken, not merely observed to be green. **Does not mean:** 28 hand-picked mutat
 mutation coverage of the codebase — they target the highest-stakes behaviors by design (see
 `test/mutation.mjs` for why hand-picked mutations were chosen over exhaustive Stryker mutation).
 
+## 7 · Independent 50-language oracle (bench50) — the `unique` question
+
+**What this measures:** whether `risk --json`'s `unique[]` verdict — the answer to "what would be
+LOST if this worktree vanished", the finding the product exists to give — agrees with an
+independent, content-hashing oracle that shares no code with holt, across 900 worktrees spanning
+every language holt publishes coverage for.
+
+**Fixture:** `bench50`, a measurement apparatus that lives outside this repository on purpose (see
+its own README for why). 50 repositories, one per supported language, each carrying the same 18
+worktree shapes — including `wt-unique` (committed work found nowhere else), `wt-ignored`
+(gitignored-only content, invisible to `git status`), `wt-symbol-dup` (declares `wt-unique`'s exact
+symbol names in a different file with different content — the one shape designed to make a
+symbol-based and a content-based witness disagree), and `wt-nul` (unique work in a file containing
+a literal NUL byte). The oracle answers from git plumbing and raw content hashing only.
+
+**Before:** precision 1.00, recall 0.76 (tp 494, fp 0, tn 250, **fn 156** / n 900). Precision was
+never the problem — holt never wrongly claimed uniqueness. It stayed silent about 156 worktrees
+that DID hold irreplaceable content, which is the specific failure mode this product exists to
+prevent: worse than a false "disposable", because nothing downstream ever raises it as a concern
+in the first place.
+
+Every one of the 156 was one of four causes, and every one was **holt being wrong**, not the
+oracle asking a different question:
+
+| cause | count | root cause | fix |
+|---|---|---|---|
+| `wt-unique` + `wt-symbol-dup` name collision | 100 | `uniqueWork()` (`src/analyze.mjs`) decided a symbol was "unique to W" purely by NAME — a `Handler` class in one worktree and an unrelated `Handler` class in a sibling zeroed BOTH worktrees' unique-symbol count, even though their files' actual bytes were completely different | a name collision now downgrades a symbol from "unique" only when the FILE it lives in also has a content-identity twin (raw or whitespace/line-ending-normalised hash, `src/content-identity.mjs`) in the colliding worktree — a name match that is not also a content match is not the same work |
+| `wt-ignored` | 50 | `uniqueWork()` built its at-risk file count from the uncommitted/untracked layers only; the gitignored layer was invisible to it entirely, so a worktree whose ONLY content was gitignored came back `nothing-unique` — while `safeToDelete` (a different function, `contentAtRisk()`) already refused to call the SAME worktree disposable | gitignored file count now feeds the same at-risk calculation the uncommitted/untracked layers already did, so `unique` and `safeToDelete` can no longer disagree about whether the identical content is "nothing" or "unverifiable" |
+| `wt-nul` | 6 (of 50 languages: C#, R, D, Objective-C, MATLAB, F#) | enry's binary-content sniff (a NUL byte anywhere near the start of a file) misclassified real, compiling source as `{"language":"","type":"Binary"}` whenever the file's only unusual content was a NUL byte inside a comment — and holt trusted that verdict as "not code", skipping symbol extraction entirely, even though ctags parses the identical bytes cleanly | ambiguous-extension files (`.cs`, `.r`, `.d`, `.m`, `.fs`, …) that enry flags `Binary` are now reclassified from a NUL-stripped COPY used for classification only; ctags always reads the real on-disk bytes. A plain "ignore enry and guess by extension" fallback was tried and rejected — it silently reintroduces the same failure for `.fs`/`.pro`, which ctags maps to Forth/INI by default and extracts nothing from |
+
+The count above is exact, not sampled: every `unique` disagreement in the corpus was one of these
+four worktree shapes, confirmed by bucketing all 156 misses by worktree name (100 + 50 + 6 = 156).
+None of them is the documented content-vs-symbol divergence bench50's own scorer names for the
+`duplicate` question (`wt-unique`/`wt-symbol-dup` legitimately disagreeing on "did these two build
+the same thing") — that divergence is real, it is a different question, and it is scored and
+reported separately (`duplicateSymbolSideChannel` in `score-holt.mjs`'s output), never folded into
+the numbers below.
+
+**After:** precision 1.00, recall **1.00** (tp 650, fp 0, tn 250, fn 0 / n 900). Zero `unique`
+disagreements against the oracle, and the scorer's own `knownGaps.symbolVsContentUnique` and
+`nulByteSymbolBlindSpot.languages` counters — its running tally of documented, un-fixed gaps —
+both read zero.
+
+Reproduce (from the bench50 apparatus, sibling to this repository):
+`node generate.mjs && node oracle-run.mjs && node score-holt.mjs`, then read
+`byQuestion.unique` in the resulting `score-holt.json`.
+
+**Means:** across every supported language and all four adversarial worktree shapes this corpus
+plants against the `unique` question, holt's answer now matches an independent, content-hashing
+oracle exactly. **Does not mean:** the `duplicate` question is equally clean — see the next
+section for the exact number and why it is not moving further.
+
+## 8 · Independent 50-language oracle (bench50) — the `duplicate` question
+
+**What this measures:** whether `duplicates --json`'s pairs agree with the same oracle's
+content-identity verdict for "did these two workstreams build the same thing", across all 153
+pairs of the 18 worktrees in each of the 50 language repositories (7,650 pairs total).
+
+**Measured:** precision 0.75, recall 1.00 (tp 150, **fp 50**, tn 7450, fn 0 / n 7650). Every one
+of the 50 false positives is the *same* planted case, once per language: `wt-unique` and
+`wt-symbol-dup` declare identical symbol names with identical bodies, in two different files,
+where the second file also carries two trailing comment lines the first does not. Symbol-identity
+(and a declared-body comparison — see below) correctly says "these built the same thing"; the
+oracle's content-identity check correctly says "these files are not byte-identical". Both are
+right, about different questions — this is bench50's own documented, deliberately unresolvable
+case (see its README, "What this apparatus does NOT prove", #1 and #2), not a fresh defect, and it
+is why the number above does not read 1.00: closing it would mean holt stopping believing its own
+correct, hand-verified answer in favour of the oracle's, on the one shape built to make them
+disagree. The harder, hand-labelled `duplicate-symbol` side channel bench50 raises for exactly
+this case — "do the two sides' declared symbols and bodies actually agree" — holt answers
+correctly on all 850 instances (`duplicateSymbolSideChannel.holtAgreesWithHandLabel`), confirming
+this is the oracle's known limitation, not holt's.
+
+**What changed, and what did not:** `duplicates()` (`src/analyze.mjs`) used to count a symbol
+name as "shared" between two workstreams whenever both added it, regardless of what either side's
+declaration actually said. `discriminativeSymbols()` already filters names common across a LARGE
+fraction of workstreams (boilerplate), but that filter has a floor: a name shared by as few as two
+or three workstreams never crosses it, so two agents independently naming an unrelated helper
+`process`, `handler` or `validate` read as duplicate work. Verified directly (not assumed): a
+controlled fixture with two workstreams that each declare a function named `process` with
+unrelated bodies was reported as a 100%-similarity duplicate before this fix, and reported nothing
+after (`test/e2e/detection.test.mjs`, "P3 PRECISION"; the same class is also covered adversarially
+in `test/e2e/break-it.test.mjs`, "ATTACK: coincidental common names must not fabricate
+duplicates" — previously passing only because it accepted a *hedged* false positive, tightened to
+require none at all). The fix: a name is only counted as shared evidence for a given PAIR once the
+two sides' actual declared bodies agree (whitespace- and comment-insensitive, across the
+single-line and block comment styles of every language in this corpus) — read once per
+(workstream, symbol), cached, and never invoked when either side is unreadable, so it can only
+REMOVE a name from "shared" on positive evidence of disagreement, never add one symbol-identity
+did not already find. That is why bench50's `duplicate` precision and recall are unchanged before
+and after (0.75/1.00 both times, `duplicateSymbolSideChannel` 850/850 both times): the false
+positive this fix targets does not occur anywhere in this corpus, by the corpus's own design (see
+above) — it targets a real, separate, small-fan-out risk this apparatus does not plant, and the
+regression test proves it directly instead.
+
+Reproduce: `node score-holt.mjs`, then read `byQuestion.duplicate` and
+`duplicateSymbolSideChannel` in the resulting `score-holt.json`.
+
+**Means:** the 0.75 precision on this question is fully accounted for by one documented,
+hand-verified case bench50 itself says should not be used to grade symbol-level precision, and a
+real, different false-positive class (small-fan-out name coincidences) is now closed and covered
+by a regression test. **Does not mean:** duplicate detection is content-aware in general — outside
+the specific declared-body check above, it is still a name match; `holt duplicates --deep` (jscpd
+token-clone detection) is the tool for the same logic written twice under different names.
+
+## 9 · Independent 50-language oracle (bench50) — `disposable`, `conflict`, `refuse`, and the oracle's own proof of independence
+
+**What this measures:** the same 900-worktree, 50-language bench50 corpus and the same independent
+oracle as §§7–8, scored on the three remaining questions `risk`/`clean`/`collisions`/`gate` answer
+— `disposable` (safe to delete), `conflict` (two worktrees' uncommitted state cannot both land),
+and `refuse` (holt correctly declines to certify a worktree it cannot verify) — plus the
+apparatus-wide agreement rate across all five questions, and the one number that would void every
+other one in this document if it were nonzero: how often holt ever called a worktree "safe to
+delete" that the oracle says holds content found nowhere else.
+
+**Oracle independence is checked, not asserted.** Every number in §§7–9 rests on the oracle in
+`bench50/oracle/` sharing no code with holt. `node independence-check.mjs` proves that three ways,
+in increasing strength: **(1)** a static walk of every import reachable from the oracle's entry
+points, plus a comment-and-string-stripped scan for escape hatches (`require`, `createRequire`, a
+literal path into this repository) — measured: 6 reachable files, 0 violations, 0 escape hatches;
+**(2)** the real oracle run under a Node module-resolution hook that aborts the process the instant
+any specifier resolves inside `/home/raed/grove`; **(3)** the hook proven to actually fire —
+`probe-imports-holt.mjs` deliberately imports holt and must succeed with the hook absent and fail
+with it present, because a clean run under a hook that is not watching looks identical to a clean
+run under one that is. Measured: exit 0 without the hook, exit 1 with it, the abort message
+present. All three passed on the run this section reports (`independence-proof.json`,
+`"independent": true`) — reproduce with `node independence-check.mjs --corpus <the corpus dir>`.
+
+**Fixture:** identical to §7 — 50 repositories (one per supported language), 18 worktrees each, all
+153 worktree pairs per repository, ground truth from an oracle that answers strictly from git
+plumbing and raw content hashing, never from holt.
+
+**Measured:**
+
+| question | precision | recall | tp | fp | tn | fn | n |
+|---|---|---|---|---|---|---|---|
+| disposable | 1.00 | 1.00 | 250 | 0 | 650 | 0 | 900 |
+| conflict | 1.00 | 0.96 | 48 | 0 | 7600 | 2 | 7650 |
+| refuse | 1.00 | 1.00 | 50 | 0 | 850 | 0 | 900 |
+
+**The catastrophic-failure check.** Across all 900 worktrees, holt called disposable **zero** that
+the oracle says held content found nowhere else — the specific failure mode that destroys
+irreplaceable work. 0 events in 900 trials bounds the true rate at **≤0.33%** (95% one-sided
+exact), stated as a bound rather than as 0%, on purpose: the corpus is finite and "never observed"
+is not the same claim as "cannot happen".
+
+**The two `conflict` misses:** `r03-a-ts` and `r06-a-java`, each the planted
+`wt-conflict-a`/`wt-conflict-b` pair, 2 of the corpus's 50 (one designed conflict pair per
+repository — the set of which 2 repositories miss has moved between scoring runs taken minutes
+apart during active development of this exact code path, most recently `r12-a-kt` alone; see the
+falsification policy below for why a moving miss is reported as what it is rather than smoothed
+into a single stale number). The oracle's `git merge-tree` snapshot comparison says these collide;
+`holt collisions --json --all` did not surface either pair (`absent-from-holt-report` in the
+scorer's disagreement log). Recorded here rather than rounded away — the specific repositories are
+named so the next run confirms or refutes this exact claim, not a vaguer one.
+
+**Overall, all five questions, all 18,000 claims** (the 850 `duplicate-symbol` claims the oracle
+abstains on are excluded exactly as §8 excludes them — scoring against a question nobody answered
+is not measurement): holt agreed with the oracle on **17,948 of 18,000 — 99.71%**. Every
+disagreement is accounted for: 50 are §8's documented `duplicate` false positive (the one
+content-vs-symbol case bench50 deliberately cannot resolve), and 2 are the `conflict` misses above.
+None is a silent, unexplained gap.
+
+Reproduce: `node generate.mjs && node oracle-run.mjs && node score-holt.mjs`, then read
+`byQuestion.disposable`, `byQuestion.conflict`, `byQuestion.refuse`, `headline.agreement`, and
+`catastrophic` in the resulting `score-holt.json`.
+
+**Means:** on this corpus, holt never once authorised deleting irreplaceable work, never once
+wrongly refused to certify a worktree it could in fact verify, and matched an independent oracle on
+99.71% of 18,000 claims spanning 50 languages — with the oracle proven independent by static
+analysis, a runtime hook, and a probe proving the hook fires, not merely by the comment saying so.
+**Does not mean:** the corpus is real-world messiness (§8's own limitations list — synthetic,
+shallow, one file per shape — applies here too), a `conflict` miss whose specific repository moves
+run to run is a stable, closed defect just because its magnitude (2 of 50) looks small, and 99.71%
+agreement is not "correct" — it is exactly the number of claims checked, with the disagreements
+named, not averaged away.
+
 ## Falsification policy
 
 Five times during development, the measuring instrument itself was wrong (a fabricated A/B

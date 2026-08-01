@@ -27,6 +27,7 @@ import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze } from '../../src/analyze.mjs';
 import { impact } from '../../src/impact.mjs';
+import { backdateWorktreeCreation } from '../fixtures.mjs';
 
 const REAL_ROOT = process.env.HOLT_REAL_REPOS
   ?? path.join(process.env.HOME ?? '/tmp', '.holt-work', 'holt-real');
@@ -114,9 +115,18 @@ async function plantScenario(repo, root) {
   };
 
   // --- duplicate work: two INDEPENDENT dispatches, same function, different files ----
+  //
+  // Family comes from git provenance (fork point + creation time; see assignFamilies in
+  // src/discover.mjs), not from naming — so "two independent dispatches" must be given
+  // genuinely different provenance, not just names the old naming heuristic would have kept
+  // apart. Both worktrees fork from the identical `base` (mk() always uses the one pinned oid),
+  // so the only lever left to make them a different family is creation time: dupA is backdated
+  // four days, far outside the 5-minute clustering window, so it cannot cluster with dupB
+  // (or anything else created "now" in this same test run) even though they share a fork point.
   const dupA = await mk('alpha-1');
   await write(dupA, `holt_probe/dup_a.${repo.ext}`, repo.dup('holtSharedDuplicate'));
   await commit(dupA, 'alpha implements shared helper');
+  await backdateWorktreeCreation(dupA, 4 * 24 * 60 * 60 * 1000);
 
   const dupB = await mk('beta-1');
   await write(dupB, `holt_probe/dup_b.${repo.ext}`, repo.dup('holtSharedDuplicate'));

@@ -23,7 +23,7 @@
  * research, and a confident wrong answer there is worse than no answer.
  */
 
-import { git, pmap, worktreeSnapshot } from './git.mjs';
+import { git, pmap, worktreeSnapshot, readWorktreeFile } from './git.mjs';
 import { symbolKey } from './symbols.mjs';
 import { isHoltLock } from './discover.mjs';
 
@@ -131,9 +131,59 @@ export function uniqueWork(scanResult) {
     }
   }
 
+  // FILE-LEVEL CONTENT IDENTITY — the SAME key space safeToDelete()'s fpOwners map uses (see
+  // content-identity.mjs), read from `w.contentKeys` rather than recomputed, so "unique" and
+  // "disposable" can never disagree about whether a file's bytes are held elsewhere.
+  //
+  // WHY THIS IS NEEDED BESIDES SYMBOL IDENTITY. `symbolOwners` above is a NAME match: a symbol
+  // is "shared" the instant two live workstreams both declare something called, say, `Handler`
+  // — even when the two declarations are completely different code. MEASURED against the
+  // independent 50-language oracle: a worktree whose sole committed file is genuinely unique
+  // content lost its ENTIRE uniqueSymbolCount (0, verdict `committed-delta-no-unique-symbols`)
+  // whenever a SIBLING workstream happened to declare a same-NAMED symbol in a different file
+  // with different content — planted deliberately by bench50's `wt-symbol-dup` fixture, but the
+  // collision is not limited to that fixture: any two agents who independently name a class or
+  // function the same common thing (`Handler`, `Config`, `parse`) trip it. A symbol name is
+  // cheap evidence; the file it lives in is the actual work, so a name collision downgrades a
+  // symbol to "shared" only when the file's CONTENT is ALSO shared — never on name alone.
+  const contentOwners = new Map(); // content-identity key -> Set(workstream id)
+  for (const w of live) {
+    for (const key of Object.values(w.contentKeys ?? {})) {
+      if (!key) continue; // unreadable/oversized: cannot prove a match, the safe direction
+      if (!contentOwners.has(key)) contentOwners.set(key, new Set());
+      contentOwners.get(key).add(w.id);
+    }
+  }
+
+  /** Is `w`'s own copy of the file at `file` backed by content no OTHER live workstream holds? */
+  function fileIsContentUnique(w, file) {
+    const key = w.contentKeys?.[file];
+    if (!key) return false; // cannot prove it — falls back to the name-only check below
+    const holders = contentOwners.get(key);
+    return !holders || holders.size === 1;
+  }
+
   return live
     .map((w) => {
-      const uniqueSymbols = (w.addedKeys ?? []).filter((k) => symbolOwners.get(k).length === 1);
+      // First file this workstream declared each symbol key in, for the content-identity
+      // fallback below. A symbol key can appear in more than one file; the first is enough to
+      // decide "is there SOME file behind this name that no other live workstream also holds".
+      const symbolFile = new Map();
+      for (const s of w.added ?? []) {
+        const k = symbolKey(s);
+        if (!symbolFile.has(k)) symbolFile.set(k, s.file);
+      }
+
+      const uniqueSymbols = (w.addedKeys ?? []).filter((k) => {
+        if (symbolOwners.get(k).length === 1) return true;
+        // Name collides with at least one other live workstream. Still unique to w when the
+        // file this symbol actually lives in has no content twin anywhere else live — a name
+        // match that is not also a content match is not the same work (see the P0 PRECISION
+        // test pinning this, and the P0 test right above it pinning the opposite: a genuine
+        // content duplicate must still be excluded from both sides).
+        const file = symbolFile.get(k);
+        return file ? fileIsContentUnique(w, file) : false;
+      });
       const byLayer = { committed: [], uncommitted: [], untracked: [] };
       const uniqueSet = setOf(uniqueSymbols);
       for (const s of w.added ?? []) {
@@ -157,8 +207,22 @@ export function uniqueWork(scanResult) {
       // safe. The report must not contradict the guard: uncommitted FILES are risk on their own,
       // whether or not a parser can see inside them.
       const uncommittedFileCount = w.uncommitted?.count ?? 0;
+
+      // GITIGNORED FILES ARE AT RISK TOO — MORE SO THAN UNCOMMITTED ONES. MEASURED against the
+      // independent 50-language oracle: `wt-ignored` (a worktree whose ONLY content is a
+      // gitignored file) was reported `nothing-unique` in every one of the 50 languages, because
+      // this count was built from `w.uncommitted` alone — the ignored layer never touches it.
+      // `safeToDelete` already refuses to call the identical worktree disposable (confidence
+      // 'unverifiable', see contentAtRisk()) — so the report meant to say what would be LOST was
+      // giving the opposite answer from the guard that stops the deletion, the exact two-commands-
+      // disagree failure contentAtRisk()'s own doc comment names for gate vs rescue. Git does not
+      // track ignored content at all, which makes it STRICTLY less visible than an uncommitted
+      // edit, not less at-risk — `ignoredContent()` (scan.mjs) has already excluded recognisable
+      // build output (node_modules, dist, caches — the GENERATED list) before this count ever
+      // sees it, so this cannot turn a worktree's dist/ into "unique work".
+      const ignoredFileCount = w.ignored?.count ?? 0;
       const atRiskSymbols = byLayer.uncommitted.length + byLayer.untracked.length;
-      const atRisk = Math.max(atRiskSymbols, uncommittedFileCount);
+      const atRisk = Math.max(atRiskSymbols, uncommittedFileCount + ignoredFileCount);
 
       // THE PATH LAYER, CARRIED BESIDE THE SYMBOL LAYER — for the same reason the count above
       // takes the max of the two. `byLayer` holds SYMBOLS, and a symbol is a lossy view of risk
@@ -167,13 +231,29 @@ export function uniqueWork(scanResult) {
       // of `byLayer` entirely. Any consumer asking a question about PATHS — "is anything under
       // infra/** at risk here" — must read paths, not symbol identities. Without this, the only
       // path-shaped consumer in the product silently matched its globs against `kind:name`
-      // strings and could never fire. Same three layers, same names, so the two views cannot
-      // drift apart.
+      // strings and could never fire. Same four layers, same names, so the views cannot drift
+      // apart. `ignored` carries no symbol-level counterpart in `byLayer` — ctags is never run
+      // over gitignored content — so this is the ONLY place that content is visible at all.
       const pathsByLayer = {
         committed: [...(w.committed?.files ?? [])],
         uncommitted: [...(w.uncommitted?.files ?? [])],
         untracked: [...(w.uncommitted?.untracked ?? [])],
+        ignored: [...(w.ignored?.files ?? [])],
       };
+
+      // A SYMBOL COUNT OF ZERO MUST NOT CLAIM TO BE A MEASUREMENT WHEN IT ISN'T ONE.
+      //
+      // `w.symbolsUnmeasured` (scan.mjs, from ctagsBatch's own `.failed`) already stops
+      // `safeToDelete` from calling an unreadable workstream disposable — but that is the
+      // deletion GATE, not this report. `uniqueSymbolCount` is what `holt risk` prints and what
+      // `--json` hands to any script keyed on "how many symbols did this workstream add", and
+      // until this line it had no way to know the ctags backend ever failed to look: a NUL byte
+      // tripping enry's binary sniff, an oversized file (`tagWorthy`'s MAX_TAG_FILE_BYTES skip),
+      // or a plain ctags timeout under load all render here as the same bare `0` a workstream
+      // that genuinely added nothing would show. Surfacing the count AND the filenames lets a
+      // caller distinguish "measured, zero" from "we could not measure this" without having to
+      // separately reconstruct safeToDelete's reasoning.
+      const symbolsUnmeasured = w.symbolsUnmeasured ?? [];
 
       return {
         id: w.id,
@@ -185,8 +265,11 @@ export function uniqueWork(scanResult) {
         pathsByLayer,
         uncommittedOnlyCount: atRisk,
         uncommittedFileCount,
+        ignoredFileCount,
         atRiskSymbolCount: atRiskSymbols,
         committedFiles: w.committed.count,
+        symbolsUnmeasuredCount: symbolsUnmeasured.length,
+        symbolsUnmeasuredFiles: symbolsUnmeasured.length ? symbolsUnmeasured.slice(0, 10) : undefined,
         verdict:
           atRisk > 0 ? 'unique-work-uncommitted'
             : uniqueSymbols.length > 0 ? 'unique-work-committed'
@@ -263,6 +346,55 @@ export function safeToDelete(scanResult, unique = null) {
   const uniq = unique ?? uniqueWork(scanResult);
   const uniqById = new Map(uniq.map((u) => [u.id, u]));
 
+  // CONTENT-IDENTITY OWNER MAP — path-blind, whitespace-insensitive, one per scan.
+  //
+  // `mergedTree` (the old check here) can only prove redundancy when TWO WORKTREES' ENTIRE
+  // committed state hashes to one git tree oid — the same branch checked out twice. It is blind
+  // to the far more common shape: one new file, present in only one worktree, that a sibling also
+  // added under a DIFFERENT PATH or in a different indentation style. Measured against an
+  // independent 50-language oracle: `feat/alpha/a.py` (4-space indent) and `feat/beta/a.py` (tab
+  // indent) are the SAME work by the oracle's own definition — delete either one and it survives
+  // in the sibling — and mergedTree cannot see the pair because neither the path nor the bytes
+  // match.
+  //
+  // So identity is decided PER FILE, using content-identity.mjs's fingerprint (raw bytes, or a
+  // normalised form insensitive to indentation width/style, line endings, BOM and blank lines —
+  // NEVER to the actual code text, so two different functions sharing a name or a shape cannot
+  // collide here). One owner map, built once, exactly mirrors uniqueWork()'s symbol-owner map:
+  // a file is "held elsewhere" when some OTHER live workstream carries a file with the same
+  // content-identity key, at any path.
+  const live = scanResult.workstreams.filter((w) => w.ok);
+  const fpOwners = new Map(); // content-identity key -> Set(workstream id)
+  for (const w of live) {
+    for (const key of Object.values(w.contentKeys ?? {})) {
+      if (!key) continue; // unreadable or oversized: cannot be matched, the safe direction
+      if (!fpOwners.has(key)) fpOwners.set(key, new Set());
+      fpOwners.get(key).add(w.id);
+    }
+  }
+
+  /**
+   * Does every file in `files` have a content-identity twin in some OTHER live workstream?
+   * Returns the full set of files matched, and every sibling that contributed a match — so a
+   * partial match (one of two files has a twin, the other does not) is visible rather than
+   * forcing an all-or-nothing verdict, and the caller can still decide the count precisely.
+   */
+  function siblingCoverage(w, files) {
+    const owners = new Set();
+    const matchedFiles = [];
+    for (const f of files) {
+      const key = w.contentKeys?.[f];
+      if (!key) continue;
+      const holders = fpOwners.get(key);
+      if (!holders) continue;
+      const others = [...holders].filter((id) => id !== w.id);
+      if (!others.length) continue;
+      matchedFiles.push(f);
+      for (const id of others) owners.add(id);
+    }
+    return { owners: [...owners], matchedFiles, allMatched: files.length > 0 && matchedFiles.length === files.length };
+  }
+
   return scanResult.workstreams.map((w) => {
     if (!w.ok) {
       return { id: w.id, path: w.path, safe: false, confidence: 'unknown', reasons: [w.reason ?? 'not scanned'] };
@@ -296,14 +428,36 @@ export function safeToDelete(scanResult, unique = null) {
     // this reason fires again, and it is refused. The set drains to exactly one survivor by
     // construction, without anyone having to sequence it. `gate` re-scans per invocation and
     // behaves identically.
-    const myTree = w.committed?.mergedTree ?? null;
-    const heldAlsoBy = myTree
-      ? scanResult.workstreams
-        .filter((o) => o.ok && o.id !== w.id && o.committed?.mergedTree === myTree)
-        .map((o) => o.id)
-      : [];
+    // PER-FILE CONTENT IDENTITY, NOT WHOLE-TREE IDENTITY. `w.committed.mergedTree` equality (the
+    // original form of this check) only fires when the worktree's ENTIRE committed state matches
+    // a sibling's at the SAME paths — the same branch checked out twice. `siblingCoverage`
+    // (defined above, over the scan-wide fingerprint owner map) asks the finer question this
+    // worktree's deletion actually turns on: does EVERY committed file have a content-identical
+    // twin in some other live workstream, wherever that twin lives? A worktree whose committed
+    // files are only PARTLY covered is correctly left un-redundant — `allMatched` requires all of
+    // them, so one genuinely unique file among three still blocks the verdict.
+    const committedCoverage = siblingCoverage(w, w.committed?.files ?? []);
+    const heldAlsoBy = committedCoverage.allMatched ? committedCoverage.owners : [];
 
-    if (risk.committedCount > 0 && heldAlsoBy.length === 0) {
+    // BASE CAN BE THE LIVING SIBLING TOO — the same reasoning as `heldAlsoBy` above, aimed at
+    // base instead of another worktree.
+    //
+    // Measured on the 50-language independent-oracle benchmark: 50 of 150 disposable misses were
+    // one worktree per repository whose ENTIRE committed delta was the SAME FILE(S), re-saved
+    // with CRLF line endings. `merge-tree` correctly says "base lacks this exact tree" — a CRLF
+    // byte and an LF byte are different bytes to git — but base holds the identical TEXT, so
+    // nothing here is unique work. scan.mjs computed the conjunction (every file, not some) as
+    // `committed.lineEndingOnlyVsBase`; this is pure computation over that already-proven fact.
+    //
+    // Named 'base' rather than a workstream id, because base is the holder and is not itself a
+    // member of scanResult.workstreams — `gate` and `clean --apply` need nothing more than a
+    // non-empty redundantWith to apply the identical safe-but-refuse-on-gate shape (see
+    // bin/holt.mjs's `gate`), so no new mechanism was needed, only a new holder name.
+    const lineEndingOnlyVsBase = heldAlsoBy.length === 0
+      && risk.committedCount > 0
+      && w.committed?.lineEndingOnlyVsBase === true;
+
+    if (risk.committedCount > 0 && heldAlsoBy.length === 0 && !lineEndingOnlyVsBase) {
       reasons.push(`${risk.committedCount} file(s) base lacks`);
     }
     const uncommittedCount = risk.layers.uncommitted.length + risk.layers.untracked.length;
@@ -348,7 +502,15 @@ export function safeToDelete(scanResult, unique = null) {
     // Nothing downstream could tell the difference, so an extraction that timed out under load
     // became "shares nothing with anyone", and a worktree holding work found nowhere else was
     // reported provably disposable. Refusing costs one manual check; the silence cost the file.
-    const unmeasured = w.symbolsUnmeasured ?? [];
+    // ...UNLESS content identity has already answered the question symbols were going to ask.
+    // Symbols exist here to establish whether this work exists anywhere else; a byte-for-byte
+    // twin in a living sibling is a strictly stronger form of that same answer. A file too large
+    // (or too strange) to tag, whose exact bytes provably live in another worktree, is not
+    // "unmeasured" in any sense that matters to disposal — refusing on it would let a weaker
+    // instrument's failure veto a stronger instrument's success, which is over-refusal wearing a
+    // safety costume. Files NOT covered by content identity keep the full refusal below.
+    const contentProven = new Set(committedCoverage.matchedFiles);
+    const unmeasured = (w.symbolsUnmeasured ?? []).filter((f) => !contentProven.has(f));
     if (unmeasured.length > 0) {
       const sample = unmeasured.slice(0, 3).join(', ');
       reasons.push(`${unmeasured.length} file(s) holt could not read symbols from${sample ? ` (e.g. ${sample})` : ''}`);
@@ -360,10 +522,10 @@ export function safeToDelete(scanResult, unique = null) {
       family: w.family,
       safe: reasons.length === 0,
       // Named, so nobody has to infer it: this worktree is disposable BECAUSE a living sibling
-      // holds the identical content, not because it holds nothing. The distinction matters to a
-      // human reading the report and it is what makes the last-one-standing behaviour legible
-      // rather than surprising.
-      redundantWith: heldAlsoBy.length ? heldAlsoBy : undefined,
+      // (or base itself, see lineEndingOnlyVsBase above) holds the identical content, not
+      // because it holds nothing. The distinction matters to a human reading the report and it
+      // is what makes the last-one-standing behaviour legible rather than surprising.
+      redundantWith: heldAlsoBy.length ? heldAlsoBy : (lineEndingOnlyVsBase ? ['base'] : undefined),
       // Surfaced so protect/clean/render can see a lock holt placed without it counting as a
       // reason the worktree is undeletable. Absent when there is no holt lock.
       holtLocked: holtLocked || undefined,
@@ -374,7 +536,14 @@ export function safeToDelete(scanResult, unique = null) {
         : scanResult.strictReadOnly ? 'approximate' : 'measured',
       unmeasuredFiles: unmeasured.length ? unmeasured.slice(0, 10) : undefined,
       ignoredFiles: ignoredCount ? risk.layers.ignored.slice(0, 10) : undefined,
-      reasons: reasons.length ? reasons : ['no committed delta, no uncommitted changes, no unique symbols'],
+      // The safe-verdict reason must be TRUE of this worktree, and "no committed delta" is false
+      // for a redundant one — it holds a real delta whose every byte a living sibling (or base)
+      // also holds. Every surface (risk, MCP, TUI, graph) prints this string verbatim, so the
+      // false version sat directly next to the contradicting redundantWith field in all of them.
+      reasons: reasons.length ? reasons
+        : (heldAlsoBy.length || lineEndingOnlyVsBase)
+          ? [`committed content is identical to work also held by ${heldAlsoBy.length ? heldAlsoBy.join(', ') : 'base (line endings aside)'}`]
+          : ['no committed delta, no uncommitted changes, no unique symbols'],
     };
   }).sort((a, b) => Number(b.safe) - Number(a.safe));
 }
@@ -606,6 +775,77 @@ function hotspotsFrom(pairs) {
 
 /* -------------------------------------------------------- P3: duplicates ---- */
 
+// A symbol name alone is not evidence once the fan-out is small. discriminativeSymbols()
+// only drops a name carried by more than 25% of LIVE workstreams (floor 3) — by design, so a
+// real fan-out of 4 sharing a helper is not gutted. But that same floor means a name shared by
+// as few as two or three workstreams NEVER crosses it, so it survives as "discriminative"
+// even when it is really just two agents independently reaching for a common, undiscriminating
+// name (`process`, `handler`, `validate`, `run`). No blocklist of common names generalises
+// across languages and codebases; the fix is to require the DECLARED BODIES to actually agree.
+const MAX_BODY_WINDOW_LINES = 40;
+
+// Single-line comment markers across the languages holt's symbol extractor covers: C-family
+// and shell/Python-family (`//`, `#`), Lua/SQL/Haskell/Ada/VHDL/Elm (`--`), Lisp-family (`;`),
+// Erlang/MATLAB (`%`), Fortran (`!`), Vimscript (`"`), plus a JSDoc-style continuation `*` and
+// an OCaml block-open `(*` used as a prefix. NOT exhaustive by design: an unrecognised marker
+// still normalises fine, it just is not stripped, which only makes the equality check MORE
+// conservative (harder to match), never less — so a gap here cannot manufacture a false
+// "these agree", only miss stripping a comment it does not know about.
+const LINE_COMMENT_PREFIX = /^(\/\/|#|--|;|%|!|"|\/\*|\(\*|<!--|\*(?!\/))/;
+
+/**
+ * Is this (already-trimmed) line NOTHING BUT a comment?
+ *
+ * The prefix set above handles every open-ended "rest of the line is a comment" marker. Brace
+ * block comments (Pascal-style `{ ... }`) are handled separately and more strictly — recognised
+ * ONLY when the entire line both starts and ends with the pair — because `{` alone is one of
+ * the most common opening-brace characters across the languages this corpus and holt both
+ * cover, and treating a bare `{` (or a genuine one-line struct/object literal like
+ * `{ port: 8080 }`) as a comment would silently blind the comparison to real code.
+ */
+function isCommentOnlyLine(line) {
+  if (LINE_COMMENT_PREFIX.test(line)) return true;
+  return line.length > 1 && line.startsWith('{') && line.endsWith('}');
+}
+
+/**
+ * The text a matched symbol's own declaration actually spans, best-effort.
+ *
+ * ctags gives a start line and nothing else here (no end-of-scope field is requested — adding
+ * one is a cross-version ctags compatibility risk this fix does not need to take). The window
+ * is bounded by whichever comes first: the next symbol THIS SAME WORKSTREAM added in the same
+ * file (a real boundary, when known), or a fixed cap. Reading the wrong-sized window only
+ * costs precision on this one check, never correctness elsewhere: a body mismatch DROPS a
+ * name from "shared" evidence, it never invents a duplicate that symbol-identity did not
+ * already find.
+ */
+async function readDeclaredBody(workstream, sym, boundariesByFile) {
+  if (!sym?.file || !sym?.line) return null;
+  const text = await readWorktreeFile(workstream.path, sym.file);
+  if (text === null) return null; // unreadable is UNKNOWN, not a mismatch — see the caller's fail-open comment
+  const lines = text.split(/\r\n|\n/);
+  const start = sym.line - 1;
+  if (start < 0 || start >= lines.length) return null;
+
+  if (!boundariesByFile.has(sym.file)) {
+    const bounds = (workstream.added ?? [])
+      .filter((s) => s.file === sym.file && typeof s.line === 'number')
+      .map((s) => s.line)
+      .sort((x, y) => x - y);
+    boundariesByFile.set(sym.file, bounds);
+  }
+  const nextBoundary = boundariesByFile.get(sym.file).find((l) => l > sym.line);
+  const hardEnd = sym.line - 1 + MAX_BODY_WINDOW_LINES;
+  const end = Math.min(nextBoundary ? nextBoundary - 1 : hardEnd, hardEnd, lines.length);
+
+  const normalised = lines
+    .slice(start, Math.max(start + 1, end))
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0 && !isCommentOnlyLine(l))
+    .join('\n');
+  return normalised || null;
+}
+
 /**
  * Two workstreams that built the same thing.
  *
@@ -613,14 +853,43 @@ function hotspotsFrom(pairs) {
  * Same-family duplication is usually expected (a fan-out deliberately samples the same task
  * N times), so it is reported but ranked below cross-family.
  *
- * Symbol-identity is the cheap signal and it is exact. `holt duplicates --deep` additionally
- * runs jscpd (Rabin-Karp token clone detection, 150+ languages, Rust engine) to catch the
- * case symbol-identity misses: the same logic written twice under different names.
+ * Symbol-identity is the cheap signal, but it is a NAME match, not a content match — two agents
+ * independently naming an unrelated function `process` would otherwise be reported as having
+ * built the same thing. So a name is only counted as shared evidence for a PAIR once the
+ * declared bodies behind it agree (whitespace- and comment-insensitive). Neither side being
+ * readable is treated as "cannot disprove", not as a mismatch — this check can only REMOVE a
+ * name from the shared set, never add one that symbol-identity did not already find, so it
+ * cannot manufacture a duplicate and cannot suppress one the old code already proved (e.g. two
+ * byte-identical checkouts of the same commit, whose bodies are trivially equal).
+ *
+ * `holt duplicates --deep` additionally runs jscpd (Rabin-Karp token clone detection, 150+
+ * languages, Rust engine) to catch the case symbol-identity misses even with matching names:
+ * the same logic written twice under completely different names.
  */
-export function duplicates(scanResult, { minShared = 1 } = {}) {
+export async function duplicates(scanResult, { minShared = 1 } = {}) {
   const all = scanResult.workstreams.filter((w) => w.ok);
   const { keep } = discriminativeSymbols(all);
   const live = all.filter((w) => discriminativeKeys(w, keep).length);
+
+  // First occurrence per (workstream, key) — overwhelmingly the common case is exactly one.
+  const symByKey = live.map((w) => {
+    const m = new Map();
+    for (const s of w.added ?? []) {
+      const k = symbolKey(s);
+      if (!m.has(k)) m.set(k, s);
+    }
+    return m;
+  });
+  const boundariesByFile = live.map(() => new Map());
+  const bodyCache = new Map(); // `${index}:${key}` -> normalised body text | null, read once each
+
+  async function declaredBodyFor(i, key) {
+    const cacheKey = `${i}:${key}`;
+    if (bodyCache.has(cacheKey)) return bodyCache.get(cacheKey);
+    const body = await readDeclaredBody(live[i], symByKey[i].get(key), boundariesByFile[i]);
+    bodyCache.set(cacheKey, body);
+    return body;
+  }
 
   const owners = new Map(); // symbolKey -> [index]
   live.forEach((w, i) => {
@@ -636,8 +905,17 @@ export function duplicates(scanResult, { minShared = 1 } = {}) {
     if (idxs.length < 2) continue;
     for (let a = 0; a < idxs.length; a++) {
       for (let b = a + 1; b < idxs.length; b++) {
-        const k = pairKey(idxs[a], idxs[b]);
-        if (!pairs.has(k)) pairs.set(k, { i: Math.min(idxs[a], idxs[b]), j: Math.max(idxs[a], idxs[b]), shared: [] });
+        const i = idxs[a];
+        const j = idxs[b];
+        // eslint-disable-next-line no-await-in-loop -- each (workstream, key) body is cached,
+        // so this awaits a real read only once per unique pair; sequencing keeps the cache simple.
+        const [bodyA, bodyB] = await Promise.all([declaredBodyFor(i, key), declaredBodyFor(j, key)]);
+        // FAIL OPEN ON SILENCE: if either side could not be read, that is unknown, not a
+        // mismatch, so the name still counts. Only a POSITIVE disagreement between two
+        // successfully-read bodies removes it.
+        if (bodyA !== null && bodyB !== null && bodyA !== bodyB) continue;
+        const k = pairKey(i, j);
+        if (!pairs.has(k)) pairs.set(k, { i: Math.min(i, j), j: Math.max(i, j), shared: [] });
         pairs.get(k).shared.push(key);
       }
     }
@@ -720,25 +998,14 @@ export function contextDigest(scanResult, workstreamId, { maxItems = 12 } = {}) 
   contested.sort((a, b) => b.fileCount - a.fileCount);
   alreadyBuilt.sort((a, b) => b.count - a.count);
 
-  // "Sibling" is a NAME-DERIVED claim (see inferFamily in discover.mjs): two directories/branches
-  // whose names match the same pattern, nothing more. It is not evidence the two workstreams are
-  // actually related — a fan-out that names its children `auth-1`/`auth-2` looks identical, by
-  // name alone, to two unrelated tasks that happened to be numbered.
-  //
-  // CONTENT MUST DOMINATE WHEN IT DISAGREES WITH THE NAME. `contested`/`alreadyBuilt` above are
-  // real content evidence (an actual shared touched file or an actual shared symbol) already
-  // computed against EVERY other workstream, family or not — so corroborating a same-family
-  // guess costs nothing extra: a family-mate is only reported as a trusted sibling if it also
-  // shows up in one of those two lists, OR the grouping came from an explicit user override
-  // (a human asserted the relationship, so there is nothing left to corroborate). Family-mates
-  // that clear neither bar are real name matches with ZERO shared content — reported separately,
-  // labelled as an unconfirmed name guess, so nothing downstream (including an agent's own
-  // context) states a naming coincidence as if it were a proven relationship.
-  const evidenceIds = new Set([...contested.map((c) => c.workstream), ...alreadyBuilt.map((a) => a.workstream)]);
-  const familyMates = live.filter((w) => w.family === me.family && w.id !== me.id);
-  const trustFamily = me.familyRule === 'user-override';
-  const siblings = familyMates.filter((w) => trustFamily || evidenceIds.has(w.id)).map((w) => w.id);
-  const unconfirmedSiblings = familyMates.filter((w) => !trustFamily && !evidenceIds.has(w.id)).map((w) => w.id);
+  // "Sibling" means came from the same dispatch — PROVENANCE (fork point + creation time, see
+  // inferFamily/assignFamilies in discover.mjs), not a naming coincidence. `familyRule` says which
+  // method actually produced this workstream's family, so a caller can see WHY two workstreams
+  // are grouped (or ask holt to explain it), but the grouping itself is not hedged here: a sibling
+  // is a sibling. Content evidence (`contestedFiles`/`duplicatedSymbols` below) answers a
+  // different, complementary question — "did they touch the same thing" — and is reported
+  // separately rather than used to second-guess who the dispatch actually contained.
+  const siblings = live.filter((w) => w.family === me.family && w.id !== me.id).map((w) => w.id);
 
   return {
     ok: true,
@@ -746,9 +1013,6 @@ export function contextDigest(scanResult, workstreamId, { maxItems = 12 } = {}) 
     family: me.family,
     familyRule: me.familyRule,
     siblings,
-    // Same name pattern as `me`, but no shared file and no shared symbol found anywhere in the
-    // scan: the grouping is a naming guess only, unconfirmed by any content evidence.
-    unconfirmedSiblings,
     contestedFiles: contested.slice(0, maxItems),
     duplicatedSymbols: alreadyBuilt.slice(0, maxItems),
     advice: buildAdvice(contested, alreadyBuilt),
@@ -925,20 +1189,34 @@ export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups
   const uniqById = new Map(uniq.map((u) => [u.id, u]));
   const safe = new Map(safeToDelete(scanResult, uniq).map((s) => [s.id, s]));
 
-  const nodes = live.map((w) => ({
-    id: w.id,
-    family: w.family,
-    path: w.path,
-    head: w.head ? w.head.slice(0, 8) : null,
-    branch: w.branch,
-    committedFiles: w.committed.count,
-    uncommittedFiles: w.uncommitted.count,
-    addedSymbols: w.stats.addedSymbols,
-    uniqueSymbols: uniqById.get(w.id)?.uniqueSymbolCount ?? 0,
-    uncommittedOnly: uniqById.get(w.id)?.uncommittedOnlyCount ?? 0,
-    safeToDelete: safe.get(w.id)?.safe ?? false,
-    verdict: uniqById.get(w.id)?.verdict ?? 'unknown',
-  }));
+  const nodes = live.map((w) => {
+    // Named so a reader can tell "safe because nothing is here" apart from "safe because a
+    // living sibling holds the identical content" — collapsing those two into one green dot
+    // is how a dashboard tells someone it is fine to delete the only copy of something.
+    //
+    // Only added to the object when non-empty, on purpose: this graph round-trips through
+    // JSON (see graph-html.mjs's DATA payload), and JSON.stringify DROPS an own property whose
+    // value is `undefined` while a plain object literal keeps it — so `redundantWith: maybeUndef`
+    // would make the pre- and post-serialisation node shapes disagree on every workstream that
+    // has no siblings, which is most of them.
+    const redundantWith = safe.get(w.id)?.redundantWith;
+    return {
+      id: w.id,
+      family: w.family,
+      familyRule: w.familyRule,
+      path: w.path,
+      head: w.head ? w.head.slice(0, 8) : null,
+      branch: w.branch,
+      committedFiles: w.committed.count,
+      uncommittedFiles: w.uncommitted.count,
+      addedSymbols: w.stats.addedSymbols,
+      uniqueSymbols: uniqById.get(w.id)?.uniqueSymbolCount ?? 0,
+      uncommittedOnly: uniqById.get(w.id)?.uncommittedOnlyCount ?? 0,
+      safeToDelete: safe.get(w.id)?.safe ?? false,
+      verdict: uniqById.get(w.id)?.verdict ?? 'unknown',
+      ...(redundantWith?.length ? { redundantWith } : {}),
+    };
+  });
 
   const edges = [];
   const families = new Map();
@@ -947,32 +1225,14 @@ export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups
     families.get(n.family).push(n.id);
   }
 
-  // A sibling edge is a NAME match (see inferFamily in discover.mjs), not proof of relatedness.
-  // `corroborated` says whether the two ALSO share real content (a touched file or an added
-  // symbol) — the graph legend and tooltip use this to draw a name-only guess differently from
-  // a confirmed relationship, so a fan-out-shaped name pair with disjoint content is not drawn
-  // identically to two workstreams that actually share work.
-  const byId = new Map(live.map((w) => [w.id, w]));
-  const { keep } = discriminativeSymbols(live);
-  const trustedFamily = new Set(
-    live.filter((w) => w.familyRule === 'user-override').map((w) => w.family),
-  );
-  const corroborates = (aId, bId, family) => {
-    if (trustedFamily.has(family)) return true; // a human asserted this grouping directly
-    const a = byId.get(aId);
-    const b = byId.get(bId);
-    if (!a || !b) return false;
-    if (intersect(setOf(a.touched ?? []), b.touched ?? []).length) return true;
-    return intersect(setOf(discriminativeKeys(a, keep)), discriminativeKeys(b, keep)).length > 0;
-  };
-
+  // A sibling edge means "same dispatch" — decided by provenance (fork point + creation time),
+  // not by naming (see assignFamilies/inferFamily in discover.mjs). `family` on the edge is the
+  // real grouping key; a reader who wants to know HOW it was decided reads `familyRule` off
+  // either endpoint's node (fork+creation-time, name-fallback:*, or user-override).
   for (const [family, ids] of families) {
     if (ids.length < 2) continue;
     for (let i = 1; i < ids.length; i++) {
-      edges.push({
-        type: 'sibling', source: ids[0], target: ids[i], family, weight: 1,
-        corroborated: corroborates(ids[0], ids[i], family),
-      });
+      edges.push({ type: 'sibling', source: ids[0], target: ids[i], family, weight: 1 });
     }
   }
   for (const c of cols) {
@@ -1002,7 +1262,7 @@ export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups
 /** Everything, computed once. The shape every renderer and the MCP server consume. */
 export async function analyze(scanResult, opts = {}) {
   const cols = await collisions(scanResult, opts);
-  const dups = duplicates(scanResult, opts);
+  const dups = await duplicates(scanResult, opts);
   const uniq = uniqueWork(scanResult);
   const safe = safeToDelete(scanResult, uniq);
   // Machine consumers get the FULL evidence (co-located included): sequencing conservatively

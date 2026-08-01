@@ -24,7 +24,7 @@
  * arguments — and an empty variable cannot silently collapse into "no argument at all".
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -292,6 +292,126 @@ export function git(argv, {
   });
 }
 
+/**
+ * Batched, STREAMING object reads: ONE `git cat-file --batch` process answers every spec,
+ * instead of one `git cat-file -p <spec>` PROCESS PER FILE.
+ *
+ * MEASURED (2026-08, --cpu-prof against a synthetic 40k-file repo with a 5,500-file delta):
+ * the per-file form spent 64.7% of wall-clock time inside `spawn` alone — 6,626 of 10,239
+ * sampled hits, one `execFile` per requested file. At kernel-scale file counts (94,852 files,
+ * see BENCHMARKS.md's 16m26s figure) that is the dominant term, not ctags: process-spawn
+ * overhead multiplied by file count. `git cat-file --batch` answers the identical question —
+ * object content by `<oid>:<path>` spec — over one long-lived process fed every spec on stdin,
+ * reading the reply back as a stream of `<sha> <type> <size>\n<payload>\n` records (or
+ * `<spec> missing\n` when the object does not exist at that spec — e.g. a file introduced only
+ * in a workstream and absent at base, the same case the old per-file call treated as "wholly
+ * new").
+ *
+ * STREAMING, not buffer-then-parse: each record is handed to `onRecord` the moment it is fully
+ * received, and the running buffer is trimmed to only the unconsumed tail. Nothing here ever
+ * holds the combined content of the whole batch in memory at once — only the one record
+ * currently in flight — which is the fix for the "something is held whole" RSS growth this
+ * apparatus was built to chase down.
+ *
+ * @param {string[]} specs   git object specs, e.g. `${oid}:${relPath}`, one per requested object
+ * @param {{cwd?: string, timeout?: number}} opts
+ * @param {(spec: string, content: Buffer|null, index: number) => any} onRecord
+ *        called once per spec, in the order `specs` was given. `content` is `null` when the
+ *        object is missing at that spec. May return a Promise; every returned promise is
+ *        awaited before this function resolves, so writes onRecord starts are guaranteed to
+ *        have settled by the time the caller proceeds.
+ * @returns {Promise<void>}
+ */
+export function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } = {}, onRecord) {
+  return new Promise((resolve, reject) => {
+    if (specs.length === 0) { resolve(); return; }
+
+    const verdict = classify(['cat-file', '--batch']);
+    if (!verdict.allowed) {
+      reject(new GitRefused(`holt refused \`git cat-file --batch\`: ${verdict.reason}`));
+      return;
+    }
+
+    const child = spawn('git', ['cat-file', '--batch'], {
+      cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat', LC_ALL: 'C',
+      },
+    });
+
+    let pending = Buffer.alloc(0);
+    let specIdx = 0;
+    /** @type {number|null} */
+    let awaitingSize = null; // non-null while mid-payload for specs[specIdx]
+    const inFlight = [];
+    let settled = false;
+    let stderrText = '';
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      reject(new GitFailed(`git cat-file --batch timed out after ${timeout}ms`, { argv: ['cat-file', '--batch'], stderr: stderrText }));
+    }, timeout);
+
+    // A record header is "<sha> <type> <size>" — sha and type never contain a space, so this
+    // cannot be confused with a "<spec> missing" line UNLESS a spec were deliberately crafted to
+    // look like a valid header, which is no weaker than the equivalent per-file design.
+    const HEADER_RE = /^([0-9a-f]{4,64}) (\S+) (\d+)$/;
+
+    function drain() {
+      for (;;) {
+        if (specIdx >= specs.length) return;
+        if (awaitingSize === null) {
+          const nl = pending.indexOf(0x0a);
+          if (nl === -1) return; // header not fully arrived yet
+          const header = pending.toString('utf8', 0, nl);
+          pending = pending.subarray(nl + 1);
+          const m = header.match(HEADER_RE);
+          if (!m) {
+            inFlight.push(Promise.resolve(onRecord(specs[specIdx], null, specIdx)));
+            specIdx++;
+            continue;
+          }
+          awaitingSize = Number(m[3]);
+        }
+        if (pending.length < awaitingSize + 1) return; // payload + its trailing \n not fully here
+        const content = Buffer.from(pending.subarray(0, awaitingSize)); // copy: don't pin the chunk
+        pending = pending.subarray(awaitingSize + 1);
+        awaitingSize = null;
+        inFlight.push(Promise.resolve(onRecord(specs[specIdx], content, specIdx)));
+        specIdx++;
+      }
+    }
+
+    child.stdout.on('data', (chunk) => {
+      pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
+      drain();
+    });
+    child.stderr.on('data', (d) => { stderrText += d; });
+    child.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new GitFailed(`git cat-file --batch failed to spawn: ${err.message}`, { argv: ['cat-file', '--batch'] }));
+    });
+    child.on('close', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // `resolve` is called with NO argument elsewhere in this executor (this function resolves
+      // `Promise<void>`); passing it directly as `.then()`'s fulfilled handler would hand it
+      // `Promise.all`'s array result instead, which is a real type mismatch, not just a checker
+      // complaint — wrapping it keeps the resolved value what the doc comment promises.
+      Promise.all(inFlight).then(() => resolve(), reject);
+    });
+
+    child.stdin.write(specs.join('\n') + '\n');
+    child.stdin.end();
+  });
+}
+
 /** Run git and throw if it exits non-zero. For calls where non-zero genuinely is a failure. */
 
 /**
@@ -396,6 +516,25 @@ export async function worktreeSnapshot(wsPath, head, { timeout = 60_000, include
 }
 
 let snapCounter = 0;
+
+/**
+ * The text of one worktree file, read directly off disk (working tree state, uncommitted
+ * changes included), or null if it cannot be read as text — missing, a directory, oversized, or
+ * binary. Deliberately narrow: callers that need this treat "cannot read" as UNKNOWN, never as a
+ * mismatch, so this fails toward silence rather than toward a wrong answer.
+ */
+export async function readWorktreeFile(root, relPath) {
+  try {
+    const abs = path.join(root, relPath);
+    const st = await fs.stat(abs);
+    if (!st.isFile() || st.size > 2 * 1024 * 1024) return null;
+    const buf = await fs.readFile(abs);
+    if (buf.includes(0)) return null;
+    return buf.toString('utf8');
+  } catch {
+    return null;
+  }
+}
 
 export async function gitOk(argv, opts) {
   const r = await git(argv, opts);

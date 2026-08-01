@@ -50,6 +50,17 @@ If a worktree is locked, that is holt protecting it. **Do not run `git worktree 
 `remove -f -f` to get past it** — run `holt rescue <id> --release`, which preserves the work
 to a verifiable ref first and then releases the lock.
 
+### The same rule applies one file at a time
+
+A worktree is not the only thing that can hold the only copy of something. An untracked file, a
+modified-but-uncommitted file and a gitignored file are all content **git cannot bring back** —
+so `rm`, `git rm`, `truncate`, `shred`, `mv` out of the tree, `cp`/`tee`/`dd` over it
+and `> file` are refused against those paths exactly as a worktree deletion is. Regenerable
+output (`node_modules/`, `dist/`, `build/`, `coverage/`, `*.log`, lockfiles) and anything
+already committed are never protected, so ordinary cleanup is unaffected. If a refusal names a
+file you truly do not want, commit it, `holt rescue` it, or delete it yourself outside the
+agent — do not look for another verb that gets past the guard.
+
 **Before starting work, check what your siblings are doing:**
 
 ```bash

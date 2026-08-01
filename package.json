@@ -34,8 +34,10 @@
     "test:e2e": "node --test \"test/e2e/*.test.mjs\"",
     "selfcheck": "node bin/holt.mjs doctor",
     "test:mutation": "node test/mutation.mjs",
-    "test:all": "npm test && npm run test:mutation && npm run typecheck",
-    "typecheck": "node scripts/typecheck.mjs"
+    "test:all": "npm test && npm run test:mutation && npm run typecheck && npm run hosts:check",
+    "typecheck": "node scripts/typecheck.mjs",
+    "hosts:generate": "node scripts/generate-hosts.mjs",
+    "hosts:check": "node scripts/generate-hosts.mjs --check"
   },
   "keywords": [
     "git",

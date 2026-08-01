@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contrare Research — Mark System v3</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{
+    background: #0c0d11; color: #c8cad3;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    min-height: 100vh; padding: 80px 24px 120px;
+  }
+  .wrap{ max-width: 1100px; margin: 0 auto; }
+  h1{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 32px; font-weight: 500; letter-spacing: -0.035em;
+    margin-bottom: 10px; color: #e8eaf0;
+  }
+  .sub{ font-size: 15px; color: #6a6e7a; line-height: 1.55; max-width: 620px; margin-bottom: 64px; }
+
+  .concept{
+    background: #131419; border-radius: 16px; padding: 40px 36px;
+    margin-bottom: 56px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+  }
+  .concept-title{
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    letter-spacing: 0.12em; text-transform: uppercase; color: #4a4d5a; margin-bottom: 16px;
+  }
+  .concept-text{ font-size: 15px; line-height: 1.6; color: #9ea1ac; max-width: 680px; }
+  .concept-text strong{ color: #e8eaf0; font-weight: 500; }
+
+  .section-label{
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    letter-spacing: 0.14em; text-transform: uppercase; color: #4a4d5a;
+    margin: 56px 0 24px; padding-bottom: 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+
+  .mark-card{
+    background: #131419; border-radius: 14px; padding: 40px 36px; margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+    display: grid; grid-template-columns: 120px 1fr; gap: 36px; align-items: center;
+  }
+  .mark-display{ display: flex; align-items: center; justify-content: center; width: 120px; height: 120px; }
+  .mark-label{
+    font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #4a4d5a; margin-bottom: 8px;
+  }
+  .mark-name{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 22px; font-weight: 600; letter-spacing: -0.025em; margin-bottom: 12px;
+  }
+  .mark-desc{ font-size: 13.5px; line-height: 1.55; color: #83868f; max-width: 520px; }
+
+  .violet{ color: #a78bfa; }
+  .blue{ color: #60a5fa; }
+  .amber{ color: #fbbf24; }
+  .gold{ color: #f59e0b; }
+
+  .synthesis{
+    background: #131419; border-radius: 16px; padding: 56px 36px; margin-bottom: 20px;
+    text-align: center;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+  }
+  .synthesis .mark-display{ width: 160px; height: 160px; margin: 0 auto 24px; }
+  .synthesis .mark-name{ font-size: 26px; }
+
+  .size-row{
+    display: flex; align-items: flex-end; gap: 32px;
+    background: #131419; border-radius: 14px; padding: 32px 36px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+  }
+  .size-col{ display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .size-tag{ font-family: 'JetBrains Mono', monospace; font-size: 9.5px; color: #4a4d5a; }
+
+  .wordmark-row{
+    background: #131419; border-radius: 14px; padding: 36px; margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+    display: flex; flex-wrap: wrap; gap: 48px; align-items: center;
+  }
+  .wordmark-item{ display: flex; align-items: center; gap: 12px; }
+  .wordmark-text{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 19px; font-weight: 600; letter-spacing: -0.025em; color: #e8eaf0;
+  }
+  .wordmark-text .light{ font-weight: 400; color: #6a6e7a; }
+
+  .on-light{
+    background: #f5f4f1; border-radius: 14px; padding: 36px; margin-bottom: 20px;
+    display: flex; flex-wrap: wrap; gap: 48px; align-items: center;
+  }
+  .on-light .wordmark-text{ color: #1a1b22; }
+  .on-light .wordmark-text .light{ color: #8a8c95; }
+
+  .blind-test{
+    background: #131419; border-radius: 14px; padding: 40px 36px; margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.03);
+  }
+  .blind-test-title{
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    letter-spacing: 0.1em; text-transform: uppercase; color: #4a4d5a; margin-bottom: 24px;
+  }
+  .blind-grid{
+    display: grid; grid-template-columns: repeat(5, 1fr); gap: 24px;
+  }
+  .blind-cell{
+    display: flex; flex-direction: column; align-items: center; gap: 16px;
+    padding: 24px 12px;
+    background: #0c0d11; border-radius: 10px;
+  }
+  .blind-cell .mark-display{ width: 64px; height: 64px; }
+  .blind-q{
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #4a4d5a;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Five distinct marks, one construction language</h1>
+  <p class="sub">Each mark is a completely different form — identifiable without a label. The family resemblance is in the construction: same grid, solid fills, same corner radius, negative space as structure. Not the same shape with variations.</p>
+
+  <div class="concept">
+    <div class="concept-title">The principle</div>
+    <div class="concept-text">
+      <strong>Contrare Research</strong> — a square with one corner inverted. The form is against itself. <strong>ARC</strong> — containment brackets, solid. A harness holds what's inside. <strong>CLIDE</strong> — a split square, one half offset. The divided interface. <strong>Medes</strong> — stacked offset layers. Knowledge with depth. <strong>Holt</strong> — a lock shackle. Protection, immediately. Five forms you could pick out of a lineup blind.
+    </div>
+  </div>
+
+  <!-- BLIND TEST FIRST — can you identify each without a label? -->
+  <div class="section-label">Blind test — which is which?</div>
+  <div class="blind-test">
+    <div class="blind-test-title">No labels. If you can't tell them apart, the marks failed.</div>
+    <div class="blind-grid">
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <path d="M 8 8 L 40 8 L 40 32 L 32 32 L 32 40 L 8 40 Z" fill="#a78bfa"/>
+            <path d="M 32 32 L 40 32 L 40 40 L 32 40 Z" fill="#0c0d11"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <path d="M 10 8 L 18 8 L 18 40 L 10 40 L 10 32 L 14 32 L 14 16 L 10 16 Z" fill="#a78bfa"/>
+            <path d="M 38 8 L 30 8 L 30 40 L 38 40 L 38 32 L 34 32 L 34 16 L 38 16 Z" fill="#a78bfa"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <rect x="8" y="8" width="18" height="32" rx="3" fill="#60a5fa"/>
+            <rect x="26" y="12" width="16" height="28" rx="3" fill="#60a5fa" opacity="0.55"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <rect x="8" y="30" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.4"/>
+            <rect x="12" y="20" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+            <rect x="16" y="10" width="28" height="10" rx="2" fill="#fbbf24"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+      <div class="blind-cell">
+        <div class="mark-display">
+          <svg viewBox="0 0 48 48" width="64" height="64">
+            <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+            <rect x="10" y="34" width="28" height="8" rx="2" fill="#f59e0b"/>
+          </svg>
+        </div>
+        <span class="blind-q">?</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ CONTRARE RESEARCH ============ -->
+  <div class="section-label">Parent — Contrare Research</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <!-- Square with one corner inverted (bottom-right corner pushed inward) -->
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <!-- Main body: square with bottom-right corner cut out -->
+        <path d="M 8 8 L 40 8 L 40 32 L 32 32 L 32 40 L 8 40 Z" fill="#a78bfa"/>
+        <!-- The inverted corner — negative space -->
+        <path d="M 32 32 L 40 32 L 40 40 L 32 40 Z" fill="#0c0d11"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Umbrella · Institute</div>
+      <div class="mark-name violet">Contrare Research</div>
+      <div class="mark-desc">A square with one corner inverted. The bottom-right corner is pushed inward — the form is against itself. One corner breaks the pattern. That's the whole thesis: contrarian, orthogonal, going against the grain of the shape's own logic. The inverted corner is the contrarian position made geometric.</div>
+    </div>
+  </div>
+
+  <!-- ============ ARC ============ -->
+  <div class="section-label">ARC — AI Research Cohort</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <!-- Containment brackets — two solid geometric brackets facing each other -->
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <!-- Left bracket -->
+        <path d="M 10 8 L 18 8 L 18 40 L 10 40 L 10 32 L 14 32 L 14 16 L 10 16 Z" fill="#a78bfa"/>
+        <!-- Right bracket -->
+        <path d="M 38 8 L 30 8 L 30 40 L 38 40 L 38 32 L 34 32 L 34 16 L 38 16 Z" fill="#a78bfa"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Research core</div>
+      <div class="mark-name violet">ARC</div>
+      <div class="mark-desc">Containment brackets. Two solid geometric brackets facing each other with a space between — a harness holds and shapes what's inside. The space isn't empty; it's where the work happens. ARC is the structure that contains the process: the checker, the search, the harness. The brackets are thick and solid — this isn't a suggestion of containment, it IS containment.</div>
+    </div>
+  </div>
+
+  <!-- ============ CLIDE ============ -->
+  <div class="section-label">CLIDE — CLI + IDE</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <!-- Split square with one half offset — the divided terminal/IDE -->
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <!-- Left half (full opacity) -->
+        <rect x="8" y="8" width="18" height="32" rx="3" fill="#60a5fa"/>
+        <!-- Right half (offset down + slightly transparent — the split panel) -->
+        <rect x="26" y="12" width="16" height="28" rx="3" fill="#60a5fa" opacity="0.55"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Interface · Tool</div>
+      <div class="mark-name blue">CLIDE</div>
+      <div class="mark-desc">A split square with one half offset. Two panels — one solid, one slightly back and lighter. That's the split-pane IDE, the divided terminal, the interface that shows you two things at once. The offset is the split; the opacity difference is the focus. You see this mark and you see a tool with panels.</div>
+    </div>
+  </div>
+
+  <!-- ============ MEDES ============ -->
+  <div class="section-label">MEDES — Interactive Textbook</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <!-- Stacked offset layers — pages with depth, recursion -->
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <!-- Bottom layer (faintest) -->
+        <rect x="8" y="30" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.4"/>
+        <!-- Middle layer -->
+        <rect x="12" y="20" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+        <!-- Top layer (full) -->
+        <rect x="16" y="10" width="28" height="10" rx="2" fill="#fbbf24"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Reader · Knowledge</div>
+      <div class="mark-name amber">Medes</div>
+      <div class="mark-desc">Three stacked layers, each offset up and to the right. Pages with depth — or recursive tooltip layers, each revealing the one beneath. The top layer is solid; the ones below fade. That's recursion made visible: you pull on a term, a layer opens, another beneath it, another beneath that. Knowledge that unfolds downward. ARC + Medes = Archimedes: the brackets (ARC) that contain the layers (Medes) of knowledge.</div>
+    </div>
+  </div>
+
+  <!-- ============ HOLT ============ -->
+  <div class="section-label">HOLT — Agent Safety Guardrail</div>
+  <div class="mark-card">
+    <div class="mark-display">
+      <!-- Lock shackle — the U-shaped guard on a base -->
+      <svg viewBox="0 0 48 48" width="96" height="96">
+        <!-- Shackle (U-shape) -->
+        <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+        <!-- Lock body (base bar) -->
+        <rect x="10" y="34" width="28" height="8" rx="2" fill="#f59e0b"/>
+      </svg>
+    </div>
+    <div class="mark-info">
+      <div class="mark-label">Guardrail · Safety</div>
+      <div class="mark-name gold">Holt</div>
+      <div class="mark-desc">A lock shackle — the U-shaped guard on a solid base. You see this and you see security, a padlock, protection. No ambiguity. The shackle is the guardrail; the base is the foundation it protects. Holt locks down what matters. The thickest stroke in the system — because safety should look solid, not delicate.</div>
+    </div>
+  </div>
+
+  <!-- ============ SIZE TEST ============ -->
+  <div class="section-label">Size test — 16 / 24 / 32 / 48 / 64 px</div>
+  <div class="size-row">
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="16" height="16">
+        <path d="M 8 8 L 40 8 L 40 32 L 32 32 L 32 40 L 8 40 Z" fill="#a78bfa"/>
+        <path d="M 32 32 L 40 32 L 40 40 L 32 40 Z" fill="#0c0d11"/>
+      </svg>
+      <span class="size-tag">16</span>
+    </div>
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="24" height="24">
+        <path d="M 10 8 L 18 8 L 18 40 L 10 40 L 10 32 L 14 32 L 14 16 L 10 16 Z" fill="#a78bfa"/>
+        <path d="M 38 8 L 30 8 L 30 40 L 38 40 L 38 32 L 34 32 L 34 16 L 38 16 Z" fill="#a78bfa"/>
+      </svg>
+      <span class="size-tag">24</span>
+    </div>
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="32" height="32">
+        <rect x="8" y="8" width="18" height="32" rx="3" fill="#60a5fa"/>
+        <rect x="26" y="12" width="16" height="28" rx="3" fill="#60a5fa" opacity="0.55"/>
+      </svg>
+      <span class="size-tag">32</span>
+    </div>
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="48" height="48">
+        <rect x="8" y="30" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.4"/>
+        <rect x="12" y="20" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+        <rect x="16" y="10" width="28" height="10" rx="2" fill="#fbbf24"/>
+      </svg>
+      <span class="size-tag">48</span>
+    </div>
+    <div class="size-col">
+      <svg viewBox="0 0 48 48" width="64" height="64">
+        <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+        <rect x="10" y="34" width="28" height="8" rx="2" fill="#f59e0b"/>
+      </svg>
+      <span class="size-tag">64</span>
+    </div>
+  </div>
+
+  <!-- ============ WORDMARK — DARK ============ -->
+  <div class="section-label">Wordmark — dark</div>
+  <div class="wordmark-row">
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 8 8 L 40 8 L 40 32 L 32 32 L 32 40 L 8 40 Z" fill="#a78bfa"/>
+        <path d="M 32 32 L 40 32 L 40 40 L 32 40 Z" fill="#0c0d11"/>
+      </svg>
+      <span class="wordmark-text">Contrare <span class="light">Research</span></span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 10 8 L 18 8 L 18 40 L 10 40 L 10 32 L 14 32 L 14 16 L 10 16 Z" fill="#a78bfa"/>
+        <path d="M 38 8 L 30 8 L 30 40 L 38 40 L 38 32 L 34 32 L 34 16 L 38 16 Z" fill="#a78bfa"/>
+      </svg>
+      <span class="wordmark-text">ARC</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <rect x="8" y="8" width="18" height="32" rx="3" fill="#60a5fa"/>
+        <rect x="26" y="12" width="16" height="28" rx="3" fill="#60a5fa" opacity="0.55"/>
+      </svg>
+      <span class="wordmark-text">CLIDE</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <rect x="8" y="30" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.4"/>
+        <rect x="12" y="20" width="28" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+        <rect x="16" y="10" width="28" height="10" rx="2" fill="#fbbf24"/>
+      </svg>
+      <span class="wordmark-text">Medes</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#f59e0b" stroke-width="5" stroke-linecap="round"/>
+        <rect x="10" y="34" width="28" height="8" rx="2" fill="#f59e0b"/>
+      </svg>
+      <span class="wordmark-text">Holt</span>
+    </div>
+  </div>
+
+  <!-- ============ WORDMARK — LIGHT ============ -->
+  <div class="section-label">Wordmark — light</div>
+  <div class="on-light">
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 8 8 L 40 8 L 40 32 L 32 32 L 32 40 L 8 40 Z" fill="#7c3aed"/>
+        <path d="M 32 32 L 40 32 L 40 40 L 32 40 Z" fill="#f5f4f1"/>
+      </svg>
+      <span class="wordmark-text">Contrare <span class="light">Research</span></span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 10 8 L 18 8 L 18 40 L 10 40 L 10 32 L 14 32 L 14 16 L 10 16 Z" fill="#7c3aed"/>
+        <path d="M 38 8 L 30 8 L 30 40 L 38 40 L 38 32 L 34 32 L 34 16 L 38 16 Z" fill="#7c3aed"/>
+      </svg>
+      <span class="wordmark-text">ARC</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <rect x="8" y="8" width="18" height="32" rx="3" fill="#2563eb"/>
+        <rect x="26" y="12" width="16" height="28" rx="3" fill="#2563eb" opacity="0.55"/>
+      </svg>
+      <span class="wordmark-text">CLIDE</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <rect x="8" y="30" width="28" height="10" rx="2" fill="#d97706" opacity="0.4"/>
+        <rect x="12" y="20" width="28" height="10" rx="2" fill="#d97706" opacity="0.7"/>
+        <rect x="16" y="10" width="28" height="10" rx="2" fill="#d97706"/>
+      </svg>
+      <span class="wordmark-text">Medes</span>
+    </div>
+    <div class="wordmark-item">
+      <svg viewBox="0 0 48 48" width="28" height="28">
+        <path d="M 14 36 L 14 20 Q 14 12 24 12 Q 34 12 34 20 L 34 36" fill="none" stroke="#d97706" stroke-width="5" stroke-linecap="round"/>
+        <rect x="10" y="34" width="28" height="8" rx="2" fill="#d97706"/>
+      </svg>
+      <span class="wordmark-text">Holt</span>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

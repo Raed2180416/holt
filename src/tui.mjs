@@ -25,7 +25,7 @@
  */
 
 import process from 'node:process';
-import { discover } from './discover.mjs';
+import { discover, repoAbsenceError } from './discover.mjs';
 import { scan } from './scan.mjs';
 import { analyze } from './analyze.mjs';
 
@@ -55,6 +55,49 @@ function pad(s, n) {
   return w >= n ? [...str].slice(0, n).join('') : str + ' '.repeat(n - w);
 }
 
+/** Matches exactly the escape sequences `paint()` above can produce — never a prefix of one,
+ *  never a suffix. Used to measure and to truncate text that already carries colour codes
+ *  without ever cutting a sequence in half (see truncateAnsi below). */
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+/** The width a terminal will actually show: escape codes cost zero columns, everything else
+ *  is one code point (see pad() above for why raw .length is not this number). */
+function visibleWidth(s) {
+  return [...String(s).replace(ANSI_RE, '')].length;
+}
+
+/**
+ * Truncate PAINTED text to `width` visible columns without ever slicing an escape sequence in
+ * half. `l.slice(0, width)` on a string that contains `paint()` output counts escape bytes as
+ * if they were visible characters, so on a real repository (long ids, narrow terminals) it
+ * regularly cut inside a code like `\x1b[90m` — the terminal then received a dangling `\x1b[9`
+ * with no terminating letter, which is not text, so a strict verifier that strips ONLY
+ * well-formed sequences (`\x1b\[[0-9;]*m`) sees the raw escape byte leak straight into the
+ * "visible" content. This walks the string keeping every complete escape sequence intact,
+ * counts only real columns against the budget, and always closes with an explicit reset so a
+ * colour started before the cut can never bleed into whatever the caller prints next.
+ */
+function truncateAnsi(s, width) {
+  const str = String(s);
+  if (visibleWidth(str) <= width) return str;
+  const budget = Math.max(0, width - 1);
+  let out = '';
+  let seen = 0;
+  let i = 0;
+  while (i < str.length) {
+    ANSI_RE.lastIndex = i;
+    const m = ANSI_RE.exec(str);
+    if (m && m.index === i) { out += m[0]; i += m[0].length; continue; }
+    if (seen >= budget) break;
+    // codePointAt(i) is only undefined when i is out of range, and the while guard above
+    // already guarantees i < str.length — the fallback is for the type checker, never live.
+    const cp = str.codePointAt(i) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    out += ch; i += ch.length; seen++;
+  }
+  return `${out}…${ansi.reset}`;
+}
+
 /* ----------------------------------------------------------------- model ---- */
 
 const BUCKET = {
@@ -63,6 +106,20 @@ const BUCKET = {
   unknown: { key: 'unknown', label: 'UNKNOWN', colour: 'magenta', order: 2, hint: 'could not assess — treat as unsafe' },
   disposable: { key: 'disposable', label: 'DISPOSABLE', colour: 'green', order: 3, hint: 'provably nothing to lose' },
 };
+
+// The list column's label field must fit the LONGEST label ('DISPOSABLE'), not a width sized
+// for the shortest one ('HOLDS'). A fixed 6 truncated every label but HOLDS to illegibility
+// ('DISPOSABLE' -> 'DISPOS', 'AT RISK' -> 'AT RIS', 'UNKNOWN' -> 'UNKNOW') on every real repo,
+// which is all of them: BUCKET is a closed, known set, so this is computed once, not guessed.
+const LABEL_W = Math.max(...Object.values(BUCKET).map((b) => b.label.length));
+
+/** A workstream is "safe" for two different reasons and a dashboard that draws them identically
+ *  is dangerous: one holds nothing at all, the other holds real committed work that is only
+ *  disposable because a LIVING SIBLING happens to hold the same content right now. Deleting one
+ *  redundant member is fine; deleting all of them at once (bypassing holt, which is exactly what
+ *  a human clearing a screenful of green dots does) destroys the only copy. The list marker and
+ *  the detail pane both need to tell these apart, so this is the one place that decides it. */
+const isRedundantSafe = (row) => row.bucket === 'disposable' && (row.verdict?.redundantWith?.length ?? 0) > 0;
 
 function bucketOf(node, verdict, uniq) {
   if (!verdict || verdict.confidence === 'unknown') return BUCKET.unknown;
@@ -73,7 +130,7 @@ function bucketOf(node, verdict, uniq) {
 
 export async function buildModel(cwd, opts = {}) {
   const disc = await discover(cwd, opts);
-  if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
   const scanned = await scan(disc, opts);
   const report = await analyze(scanned, opts);
 
@@ -88,6 +145,7 @@ export async function buildModel(cwd, opts = {}) {
     return {
       id: n.id,
       family: n.family,
+      familyRule: n.familyRule,
       branch: n.branch,
       head: n.head,
       bucket: bucket.key,
@@ -106,7 +164,7 @@ export async function buildModel(cwd, opts = {}) {
   for (const s of report.safe) {
     if (!rows.some((r) => r.id === s.id) && s.confidence === 'unknown') {
       rows.push({
-        id: s.id, family: '?', branch: null, head: null,
+        id: s.id, family: '?', familyRule: null, branch: null, head: null,
         bucket: 'unknown', bucketMeta: BUCKET.unknown, verdict: s,
         uniq: null, collisions: [], committedFiles: 0, uncommittedFiles: 0,
         addedSymbols: 0, uniqueSymbols: 0,
@@ -143,11 +201,14 @@ export function renderFrame(model, state, size) {
     paint('bold', ' holt ') + paint('grey', '· ') + paint('cyan', model.root)
     + paint('grey', `  base ${report.base.ref}@${report.base.oid.slice(0, 8)}`),
   );
+  const disposableRows = rows.filter((r) => r.bucket === 'disposable');
+  const redundantOnly = disposableRows.filter(isRedundantSafe).length;
   const counts = [
     paint('red', `${rows.filter((r) => r.bucket === 'atRisk').length} at-risk`),
     paint('yellow', `${rows.filter((r) => r.bucket === 'holds').length} holding`),
     paint('magenta', `${rows.filter((r) => r.bucket === 'unknown').length} unknown`),
-    paint('green', `${rows.filter((r) => r.bucket === 'disposable').length} disposable`),
+    paint('green', `${disposableRows.length} disposable`)
+      + (redundantOnly ? paint('grey', ` (${redundantOnly} only because a sibling holds it)`) : ''),
     paint('grey', `${k.collisions} collisions · ${k.duplicatePairs} duplicate pairs`),
   ].join(paint('grey', '  ·  '));
   out.push(` ${counts}`);
@@ -160,8 +221,17 @@ export function renderFrame(model, state, size) {
     let left;
     if (!r) left = ' '.repeat(listW);
     else {
-      const mark = paint(r.bucketMeta.colour, '●');
-      const line = ` ${mark} ${pad(r.id, listW - 10)} ${paint('grey', pad(r.bucketMeta.label, 6))}`;
+      // A redundant-but-safe row gets a HALF disc, not the full one: it is disposable only while
+      // its sibling lives (see isRedundantSafe). A human clearing a screenful of identical green
+      // dots deletes all of them at once — which is exactly how the only copy dies when two
+      // worktrees are each other's only backup. The glyph is the at-a-glance layer; the label
+      // suffix and the detail pane carry the words.
+      const redundant = isRedundantSafe(r);
+      const mark = paint(r.bucketMeta.colour, redundant ? '◐' : '●');
+      // LABEL_W, not a guessed 6 — see the comment on LABEL_W: a fixed 6 truncated every label
+      // but HOLDS into an unreadable stub. The id column absorbs the difference.
+      const label = pad(redundant ? `${r.bucketMeta.label}*` : r.bucketMeta.label, LABEL_W + 1);
+      const line = ` ${mark} ${pad(r.id, listW - LABEL_W - 5)} ${paint('grey', label)}`;
       left = (scroll + i === sel) ? `${ansi.inverse}${line}${ansi.reset}` : line;
     }
     out.push(`${left} ${paint('grey', '│')} ${detail[i] ?? ''}`);
@@ -189,12 +259,21 @@ function detailLines(row, width, height) {
   const L = [];
   const b = row.bucketMeta;
 
+  const redundant = row.verdict?.redundantWith ?? [];
   L.push(paint('bold', row.id) + (row.branch ? paint('grey', `  [${row.branch}]`) : paint('grey', '  (detached)')));
-  L.push(paint(b.colour, `${b.label}`) + paint('grey', ` — ${b.hint}`));
+  // "provably nothing to lose" is TRUE for an empty worktree and FALSE for a redundant one — it
+  // holds real committed work, it is just work a living sibling also holds right now. Saying the
+  // generic hint here is the exact equivalence this pane must not draw.
+  L.push(paint(b.colour, `${b.label}`) + paint('grey', redundant.length
+    ? ` — safe only because a living sibling holds the identical content (${redundant.join(', ')})`
+    : ` — ${b.hint}`));
   L.push('');
   if (row.verdict) {
     L.push(paint('grey', 'verdict   ') + (row.verdict.safe ? paint('green', 'safe to delete') : paint('red', 'do not delete')));
     for (const reason of row.verdict.reasons ?? []) L.push(paint('grey', '          ') + reason);
+  }
+  if (redundant.length) {
+    L.push(paint('grey', 'redundant ') + `identical to work also held by ${redundant.join(', ')}`);
   }
   L.push(paint('grey', 'committed ') + `${row.committedFiles} file(s) base lacks`);
   L.push(paint('grey', 'uncommit  ') + `${row.uncommittedFiles} file(s)`);
@@ -228,7 +307,10 @@ function detailLines(row, width, height) {
     ? 'holt clean --apply would remove this'
     : `holt rescue ${row.id} --release preserves then unlocks`));
 
-  return L.map((l) => l.length > width ? `${l.slice(0, width - 1)}…` : l);
+  // truncateAnsi, never a raw slice: `l.slice(0, width)` counts escape bytes as columns and cuts
+  // colour codes in half — the terminal then receives a dangling `\x1b[9` that is not text, and
+  // the unterminated colour bleeds into every line printed after it. See truncateAnsi's contract.
+  return L.map((l) => truncateAnsi(l, width));
 }
 
 /* ------------------------------------------------------------ interactive ---- */

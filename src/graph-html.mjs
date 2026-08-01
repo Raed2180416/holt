@@ -178,13 +178,14 @@ export function renderHtml(report) {
       <label><input type="checkbox" data-edge="semantic-overlap" checked><span class="swatch" style="border-color:var(--overlap)"></span>same symbol, merges clean</label>
       <label><input type="checkbox" data-edge="predicted" checked><span class="swatch" style="border-color:var(--hold)"></span>predicted conflict</label>
       <label><input type="checkbox" data-edge="duplicate"><span class="swatch" style="border-color:var(--dup);border-top-style:dashed"></span>duplicate work</label>
-      <label><input type="checkbox" data-edge="sibling"><span class="swatch" style="border-color:var(--sibling)"></span>same family (name guess — dashed means no shared content found)</label>
+      <label><input type="checkbox" data-edge="sibling"><span class="swatch" style="border-color:var(--sibling)"></span>same family (same dispatch — see node detail for how holt knows)</label>
     </div>
     <h2>Legend</h2>
     <div class="legend">
       <span><i style="background:var(--risk)"></i>at risk</span>
       <span><i style="background:var(--hold)"></i>unique committed</span>
       <span><i style="background:var(--safe)"></i>disposable</span>
+      <span><i style="background:var(--safe);border:2px dashed var(--dup)"></i>disposable, redundant — a sibling holds the same content, don't remove both at once</span>
       <span><i style="background:var(--muted)"></i>other</span>
     </div>
     <h2>Selection</h2>
@@ -232,6 +233,16 @@ const colorOf = n =>
   : n.uniqueSymbols  > 0 ? 'var(--hold)'
   : n.safeToDelete       ? 'var(--safe)'
   : 'var(--muted)';
+
+// "Safe" is true for two different reasons and drawing them identically is dangerous: one node
+// holds nothing at all, the other holds real committed work that is disposable ONLY because a
+// living sibling holds the identical content RIGHT NOW. Deleting one redundant node is fine;
+// deleting every green node on screen (which is exactly what a solid-green legend invites) takes
+// the sibling with it and destroys the only copy. redundantWith names which sibling(s) it is
+// relying on, so a dashed ring - rather than a second colour, which would collide with the
+// risk/hold/safe vocabulary above - marks a node whose safety is conditional on another node
+// still being on screen.
+const isRedundant = n => n.safeToDelete && Array.isArray(n.redundantWith) && n.redundantWith.length > 0;
 
 // An edge's CLASS is its collision kind where it has one, so the filters map onto the same
 // vocabulary the CLI prints rather than a second, invented one.
@@ -480,24 +491,23 @@ function draw() {
       stroke: st.stroke, 'stroke-width': st.w / Math.max(1, scale * 0.6),
       opacity: on ? st.o : st.o * 0.08,
     };
-    // A sibling edge is a NAME match, not proof. Uncorroborated ones (no shared file or symbol
-    // found anywhere in the scan) are drawn dashed so a naming guess never looks identical to a
-    // relationship backed by actual content.
-    const dash = e.type === 'sibling' && e.corroborated === false ? '2 4' : st.dash;
-    if (dash) attrs['stroke-dasharray'] = dash;
+    if (st.dash) attrs['stroke-dasharray'] = st.dash;
     g.appendChild(svgEl('line', attrs));
   }
 
   // PASS 1 - circles. Drawn first so every label sits on top of every node.
   nodes.forEach((n, i) => {
     const on = lit(i);
-    const circle = svgEl('circle', {
+    const redundant = i !== focus && isRedundant(n);
+    const attrs = {
       class: 'node', cx: n.x.toFixed(1), cy: n.y.toFixed(1), r: n.r.toFixed(1),
-      fill: colorOf(n), stroke: i === focus ? 'var(--fg)' : 'var(--bg)',
-      'stroke-width': i === focus ? 2.5 : 1.5, opacity: on ? 1 : 0.12,
-    });
+      fill: colorOf(n), stroke: i === focus ? 'var(--fg)' : redundant ? 'var(--dup)' : 'var(--bg)',
+      'stroke-width': i === focus ? 2.5 : redundant ? 2 : 1.5, opacity: on ? 1 : 0.12,
+    };
+    if (redundant) attrs['stroke-dasharray'] = '3 2';
+    const circle = svgEl('circle', attrs);
     const tip = svgEl('title', {});
-    tip.textContent = n.id;
+    tip.textContent = n.id + (isRedundant(n) ? ' (redundant with ' + n.redundantWith.join(', ') + ')' : '');
     circle.appendChild(tip);
     g.appendChild(circle);
   });
@@ -557,7 +567,7 @@ function describe(i) {
   detail.textContent =
     n.id + '\\n' +
     '─'.repeat(Math.min(34, n.id.length)) + '\\n' +
-    'family      ' + n.family + '\\n' +
+    'family      ' + n.family + ' (' + (n.familyRule || '?') + ')\\n' +
     'head        ' + (n.head || '—') + '\\n' +
     'branch      ' + (n.branch || '(detached)') + '\\n' +
     'verdict     ' + n.verdict + '\\n\\n' +
@@ -566,11 +576,13 @@ function describe(i) {
     'added       ' + n.addedSymbols + ' symbol(s)\\n' +
     'unique      ' + n.uniqueSymbols + ' symbol(s)\\n' +
     'at risk     ' + n.uncommittedOnly + ' uncommitted-only\\n' +
-    'disposable  ' + (n.safeToDelete ? 'yes' : 'no') + '\\n\\n' +
+    'disposable  ' + (n.safeToDelete ? 'yes' : 'no') +
+      (n.redundantWith && n.redundantWith.length
+        ? '  (ONLY because: ' + n.redundantWith.join(', ') + ' — do not remove all of these together)'
+        : '') + '\\n\\n' +
     'edges (' + rel.length + ')\\n' +
     rel.slice(0, 14).map(e =>
       '  ' + String(e.kind || e.type).padEnd(18) + (e.source === n.id ? e.target : e.source) +
-      (e.type === 'sibling' && e.corroborated === false ? '  [name guess — no shared content]' : '') +
       (e.why ? '\\n     ' + e.why : '')).join('\\n');
 }
 

@@ -33,7 +33,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
-import { discover } from '../discover.mjs';
+import { discover, repoAbsenceError } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze, contextDigest } from '../analyze.mjs';
 import { landingOrder } from '../order.mjs';
@@ -73,11 +73,7 @@ async function getReport(cwd, opts = {}, { fresh = false } = {}) {
     return { ...hit.value, _ageMs: now - hit.at };
   }
   const disc = await discover(cwd, opts);
-  if (!disc.root) {
-    const e = new Error(`not a git repository: ${cwd}`);
-    e.code = 'ENOTREPO';
-    throw e;
-  }
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
   const scanned = await scan(disc, opts);
   const report = await analyze(scanned, opts);
   const value = { report, scanned };
@@ -324,6 +320,12 @@ async function handle(name, args) {
         collisions: report.counts.collisions,
         duplicatePairs: report.counts.duplicatePairs,
         disposable: report.counts.safeToDelete,
+        // "Disposable" spans two materially different situations, and an agent deciding what to
+        // delete must be able to tell them apart: a worktree holding NOTHING, and a worktree
+        // whose content a LIVING SIBLING also holds. The second is safe only while the sibling
+        // lives — `clean --apply` re-verifies before each removal so a redundant set drains to
+        // exactly one survivor. Collapsing the two into one number invites "delete all N".
+        disposableRedundant: report.safe.filter((s) => s.safe && s.redundantWith?.length).length || undefined,
         reviewQueue: `${r.total} workstreams -> drop ${r.dropped}, collapse ${r.collapsed} -> ${r.toReview} to review`,
         topRisks: report.unique.filter((u) => u.uncommittedOnlyCount > 0).slice(0, 3).map(compactUnique),
         skipped: report.skipped.length
@@ -412,12 +414,12 @@ async function handle(name, args) {
       return {
         workstream: d.workstream,
         family: d.family,
+        // How `family` was decided: 'fork+creation-time' (git provenance — the normal case),
+        // 'name-fallback:<pattern>' (provenance unavailable, fell back to directory/branch
+        // naming), or 'user-override' (an explicit human regex). See assignFamilies in
+        // discover.mjs.
+        familyRule: d.familyRule,
         siblings: d.siblings,
-        // Family is a NAME match (branch/directory naming pattern), not content evidence. These
-        // share the pattern but shared no file or symbol anywhere in the scan — a naming guess,
-        // not a confirmed relationship. Kept separate from `siblings` so a caller cannot mistake
-        // one for the other.
-        unconfirmedSiblings: d.unconfirmedSiblings,
         advice: d.advice,
         alreadyBuiltElsewhere: d.duplicatedSymbols.map((x) => ({
           workstream: x.workstream, symbols: x.symbols.slice(0, 5), count: x.count,

@@ -6,7 +6,10 @@
  * what's redundant, what collides, what's safe to delete, and what you're about to lose.
  */
 
-export { discover, inferFamily, parseWorktreePorcelain } from './discover.mjs';
+export {
+  discover, inferFamily, assignFamilies, DEFAULT_FAMILY_WINDOW_MS, parseWorktreePorcelain,
+  repoAbsenceError,
+} from './discover.mjs';
 export { scan, resolveBase, looksGenerated } from './scan.mjs';
 export {
   analyze, uniqueWork, safeToDelete, collisions, duplicates,
@@ -19,7 +22,7 @@ export {
 } from './symbols.mjs';
 export { deepDuplicates, detectJscpd } from './deep.mjs';
 
-import { discover } from './discover.mjs';
+import { discover, repoAbsenceError as _repoAbsenceError } from './discover.mjs';
 import { scan } from './scan.mjs';
 import { analyze } from './analyze.mjs';
 
@@ -33,8 +36,9 @@ import { analyze } from './analyze.mjs';
 export async function inspect(cwd = process.cwd(), opts = {}) {
   const disc = await discover(cwd, opts);
   if (!disc.root) {
-    const err = new Error(`holt: not a git repository (searched from ${cwd})`);
-    err.code = 'ENOTREPO';
+    const base = _repoAbsenceError(disc, cwd);
+    const err = new Error(disc.bare ? base.message : `holt: not a git repository (searched from ${cwd})`);
+    err.code = base.code;
     throw err;
   }
   const scanned = await scan(disc, opts);

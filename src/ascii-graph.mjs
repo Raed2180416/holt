@@ -60,6 +60,12 @@ export function clusters(report) {
         if (m < n) edges.push({ a: m, b: n, why: [...whys] });
       }
     }
+    // Most-actionable first: a PROVEN conflict is something to actually resolve; "duplicate
+    // work" alone is the least urgent of the three kinds this graph draws. This is the order
+    // renderClusters shows edges in, and it decides which ones survive the cap below when a
+    // tangle is large enough that not all of them can be shown.
+    const rank = (whys) => (whys.includes('conflict') ? 2 : whys.includes('likely conflict') ? 1 : 0);
+    edges.sort((x, y) => rank(y.why) - rank(x.why) || x.a.localeCompare(y.a) || x.b.localeCompare(y.b));
     out.push({ members, edges, entangled: members.length > 1 });
   }
   // Biggest tangles first — that is what needs attention.
@@ -71,13 +77,30 @@ export function clusters(report) {
  * Render clusters as indented text.
  * @param {(color:string, s:string)=>string} paint  colouring hook (identity in --no-color/tests)
  */
+// A tangle's edge list is bounded, not dumped whole. Measured against holt's own repository (a
+// genuinely hard case: 29 worktrees, 73 collisions): one 15-member tangle produced 84 pairwise
+// edge lines, almost all of them a near-identical restatement of "conflict, duplicate work" —
+// exactly the failure this file's own header comment warns against ("a 200x200 matrix"), just
+// triggered by density inside ONE component instead of by component count. Capping is silent
+// unless it says what it cut, which is the same rule the rest of holt's output already follows
+// (see render.mjs's "… and N more" pattern) — an unmarked bound reads as complete coverage.
+const MAX_EDGES_PER_TANGLE = 16;
+
 export function renderClusters(report, paint = (_c, s) => s) {
   const groups = clusters(report);
   const risky = new Set((report.unique ?? []).filter((u) => u.uncommittedOnlyCount > 0).map((u) => u.id));
-  const disposable = new Set((report.safe ?? []).filter((s) => s.safe).map((s) => s.id));
+  const safeRecords = report.safe ?? [];
+  const disposable = new Set(safeRecords.filter((s) => s.safe).map((s) => s.id));
+  // Safe for two different reasons, and drawing them with the same glyph is dangerous: one
+  // worktree holds nothing at all, the other holds real committed work that is disposable ONLY
+  // because a LIVING SIBLING currently holds the identical content (see analyze.mjs's
+  // `redundantWith`). Landing/removing every hollow-marked member of a tangle at once would take
+  // the sibling with it and destroy the only copy — the same distinction the TUI and the HTML
+  // graph now both draw, so this is the third and last surface that needs to stop hiding it.
+  const redundant = new Set(safeRecords.filter((s) => s.safe && s.redundantWith?.length).map((s) => s.id));
 
   const mark = (id) => (risky.has(id) ? paint('red', '●')
-    : disposable.has(id) ? paint('green', '○')
+    : disposable.has(id) ? (redundant.has(id) ? paint('green', '◐') : paint('green', '○'))
       : paint('yellow', '●'));
 
   const lines = [];
@@ -89,8 +112,15 @@ export function renderClusters(report, paint = (_c, s) => s) {
     for (const g of tangles) {
       lines.push('');
       for (const id of g.members) lines.push(`    ${mark(id)} ${id}`);
-      for (const e of g.edges) {
+      const shown = g.edges.slice(0, MAX_EDGES_PER_TANGLE);
+      for (const e of shown) {
         lines.push(paint('grey', `      ${e.a} ── ${e.b}   ${e.why.join(', ')}`));
+      }
+      const hidden = g.edges.length - shown.length;
+      if (hidden > 0) {
+        lines.push(paint('grey',
+          `      … and ${hidden} more relationship(s) among these ${g.members.length} — ` +
+          `\`holt collisions\` lists every pair`));
       }
     }
   }
@@ -105,7 +135,8 @@ export function renderClusters(report, paint = (_c, s) => s) {
   if (!lines.length) lines.push(paint('grey', 'no workstreams to relate'));
 
   lines.push('');
-  const legend = `  ${paint('red', '●')} at risk   ${paint('yellow', '●')} holds work   ${paint('green', '○')} disposable`;
+  const legend = `  ${paint('red', '●')} at risk   ${paint('yellow', '●')} holds work   ${paint('green', '○')} disposable` +
+    `   ${paint('green', '◐')} disposable, redundant (a sibling holds the same content — don't remove both)`;
   lines.push(paint('grey', legend));
   return lines.join('\n');
 }

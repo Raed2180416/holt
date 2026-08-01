@@ -21,7 +21,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git, gitOk, pmap, authorEnv } from './git.mjs';
-import { discover, isHoltLock, unquotePorcelain } from './discover.mjs';
+import { discover, isHoltLock, unquotePorcelain, repoAbsenceError } from './discover.mjs';
 import {
   underOrEqualAsync, relativeWithinAsync, relativeLinkAwareAsync, canonicalPath, samePathSync,
 } from './paths.mjs';
@@ -96,7 +96,7 @@ function withJournalWarning(result, failures) {
 /** One scan shared by every action, so protect/rescue/clean cannot disagree with each other. */
 async function assess(cwd, opts = {}) {
   const disc = await discover(cwd, opts);
-  if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
   const scanned = await scan(disc, opts);
   const report = await analyze(scanned, opts);
   return { disc, scanned, report };
@@ -635,7 +635,7 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
   if (!list.length) return { ok: false, error: 'discard needs at least one path' };
 
   const disc = await discover(cwd, opts);
-  if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
 
   // Every path must sit inside ONE worktree: the capture is a tree built in that worktree's
   // index, and silently splitting a discard across two of them would produce two half-captures.

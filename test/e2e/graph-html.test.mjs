@@ -510,3 +510,91 @@ test('GRAPH LEGIBILITY: no label is drawn on top of another', async (t) => {
   assert.deepEqual(clashes, [],
     `these labels are drawn on top of each other, which is what made the graph unreadable:\n  ${clashes.join('\n  ')}`);
 });
+
+/**
+ * THE DEFECT THIS PINS: a workstream that is `safeToDelete` because it holds nothing at all and
+ * one that is `safeToDelete` ONLY because a living sibling holds the identical content
+ * (`redundantWith`) rendered as the exact same solid-green circle — same fill, same stroke, no
+ * distinguishing mark of any kind, and `redundantWith` was not even present in the payload the
+ * page receives. A person clearing every green node on screen would take the sibling with it and
+ * destroy the only copy.
+ */
+test('GRAPH REDUNDANCY: a redundant-but-safe node is visually and structurally distinct from an empty one', async (t) => {
+  const fx = await newRepo('graph-redundant');
+  t.after(() => fx.cleanup());
+
+  const twinA = await fx.worktree('twin-a');
+  await fs.writeFile(path.join(twinA, 'shared-feature.js'), 'export function SHARED_WORK() { return 7; }\n');
+  await fx.git(['add', '-A'], twinA);
+  await fx.git(['commit', '-q', '-m', 'twin-a: the same work'], twinA);
+
+  const twinB = await fx.worktree('twin-b');
+  await fs.writeFile(path.join(twinB, 'shared-feature.js'), 'export function SHARED_WORK() { return 7; }\n');
+  await fx.git(['add', '-A'], twinB);
+  await fx.git(['commit', '-q', '-m', 'twin-b: the same work, again'], twinB);
+
+  await fx.worktree('genuinely-empty');
+
+  const report = await inspect(fx.root, {});
+  const html = renderHtml(report);
+  const data = JSON.parse(dataLiteral(html));
+  const byId = new Map(data.nodes.map((n) => [n.id, n]));
+  const twinANode = byId.get('twin-a');
+  const emptyNode = byId.get('genuinely-empty');
+
+  // NON-VACUITY FIRST.
+  assert.equal(twinANode.safeToDelete, true, `setup: ${JSON.stringify(twinANode)}`);
+  assert.equal(emptyNode.safeToDelete, true, `setup: ${JSON.stringify(emptyNode)}`);
+  assert.ok(Array.isArray(twinANode.redundantWith) && twinANode.redundantWith.includes('twin-b'),
+    `twin-a must carry redundantWith naming its sibling, or nothing below is tested: ${JSON.stringify(twinANode)}`);
+  assert.ok(!emptyNode.redundantWith,
+    `genuinely-empty must NOT carry redundantWith, or this is not the negative control: ${JSON.stringify(emptyNode)}`);
+
+  // Run the page's own script and check the rendered circle attributes for both nodes.
+  const created = [];
+  const makeEl = (name) => {
+    const el = {
+      tagName: name, attrs: {}, children: [], text: '',
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      appendChild(c) { this.children.push(c); return c; },
+      replaceChildren(...c) { this.children = c; },
+      addEventListener() {}, removeEventListener() {}, setPointerCapture() {},
+      getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 700 }; },
+      classList: { add() {}, remove() {} },
+      set textContent(v) { this.text = String(v); this.children.length = 0; },
+      get textContent() { return this.text; },
+      get dataset() { return {}; },
+      get clientWidth() { return 1000; },
+      get clientHeight() { return 700; },
+      querySelectorAll() { return []; },
+    };
+    created.push(el);
+    return el;
+  };
+  const stage = makeEl('div');
+  const document = {
+    createElementNS: (_ns, name) => makeEl(name),
+    getElementById: (id) => (id === 'stage' ? stage : makeEl('div')),
+    querySelectorAll: () => [],
+    get activeElement() { return null; },
+  };
+  let frames = 0;
+  const raf = (fn) => { if (frames++ < 400) fn(); return frames; };
+  const body = scriptBody(html);
+  const src = body.slice(0, body.lastIndexOf('</script>'));
+  new Function('document', 'addEventListener', 'setTimeout', 'clearTimeout',
+    'requestAnimationFrame', 'Math', src)(document, () => {}, () => 0, () => {}, raf, Math);
+
+  const circles = created.filter((e) => e.tagName === 'circle');
+  const circleFor = (id) => circles.find((c) => c.children.some((k) => k.tagName === 'title' && k.text.startsWith(id)));
+  const twinCircle = circleFor('twin-a');
+  const emptyCircle = circleFor('genuinely-empty');
+  assert.ok(twinCircle && emptyCircle, 'both nodes must actually be drawn, or nothing below is tested');
+
+  assert.notEqual(twinCircle.attrs['stroke-dasharray'], emptyCircle.attrs['stroke-dasharray'],
+    `a redundant-safe node and a genuinely empty node drew identical strokes: ${JSON.stringify({
+      twin: twinCircle.attrs, empty: emptyCircle.attrs,
+    })}`);
+  assert.equal(twinCircle.attrs.fill, emptyCircle.attrs.fill,
+    'both are still legitimately "safe" and should share the same fill colour — only the ring differs');
+});

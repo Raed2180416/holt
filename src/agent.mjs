@@ -33,7 +33,7 @@ import {
   underOrEqualAsync, canonicalPath, foldCase, CASE_INSENSITIVE_FS,
   samePathSync, underOrEqualSync, relativeWithinAsync,
 } from './paths.mjs';
-import { discover } from './discover.mjs';
+import { discover, repoAbsenceError } from './discover.mjs';
 import { scan, atRiskFiles, atRiskFromStatus } from './scan.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
 import { scratchDir } from './symbols.mjs';
@@ -71,7 +71,7 @@ function cachePath(root) {
 
 export async function cachedReport(cwd, opts = {}) {
   const disc = await discover(cwd, opts);
-  if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
 
   const fp = await fingerprint(disc.root);
   const file = cachePath(disc.root);
@@ -114,6 +114,43 @@ const GIT_GLOBALS = '(?:-[cC]\\s+\\S+\\s+|--(?:git-dir|work-tree|namespace|exec-
   // `git reset HEAD .` was allowed, which is the kind of inconsistency that teaches a developer
   // the whole layer is arbitrary.
   const unstageOnly = (c) => /\brestore\b/.test(c) && /--staged\b/.test(c) && !/--worktree\b/.test(c);
+
+/**
+ * Does this `git stash` invocation carry a PATHSPEC?
+ *
+ * `git stash push -- <path>` (or `git stash <path>`, or `git stash -u -- <path>`) scopes the
+ * sweep to exactly the paths named — the invoker chose them, so the blast radius is bounded and
+ * deliberate, unlike a bare `git stash` which takes everything uncommitted in the worktree
+ * without anyone having asked for that specific file. `git stash save <message>` is the one
+ * exception: `save` has NO pathspec support at all (git-stash(1)) — its trailing words are a
+ * commit message, never a path — so it is always unscoped, however many words follow it.
+ *
+ * A token scan, not a full parser: the only option `stash push` takes that consumes a VALUE is
+ * `-m`/`--message`; every other flag is boolean and skipped whole. `--` marks the start of
+ * pathspecs unambiguously; without it, the first bare (non-flag) token is one.
+ */
+function stashHasPathspec(command) {
+  const m = new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\b\\s*([\\s\\S]*)`).exec(String(command ?? ''));
+  if (!m) return false;
+  // Stop at the next shell separator so a LATER command is never read as this stash's own args.
+  const rest = m[1].split(/&&|\|\||[;&|\n]/)[0];
+  const tokens = rest.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+
+  let i = 0;
+  if (tokens[0] === 'push') i = 1;
+  else if (tokens[0] === 'save') return false; // save never takes a pathspec — always the whole tree
+
+  for (; i < tokens.length; i++) {
+    const t = tokens[i].replace(/^['"]|['"]$/g, '');
+    if (t === '--') return tokens.slice(i + 1).length > 0;
+    if (/^-/.test(t)) {
+      if (/^(-m|--message)$/.test(t)) i++; // consumes its value, never a path
+      continue;
+    }
+    return true; // a bare operand with no preceding '--': git treats it as a pathspec
+  }
+  return false;
+}
 
 const DESTRUCTIVE = [
   // DISARMING THE PROTECTION IS ITSELF A DESTRUCTIVE ACT.
@@ -188,10 +225,54 @@ const DESTRUCTIVE = [
   // the loss path is exactly these verbs, and they were the one part of it left unguarded. They
   // are as final as `reset --hard`, which has been in this table from the beginning.
   //
-  // `pop` is included because it is `apply` plus `drop`: a pop that hits a conflict can leave the
-  // entry dropped with the content unapplied. `list`, `show` and `apply` are reads and stay out.
+  // `list`, `show` and `apply` are reads and stay out entirely.
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+(?:drop|clear)\\b`), kind: 'git stash drop/clear (destroys stashed work)', cwdTarget: true, all: true },
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+pop\\b`), kind: 'git stash pop (drops the entry even if applying fails)', cwdTarget: true, all: true },
+
+  // POP IS THE RECOVERY ACTION, AND A FLAT DENY ON IT WAS THE OVER-REFUSAL THAT MADE TONIGHT'S
+  // INCIDENT WORSE: an agent that had just had eleven siblings' work swept into the stash by a
+  // bare `git stash` was then BLOCKED from putting any of it back with `pop`. Its actual risk is
+  // narrow — a pop that hits a conflict can drop the entry with the content left unapplied — and
+  // `apply` does everything `pop` does except that one unsafe last step. So the honest verdict is
+  // `ask`, evidence-gated exactly like every other rule here (still `all: true`: the entry being
+  // popped may belong to ANY worktree sharing this repository's one `refs/stash`, not only the
+  // one `pop` is run from), never hardened into a refusal that blocks the only way back.
+  {
+    re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+pop\\b`),
+    kind: 'git stash pop (drops the entry even if applying fails)',
+    cwdTarget: true,
+    all: true,
+    verdict: 'ask',
+    recovery: '`git stash apply` does everything `pop` does except drop the entry afterward — '
+      + 'the same content back, without the one step that can lose it on a conflict.',
+  },
+
+  // BARE `stash` / `stash push` / `stash save` WITH NO PATHSPEC SWEEP THE WHOLE WORKTREE, AND
+  // THIS IS THE COMMAND THAT ACTUALLY CAUSED TONIGHT'S INCIDENT: run in a working tree several
+  // agents were editing at once, it took every one of their uncommitted edits into a single stash
+  // entry — the working tree went clean and none of them had been asked. It was let straight
+  // through before because a stash IS recoverable; "recoverable if you know to look" is not
+  // "safe to run without asking", which is the same reasoning gap `checkout`/`restore` above
+  // closed for the working tree and stash never got.
+  //
+  // So it goes through the SAME evidence engine as `reset --hard` and `clean -fd`: a clean
+  // worktree has nothing to sweep and the verdict is a silent allow, and a worktree holding
+  // uncommitted-only work gets `ask` — never a flat deny, because stashing is ordinary, everyday,
+  // legitimate work and refusing it outright is the opposite failure this whole fix is against.
+  //
+  // A PATHSPEC NARROWS THE BLAST RADIUS ON PURPOSE: `git stash push -- <path>` sweeps only the
+  // files named, chosen by the invoker, so it is the scoped and deliberate act it looks like and
+  // is left alone entirely (see `stashHasPathspec`). `save` is excluded from that exemption: it
+  // has NO pathspec support at all, so its trailing words are a message, never a path, and it is
+  // always treated as sweeping everything.
+  {
+    re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\b(?!\\s+(?:apply|list|show|branch|create|store|pop|drop|clear)\\b)`),
+    kind: 'git stash / stash push (sweeps every uncommitted change in this worktree into the shared stash)',
+    cwdTarget: true,
+    verdict: 'ask',
+    recovery: '`git stash list` shows what just got queued, and `git stash apply` restores the '
+      + 'most recent entry without dropping it.',
+    unless: (c) => stashHasPathspec(c),
+  },
 
   // ---- THE SAME ACTS, SPELLED FOR WINDOWS -------------------------------------------------
   // Every rule above is POSIX. On Windows the default shell of most agent hosts is PowerShell or
@@ -357,14 +438,23 @@ const INLINE_CODE_FLAGS = new Set(['-e', '-c', '--eval', '-E', '--exec', '-p', '
  * recogniser for the common case, not an attempt to understand arbitrary code.
  */
 const INLINE_DESTRUCTIVE = [
-  { re: /\brmSync\s*\(|\brmdirSync\s*\(|\bunlinkSync\s*\(|\bfs\s*\.\s*(rm|rmdir|unlink)\s*\(/, what: 'a filesystem remove' },
-  { re: /\bshutil\s*\.\s*rmtree\s*\(|\bos\s*\.\s*(remove|unlink|rmdir)\s*\(/, what: 'a filesystem remove' },
+  { re: /\brmSync\s*\(|\brmdirSync\s*\(|\bunlinkSync\s*\(|\bfs\s*\.\s*(rm|rmdir|unlink)\s*\(/, what: 'a filesystem remove', role: 'remove' },
+  { re: /\bshutil\s*\.\s*rmtree\s*\(|\bos\s*\.\s*(remove|unlink|rmdir)\s*\(/, what: 'a filesystem remove', role: 'remove' },
   // perl and ruby spell these with no namespace at all, which is how `perl -e "unlink('…')"`
   // walked past a list that only knew the JS and Python forms.
-  { re: /\bunlink\s*\(|\brmtree\s*\(|\bremove_entry\s*\(|\bFileUtils\s*\.\s*rm_(rf|r|f)?\b/, what: 'a filesystem remove' },
-  { re: /\btruncateSync\s*\(|\bwriteFileSync\s*\(/, what: 'a filesystem overwrite' },
-  { re: /\bos\s*\.\s*system\s*\(|\bsubprocess\s*\.|\bchild_process\b|\bexecSync\s*\(/, what: 'a shelled-out command' },
-  { re: /\bFile\s*\.\s*delete\b|\bFileUtils\s*\.\s*rm/, what: 'a filesystem remove' },
+  { re: /\bunlink\s*\(|\brmtree\s*\(|\bremove_entry\s*\(|\bFileUtils\s*\.\s*rm_(rf|r|f)?\b/, what: 'a filesystem remove', role: 'remove' },
+  // OVERWRITE IS ITS OWN ROLE, NOT A REMOVE. The old bytes are equally gone, so a target whose
+  // only copy is uncommitted still deserves a guard — but writing a file is also the everyday act
+  // of editing, performed constantly by legitimate scripts against files they own. Classifying it
+  // through the same `rm -rf` proxy as a remove produced verdicts that were wrong in BOTH fields:
+  // the label claimed "rm (deletes the file)" about a write, and the decision was a flat deny —
+  // measured live, twice in one session, each time blocking a script from editing the very file
+  // its author was working on. A guard that misdescribes what it saw teaches the reader to
+  // distrust every other message it prints. Overwrites of at-risk files resolve to ASK, with a
+  // label that says overwrite.
+  { re: /\btruncateSync\s*\(|\bwriteFileSync\s*\(/, what: 'a filesystem overwrite', role: 'overwrite' },
+  { re: /\bos\s*\.\s*system\s*\(|\bsubprocess\s*\.|\bchild_process\b|\bexecSync\s*\(/, what: 'a shelled-out command', role: 'shell' },
+  { re: /\bFile\s*\.\s*delete\b|\bFileUtils\s*\.\s*rm/, what: 'a filesystem remove', role: 'remove' },
 ];
 
 /**
@@ -456,10 +546,11 @@ export function indirectVerb(command) {
       for (let i = 1; i < w.length; i++) {
         if (!INLINE_CODE_FLAGS.has(w[i]) || !w[i + 1]) continue;
         const code = w[i + 1];
-        for (const { re, what } of INLINE_DESTRUCTIVE) {
+        for (const { re, what, role } of INLINE_DESTRUCTIVE) {
           if (!re.test(code)) continue;
           return {
             kind: `${verb} ${w[i]} performing ${what}`,
+            inlineRole: role,
             inlineStrings: inlineStrings(code),
           };
         }
@@ -498,7 +589,7 @@ export function indirectVerb(command) {
 export function classifyCommand(command) {
   if (typeof command !== 'string' || !command.trim()) return null;
   const masked = maskedRegions(command);
-  for (const { re, kind, all, cwdTarget, unless } of DESTRUCTIVE) {
+  for (const { re, kind, all, cwdTarget, unless, verdict, recovery } of DESTRUCTIVE) {
     // A rule may declare an exemption that is not expressible as "the pattern should not have
     // matched", because it depends on ANOTHER flag elsewhere in the command — `--dry-run` on a
     // clean, `--staged` without `--worktree` on a restore. Encoding those as negative lookaheads
@@ -518,6 +609,12 @@ export function classifyCommand(command) {
         target: m.groups?.target ? m.groups.target.replace(/^['"]|['"]$/g, '') : null,
         all: !!all,
         cwdTarget: !!cwdTarget,
+        // A rule may cap its OWN verdict below the table's default 'deny' — stash is recoverable
+        // (the content lands in a stash commit, not nowhere), so its worst honest answer is
+        // "confirm before you do this", never a flat refusal. Absent on every other rule, where
+        // the default (assessWorktreeCommand falling through to 'deny') is unchanged.
+        verdict: verdict ?? null,
+        recovery: recovery ?? null,
       };
     }
   }
@@ -1313,6 +1410,22 @@ async function assessWorktreeCommand(command, cwd, ctx) {
           ? asCommand
           : await viaWorktree(`rm -rf ${str}`);
         if (resolved && resolved.decision !== 'allow') {
+          // The `rm -rf` resolution above is a TARGETING proxy — it answers "would this path's
+          // loss matter", not "what is this program doing". For a REMOVE the two coincide. For an
+          // OVERWRITE they do not: the old content is equally gone, but writing a file is the
+          // everyday act of editing, and inheriting the proxy verbatim produced a message calling
+          // a write "rm (deletes the file)" and a flat deny where the calibrated answer is ask —
+          // the target matters, the human decides, and the label tells the truth about the act.
+          if (blind.inlineRole === 'overwrite') {
+            return {
+              ...resolved,
+              decision: 'ask',
+              kind: blind.kind,
+              reason: `this overwrites file(s) whose current content exists nowhere else — the old bytes are unrecoverable if this is wrong.\n`
+                + `${resolved.reason.split('\n').slice(1).join('\n')}\n`
+                + `(seen inside ${blind.kind} — confirm the write is intended, or use holt discard first to capture the current content)`,
+            };
+          }
           return { ...resolved, kind: blind.kind, reason: `${resolved.reason}\n(seen inside ${blind.kind})` };
         }
       }
@@ -1384,6 +1497,27 @@ async function assessWorktreeCommand(command, cwd, ctx) {
     return `  • ${s.id}: ${s.reasons.join('; ')}${sample ? `\n      e.g. ${sample}` : ''}`;
   }).join('\n');
 
+  // A RULE THAT CAPPED ITS OWN VERDICT AT 'ask' NEVER ESCALATES TO 'deny', no matter how much is
+  // at stake — the whole point of capping it here is that this action is recoverable (see the
+  // stash rules above), so the worst honest answer is "confirm before you do this", not a
+  // refusal. Same evidence as a deny, same per-workstream detail — a softer landing, not a
+  // weaker check.
+  if (hit.verdict === 'ask') {
+    return {
+      decision: 'ask',
+      kind: hit.kind,
+      targets: holding.map((h) => h.id),
+      reason:
+        `holt is asking before this: ${hit.kind} would touch work that exists nowhere else, ` +
+        `across ${holding.length} workstream(s):\n${detail}\n` +
+        (unknown.length
+          ? `  ${unknown.length} of these could not be scanned, so holt cannot confirm they are safe.\n`
+          : '') +
+        `${hit.recovery}\n` +
+        'Run `holt risk` to inspect first, or confirm this is what you mean.',
+    };
+  }
+
   return {
     decision: 'deny',
     kind: hit.kind,
@@ -1423,19 +1557,23 @@ function briefStatePath(root) {
  * Build the agent-facing brief.
  *
  * @param {string} cwd
- * @param {{ onlyIfChanged?: boolean }} [opts]
+ * @param {{ onlyIfChanged?: boolean, familyOverrides?: string[],
+ *           maintenanceFloor?: number, maintenanceRatio?: number }} [opts]
  *   onlyIfChanged — return null when this exact brief was already emitted for this exact
  *   repository state. Wired to UserPromptSubmit, which fires on EVERY message: without it holt
  *   re-injected a byte-identical paragraph into the agent's context on every single turn, which
  *   is not a reminder, it is noise that teaches the reader to skip holt's output. SessionStart
  *   never passes it — a new session has seen nothing.
+ *   familyOverrides / maintenanceFloor / maintenanceRatio — the project config surface
+ *   (`.holtrc.json`, see src/config.mjs). Defaulted here so a caller that never loads config
+ *   (or a repo with none) gets exactly the built-in behaviour.
  */
 export async function buildBrief(cwd = process.cwd(), opts = {}) {
   let report;
   let scanned;
   let root = null;
   try {
-    ({ report, scanned, root } = await cachedReport(cwd));
+    ({ report, scanned, root } = await cachedReport(cwd, { familyOverrides: opts.familyOverrides }));
   } catch {
     return null; // no repo, or unscannable: contribute nothing rather than noise
   }
@@ -1454,16 +1592,8 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   if (here) {
     const d = contextDigest(scanned, here.id);
     if (d.ok) {
-      lines.push(`You are working in workstream '${d.workstream}' (family ${d.family}).`);
+      lines.push(`You are working in workstream '${d.workstream}' (family ${d.family}, via ${d.familyRule}).`);
       if (d.siblings.length) lines.push(`Siblings from the same dispatch: ${d.siblings.join(', ')}.`);
-      // Same-name-pattern workstreams with NO shared file or symbol are not asserted as
-      // siblings — family is inferred from directory/branch naming, not from content, so a
-      // naming coincidence must never read to the agent as "these are from my dispatch".
-      if (d.unconfirmedSiblings?.length) {
-        lines.push(
-          `Same naming pattern as '${d.workstream}' but nothing shared (unconfirmed, likely unrelated): ${d.unconfirmedSiblings.join(', ')}.`,
-        );
-      }
       for (const a of d.advice) lines.push(`- ${a}`);
       if (d.duplicatedSymbols.length) {
         lines.push('Symbols you added that ALSO exist elsewhere (check before building further):');
@@ -1507,7 +1637,11 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   // a three-worktree repo nagging about one empty tree.
   const disposable = report.safe.filter((x) => x.safe).length;
   const total = report.counts.workstreams || 0;
-  if (disposable >= MAINTENANCE_FLOOR && disposable / Math.max(1, total) >= MAINTENANCE_RATIO) {
+  // `.holtrc.json` may override either number (src/config.mjs); an absent or partial config
+  // falls back to the built-in floor/ratio exported below, one key at a time.
+  const floor = opts.maintenanceFloor ?? MAINTENANCE_FLOOR;
+  const ratio = opts.maintenanceRatio ?? MAINTENANCE_RATIO;
+  if (disposable >= floor && disposable / Math.max(1, total) >= ratio) {
     lines.push(
       `MAINTENANCE: ${disposable} of ${total} workstream(s) are provably disposable — they hold ` +
       'nothing base lacks. `holt clean --apply` removes exactly those and nothing else, ' +

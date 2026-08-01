@@ -62,6 +62,23 @@ export function renderHeader(report) {
   return lines.join('\n');
 }
 
+/**
+ * `report.counts.scanned === 0` means one of two very different things, and every all-zero
+ * DECISIONS table or "nothing unique" verdict below is reached by BOTH of them:
+ *   - the overwhelmingly common first run: nobody has created a second worktree yet, so there is
+ *     nothing to compare THIS one against, and every count is zero because the comparison never
+ *     ran, not because it ran and cleared the repo.
+ *   - every sibling really was checked and really held nothing unique — a genuine all-clear.
+ * A report that cannot tell these apart reads as confident either way. Since `report.counts`
+ * already knows which one happened, say so, in the same words `holt setup` already uses for the
+ * same situation (see step 3 of cmdSetup in bin/holt.mjs).
+ */
+function noSiblingsNote(report) {
+  return report.counts.scanned > 0 ? null
+    : c('grey', '  no worktrees yet — holt has nothing to relate until agents fan out. '
+      + '`git worktree add ../<name> <branch>`, then re-run.');
+}
+
 /** The default view: the decision surface, not the inventory. */
 export function renderSummary(report) {
   const out = [renderHeader(report), ''];
@@ -71,6 +88,9 @@ export function renderSummary(report) {
   const uniqueCommitted = report.unique.filter(
     (u) => u.uncommittedOnlyCount === 0 && u.uniqueSymbolCount > 0,
   );
+
+  const note = noSiblingsNote(report);
+  if (note) { out.push(note, ''); }
 
   out.push(c('bold', 'DECISIONS'));
   out.push('');
@@ -170,6 +190,12 @@ export function renderRisk(report) {
   const rows = report.unique.filter((u) => u.uniqueSymbolCount > 0 || u.committedFiles > 0
     || u.uncommittedOnlyCount > 0);
   if (!rows.length) {
+    // "Nothing unique anywhere" is a VERDICT — it means every workstream was checked and each
+    // one was reproducible from base. With zero workstreams scanned there was no checking to do,
+    // and printing the verdict anyway reads as "holt looked and this repo is fine" to someone who
+    // has simply not created a second worktree yet. Say THAT instead.
+    const note = noSiblingsNote(report);
+    if (note) { out.push(note, ''); return out.join('\n'); }
     out.push(c('green', '  Nothing unique anywhere. Every workstream is reproducible from base.'));
     out.push('');
     return out.join('\n');
@@ -181,6 +207,14 @@ export function renderRisk(report) {
       `  ${flag} ${pad(u.id, 32)} ${padStart(u.uniqueSymbolCount, 5)} ${padStart(u.uncommittedOnlyCount, 7)}  ${c('grey', u.verdict)}`
       + (u.uniqueSymbolCount === 0 && u.uncommittedFileCount > 0
         ? c('grey', `\n      ${u.uncommittedFileCount} uncommitted file(s) with no parseable symbols — still lost if deleted`)
+        : '')
+      // THE 'uniq' COLUMN CAN BE A FLOOR, NOT A TOTAL. ctagsBatch names every file it could not
+      // read (a NUL byte tripping the content classifier, a file over the size cap, a timeout) in
+      // `symbolsUnmeasuredFiles` — say so here, or the number above reads as a complete count when
+      // it may be an undercount that safeToDelete is already refusing to trust.
+      + (u.symbolsUnmeasuredCount > 0
+        ? c('yellow', `\n      ${u.symbolsUnmeasuredCount} file(s) holt could not read symbols from `
+          + `(e.g. ${(u.symbolsUnmeasuredFiles ?? []).slice(0, 3).join(', ')}) — 'uniq' is a floor, not a total`)
         : ''),
     );
   }
@@ -342,14 +376,9 @@ export function renderContext(digest) {
     return c('red', `holt: ${digest.error}`) + '\n' + c('grey', `known: ${digest.known.join(', ')}`);
   }
   const out = [];
-  out.push(c('bold', `CONTEXT for ${digest.workstream}`) + c('grey', `  (family ${digest.family})`));
+  out.push(c('bold', `CONTEXT for ${digest.workstream}`) + c('grey', `  (family ${digest.family} — ${digest.familyRule})`));
   out.push('');
   if (digest.siblings.length) out.push(c('grey', `  siblings: ${digest.siblings.join(', ')}`), '');
-  // Same name pattern, but nothing shared — a naming guess, not a confirmed relationship. Never
-  // fold this into `siblings` above: that line is read as fact.
-  if (digest.unconfirmedSiblings?.length) {
-    out.push(c('grey', `  same name pattern, unconfirmed (no shared file or symbol): ${digest.unconfirmedSiblings.join(', ')}`), '');
-  }
   for (const a of digest.advice) out.push(`  ${c('yellow', '!')} ${a}`);
   out.push('');
   if (digest.duplicatedSymbols.length) {

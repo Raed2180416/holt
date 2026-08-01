@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contrare Research — Logo System Prototype</title>
+<style>
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{
+    background: oklch(14% 0.006 250);
+    color: oklch(88% 0.004 250);
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+    padding: 60px 24px;
+  }
+  .wrap{ max-width: 920px; margin: 0 auto; }
+  h1{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 28px; font-weight: 500; letter-spacing: -0.03em;
+    margin-bottom: 8px;
+  }
+  .sub{
+    font-size: 14px; color: oklch(58% 0.006 250);
+    margin-bottom: 48px; line-height: 1.5;
+  }
+  .grid{
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 20px;
+  }
+  .card{
+    background: oklch(20% 0.008 250);
+    border-radius: 14px;
+    padding: 32px 28px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04);
+  }
+  .card-label{
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: oklch(52% 0.006 250);
+    margin-bottom: 6px;
+  }
+  .card-name{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 18px; font-weight: 500; letter-spacing: -0.02em;
+    margin-bottom: 24px;
+  }
+  .logo-row{
+    display: flex; align-items: center; gap: 14px;
+    margin-bottom: 16px;
+  }
+  .glyph-box{
+    width: 48px; height: 48px;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .wordmark{
+    font-family: 'Space Grotesk', system-ui, sans-serif;
+    font-size: 20px; font-weight: 600; letter-spacing: -0.03em;
+  }
+  .wordmark .accent{ font-weight: 400; }
+  .desc{
+    font-size: 12.5px; line-height: 1.5;
+    color: oklch(62% 0.006 250);
+  }
+  .accent-violet{ color: oklch(72% 0.14 280); }
+  .accent-blue{ color: oklch(72% 0.14 250); }
+  .accent-amber{ color: oklch(72% 0.12 55); }
+  .accent-gold{ color: oklch(75% 0.13 50); }
+
+  .stroke-violet{ stroke: oklch(72% 0.14 280); }
+  .stroke-blue{ stroke: oklch(72% 0.14 250); }
+  .stroke-amber{ stroke: oklch(72% 0.12 55); }
+  .stroke-gold{ stroke: oklch(75% 0.13 50); }
+  .stroke-ink{ stroke: oklch(88% 0.004 250); }
+
+  .fill-violet{ fill: oklch(72% 0.14 280); }
+  .fill-blue{ fill: oklch(72% 0.14 250); }
+  .fill-amber{ fill: oklch(72% 0.12 55); }
+  .fill-gold{ fill: oklch(75% 0.13 50); }
+  .fill-ink{ fill: oklch(88% 0.004 250); }
+  .fill-none{ fill: none; }
+
+  .section-title{
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: oklch(52% 0.006 250);
+    margin: 48px 0 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid oklch(50% 0.006 250 / 17%);
+  }
+
+  .arch-mark{
+    background: oklch(20% 0.008 250);
+    border-radius: 14px;
+    padding: 48px 28px;
+    text-align: center;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.04);
+  }
+  .arch-mark .glyph-box{ width: 96px; height: 96px; margin: 0 auto 20px; }
+  .arch-mark .wordmark{ font-size: 24px; }
+
+  .sizes{
+    display: flex; align-items: flex-end; gap: 24px;
+    margin-top: 20px; padding-top: 20px;
+    border-top: 1px solid oklch(50% 0.006 250 / 12%);
+  }
+  .sizes .glyph-box{ width: auto; height: auto; }
+  .size-label{
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 9.5px; color: oklch(48% 0.006 250);
+    margin-top: 6px; text-align: center;
+  }
+  .size-col{ display: flex; flex-direction: column; align-items: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Contrare Research — Logo System</h1>
+  <p class="sub">The Archimedes lever family. Every logo is a bar on a triangular fulcrum, each showing a different state. The fulcrum is the shared element — that's the family resemblance. ARC <em>is</em> the fulcrum. CLIDE applies force. Medes lifts knowledge. Holt locks the base.</p>
+
+  <!-- ============ PARENT ============ -->
+  <div class="section-title">Parent brand</div>
+  <div class="card">
+    <div class="card-label">Umbrella · Institute</div>
+    <div class="card-name accent-violet">Contrare Research</div>
+    <div class="logo-row">
+      <div class="glyph-box">
+        <!-- Lever at rest on fulcrum -->
+        <svg viewBox="0 0 48 48" width="48" height="48">
+          <!-- bar (horizontal, at rest) -->
+          <line x1="6" y1="18" x2="42" y2="18" class="stroke-ink" stroke-width="2.5" stroke-linecap="round"/>
+          <!-- fulcrum (triangle) -->
+          <path d="M 24 18 L 19 28 L 29 28 Z" class="fill-violet stroke-violet" stroke-width="1.5" stroke-linejoin="round"/>
+          <!-- ground line -->
+          <line x1="16" y1="30" x2="32" y2="30" class="stroke-ink" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+        </svg>
+      </div>
+      <div class="wordmark">Contrare <span class="accent accent-violet">Research</span></div>
+    </div>
+    <p class="desc">The lever at rest. The institute itself — potential energy, the thesis before it moves the world. "Give me a lever long enough and a fulcrum on which to place it, and I shall move the world."</p>
+  </div>
+
+  <!-- ============ ARC ============ -->
+  <div class="section-title">ARC — AI Research Cohort</div>
+  <div class="grid">
+    <div class="card">
+      <div class="card-label">Research core</div>
+      <div class="card-name accent-violet">ARC</div>
+      <div class="logo-row">
+        <div class="glyph-box">
+          <!-- ARC = the fulcrum itself, solid -->
+          <svg viewBox="0 0 48 48" width="48" height="48">
+            <!-- fulcrum triangle, prominent -->
+            <path d="M 24 8 L 14 32 L 34 32 Z" class="fill-violet stroke-violet" stroke-width="2" stroke-linejoin="round"/>
+            <!-- ground line -->
+            <line x1="11" y1="34" x2="37" y2="34" class="stroke-ink" stroke-width="1.5" stroke-linecap="round" opacity="0.4"/>
+          </svg>
+        </div>
+        <div class="wordmark">ARC</div>
+      </div>
+      <p class="desc">The fulcrum. The point everything pivots on. Without it, the lever is just a stick. ARC is the research core — the harness, the engine, the foundation.</p>
+    </div>
+
+    <!-- ============ CLIDE ============ -->
+    <div class="card">
+      <div class="card-label">Interface · Tool</div>
+      <div class="card-name accent-blue">CLIDE</div>
+      <div class="logo-row">
+        <div class="glyph-box">
+          <!-- CLIDE = lever tilted, force applied -->
+          <svg viewBox="0 0 48 48" width="48" height="48">
+            <!-- bar tilted (force applied on left, lifting right) -->
+            <line x1="6" y1="24" x2="42" y2="12" class="stroke-blue" stroke-width="2.5" stroke-linecap="round"/>
+            <!-- fulcrum -->
+            <path d="M 24 18 L 19 28 L 29 28 Z" class="fill-ink stroke-ink" stroke-width="1.5" stroke-linejoin="round" opacity="0.5"/>
+            <!-- ground line -->
+            <line x1="16" y1="30" x2="32" y2="30" class="stroke-ink" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+            <!-- force arrow on left (downward) -->
+            <line x1="8" y1="14" x2="8" y2="20" class="stroke-blue" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M 6 18 L 8 22 L 10 18" class="fill-none stroke-blue" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <div class="wordmark">CLIDE</div>
+      </div>
+      <p class="desc">The lever in motion. Force applied — the tool that does the work. CLIDE is where the research becomes action: the terminal, the interface, the hands on the bar.</p>
+    </div>
+  </div>
+
+  <!-- ============ MEDES ============ -->
+  <div class="section-title">MEDES — Interactive Textbook</div>
+  <div class="card">
+    <div class="card-label">Reader · Knowledge</div>
+    <div class="card-name accent-amber">Medes</div>
+    <div class="logo-row">
+      <div class="glyph-box">
+        <!-- MEDES = lever lifting a circle (knowledge/book) -->
+        <svg viewBox="0 0 48 48" width="48" height="48">
+          <!-- bar tilted (left down, right up lifting the circle) -->
+          <line x1="6" y1="24" x2="42" y2="12" class="stroke-amber" stroke-width="2.5" stroke-linecap="round"/>
+          <!-- fulcrum -->
+          <path d="M 24 18 L 19 28 L 29 28 Z" class="fill-ink stroke-ink" stroke-width="1.5" stroke-linejoin="round" opacity="0.5"/>
+          <!-- ground line -->
+          <line x1="16" y1="30" x2="32" y2="30" class="stroke-ink" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+          <!-- circle being lifted (knowledge) -->
+          <circle cx="42" cy="8" r="4" class="fill-amber stroke-amber" stroke-width="1.5"/>
+        </svg>
+      </div>
+      <div class="wordmark">Medes</div>
+    </div>
+    <p class="desc">The lever lifting knowledge. The circle is the idea, the book, the concept being raised. Medes is the reader that turns passive text into understanding you can reach into. ARC + Medes = Archimedes — the lever and the fulcrum that move the world of knowledge.</p>
+  </div>
+
+  <!-- ============ HOLT ============ -->
+  <div class="section-title">HOLT — Agent Safety Guardrail</div>
+  <div class="card">
+    <div class="card-label">Guardrail · Safety</div>
+    <div class="card-name accent-gold">Holt</div>
+    <div class="logo-row">
+      <div class="glyph-box">
+        <!-- HOLT = lock integrated into fulcrum -->
+        <svg viewBox="0 0 48 48" width="48" height="48">
+          <!-- bar at rest -->
+          <line x1="6" y1="18" x2="42" y2="18" class="stroke-gold" stroke-width="2.5" stroke-linecap="round"/>
+          <!-- fulcrum as lock body -->
+          <rect x="19" y="22" width="10" height="8" rx="1.5" class="fill-gold stroke-gold" stroke-width="1.5"/>
+          <!-- lock shackle -->
+          <path d="M 21 22 L 21 19 Q 21 16 24 16 Q 27 16 27 19 L 27 22" class="fill-none stroke-gold" stroke-width="1.5" stroke-linecap="round"/>
+          <!-- keyhole -->
+          <circle cx="24" cy="26" r="1.2" class="fill-ink"/>
+          <!-- ground line -->
+          <line x1="16" y1="32" x2="32" y2="32" class="stroke-ink" stroke-width="1.5" stroke-linecap="round" opacity="0.3"/>
+        </svg>
+      </div>
+      <div class="wordmark">Holt</div>
+    </div>
+    <p class="desc">The lock on the fulcrum. The foundation is protected — nothing moves unless it's safe to move. Holt is the guardrail that keeps the base intact while the lever works above it.</p>
+  </div>
+
+  <!-- ============ ARCHIMEDES SYNTHESIS ============ -->
+  <div class="section-title">The Archimedes synthesis</div>
+  <div class="arch-mark">
+    <div class="glyph-box">
+      <!-- Full Archimedes lever: fulcrum (ARC) + bar (CLIDE) + circle (MEDES) -->
+      <svg viewBox="0 0 96 96" width="96" height="96">
+        <!-- bar tilted, lifting the circle -->
+        <line x1="12" y1="48" x2="84" y2="24" class="stroke-ink" stroke-width="3" stroke-linecap="round"/>
+        <!-- fulcrum (ARC) -->
+        <path d="M 48 36 L 38 56 L 58 56 Z" class="fill-violet stroke-violet" stroke-width="2" stroke-linejoin="round"/>
+        <!-- ground line -->
+        <line x1="32" y1="60" x2="64" y2="60" class="stroke-ink" stroke-width="2" stroke-linecap="round" opacity="0.3"/>
+        <!-- circle being lifted (knowledge) -->
+        <circle cx="84" cy="16" r="8" class="fill-amber stroke-amber" stroke-width="2"/>
+        <!-- force arrow on left (downward, CLIDE applying force) -->
+        <line x1="14" y1="30" x2="14" y2="42" class="stroke-blue" stroke-width="2" stroke-linecap="round"/>
+        <path d="M 10 38 L 14 46 L 18 38" class="fill-none stroke-blue" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="wordmark">ARC <span class="accent accent-amber">+</span> Medes <span class="accent accent-violet">=</span> Archimedes</div>
+    <p class="desc" style="max-width: 420px; margin: 16px auto 0;">The full picture. ARC (violet fulcrum) + CLIDE (blue force) + Medes (amber circle) = the Archimedes lever. The fulcrum and the lever that move the world of knowledge. This is the parent mark — the visual thesis of Contrare Research.</p>
+  </div>
+
+  <!-- ============ SIZE TEST ============ -->
+  <div class="section-title">Size test — does it hold at 16px?</div>
+  <div class="card">
+    <div class="card-label">Favicon / 16px / 24px / 32px / 48px</div>
+    <div class="sizes">
+      <div class="size-col">
+        <svg viewBox="0 0 48 48" width="16" height="16">
+          <line x1="6" y1="18" x2="42" y2="18" class="stroke-ink" stroke-width="3" stroke-linecap="round"/>
+          <path d="M 24 18 L 19 28 L 29 28 Z" class="fill-violet stroke-violet" stroke-width="2" stroke-linejoin="round"/>
+        </svg>
+        <span class="size-label">16</span>
+      </div>
+      <div class="size-col">
+        <svg viewBox="0 0 48 48" width="24" height="24">
+          <line x1="6" y1="18" x2="42" y2="18" class="stroke-ink" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M 24 18 L 19 28 L 29 28 Z" class="fill-violet stroke-violet" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+        <span class="size-label">24</span>
+      </div>
+      <div class="size-col">
+        <svg viewBox="0 0 48 48" width="32" height="32">
+          <line x1="6" y1="18" x2="42" y2="18" class="stroke-ink" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M 24 18 L 19 28 L 29 28 Z" class="fill-violet stroke-violet" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+        <span class="size-label">32</span>
+      </div>
+      <div class="size-col">
+        <svg viewBox="0 0 48 48" width="48" height="48">
+          <line x1="6" y1="18" x2="42" y2="18" class="stroke-ink" stroke-width="2.5" stroke-linecap="round"/>
+          <path d="M 24 18 L 19 28 L 29 28 Z" class="fill-violet stroke-violet" stroke-width="1.5" stroke-linejoin="round"/>
+        </svg>
+        <span class="size-label">48</span>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -969,6 +969,10 @@ test('CATASTROPHIC: git stash drop/clear/pop are destructive, and the guard says
   // Removing the WORKTREE does not lose a stash: refs/stash is repository-wide and shared across
   // worktrees. So the loss path is exactly these verbs, and they were the one part of it that was
   // unguarded — while `reset --hard`, which is no more final, has been covered from the start.
+  //
+  // `pop` is classified here too, but NOT denied outright any more — see the guard-asymmetry
+  // fix below (`git stash pop is the recovery action...`): a flat deny on the only way back is
+  // the over-refusal that made the incident this whole rule table exists for worse, not better.
   const { classifyCommand } = await import('../../src/agent.mjs');
 
   for (const cmd of ['git stash drop', 'git stash clear', 'git stash drop stash@{2}', 'git stash pop']) {
@@ -976,12 +980,33 @@ test('CATASTROPHIC: git stash drop/clear/pop are destructive, and the guard says
     assert.ok(v, `${cmd} destroys work and must be classified: got ${JSON.stringify(v)}`);
     assert.match(v.kind, /stash/, `and named for what it is: ${JSON.stringify(v)}`);
   }
+  // `pop` caps its own verdict at 'ask' (recoverable via `apply`); `drop`/`clear` do not (final).
+  assert.equal(classifyCommand('git stash pop').verdict, 'ask',
+    'pop must never harden past ask — it is the recovery action, not a new act of destruction');
+  assert.equal(classifyCommand('git stash drop').verdict, null,
+    'drop stays a flat deny — dropping IS the final, unrecoverable act');
 
   // ANTI-VACUITY. Reading a stash is not destroying one; if these tripped, every developer
   // inspecting their own stash would be interrupted, which is how a guard gets switched off.
-  for (const cmd of ['git stash list', 'git stash show', 'git stash show -p', 'git stash apply', 'git stash push -u -m wip']) {
+  // A pathspec-scoped push is included here too: the invoker named exactly which files to sweep,
+  // which bounds the blast radius on purpose (see 'git stash: bare sweeps ask, scoped ones don't'
+  // in test/e2e/integration.test.mjs) — it is not classified as destructive at all.
+  for (const cmd of [
+    'git stash list', 'git stash show', 'git stash show -p', 'git stash apply',
+    'git stash push -- src/agent.mjs',
+  ]) {
     assert.equal(classifyCommand(cmd), null, `${cmd} is not destructive`);
   }
+
+  // …while the UNSCOPED form of the exact same command — no pathspec at all — now IS classified,
+  // which is the guard-asymmetry fix itself: `git stash push -u -m wip` used to sail through
+  // `classifyCommand` unconditionally (kind:null, allowed no matter what it was about to sweep).
+  // It must still allow a CLEAN worktree (asserted end-to-end in integration.test.mjs); the
+  // assertion here is only that holt now looks at all.
+  const swept = classifyCommand('git stash push -u -m wip');
+  assert.ok(swept, 'a pathspec-less stash push must be classified so its blast radius gets checked');
+  assert.match(swept.kind, /stash/);
+  assert.equal(swept.verdict, 'ask', 'and capped at ask — stashing is ordinary, everyday work');
 });
 
 test('CATASTROPHIC: rescue REFUSES a dirty submodule instead of reporting it verified', async (t) => {
@@ -1180,6 +1205,175 @@ test('RECALL: mutually redundant worktrees are disposable, and the LAST one neve
   assert.equal(soloVerdict.safe, false,
     `work no sibling holds must still be refused: ${JSON.stringify(soloVerdict)}`);
 });
+
+test('RECALL: the same work at a DIFFERENT PATH, in a DIFFERENT INDENTATION STYLE, is still disposable',
+  async (t) => {
+    // MEASURED against an independent 50-language, 900-worktree oracle: `mergedTree` whole-tree
+    // identity (the ONLY redundancy check before this test was written) requires two worktrees'
+    // entire committed state to hash to one git tree oid — which can only happen at the SAME
+    // paths. It is blind to the shape the oracle's own duplicate-triangle fixture plants in every
+    // one of its 50 repositories: one new file, at a DIFFERENT path, reindented from spaces to
+    // tabs. Same work by the oracle's own definition (delete either worktree and it survives in
+    // the sibling) — invisible to path-and-byte identity. This is that exact shape, reproduced.
+    const fx = await newRepo('redundant-reindent');
+    t.after(() => fx.cleanup());
+
+    const alpha = await fx.worktree('dup-alpha');
+    await fx.write('feat/alpha/thing.py',
+      'class PyThing:\n    def method(self):\n        return 1\n\ndef free_fn(): pass\n', alpha);
+    await fx.commit('alpha: implement the thing', alpha);
+
+    const beta = await fx.worktree('dup-beta');
+    await fx.write('feat/beta/thing.py',
+      // Same code, different path, tabs instead of 4 spaces — every indented byte differs.
+      'class PyThing:\n\tdef method(self):\n\t\treturn 1\n\ndef free_fn(): pass\n', beta);
+    await fx.commit('beta: implement the identical thing, reindented', beta);
+
+    const before = await inspect(fx.root);
+    const va = before.safe.find((s) => s.id === 'dup-alpha');
+    const vb = before.safe.find((s) => s.id === 'dup-beta');
+
+    assert.equal(va.safe, true, `dup-alpha: a sibling holds the same work, just reindented: ${JSON.stringify(va)}`);
+    assert.equal(vb.safe, true, `dup-beta: a sibling holds the same work, just reindented: ${JSON.stringify(vb)}`);
+    assert.deepEqual(va.redundantWith, ['dup-beta'], JSON.stringify(va));
+    assert.deepEqual(vb.redundantWith, ['dup-alpha'], JSON.stringify(vb));
+
+    // NEVER-WORSE: a sibling that merely LOOKS like part of the same fan-out (same directory
+    // shape) but holds genuinely different code must not be swept up by the match.
+    const gamma = await fx.worktree('dup-gamma');
+    await fx.write('feat/gamma/thing.py',
+      'class PyThing:\n    def method(self):\n        return 999\n\ndef different_fn(): pass\n', gamma);
+    await fx.commit('gamma: a DIFFERENT implementation', gamma);
+    const withGamma = await inspect(fx.root);
+    const vg = withGamma.safe.find((s) => s.id === 'dup-gamma');
+    assert.equal(vg.safe, false, `genuinely different code must never be called redundant: ${JSON.stringify(vg)}`);
+
+    // PRECISION: the real destructive command drains the true duplicate pair to one survivor,
+    // and leaves the genuinely unique worktree alone.
+    const cleaned = await clean(fx.root, { apply: true });
+    const left = [];
+    for (const id of ['dup-alpha', 'dup-beta', 'dup-gamma']) {
+      try { await fs.stat(fx.wt(id)); left.push(id); } catch { /* removed */ }
+    }
+    assert.ok(left.includes('dup-gamma'), `the unique worktree must survive: removed=${cleaned.removed}`);
+    assert.equal(left.filter((id) => id === 'dup-alpha' || id === 'dup-beta').length, 1,
+      `the reindented pair must drain to exactly one survivor, never zero: left=${JSON.stringify(left)}`);
+  });
+
+test('PRECISION: one matched file and one genuinely unique file must still be refused, not partially cleared',
+  async (t) => {
+    // The danger this guards: content-identity matching must be PER FILE, not "some file of mine
+    // matches somewhere, so I am redundant". A worktree holding one file a sibling also has, AND
+    // one file nobody else has, still holds real unique work and must not be swept.
+    const fx = await newRepo('redundant-partial');
+    t.after(() => fx.cleanup());
+
+    const a = await fx.worktree('partial-a');
+    await fx.write('shared/dup.py', 'def shared_thing():\n    return 1\n', a);
+    await fx.write('only/unique.py', 'def ONLY_HERE():\n    return "nobody else has this"\n', a);
+    await fx.commit('partial-a: one shared file, one unique file', a);
+
+    const b = await fx.worktree('partial-b');
+    // Same content as shared/dup.py, different path and indentation — a real match — but NOTHING
+    // matching only/unique.py.
+    await fx.write('renamed/dup.py', 'def shared_thing():\n\treturn 1\n', b);
+    await fx.commit('partial-b: only the shared file, reindented', b);
+
+    const report = await inspect(fx.root);
+    const va = report.safe.find((s) => s.id === 'partial-a');
+    assert.equal(va.safe, false,
+      `partial-a holds real unique work (only/unique.py) and must stay refused: ${JSON.stringify(va)}`);
+    assert.ok(va.reasons.some((r) => /file\(s\) base lacks/.test(r)), JSON.stringify(va));
+  });
+
+/* ============================================== LINE-ENDING-ONLY vs BASE ==== */
+
+test('RECALL: a worktree whose ENTIRE committed delta is line-ending-only vs base is disposable, named "base"',
+  async (t) => {
+    // MEASURED against the 50-language independent-oracle benchmark's `wt-crlf` fixture class:
+    // the SAME FILE re-saved with CRLF line endings instead of LF. `merge-tree` correctly reports
+    // "base lacks this exact tree" — a CRLF byte and an LF byte are different bytes to git — but
+    // base holds the identical TEXT, so nothing here is unique work.
+    //
+    // Deliberately built WITHOUT a living sibling (no other worktree holds a copy of this file):
+    // the sibling-content-identity mechanism (siblingCoverage, above) cannot reach this case by
+    // construction — it only ever compares live workstreams to each other, never to base. This is
+    // the shape that mechanism cannot see, and the ONLY thing that can prove it is a direct
+    // comparison against base itself.
+    const fx = await newRepo('crlf-vs-base');
+    t.after(() => fx.cleanup());
+    await fx.write('src/eol.py', 'def thing():\n    return 1\n\ndef other():\n    return 2\n');
+    await fx.commit('base: add eol.py with LF endings');
+
+    const wt = await fx.worktree('crlf-only');
+    // Every line's terminator becomes \r\n; not one character of actual content changes.
+    await fx.write('src/eol.py', 'def thing():\r\n    return 1\r\n\r\ndef other():\r\n    return 2\r\n', wt);
+    await fx.commit('re-save eol.py with CRLF endings, nothing else', wt);
+
+    const before = await inspect(fx.root);
+    const v = before.safe.find((s) => s.id === 'crlf-only');
+    assert.equal(v.safe, true, `line-ending-only vs base must be disposable: ${JSON.stringify(v)}`);
+    assert.deepEqual(v.redundantWith, ['base'],
+      `base is the holder, not a sibling — there is no sibling here: ${JSON.stringify(v)}`);
+    assert.ok(!v.reasons.some((r) => /file\(s\) base lacks/.test(r)),
+      `the base-lacks reason must be suppressed once base is proven to hold the same text: ${JSON.stringify(v)}`);
+
+    // PRECISION: the real destructive command actually removes it.
+    const cleaned = await clean(fx.root, { apply: true });
+    await assert.rejects(() => fs.stat(fx.wt('crlf-only')),
+      `clean --apply must actually remove a line-ending-only worktree: ${JSON.stringify(cleaned)}`);
+
+    // NEVER-WORSE #1: a BINARY file containing the byte pair 0x0D 0x0A is not a line ending, and a
+    // genuine change to one must still be refused — binary content is never normalised.
+    const binBase = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...Array.from({ length: 32 }, (_, i) => i)]);
+    await fx.write('assets/img.bin', binBase);
+    await fx.commit('base: add a binary asset containing 0x0D 0x0A bytes');
+    const binWt = await fx.worktree('binary-change');
+    const binChanged = Buffer.from(binBase);
+    binChanged[10] = 0xff; // a genuine byte-level change, unrelated to the 0x0D 0x0A pair
+    await fx.write('assets/img.bin', binChanged, binWt);
+    await fx.commit('change a pixel', binWt);
+    const vBin = (await inspect(fx.root)).safe.find((s) => s.id === 'binary-change');
+    assert.equal(vBin.safe, false,
+      `a genuine binary change must never be waved through as line-ending noise: ${JSON.stringify(vBin)}`);
+    assert.equal(vBin.redundantWith, undefined, JSON.stringify(vBin));
+
+    // NEVER-WORSE #2: a MODE-ONLY change (chmod +x, byte-identical content) is "another kind of
+    // change" and must still be refused — identical bytes is not the same claim as identical file.
+    await fx.write('src/tool.sh', '#!/bin/sh\necho hi\n');
+    await fx.commit('base: add tool.sh, not executable');
+    const modeWt = await fx.worktree('mode-only');
+    await fs.chmod(path.join(fx.wt('mode-only'), 'src/tool.sh'), 0o755);
+    await fx.git(['add', 'src/tool.sh'], fx.wt('mode-only'));
+    await fx.git(['commit', '-m', 'chmod +x, no content change'], fx.wt('mode-only'));
+    const vMode = (await inspect(fx.root)).safe.find((s) => s.id === 'mode-only');
+    assert.equal(vMode.safe, false,
+      `a mode-only change must not be classified as line-ending noise: ${JSON.stringify(vMode)}`);
+
+    // NEVER-WORSE #3: ALL FILES, NOT SOME. One file line-ending-only plus one file genuinely
+    // edited must still be refused in full — a partial match must never authorise a delete.
+    await fx.write('src/eol2.py', 'def alpha():\n    return 1\n');
+    await fx.write('src/plain.py', 'def beta():\n    return 2\n');
+    await fx.commit('base: two more files');
+    const mixedWt = await fx.worktree('mixed-partial');
+    await fx.write('src/eol2.py', 'def alpha():\r\n    return 1\r\n', mixedWt); // line-ending-only
+    await fx.write('src/plain.py', 'def beta():\n    return 999\n', mixedWt); // a REAL edit
+    await fx.commit('one line-ending-only file, one real edit', mixedWt);
+    const vMixed = (await inspect(fx.root)).safe.find((s) => s.id === 'mixed-partial');
+    assert.equal(vMixed.safe, false,
+      `one genuinely-changed file must block the WHOLE workstream, not just itself: ${JSON.stringify(vMixed)}`);
+    assert.ok(vMixed.reasons.some((r) => /file\(s\) base lacks/.test(r)), JSON.stringify(vMixed));
+
+    // NEVER-WORSE #4: an ADDED file base never had at all — even with CRLF endings and no sibling
+    // — is not "line-ending noise vs base": there is no base counterpart to normalise against.
+    const addedWt = await fx.worktree('added-crlf');
+    await fx.write('src/brand-new.py', 'def new_thing():\r\n    return 1\r\n', addedWt);
+    await fx.commit('a brand new CRLF file base never had', addedWt);
+    const vAdded = (await inspect(fx.root)).safe.find((s) => s.id === 'added-crlf');
+    assert.equal(vAdded.safe, false,
+      `a file base never had at all must still count as unique work: ${JSON.stringify(vAdded)}`);
+    assert.equal(vAdded.redundantWith, undefined, JSON.stringify(vAdded));
+  });
 
 /* ================================================== CONCURRENT CAPTURES ==== */
 

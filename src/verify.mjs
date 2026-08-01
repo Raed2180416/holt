@@ -70,7 +70,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { git, gitOk, authorEnv } from './git.mjs';
 import { scratchDir } from './symbols.mjs';
-import { discover } from './discover.mjs';
+import { discover, repoAbsenceError } from './discover.mjs';
 import { scan } from './scan.mjs';
 
 /**
@@ -235,7 +235,7 @@ export function extractFailures(text, { workdir = null } = {}) {
  */
 export async function verifyPair(cwd, idA, idB, { run = null, timeout = 600_000, ...opts } = {}) {
   const disc = await discover(cwd, opts);
-  if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
 
   const command = run ?? await testCommandFromConfig(disc.root);
   if (!command) {

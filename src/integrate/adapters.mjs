@@ -254,6 +254,74 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
 }
 
 /**
+ * Locations a PAST version of `holt integrate` wrote that are now known WRONG or superseded —
+ * each confirmed against the host's own source or docs, not merely renamed for tidiness.
+ *
+ * PROVEN, not hypothetical: the commit that shipped as v0.3.0 (a976ab4d) wrote a project-scope
+ * `.cline/mcp.json` and a user-scope `~/.cline/mcp.json`. The very next commit (435a0979)
+ * discovered both were wrong — Cline CLI has no project-scope MCP file at all
+ * (cline/cline#11671), and the real global file lives at
+ * `~/.cline/data/settings/cline_mcp_settings.json` — and removed them from `mcpTargets`, with
+ * nothing that ever cleans up a copy already on a real disk. Anyone who ran `integrate` against
+ * that one commit and then upgrades has these files forever, and `holt integrate` never looks at
+ * them again because they are not in `mcpTargets` any more. This list, and retireLegacyMcp below,
+ * is the general mechanism so the NEXT correction (there will be one) is safe by construction
+ * instead of requiring a fresh one-off cleanup.
+ */
+export function legacyMcpTargets(repoRoot, home = os.homedir()) {
+  return [
+    {
+      host: 'cline', scope: 'project', file: path.join(repoRoot, '.cline', 'mcp.json'), key: 'mcpServers',
+      reason: 'Cline CLI has no project-scope MCP file (cline/cline#11671) — this should never have been written',
+    },
+    {
+      host: 'cline', scope: 'user', file: path.join(home, '.cline', 'mcp.json'), key: 'mcpServers',
+      reason: 'wrong path — Cline reads ~/.cline/data/settings/cline_mcp_settings.json, never this file',
+    },
+  ];
+}
+
+/**
+ * Remove holt's entry from every retired location, IF it is still there and still looks like
+ * holt's own entry. Only the `holt` key is touched — anything else a user (or another tool) put
+ * in the same file survives untouched; the file itself is removed only when holt's entry was its
+ * entire content.
+ *
+ * Silent when there is nothing to retire: an absent legacy file is the expected steady state for
+ * the overwhelming majority of repositories (anyone who never ran integrate during the narrow
+ * window a since-corrected path was live), and reporting "nothing here" on every run would bury
+ * the rare real finding in noise.
+ */
+export async function retireLegacyMcp(repoRoot, { home = os.homedir(), scope = 'project' } = {}) {
+  const results = [];
+  for (const t of legacyMcpTargets(repoRoot, home)) {
+    if (t.scope === 'user' && scope === 'project') continue; // never touch HOME unless asked
+    let cfg;
+    try {
+      cfg = JSON.parse(stripJsonComments(await fs.readFile(t.file, 'utf8')));
+    } catch {
+      continue; // no file (the common case) — nothing to retire, nothing to say
+    }
+    if (!cfg[t.key] || !cfg[t.key].holt) continue; // holt never wrote here, or it is already gone
+
+    delete cfg[t.key].holt;
+    if (Object.keys(cfg[t.key]).length === 0) delete cfg[t.key];
+
+    if (Object.keys(cfg).length === 0) {
+      await fs.rm(t.file, { force: true });
+      results.push({ adapter: 'mcp-retire', host: t.host, scope: t.scope, path: t.file, action: `removed — ${t.reason}` });
+    } else {
+      await fs.writeFile(t.file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+      results.push({
+        adapter: 'mcp-retire', host: t.host, scope: t.scope, path: t.file,
+        action: `holt's entry removed, your other settings kept — ${t.reason}`,
+      });
+    }
+  }
+  return results;
+}
+
+/**
  * The server entry, in whichever shape the host expects.
  *
  * `bin` may carry arguments ("node /path/holt.mjs", "npx holt"), so it is split rather than
@@ -342,6 +410,17 @@ export function tomlWithHoltServer(existing, bin = 'holt') {
   return merged.endsWith('\n') ? merged : `${merged}\n`;
 }
 
+/** The inverse of tomlWithHoltServer: remove holt's table, leaving everything else untouched. */
+export function tomlWithoutHoltServer(existing) {
+  const src = String(existing ?? '');
+  const lines = src.split('\n');
+  const start = lines.findIndex((l) => /^\s*\[mcp_servers\.holt\]\s*$/.test(l));
+  if (start === -1) return src;
+  let end = start + 1;
+  while (end < lines.length && !/^\s*\[/.test(lines[end])) end++;
+  return [...lines.slice(0, start), ...lines.slice(end)].join('\n').replace(/\n{3,}/g, '\n\n');
+}
+
 /**
  * Write the holt MCP server into a host config.
  * `onlyExisting` (default) touches only files that already exist, so holt never fabricates
@@ -424,6 +503,34 @@ export async function installMcp(repoRoot, {
   return results;
 }
 
+/* ------------------------------------------------------ upgrade-safe reconciliation ---- */
+
+/**
+ * Recognise a holt-authored hook command WITHOUT caring what `bin` wrote it.
+ *
+ * MEASURED DEFECT: `installClaudeCode`'s old dedupe checked whether an event's entries contained
+ * the literal string `${bin} hook` — built from the CURRENTLY resolved bin. A prior install often
+ * used a different bin string (an absolute dev path, `npx holt`, a future/past flag set, a
+ * renamed binary) and that check would then find no match, so integrate PUSHED A SECOND ENTRY
+ * rather than recognising and replacing the first. Reproduced end-to-end: seeding
+ * `.claude/settings.json` with `node /Users/dev/projects/holt/bin/holt.mjs hook pre-tool-use
+ * --host claude-code` and re-running `holt integrate` left that entry untouched and appended
+ * `holt hook pre-tool-use --host claude-code` next to it — every Bash call now fires BOTH, and if
+ * the stale absolute path no longer exists (the ordinary case after an upgrade or a machine
+ * change) it errors on every single tool call.
+ *
+ * The fix matches on the STRUCTURE of the call — `hook <subcommand>` — never on `bin`, so an
+ * entry written by any past or future version of holt is found and reconciled, not duplicated.
+ */
+function isHoltHookCommand(command, subcommand) {
+  return typeof command === 'string' && new RegExp(`\\bhook\\s+${subcommand}\\b`).test(command);
+}
+
+/** Every literal `command` string nested under a Claude Code hook-list entry. */
+function commandsOf(entry) {
+  return Array.isArray(entry?.hooks) ? entry.hooks.map((h) => h?.command).filter((c) => typeof c === 'string') : [];
+}
+
 /* ---------------------------------------------------------------------- Cursor ---- */
 
 /**
@@ -462,8 +569,11 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   cfg.version ??= 1;
   cfg.hooks ??= {};
   const list = Array.isArray(cfg.hooks.beforeShellExecution) ? cfg.hooks.beforeShellExecution : [];
-  // Never duplicate holt's own entry, and never disturb a hook the user put there.
-  const mine = (h) => typeof h?.command === 'string' && /\bholt\b.*hook\s+pre-tool-use/.test(h.command);
+  // Never duplicate holt's own entry, and never disturb a hook the user put there. Matched
+  // structurally (isHoltHookCommand), not against the current `bin` string — see the comment on
+  // that helper for the duplication this previously caused when a prior install used a
+  // different bin.
+  const mine = (h) => isHoltHookCommand(h?.command, 'pre-tool-use');
   const already = list.some(mine);
   cfg.hooks.beforeShellExecution = [
     ...list.filter((h) => !mine(h)),
@@ -491,6 +601,24 @@ export function claudeCodeHooks(bin = 'holt') {
   };
 }
 
+// Which subcommand each event's hook invokes — the structural signature isHoltHookCommand
+// matches on, independent of `bin`.
+const CLAUDE_EVENT_SUBCOMMAND = {
+  PreToolUse: 'pre-tool-use',
+  SessionStart: 'session-start',
+  UserPromptSubmit: 'user-prompt-submit',
+};
+
+/**
+ * Install/reconcile holt's Claude Code hooks, UPGRADE-SAFE.
+ *
+ * For each event: entries recognised as holt's own (by isHoltHookCommand, not by `bin`) are
+ * removed and replaced with the current, correct entry; anything else — a user's own hook on the
+ * same event — is left exactly where it was. This makes re-running integrate after an upgrade a
+ * true reconciliation rather than an append-if-absent: a stale entry from ANY prior version
+ * (different bin, different flags, a since-corrected subcommand) is found and fixed in place
+ * instead of accumulating as a second, possibly-broken, hook that still fires on every tool call.
+ */
 export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(repoRoot, '.claude', 'settings.json');
   let cfg = {};
@@ -499,18 +627,32 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
 
   cfg.hooks ??= {};
   const wanted = claudeCodeHooks(bin);
-  let added = 0;
+  let installed = 0;
+  let reconciled = 0;
+  let unchanged = 0;
   for (const [event, entries] of Object.entries(wanted)) {
-    cfg.hooks[event] ??= [];
-    const already = cfg.hooks[event].some((e) => JSON.stringify(e).includes(`${bin} hook`));
-    if (already) continue;
-    cfg.hooks[event].push(...entries);
-    added++;
+    const sub = CLAUDE_EVENT_SUBCOMMAND[event];
+    const existing = Array.isArray(cfg.hooks[event]) ? cfg.hooks[event] : [];
+    const mine = existing.filter((e) => commandsOf(e).some((c) => isHoltHookCommand(c, sub)));
+    const others = existing.filter((e) => !mine.includes(e));
+
+    if (mine.length === 0) {
+      installed++;
+    } else if (JSON.stringify(mine) !== JSON.stringify(entries)) {
+      reconciled++;
+    } else {
+      unchanged++;
+    }
+    cfg.hooks[event] = [...others, ...entries];
   }
 
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
-  return { adapter: 'claude-code', path: file, created, added, action: added ? 'installed' : 'already present' };
+  const action = installed && !reconciled && !unchanged ? 'installed'
+    : reconciled ? `reconciled ${reconciled} stale hook(s) from a prior version${installed ? `, installed ${installed} new` : ''}`
+    : installed ? `installed ${installed} new hook(s) (rest already present)`
+    : 'already present';
+  return { adapter: 'claude-code', path: file, created, installed, reconciled, unchanged, action };
 }
 
 /* --------------------------------------------------------------------- OpenCode ---- */
@@ -808,6 +950,10 @@ export async function integrate(repoRoot, {
 
   results.push(await installAgentsMd(repoRoot, { bin }));
   results.push(...await installMcp(repoRoot, { bin, home, scope, hosts: present }));
+  // UPGRADE SAFETY: clean up locations a PAST version of holt wrote that are now known wrong,
+  // before anything else gets a chance to read them. See legacyMcpTargets for the proven case
+  // this closes (v0.3.0 itself shipped a wrong `.cline/mcp.json` for one commit).
+  results.push(...await retireLegacyMcp(repoRoot, { home, scope }));
 
   if (present.includes('claude-code')) results.push(await installClaudeCode(repoRoot, { bin }));
   // Cursor blocks deterministically now that its hook schema is confirmed rather than guessed.
@@ -816,6 +962,160 @@ export async function integrate(repoRoot, {
   results.push(await installGitHooks(repoRoot, { bin }));
 
   return { detected, scope, results, bin: { ...resolved } };
+}
+
+/**
+ * The other half of `holt integrate`: reverse it.
+ *
+ * `npm uninstall -g holt` removes the PACKAGE, nothing else — every hook and MCP entry
+ * `integrate` ever wrote, in every repository, is left behind pointing at a binary that no
+ * longer exists. That is a real launch blocker: an agent whose PreToolUse hook now fails to spawn
+ * on every single Bash call is a broken machine, and there was no documented way back except
+ * hand-editing JSON. This must be run BEFORE the package is removed, while `holt` is still on
+ * PATH to do the reversal — exposed as `holt uninstall` and `holt integrate --remove`.
+ *
+ * Only entries recognisable as holt's OWN — by the same structural signatures installClaudeCode/
+ * installCursorHooks reconcile with, never by matching the current `bin` — are touched. Anything
+ * else in a shared config file (a user's own hooks, another MCP server, unrelated settings)
+ * survives untouched. A file is deleted outright only when holt's own content was the entirety of
+ * it; otherwise the holt-authored key is stripped and the rest of the file is rewritten as-is.
+ *
+ * Covers current target shapes AND retired/legacy ones, because a repository integrated by an
+ * older holt may hold config at a path this version no longer writes to.
+ */
+export async function uninstall(repoRoot, { home = os.homedir(), scope = 'project' } = {}) {
+  const results = [];
+
+  // ---- AGENTS.md: strip holt's block; remove the file only if that was its entire content ----
+  {
+    const file = path.join(repoRoot, 'AGENTS.md');
+    try {
+      const existing = await fs.readFile(file, 'utf8');
+      if (existing.includes(HOLT_BEGIN)) {
+        const stripped = stripHoltBlock(existing).trim();
+        if (!stripped) {
+          await fs.rm(file, { force: true });
+          results.push({ adapter: 'agents-md', path: file, action: 'removed (holt-only content)' });
+        } else {
+          await fs.writeFile(file, `${stripped}\n`, 'utf8');
+          results.push({ adapter: 'agents-md', path: file, action: "holt's block removed, your content kept" });
+        }
+      }
+    } catch { /* no AGENTS.md — nothing to remove */ }
+  }
+
+  // ---- MCP config: every current target, plus every retired one, both scopes as requested ----
+  const jsonTargets = [...mcpTargets(repoRoot, home, { scope: 'all' }), ...legacyMcpTargets(repoRoot, home)];
+  for (const t of jsonTargets) {
+    if (t.scope === 'user' && scope === 'project') continue;
+
+    if (t.format === 'toml') {
+      let existing;
+      try { existing = await fs.readFile(t.file, 'utf8'); } catch { continue; }
+      if (!/^\s*\[mcp_servers\.holt\]\s*$/m.test(existing)) continue;
+      const stripped = tomlWithoutHoltServer(existing);
+      if (!stripped.trim()) {
+        await fs.rm(t.file, { force: true });
+        results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'removed (holt-only content)' });
+      } else {
+        await fs.writeFile(t.file, stripped.endsWith('\n') ? stripped : `${stripped}\n`, 'utf8');
+        results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: "holt's entry removed, your other settings kept" });
+      }
+      continue;
+    }
+
+    let cfg;
+    try { cfg = JSON.parse(stripJsonComments(await fs.readFile(t.file, 'utf8'))); } catch { continue; }
+    if (!cfg[t.key] || !cfg[t.key].holt) continue;
+    delete cfg[t.key].holt;
+    if (Object.keys(cfg[t.key]).length === 0) delete cfg[t.key];
+    if (Object.keys(cfg).length === 0) {
+      await fs.rm(t.file, { force: true });
+      results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'removed (holt-only content)' });
+    } else {
+      await fs.writeFile(t.file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+      results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: "holt's entry removed, your other settings kept" });
+    }
+  }
+
+  // ---- Claude Code hooks: remove only entries matching holt's structural signature ----
+  {
+    const file = path.join(repoRoot, '.claude', 'settings.json');
+    try {
+      const cfg = JSON.parse(await fs.readFile(file, 'utf8'));
+      let removed = 0;
+      for (const [event, sub] of Object.entries(CLAUDE_EVENT_SUBCOMMAND)) {
+        if (!Array.isArray(cfg.hooks?.[event])) continue;
+        const before = cfg.hooks[event].length;
+        cfg.hooks[event] = cfg.hooks[event].filter((e) => !commandsOf(e).some((c) => isHoltHookCommand(c, sub)));
+        removed += before - cfg.hooks[event].length;
+        if (cfg.hooks[event].length === 0) delete cfg.hooks[event];
+      }
+      if (removed > 0) {
+        if (cfg.hooks && Object.keys(cfg.hooks).length === 0) delete cfg.hooks;
+        if (Object.keys(cfg).length === 0) {
+          await fs.rm(file, { force: true });
+          results.push({ adapter: 'claude-code', path: file, action: 'removed (holt-only content)' });
+        } else {
+          await fs.writeFile(file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+          results.push({ adapter: 'claude-code', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+        }
+      }
+    } catch { /* no settings.json */ }
+  }
+
+  // ---- Cursor hooks.json: same pattern ----
+  {
+    const file = path.join(repoRoot, '.cursor', 'hooks.json');
+    try {
+      const cfg = JSON.parse(stripJsonComments(await fs.readFile(file, 'utf8')));
+      const list = Array.isArray(cfg.hooks?.beforeShellExecution) ? cfg.hooks.beforeShellExecution : [];
+      const kept = list.filter((h) => !isHoltHookCommand(h?.command, 'pre-tool-use'));
+      if (kept.length !== list.length) {
+        if (kept.length) cfg.hooks.beforeShellExecution = kept; else delete cfg.hooks.beforeShellExecution;
+        if (cfg.hooks && Object.keys(cfg.hooks).length === 0) delete cfg.hooks;
+        const onlyVersionLeft = Object.keys(cfg).length === 0
+          || (Object.keys(cfg).length === 1 && 'version' in cfg);
+        if (onlyVersionLeft) {
+          await fs.rm(file, { force: true });
+          results.push({ adapter: 'cursor', path: file, action: 'removed (holt-only content)' });
+        } else {
+          await fs.writeFile(file, `${JSON.stringify(cfg, null, 2)}\n`, 'utf8');
+          results.push({ adapter: 'cursor', path: file, action: "holt's hook removed, your settings kept" });
+        }
+      }
+    } catch { /* no hooks.json */ }
+  }
+
+  // ---- OpenCode plugin: the whole file is holt's ----
+  {
+    const file = path.join(repoRoot, '.opencode', 'plugins', 'holt.js');
+    try {
+      const text = await fs.readFile(file, 'utf8');
+      if (text.includes('holt — OpenCode plugin')) {
+        await fs.rm(file, { force: true });
+        results.push({ adapter: 'opencode', path: file, action: 'removed' });
+      } else {
+        results.push({ adapter: 'opencode', path: file, action: 'left in place (does not look holt-authored)' });
+      }
+    } catch { /* no plugin file */ }
+  }
+
+  // ---- git pre-commit hook: remove only if it is still holt's own, unmodified file ----
+  {
+    const file = path.join(repoRoot, '.git', 'hooks', 'pre-commit');
+    try {
+      const text = await fs.readFile(file, 'utf8');
+      if (text.includes('holt —')) {
+        await fs.rm(file, { force: true });
+        results.push({ adapter: 'git-hooks', path: file, action: 'removed' });
+      } else {
+        results.push({ adapter: 'git-hooks', path: file, action: 'left in place (not holt-authored, or edited since)' });
+      }
+    } catch { /* no pre-commit hook */ }
+  }
+
+  return results;
 }
 
 /* --------------------------------------------------------- response formatting ---- */

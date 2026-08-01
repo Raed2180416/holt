@@ -39,7 +39,14 @@ test('MCP holt_status: returns the decision surface, not an inventory', async (t
   assert.equal(r.workstreams, 8);
   assert.equal(r.atRisk, 1, 'one workstream holds uncommitted-only work');
   assert.equal(r.collisions, 1);
-  assert.equal(r.disposable, 2);
+  // Four, not two, and the extra pair is the POINT: alpha-1 and beta-1 commit byte-identical
+  // content at different paths (the fixture's "two dispatches built the same thing"), so each is
+  // disposable while the other lives — the per-file content-identity recall fix. The summary must
+  // also SAY that two of the four are only conditionally safe, because an agent reading
+  // `disposable: 4` with no qualifier deletes all four and loses the work both copies held.
+  assert.equal(r.disposable, 4);
+  assert.equal(r.disposableRedundant, 2,
+    'the redundant pair must be distinguished from the genuinely-empty worktrees');
   assert.match(r.reviewQueue, /to review/);
   assert.ok(Array.isArray(r.topRisks) && r.topRisks.length === 1);
   assert.equal(r.topRisks[0].id, 'uniqueUncommitted');

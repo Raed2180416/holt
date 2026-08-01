@@ -277,6 +277,87 @@ test('FIRST RUN: branches outside a repo matches every other command', async (t)
   }
 });
 
+test('FIRST RUN: no worktrees yet gets an honest message, never a silent all-clear', async (t) => {
+  // The overwhelmingly common first run: a git repo that nobody has fanned out of yet. Every
+  // count in `status` and `risk` is zero here for a reason that has NOTHING to do with the
+  // repository's health — there was nothing to compare against — and printing the exact same
+  // all-zero table (or "Nothing unique anywhere. Every workstream is reproducible from base.")
+  // that a genuinely clean multi-worktree scan would print reads as a verified all-clear to
+  // someone who has simply not run `git worktree add` yet.
+  const fx = await newRepo('no-siblings');
+  t.after(() => fx.cleanup());
+
+  const risk = await holt(['risk', '--cwd', fx.root], fx.root);
+  assert.equal(risk.code, 0, `risk exited ${risk.code}: ${risk.stderr}`);
+  assert.match(risk.stdout, /no worktrees yet/i,
+    `risk must say WHY everything is zero, got: ${risk.stdout}`);
+  assert.ok(!/Nothing unique anywhere/.test(risk.stdout),
+    'must not print the "verified clean" verdict when nothing was ever compared');
+
+  const status = await holt(['status', '--cwd', fx.root], fx.root);
+  assert.equal(status.code, 0, `status exited ${status.code}: ${status.stderr}`);
+  assert.match(status.stdout, /no worktrees yet/i,
+    `status must say WHY every DECISIONS row is zero, got: ${status.stdout}`);
+
+  // `holt brief` collapses onto the same fixed sentence regardless of WHY there was nothing to
+  // say — indistinguishable from "not a repo" and from "genuinely nothing to report".
+  const brief = await holt(['brief', '--cwd', fx.root], fx.root);
+  assert.equal(brief.code, 0);
+  assert.match(brief.stdout, /no other worktrees yet/i, `brief got: ${brief.stdout}`);
+  assert.ok(!/no parallel workstream findings/.test(brief.stdout),
+    'the old fixed sentence must be gone');
+});
+
+test('FIRST RUN: `setup` outside a repository fails fast, not mid-sentence', async (t) => {
+  // Previously: `holt setup` printed the FULL backends section and the FULL agent-wiring
+  // section, THEN reached step 3's buildReport(), which calls process.exit(2) directly —
+  // bypassing the try/catch wrapped around it — and died with no indication of what to do.
+  // The one command every artifact tells a new user to run first must not do that.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-setup-nogit-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  const r = await holt(['setup', '--cwd', dir], dir);
+  assert.equal(r.code, 2, `setup outside a repo should exit 2, got ${r.code}: ${r.stdout}`);
+  assert.ok(!/node:internal|\bat async\b/.test(r.stdout + r.stderr), 'must not print a stack trace');
+  assert.match(r.stderr, /not a git repository/i);
+  // And must not have printed the sections that promise things this directory cannot deliver
+  // (the intro tagline itself says "agent wiring" in passing, so check for the numbered step).
+  assert.ok(!/1\. analysis backends|2\. agent wiring/.test(r.stdout),
+    `must fail before step 1/2, got: ${r.stdout}`);
+});
+
+test('FIRST RUN: a bare repository is diagnosed correctly, not called "not a git repository"', async (t) => {
+  // A bare repo IS a real git repository — it just has no working tree. `not a git repository`
+  // is simply false there, and holt exists to give people accurate information about their own
+  // repositories. Cover every command a first-run user is told to run.
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-bare-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const bare = path.join(dir, 'repo.git');
+  await new Promise((res, rej) => execFile('git', ['init', '-q', '--bare', '-b', 'main', bare], (e) => (e ? rej(e) : res())));
+
+  for (const cmd of [['status'], ['risk'], ['integrate']]) {
+    const r = await holt([...cmd, '--cwd', bare], bare);
+    assert.equal(r.code, 2, `${cmd[0]} in a bare repo should exit 2, got ${r.code}`);
+    assert.ok(!/node:internal|\bat async\b/.test(r.stderr), `${cmd[0]} must not print a stack trace`);
+    assert.match(r.stderr, /bare repository/i, `${cmd[0]} must name the actual state, got: ${r.stderr}`);
+    assert.ok(!/^holt: not a git repository/im.test(r.stderr),
+      `${cmd[0]} must not claim this is not a git repository at all, got: ${r.stderr}`);
+  }
+
+  const setup = await holt(['setup', '--cwd', bare], bare);
+  assert.equal(setup.code, 2, `setup in a bare repo should exit 2, got ${setup.code}`);
+  assert.match(setup.stderr, /bare repository/i, `setup got: ${setup.stderr}`);
+
+  const doctor = await holt(['doctor', '--cwd', bare, '--json'], bare);
+  assert.equal(doctor.code, 0, `doctor should still exit 0 in a bare repo: ${doctor.stderr}`);
+  const info = JSON.parse(doctor.stdout);
+  assert.equal(info.bare, true, `doctor --json must flag bare:true, got: ${doctor.stdout}`);
+
+  const brief = await holt(['brief', '--cwd', bare], bare);
+  assert.equal(brief.code, 0);
+  assert.match(brief.stdout, /bare repository/i, `brief got: ${brief.stdout}`);
+});
+
 test('SCRIPTABILITY: context exits non-zero for an unknown id, zero for a real one', async (t) => {
   const fx = await newRepo('ctx-exit');
   t.after(() => fx.cleanup());

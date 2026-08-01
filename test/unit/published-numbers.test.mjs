@@ -24,43 +24,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { TEST_COUNT_PATTERNS as TEST_COUNT, MUTATION_PATTERNS as MUTATION, claims } from '../lib/published-number-patterns.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SURFACES = ['README.md', 'BENCHMARKS.md', 'site/index.html'];
-
-/** Every way this repo has ever written "N tests pass". */
-const TEST_COUNT = [
-  /tests-(\d+)%20passing/g,                                   // shields badge
-  /(\d+)\s+(?:tests?)\s+passing/gi,
-  /(\d+)\s+tests?,\s+and\s+the\s+interesting/gi,
-  /(\d+)\s+tests\s+\+/gi,
-  /tile-num">(\d+)<\/div><div class="tile-label">tests passing/g, // site tile
-  /\|\s*tests\s*\|\s*(\d+)\s+passing/gi,                          // BENCHMARKS table row
-];
-
-/** Every way this repo has ever written the mutation score. */
-const MUTATION = [
-  /mutation%20score-(\d+)%2F(\d+)%20killed/g,
-  /(\d+)\/(\d+)\s+(?:deliberate[- ]defects?|mutations?)\s+killed/gi,
-  /(\d+)\/(\d+)\s+killed/gi,
-  /tile-num">(\d+)\/(\d+)<\/div>/g,
-];
 
 async function readAll() {
   const out = new Map();
   for (const f of SURFACES) out.set(f, await fs.readFile(path.join(ROOT, f), 'utf8'));
   return out;
 }
-
-const claims = (text, patterns, arity = 1) => {
-  const found = [];
-  for (const re of patterns) {
-    for (const m of text.matchAll(new RegExp(re.source, re.flags))) {
-      found.push(arity === 1 ? m[1] : `${m[1]}/${m[2]}`);
-    }
-  }
-  return found;
-};
 
 test('published numbers: every surface states the SAME test count', async () => {
   const files = await readAll();

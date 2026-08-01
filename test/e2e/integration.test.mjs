@@ -554,6 +554,120 @@ test('COVERAGE: git -C redirects which worktree a path-less verb acts on', async
   assert.equal(v.decision, 'deny', `-C must be followed to the real target: ${JSON.stringify(v)}`);
 });
 
+/* ------------------------------------------------------ THE GUARD ASYMMETRY ---- */
+
+/**
+ * TONIGHT'S INCIDENT, IN TWO HALVES.
+ *
+ * `git stash` (create) is a working-tree-wide sweep with no path argument — the same shape as
+ * `reset --hard` and `clean -fd`, which this table already evidence-gates — and it was let
+ * through unconditionally instead. Run in a working tree several agents were editing at once, it
+ * took every one of their uncommitted edits into a single stash entry: the tree went clean and
+ * nobody had been asked.
+ *
+ * `git stash pop` is the RECOVERY from exactly that, and it was a flat deny: an agent that had
+ * just lost its siblings' work to a bare stash was then blocked from putting any of it back.
+ * Over-refusal is not the safe failure mode here — it is the second half of the same incident.
+ *
+ * Both halves get the SAME fix: evidence-gated, capped at 'ask', never silent and never a wall.
+ */
+test('COVERAGE: bare `git stash`/`stash push`/`stash save` are evidence-gated — ask, not a silent allow', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const wt = fx.wt('uniqueUncommitted');
+
+  for (const cmd of ['git stash', 'git stash push', 'git stash push -u', 'git stash push -u -m wip', 'git stash save wip']) {
+    const v = await assessCommand(cmd, wt);
+    assert.equal(v.decision, 'ask',
+      `${cmd} against work that exists nowhere else must ASK — never silently sweep it, and never flatly refuse ordinary stashing: ${JSON.stringify(v)}`);
+    assert.match(v.reason, /uncommitted/i, `${cmd} must say what is at stake: ${v.reason}`);
+    assert.match(v.reason, /workstream/i, `${cmd} must say WHICH workstream(s): ${v.reason}`);
+    assert.match(v.reason, /git stash (list|apply)/, `${cmd} must name the recovery path: ${v.reason}`);
+  }
+});
+
+test('COVERAGE: stash — NEVER-WORSE half: a clean worktree has nothing to sweep, and stays allowed', async (t) => {
+  // The rule must be invisible in ordinary use, exactly like reset --hard and clean -fd above.
+  // Getting this half wrong — turning "ask sometimes" into "ask always" — is the failure mode
+  // this whole project's standing rules call out by name: refusing (or interrupting) everything
+  // is trivially safe and worthless.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  for (const cmd of ['git stash', 'git stash push', 'git stash push -u', 'git stash save wip']) {
+    const v = await assessCommand(cmd, fx.wt('empty'));
+    assert.equal(v.decision, 'allow', `${cmd} in a clean worktree must stay allowed: ${JSON.stringify(v)}`);
+  }
+});
+
+test('COVERAGE: stash SCOPED to a pathspec is deliberate and bounded — it stays allowed, not asked', async (t) => {
+  // `git stash push -- <path>` (or the equivalent bare `git stash -- <path>`) sweeps only the
+  // files the invoker named. That is the scoped, deliberate act this fix is supposed to leave
+  // alone — asking about it would be the exact over-refusal this rule exists to avoid.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const wt = fx.wt('uniqueUncommitted');
+
+  for (const cmd of [
+    'git stash push -- src/only_uncommitted.js',
+    'git stash -- src/only_uncommitted.js',
+    'git stash push -u -- src/only_uncommitted.js',
+    'git stash push -m "wip" -- src/only_uncommitted.js',
+  ]) {
+    const v = await assessCommand(cmd, wt);
+    assert.equal(v.decision, 'allow',
+      `a pathspec bounds the blast radius on purpose, and must not be asked about: ${cmd}: ${JSON.stringify(v)}`);
+  }
+
+  // `save` is the one exception: it has NO pathspec support in git at all, so trailing words are
+  // always a message, never a path — it must stay in the evidence-gated, ask-on-dirty bucket.
+  const saveV = await assessCommand('git stash save src/only_uncommitted.js', wt);
+  assert.equal(saveV.decision, 'ask',
+    `save cannot be scoped to a path — its trailing words are a message, so it still sweeps everything: ${JSON.stringify(saveV)}`);
+});
+
+test('COVERAGE: `git stash pop` stops being a flat deny — it is the recovery action, not a new act', async (t) => {
+  // MEASURED: an agent that had just had eleven siblings' work swept into the stash by a bare
+  // `git stash` was then BLOCKED from putting any of it back with `pop`. A guard that blocks the
+  // only way back is not protecting anyone.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const wt = fx.wt('uniqueUncommitted');
+
+  const v = await assessCommand('git stash pop', wt);
+  assert.equal(v.decision, 'ask', `pop must ask, never flatly deny the only way back: ${JSON.stringify(v)}`);
+  assert.match(v.reason, /git stash apply/,
+    `the message must name apply as the entry-preserving equivalent: ${v.reason}`);
+
+  // `drop`/`clear` are genuinely final — dropping IS the destructive act, with no equivalent that
+  // keeps the entry — and stay denied outright. If this fix had accidentally softened those too,
+  // it would be the conservative-sounding change that is actually a regression: a real loss with
+  // no confirmation step at all instead of one.
+  for (const cmd of ['git stash drop', 'git stash clear']) {
+    const d = await assessCommand(cmd, wt);
+    assert.equal(d.decision, 'deny', `${cmd} is genuinely final and must stay denied: ${JSON.stringify(d)}`);
+  }
+});
+
+test('COVERAGE: stash pop/push NEVER-WORSE — clean repositories never see either message', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const empty = fx.wt('empty');
+
+  // `pop`'s evidence is gathered across every workstream (the shared refs/stash), so this only
+  // proves the never-worse property when EVERY workstream in the fixture is actually clean —
+  // which 'empty' alone does not guarantee, since standardFixture's other worktrees hold real
+  // work. So this asserts the narrower, still-real claim: a repository where nothing anywhere is
+  // at risk allows pop outright. Build one fresh, single-worktree repo for it.
+  const clean = await newRepo('stash-clean');
+  t.after(() => clean.cleanup());
+  const popV = await assessCommand('git stash pop', clean.root);
+  assert.equal(popV.decision, 'allow', `pop with nothing at risk anywhere must be allowed: ${JSON.stringify(popV)}`);
+
+  const pushV = await assessCommand('git stash push', empty);
+  assert.equal(pushV.decision, 'allow', `push in a clean worktree must be allowed: ${JSON.stringify(pushV)}`);
+});
+
 /* ------------------------------------------- FILE-GRANULAR DESTRUCTION ---- */
 
 /**
@@ -1334,4 +1448,37 @@ test('GATE: a variable assigned a literal in the same command is not opaque', as
     assert.equal(v.decision, 'ask',
       `holt cannot resolve this and must not bless it: ${cmd} -> ${JSON.stringify(v)}`);
   }
+});
+
+test('GUARD: an inline OVERWRITE of at-risk content asks with an honest label — never "rm (deletes the file)", never a flat deny', async (t) => {
+  // MEASURED LIVE, twice in one session: `node -e "...writeFileSync('src/x.mjs',...)"` against a
+  // file whose only copy was uncommitted returned a DENY whose reason began
+  // "rm (deletes the file) would destroy" — a message that is false about the act (nothing is
+  // deleted; content is replaced) attached to a verdict that is wrong in kind (editing a file a
+  // script owns is the everyday case; the calibrated answer is ask). Both times the block landed
+  // on the author of the very content being protected. The remove path must keep its deny; the
+  // out-of-repo write must stay allowed; and the overwrite must ask, saying "overwrite".
+  const fx = await newRepo('inline-overwrite');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('editing');
+  await fx.write('src/only.mjs', 'export function ONLY_COPY_HERE() { return 1; }\n', wt);
+  // uncommitted on purpose: the file's current content exists nowhere else.
+
+  const overwrite = await assessCommand(
+    `node -e "require('fs').writeFileSync('src/only.mjs','edited')"`, wt);
+  assert.equal(overwrite.decision, 'ask',
+    `an overwrite of at-risk content is the author-editing case — ask, got: ${JSON.stringify(overwrite)}`);
+  assert.match(overwrite.reason, /overwrite/i, 'the reason must describe the actual act');
+  assert.doesNotMatch(overwrite.reason.split('\n')[0], /rm \(deletes the file\)/,
+    'the headline must not claim a write is a delete — a guard that misdescribes what it saw is not believed next time');
+
+  const remove = await assessCommand(
+    `node -e "require('fs').rmSync('src/only.mjs')"`, wt);
+  assert.equal(remove.decision, 'deny',
+    `the REMOVE path keeps its deny — this fix must scope, not weaken: ${JSON.stringify(remove)}`);
+
+  const elsewhere = await assessCommand(
+    `node -e "require('fs').writeFileSync('${process.env.HOLT_TMPDIR || '/tmp'}/scratch-ok.txt','x')"`, wt);
+  assert.equal(elsewhere?.decision ?? 'allow', 'allow',
+    `a write outside the repo puts nothing at risk: ${JSON.stringify(elsewhere)}`);
 });

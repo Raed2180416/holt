@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/dev/projects/holt/bin/holt.mjs hook pre-tool-use --host claude-code",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/dev/projects/holt/bin/holt.mjs hook session-start --autoprotect --host claude-code",
+            "timeout": 120
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node /Users/dev/projects/holt/bin/holt.mjs hook user-prompt-submit --host claude-code",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

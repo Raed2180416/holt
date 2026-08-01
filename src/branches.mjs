@@ -23,7 +23,7 @@
  */
 
 import { git, gitOk } from './git.mjs';
-import { discover } from './discover.mjs';
+import { discover, repoAbsenceError } from './discover.mjs';
 import { resolveBase, committedDelta } from './scan.mjs';
 import { appendEvent } from './journal.mjs';
 
@@ -43,7 +43,7 @@ async function journal(cwd, event, failures) {
 
 export async function branchAudit(cwd, { apply = false, base: baseRef = null, ...opts } = {}) {
   const disc = await discover(cwd, opts);
-  if (!disc.root) throw Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
   const root = disc.root;
 
   const base = await resolveBase(root, baseRef);

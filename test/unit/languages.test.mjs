@@ -149,12 +149,12 @@ test('language coverage: every case yields its named symbols', async (t) => {
     `too many languages skipped (${unsupported.length}) — the suite would be proving nothing`);
 });
 
-test('language coverage: holt reports the gap between what it names and what this ctags supports', async () => {
+test('language coverage: holt reports the gap between what it names and what this ctags supports', async (t) => {
   // The honesty mechanism itself. holt must never claim coverage the installed toolchain cannot
   // deliver: languageCoverage() names the missing parsers so `holt doctor` can surface them.
   const named = [...new Set(Object.values(CASE_LANGUAGE))];
   const cov = await languageCoverage(named);
-  if (!cov.available) return; // no ctags at all — the regex-fallback path, covered elsewhere
+  if (!cov.available) return t.skip('ctags unavailable — no ctags at all, the regex-fallback path is covered elsewhere');
   assert.equal(cov.checked, named.length);
   assert.equal(cov.supported + cov.missing.length, cov.checked, 'the accounting must balance');
   assert.ok(cov.note.length > 0, 'the report must always explain itself');
@@ -227,6 +227,66 @@ test('binary and oversized files are skipped, not misparsed', async (t) => {
   assert.deepEqual(found.get('blob.bin'), []);
 });
 
+test('AMBIGUOUS EXTENSION + embedded NUL byte: real declarations must still be found', async (t) => {
+  // MEASURED (bench50 corpus, r11-a-cs/wt-nul): a real, compiling C# file whose only unusual
+  // content is a literal NUL byte inside a trailing `//` comment comes back from
+  // `enry -json` as `{"language":"","type":"Binary"}` — enry's binary sniff is a content
+  // heuristic (does the file contain a NUL near the start), not a verdict about source code.
+  // `.cs` is one of holt's AMBIGUOUS_EXT entries (C# / Smalltalk), so it is routed through enry
+  // before ctags. Trusting that Binary verdict as "not code" zeroed the symbol extraction for the
+  // file entirely, even though ctags — pointed at the identical bytes directly — extracts both
+  // declarations cleanly. Every one of holt's ambiguous-extension languages that this corpus
+  // exercises with a NUL byte (.cs, .r, .d, .m x2, .fs) hit exactly this.
+  const backend = await resolveBackend();
+  if (backend.kind !== 'ctags') return t.skip('ctags unavailable — the regex fallback does not model ambiguous-extension NUL-byte routing');
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-nul-amb-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  const src = Buffer.concat([
+    Buffer.from('public class CsNulClass {\n  public void CsNulMethod() {}\n}\n// NUL'),
+    Buffer.from([0]),
+    Buffer.from('INSIDE'),
+    Buffer.from([0]),
+    Buffer.from('COMMENT\n'),
+  ]);
+  await fs.writeFile(path.join(dir, 'a.cs'), src);
+
+  const found = await symbolsOnDisk(dir, ['a.cs'], backend);
+  const names = (found.get('a.cs') ?? []).map((s) => s.name);
+  assert.ok(names.includes('CsNulClass') && names.includes('CsNulMethod'),
+    `a NUL byte elsewhere in an ambiguous-extension file must not blind ctags to real ` +
+    `declarations: found ${JSON.stringify(names)}`);
+});
+
+test('AMBIGUOUS EXTENSION + NUL BYTE, GAP LANGUAGE: F# still needs its real language name', async (t) => {
+  // `.fs` is BOTH an AMBIGUOUS_EXT entry (F# / Forth / GLSL) AND a "gap" language ctags only
+  // parses via holt's own compat langdef (HoltFSharp), reached through `forcedName()` once enry
+  // names the language "F#". A naive fix for the Binary-misclassification bug — falling back to
+  // plain extension-based ctags with NO language-force whenever enry says "Binary" — is NOT
+  // enough for this case: MEASURED, bare ctags maps `.fs` to its OWN built-in "Forth" by default
+  // and extracts zero tags from real F#. So the real language name must still reach
+  // `resolveAmbiguous`'s caller even when the raw file trips enry's binary sniff.
+  const backend = await resolveBackend();
+  if (backend.kind !== 'ctags') return t.skip('ctags unavailable — the F# gap-language routing this asserts is ctags-specific');
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-nul-fs-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  const src = Buffer.concat([
+    Buffer.from('module FsNulModule\nlet fsNulFunction x = x\n// NUL'),
+    Buffer.from([0]),
+    Buffer.from('INSIDE'),
+    Buffer.from([0]),
+    Buffer.from('COMMENT\n'),
+  ]);
+  await fs.writeFile(path.join(dir, 'm.fs'), src);
+
+  const found = await symbolsOnDisk(dir, ['m.fs'], backend);
+  const names = (found.get('m.fs') ?? []).map((s) => s.name);
+  assert.ok(names.includes('FsNulModule') && names.includes('fsNulFunction'),
+    `an F# file with an embedded NUL byte must still be recognised as F#, not silently ` +
+    `misrouted to ctags' default Forth mapping: found ${JSON.stringify(names)}`);
+});
+
 test('COMPAT: holt closes its toolchain\'s gaps instead of reporting them', async (t) => {
   // NEVER CONCEDE A LANGUAGE TO THE TOOLCHAIN. The version before this test measured that a ctags
   // could not parse Terraform or Elm and simply reported reduced coverage. On Ubuntu 24.04 LTS
@@ -234,7 +294,7 @@ test('COMPAT: holt closes its toolchain\'s gaps instead of reporting them', asyn
   // silently yields no symbols, and silence reads as "these two agents share nothing". A coverage
   // gap becomes a wrong ANSWER, not a smaller number.
   const backend = await resolveBackend();
-  if (backend.kind !== 'ctags') return; // regex-fallback path is covered elsewhere
+  if (backend.kind !== 'ctags') return t.skip('ctags unavailable — the regex-fallback path is covered elsewhere');
 
   const c = await compatReport();
   t.diagnostic(`compat: loaded ${c.loaded.length} pack(s); fixed [${c.fixed.join(', ') || 'none'}]`);
@@ -249,11 +309,11 @@ test('COMPAT: holt closes its toolchain\'s gaps instead of reporting them', asyn
     'capability is restored rather than conceded.');
 });
 
-test('COMPAT: every pack is loadable by this ctags and defines what it claims', async () => {
+test('COMPAT: every pack is loadable by this ctags and defines what it claims', async (t) => {
   // A compat pack that ctags rejects would silently do nothing, and the gap it exists to close
   // would reappear as "coverage reduced" — the exact concession this mechanism removes.
   const backend = await resolveBackend();
-  if (backend.kind !== 'ctags') return;
+  if (backend.kind !== 'ctags') return t.skip('ctags unavailable — compat packs are a ctags-specific mechanism');
   const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../src/optlib/compat');
   const packs = (await fs.readdir(dir).catch(() => [])).filter((f) => f.endsWith('.ctags'));
   assert.ok(packs.length > 0, 'the compat directory must not be empty — it is the mechanism');
@@ -271,14 +331,14 @@ test('COMPAT: every pack is loadable by this ctags and defines what it claims', 
   }
 });
 
-test('PRECISION: a repeated package/namespace clause is not authored work', async () => {
+test('PRECISION: a repeated package/namespace clause is not authored work', async (t) => {
   // MEASURED on a 1,000-pair labelled corpus: EVERY false positive holt produced was Go, and all
   // of them traced to one tag — ctags emits `package corpus` (kind "package") for the clause each
   // file in a Go package repeats verbatim. It counted as a symbol, so a NEW file in an existing
   // package looked like work found nowhere else, and two agents adding unrelated files to the same
   // package looked like they had built the same thing. Precision 96.5%; every miss was this.
   const backend = await resolveBackend();
-  if (backend.kind !== 'ctags') return;
+  if (backend.kind !== 'ctags') return t.skip('ctags unavailable — this is a ctags-specific noise-filter regression test');
   const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-container-'));
   try {
     await fs.writeFile(path.join(dir, 'a.go'), 'package corpus\n\nfunc AlphaFunc() int { return 1 }\n');
@@ -300,13 +360,13 @@ test('PRECISION: a repeated package/namespace clause is not authored work', asyn
   }
 });
 
-test('PRECISION: a one-per-file module declaration IS work and must survive', async () => {
+test('PRECISION: a one-per-file module declaration IS work and must survive', async (t) => {
   // The line this filter must not cross. Go's `package` is restated by every file; F#'s
   // `module FsModule` names one thing once and a developer owns that name. An over-broad first
   // version of the filter excluded `module` too and made holt blind to real work in F#, Elixir and
   // Haskell — caught by the language suite, pinned here so it cannot come back.
   const backend = await resolveBackend();
-  if (backend.kind !== 'ctags') return;
+  if (backend.kind !== 'ctags') return t.skip('ctags unavailable — this is a ctags-specific noise-filter regression test');
   const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-module-'));
   try {
     await fs.writeFile(path.join(dir, 'm.fs'), 'module FsUniqueModule\nlet fsFn x = x\n');

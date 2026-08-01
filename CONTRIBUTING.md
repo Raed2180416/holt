@@ -18,10 +18,17 @@ it will ever bother you.
 ```bash
 npm test                 # the full suite
 npm run test:mutation    # deliberate defects must all still be caught
+npm run typecheck        # the diagnostic count may go down, never up
+npm run hosts:check      # HOSTS.md must match src/integrate/hosts.mjs
 ```
 
-Both must be green. If you fix a bug, add the test that would have caught it — the suite is
-mostly a record of things that actually went wrong.
+All four must be green. If you fix a bug, add the test that would have caught it — the suite is
+mostly a record of things that actually went wrong. `typecheck` is a ratchet, not a pass/fail
+checker with a fixed bar: it fails if your change adds diagnostics, however small, even though the
+repository does not (and will not) reach zero. Fixing pre-existing diagnostics your change touches
+is welcome; adding new ones is not. If you edit `src/integrate/hosts.mjs` (add/change a host), run
+`npm run hosts:generate` and commit the regenerated `HOSTS.md` — `hosts:check` fails the build
+otherwise; see the comment at the top of `scripts/generate-hosts.mjs`.
 
 ## Things reviewers look for
 

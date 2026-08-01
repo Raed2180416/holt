@@ -10,10 +10,35 @@
  * that git makes invisible.
  */
 
-import { git, repoRoot } from './git.mjs';
+import { git, repoRoot, pmap } from './git.mjs';
 import { discoverJjWorkspaces as _discoverJj } from './jj.mjs';
+import { resolveBase } from './scan.mjs';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalPath, foldCase } from './paths.mjs';
+
+/**
+ * Build the error every "this call needed disc.root and it was null" call site throws.
+ *
+ * A BARE repository — a real git repository, just with no working tree — gets a message that
+ * says so, instead of the "not a git repository" every one of these call sites used to print
+ * unconditionally. That claim is simply false for a bare repo, and holt exists to give people
+ * ACCURATE information about their repositories; a tool that misdiagnoses the one it is standing
+ * in has already lost the argument for trusting anything else it says.
+ *
+ * @param {{bare?: boolean}|null} disc  the `discover()` (or `discoverGitWorktrees()`) result
+ * @param {string} cwd
+ */
+export function repoAbsenceError(disc, cwd) {
+  if (disc?.bare) {
+    return Object.assign(
+      new Error(`${cwd} is a bare repository (no working tree) — holt compares file content `
+        + 'across worktrees and needs at least one checkout; run it from a normal clone instead'),
+      { code: 'EBAREREPO', bare: true },
+    );
+  }
+  return Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
+}
 
 /**
  * The prefix every lock holt places carries, and the test for one.
@@ -68,16 +93,64 @@ export function unquotePorcelain(s) {
 }
 
 /**
- * Family inference.
+ * Family inference — PROVENANCE, NOT NAMING.
  *
- * Agents fan out with generated names. Grouping them recovers "these 5 came from one
- * dispatch", which is what makes duplicate detection meaningful — 5 siblings solving the
- * same task is expected; 2 strangers solving it is waste.
+ * "Family" means: came from the same dispatch. That is what makes duplicate detection
+ * meaningful — 5 siblings solving the same task is expected fan-out; 2 strangers solving it
+ * independently is waste worth flagging — and it is what an agent gets told about its
+ * neighbours. Grouping by directory/branch NAMING PATTERN alone (the previous approach here)
+ * gets this backwards in both directions: `feat/auth-1` and `feat/auth-2` LOOK related and can
+ * be forked from different commits days apart; `alpha`, `zebra`, `quux` look like three
+ * singletons and can be the exact same fan-out. A human-readable name is not evidence of a
+ * shared dispatch. Git's own history is:
  *
- * This is heuristic, and it is the single most likely thing to be wrong on a layout we
- * have not seen. It is therefore (a) overridable via config and (b) reported, so a user
- * can see the grouping holt chose rather than having it silently applied.
+ *   FORK POINT     `git merge-base <base> <head>`. Workstreams dispatched together all fork
+ *                  from the SAME commit — that is what "dispatched together" means. Two
+ *                  efforts that just happen to share a naming convention essentially never
+ *                  share an exact fork commit.
+ *   CREATION TIME  when the workstream came into existence. VERIFIED empirically (see
+ *                  creationTimeMs below) on Linux: the mtime of a linked worktree's private
+ *                  `gitdir` file and the worktree's own per-worktree HEAD reflog entry agree
+ *                  to the second, and BOTH correctly track the moment the worktree was
+ *                  created — not the moment its branch was, which can be much older when a
+ *                  worktree is later added for a pre-existing branch. mtime is used as the
+ *                  primary signal for exactly that reason (it is a direct, single-purpose
+ *                  measurement); the reflog read is the fallback when mtime is unavailable.
+ *
+ * CLUSTERING groups workstreams that share a fork point, then single-links them by creation
+ * time within FAMILY_WINDOW_MS — so a fan-out dispatched over a couple of minutes (agents do
+ * not all start in the same millisecond) still lands in one family, while two unrelated
+ * dispatches that happen to fork from the same commit months apart do not.
+ *
+ * NAMING IS A FALLBACK, used only when history genuinely cannot answer (no branch, no
+ * reflog, no worktree metadata — e.g. some jj layouts, or a worktree whose metadata was lost).
+ * When it is used, `familyRule` says so (`name-fallback:<pattern>`), so nothing downstream
+ * mistakes a naming guess for a proven relationship.
+ *
+ * An explicit human override (regex on the name) still wins over everything — a human
+ * assertion about grouping is not something history gets to overrule.
  */
+
+/**
+ * The fork-point + creation-time window: how far apart two workstreams forked from the SAME
+ * commit may have been created and still count as one dispatch.
+ *
+ * 60 minutes. The first version of this was 5 minutes, justified by how fast a scripted
+ * fan-out loop runs — and adversarial review refuted it with an entirely ordinary fixture: a
+ * genuine two-worktree dispatch staggered by 20 minutes (a human reviewing between spawns, a
+ * rate-limited API, CI provisioning in waves) was split into two "families", and a duplicate
+ * pair between its halves flipped from the correct 'expected-fanout' to a confidently wrong
+ * 'cross-dispatch-waste'. The boundary that matters is not "how fast is a tight loop" but
+ * "what gap separates one staggered dispatch from two unrelated efforts" — and that gap is
+ * hours-to-days, not minutes. 60 minutes of single-linkage keeps every ordinary stagger in one
+ * family (a chain of creations each within an hour of the previous stays whole, however long
+ * the chain) while day-apart efforts sharing a fork point still split. Same-fork-point clusters
+ * whose members share a fan-out naming stem merge across even this window — see the
+ * corroboration step in assignFamilies. Configurable via `discover(cwd, { familyWindowMs })`
+ * for repositories where this default is wrong.
+ */
+export const DEFAULT_FAMILY_WINDOW_MS = 60 * 60 * 1000;
+
 const FAMILY_PATTERNS = [
   // wf_11177c4b-466-1  ->  wf_11177c4b-466      (Claude Code / workflow fan-out)
   { re: /^(.*?)-\d+$/, name: 'numeric-suffix' },
@@ -87,6 +160,14 @@ const FAMILY_PATTERNS = [
   { re: /^(.*)\.\d+$/, name: 'dotted-suffix' },
 ];
 
+/**
+ * Name-based inference: checks an explicit user override first (returns rule 'user-override'
+ * when one matches — this always wins, regardless of what provenance would say), then falls
+ * through to the naming patterns. Used directly for the override check; used as the FALLBACK,
+ * with its result relabelled `name-fallback:<rule>`, when provenance cannot answer. Exported
+ * standalone (rather than folded into assignFamilies) because it needs no git access at all —
+ * useful on its own, and it is what the safety net degrades to when everything else fails.
+ */
 export function inferFamily(name, overrides = []) {
   for (const o of overrides) {
     try {
@@ -102,6 +183,193 @@ export function inferFamily(name, overrides = []) {
     if (m) return { family: m[1], rule };
   }
   return { family: name, rule: 'singleton' };
+}
+
+/** The commit two workstreams (or a workstream and `base`) diverged from, or null if unknown. */
+async function forkPoint(root, baseOid, headOid) {
+  if (!baseOid || !headOid) return null;
+  if (baseOid === headOid) return baseOid; // the workstream IS base (e.g. primary, on trunk)
+  const r = await git(['merge-base', baseOid, headOid], { cwd: root }).catch(() => null);
+  if (!r || r.code !== 0) return null;
+  const oid = r.stdout.trim();
+  return oid || null;
+}
+
+/**
+ * When a workstream's worktree came into existence, in epoch milliseconds, or null if holt
+ * cannot determine it at all.
+ *
+ * PRIMARY: the mtime of the linked worktree's private `gitdir` file
+ * (`<root>/.git/worktrees/<name>/gitdir`), located via `git rev-parse --git-dir` rather than by
+ * guessing the metadata directory's name (git disambiguates it on a collision). Written once,
+ * at `git worktree add` time, and VERIFIED not to be touched again by ordinary use (a commit
+ * inside the worktree changes `HEAD`/`index`, not `gitdir`).
+ *
+ * FALLBACK (used when the worktree has no such metadata — the primary worktree, or a backend
+ * without linked-worktree files): the worktree's own per-worktree HEAD reflog, oldest entry,
+ * read via `git log -g` — NOT `git reflog`, which is on holt's permanently-refused command list
+ * (see git.mjs DESTRUCTIVE_ALWAYS) because it can rewrite the ref it reads from; `log -g` reads
+ * the identical data through the allowlisted, read-only `log` machinery. This is read from
+ * WITHIN the worktree (`HEAD`, not the branch name), because each worktree has its own private
+ * HEAD reflog: reading the BRANCH's reflog instead would report when the branch was created,
+ * which is a different and often much older moment when a worktree is later added for a
+ * pre-existing branch — verified live, see the file-level comment above.
+ */
+async function creationTimeMs(root, wPath) {
+  const gd = await git(['rev-parse', '--git-dir'], { cwd: wPath }).catch(() => null);
+  if (gd && gd.code === 0) {
+    const raw = gd.stdout.trim();
+    const abs = path.isAbsolute(raw) ? raw : path.resolve(wPath, raw);
+    try {
+      const st = await fs.stat(path.join(abs, 'gitdir'));
+      return st.mtimeMs;
+    } catch {
+      /* not a linked worktree (e.g. primary) — fall through to the reflog */
+    }
+  }
+
+  const lg = await git(['log', '-g', '--date=iso-strict', '--format=%gd', 'HEAD'], { cwd: wPath })
+    .catch(() => null);
+  if (lg && lg.code === 0) {
+    const lines = lg.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    // `log -g` lists newest-first; the OLDEST entry is the worktree's creation moment.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = lines[i].match(/@\{([^}]+)\}/);
+      const t = m ? Date.parse(m[1]) : NaN;
+      if (!Number.isNaN(t)) return t;
+    }
+  }
+  return null;
+}
+
+/** Single-linkage clustering of {id, t} by time: a new cluster starts whenever the gap to the
+ *  previous (sorted) entry exceeds `windowMs`. */
+function clusterBySingleLink(items, windowMs) {
+  const sorted = [...items].sort((a, b) => a.t - b.t);
+  const clusters = [];
+  let cur = [];
+  let prevT = null;
+  for (const it of sorted) {
+    if (prevT !== null && it.t - prevT > windowMs) {
+      clusters.push(cur);
+      cur = [];
+    }
+    cur.push(it.id);
+    prevT = it.t;
+  }
+  if (cur.length) clusters.push(cur);
+  return clusters;
+}
+
+/**
+ * Assign `family`/`familyRule` to every workstream: user override, then fork-point +
+ * creation-time provenance, then name as a last resort. See the file-level comment above for
+ * the design and DEFAULT_FAMILY_WINDOW_MS for the clustering window.
+ */
+export async function assignFamilies(root, workstreams, {
+  familyOverrides = [],
+  familyWindowMs = DEFAULT_FAMILY_WINDOW_MS,
+  base = null,
+} = {}) {
+  const results = new Map();
+  const pending = [];
+  for (const w of workstreams) {
+    const named = inferFamily(w.id, familyOverrides);
+    if (named.rule === 'user-override') {
+      results.set(w.id, { family: named.family, familyRule: 'user-override' });
+    } else if (w.isPrimary) {
+      // The primary worktree is the repository root — it was never DISPATCHED, so it has no
+      // dispatch-mates by definition. Left in the clustering, its reflog-derived "creation time"
+      // (really the repo's) routinely falls inside some dispatch's window and sweeps the root
+      // into that family — a relationship class the old naming heuristic could essentially never
+      // produce (roots are not named `agent-3`), found live by adversarial review.
+      results.set(w.id, { family: w.id, familyRule: 'primary-worktree' });
+    } else {
+      pending.push(w);
+    }
+  }
+
+  if (pending.length) {
+    let baseOid = null;
+    try {
+      baseOid = (await resolveBase(root, base))?.oid ?? null;
+    } catch {
+      baseOid = null; // no usable base (e.g. empty repo) — provenance cannot answer for anyone
+    }
+
+    const provenance = await pmap(pending, async (w) => {
+      const [fp, t] = await Promise.all([
+        forkPoint(root, baseOid, w.head),
+        creationTimeMs(root, w.path),
+      ]);
+      return { id: w.id, forkPoint: fp, t };
+    });
+
+    const byFork = new Map();
+    for (const p of provenance) {
+      // Family requires BOTH facts. Either missing means history genuinely cannot answer for
+      // this workstream, so it falls through to the name-based fallback below.
+      if (!p.forkPoint || p.t == null) continue;
+      if (!byFork.has(p.forkPoint)) byFork.set(p.forkPoint, []);
+      byFork.get(p.forkPoint).push(p);
+    }
+    for (const [fp, items] of byFork) {
+      let clusters = clusterBySingleLink(items, familyWindowMs);
+
+      // CORROBORATION ACROSS THE TIME BOUNDARY. Any window is a guess about orchestration speed,
+      // and a dispatch staggered past it gets split — the exact confidently-wrong flip
+      // adversarial review demonstrated. But when two time-clusters of the SAME fork point carry
+      // the same fan-out naming stem (`auth-1`/`auth-2`), the name is not the primary signal —
+      // provenance already put them on one fork commit — it is a second, independent witness
+      // breaking the timing tie, and two witnesses beat a timer. Names never group across
+      // DIFFERENT fork points (that stays the naming heuristic this design replaced), and
+      // singleton name-rules contribute nothing.
+      if (clusters.length > 1) {
+        const stemOf = (id) => {
+          const n = inferFamily(id, []);
+          return n.rule !== 'singleton' ? n.family : null;
+        };
+        const byStem = new Map();
+        clusters.forEach((ids, ci) => {
+          for (const id of ids) {
+            const stem = stemOf(id);
+            if (!stem) continue;
+            if (!byStem.has(stem)) byStem.set(stem, new Set());
+            byStem.get(stem).add(ci);
+          }
+        });
+        const mergeInto = new Map();
+        for (const cis of byStem.values()) {
+          if (cis.size < 2) continue;
+          const [root, ...rest] = [...cis].sort((a, b) => a - b);
+          for (const ci of rest) mergeInto.set(ci, mergeInto.get(root) ?? root);
+        }
+        if (mergeInto.size) {
+          const merged = new Map();
+          clusters.forEach((ids, ci) => {
+            const target = mergeInto.get(ci) ?? ci;
+            merged.set(target, [...(merged.get(target) ?? []), ...ids]);
+          });
+          clusters = [...merged.values()];
+        }
+      }
+
+      clusters.forEach((ids, idx) => {
+        // Suffixed only when the SAME fork point produced more than one time-cluster (two
+        // unrelated dispatches that happened to both start from that commit) — the common case
+        // stays a plain, stable label.
+        const label = clusters.length > 1 ? `fork:${fp.slice(0, 12)}#${idx + 1}` : `fork:${fp.slice(0, 12)}`;
+        for (const id of ids) results.set(id, { family: label, familyRule: 'fork+creation-time' });
+      });
+    }
+  }
+
+  return workstreams.map((w) => {
+    if (results.has(w.id)) return { ...w, ...results.get(w.id) };
+    // Provenance could not answer: fall back to naming, and say so honestly in familyRule.
+    const named = inferFamily(w.id, []); // overrides already resolved in the pass above
+    return { ...w, family: named.family, familyRule: `name-fallback:${named.rule}` };
+  });
 }
 
 /**
@@ -140,7 +408,22 @@ export function parseWorktreePorcelain(stdout) {
 /** Discover git worktrees from any path inside the repo. */
 export async function discoverGitWorktrees(cwd) {
   const root = await repoRoot(cwd);
-  if (!root) return { root: null, workstreams: [], vcs: null };
+  if (!root) {
+    // repoRoot() returns null for two situations that must not be reported the same way: no git
+    // repository at all, and a BARE repository — a real repo, just with no working tree, which
+    // makes `--show-toplevel` fail exactly the way it does outside any repo at all. Distinguish
+    // them here, once, so every caller upstream can stop telling someone standing in a perfectly
+    // real bare repo that they are not in a git repository. See repoAbsenceError() below.
+    //
+    // Same defensiveness as repoRoot() itself: a cwd that does not exist at all makes `git`
+    // REJECT (ENOENT is not a numeric exit code, see git.mjs), not resolve with a failing code.
+    // Uncaught, that turns "you're not in a repo" into an unhandled rejection instead of the
+    // clean answer every other absent-repo path already gives.
+    const bare = await git(['rev-parse', '--is-bare-repository'], { cwd })
+      .then((r) => r.code === 0 && r.stdout.trim() === 'true')
+      .catch(() => false);
+    return { root: null, workstreams: [], vcs: null, bare };
+  }
 
   const r = await git(['worktree', 'list', '--porcelain'], { cwd: root });
   if (r.code !== 0) {
@@ -184,10 +467,15 @@ export { discoverJjWorkspaces } from './jj.mjs';
  * Full discovery. Returns every workstream holt can see, tagged by backend,
  * with families assigned.
  */
-export async function discover(cwd, { familyOverrides = [], includeJj = true } = {}) {
+export async function discover(cwd, {
+  familyOverrides = [], includeJj = true, familyWindowMs = DEFAULT_FAMILY_WINDOW_MS, base = null,
+} = {}) {
   const g = await discoverGitWorktrees(cwd);
   if (!g.root) {
-    return { root: null, vcs: null, workstreams: [], jj: null, error: 'not-a-git-repository' };
+    return {
+      root: null, vcs: null, workstreams: [], jj: null,
+      error: g.bare ? 'bare-repository' : 'not-a-git-repository', bare: !!g.bare,
+    };
   }
 
   let jj = null;
@@ -211,9 +499,8 @@ export async function discover(cwd, { familyOverrides = [], includeJj = true } =
     }
   }
 
-  const workstreams = disambiguate([...byPath.values()]).map((w) => {
-    const { family, rule } = inferFamily(w.id, familyOverrides);
-    return { ...w, family, familyRule: rule };
+  const workstreams = await assignFamilies(g.root, disambiguate([...byPath.values()]), {
+    familyOverrides, familyWindowMs, base,
   });
 
   return { root: g.root, vcs: g.vcs, workstreams, jj, error: null };

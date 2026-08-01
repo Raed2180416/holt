@@ -33,11 +33,15 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { git, pmap } from './git.mjs';
+import { pmap, catFileBatch } from './git.mjs';
 import { ensureOnPath } from './toolchain.mjs';
 
 /* ------------------------------------------------------------------ ctags ---- */
 
+// The probe caches are annotated because `let _x = null` infers the type `null`, which makes
+// every detect*() return type `null`-shaped and every caller's field access "possibly 'null'" —
+// 14 diagnostics in bin/holt.mjs alone traced back to these declarations.
+/** @type {Promise<{available: boolean, version?: string, reason?: string}>|null} */
 let _ctagsProbe = null;
 
 /**
@@ -380,15 +384,23 @@ const MAX_TAG_FILE_BYTES = 2 * 1024 * 1024;
  */
 async function tagWorthy(cwd, relPaths) {
   const keep = [];
+  // A real, non-empty file over MAX_TAG_FILE_BYTES is a POLICY SKIP, not a demonstrated absence of
+  // symbols — holt chose not to look, the same distinction ctagsBatch already draws for a timed-out
+  // extraction (see its own doc comment). Carried back separately from `keep` so the caller can
+  // mark these `failed` instead of folding them into the same `[]` a genuinely empty/unknown file
+  // produces; a zero here must never be silently indistinguishable from "nothing to find".
+  const oversized = [];
   await pmap(relPaths, async (rel) => {
     try {
       const st = await fs.stat(path.join(cwd, rel));
-      if (st.isFile() && st.size > 0 && st.size <= MAX_TAG_FILE_BYTES) keep.push(rel);
+      if (!st.isFile() || st.size === 0) return; // not a file, or genuinely empty: correctly "no symbols"
+      if (st.size > MAX_TAG_FILE_BYTES) { oversized.push(rel); return; }
+      keep.push(rel);
     } catch {
       /* vanished between scan and tag — not an error, just nothing to tag */
     }
   }, 16);
-  return keep;
+  return { keep, oversized };
 }
 
 const CTAGS_EXCLUDES = [
@@ -438,9 +450,13 @@ export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400,
   // Files whose extraction ERRORED. Carried on the result so every caller can distinguish
   // "no symbols here" from "could not look", which are the same value and opposite meanings.
   const failed = new Set();
-  const usable = await tagWorthy(cwd, relPaths);
+  const { keep: usable, oversized } = await tagWorthy(cwd, relPaths);
   for (const p of relPaths) result.set(p, []); // unusable paths are "no symbols", never "unscanned"
-  if (usable.length === 0) { result.failed = []; return result; }
+  // A file too large to tag is holt CHOOSING not to look, not a proof the file has no symbols —
+  // it must be named the same way a timed-out extraction is, below, or it is silently
+  // indistinguishable from a genuinely empty file.
+  for (const p of oversized) failed.add(p);
+  if (usable.length === 0) { result.failed = [...failed]; return result; }
 
   // argv has an OS limit; chunk so a workstream touching thousands of files still works.
   const chunks = [];
@@ -595,6 +611,7 @@ const LINGUIST_TO_CTAGS = new Map(Object.entries({
   'Gerber Image': null,
 }));
 
+/** @type {Promise<{available: boolean, version?: string, reason?: string}>|null} */
 let _enryProbe = null;
 
 /** Detect enry (the Go port of GitHub Linguist) once per process. */
@@ -637,6 +654,40 @@ function forcedName(lang) {
   return _extraFlags.some((f) => f.endsWith(`${lang}.ctags`)) ? priv : lang;
 }
 
+function classifyWithEnry(cwd, rel) {
+  return new Promise((resolve) => {
+    execFile('enry', ['-json', rel], { cwd, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err && !stdout) return resolve(null);
+        try { resolve(JSON.parse(String(stdout))); }
+        catch { resolve(null); }
+      });
+  });
+}
+
+/**
+ * A NUL-stripped copy of one file, at the SAME relative path under `root`.
+ *
+ * Preserving the relative path (not just the basename) matters: enry's vendored/path heuristics
+ * look at the surrounding path (`vendor/`, `node_modules/`, …), and two different directories can
+ * share a basename. Returns null if the file could not be read or held no NUL byte to begin with
+ * (callers only reach here after a `Binary` verdict, so the latter should not happen in practice).
+ */
+async function sanitizedCopyForClassification(cwd, rel, root) {
+  try {
+    const buf = await fs.readFile(path.join(cwd, rel));
+    if (!buf.includes(0)) return null;
+    const cleaned = Buffer.from(buf);
+    for (let i = 0; i < cleaned.length; i++) if (cleaned[i] === 0) cleaned[i] = 0x20; // NUL -> space
+    const dest = path.join(root, rel);
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    await fs.writeFile(dest, cleaned);
+    return dest;
+  } catch {
+    return null;
+  }
+}
+
 export async function resolveAmbiguous(cwd, relPaths) {
   const out = new Map();
   if (relPaths.length === 0) return out;
@@ -644,21 +695,58 @@ export async function resolveAmbiguous(cwd, relPaths) {
   const probe = await detectEnry();
   if (!probe.available) return out; // caller falls back to extension mapping and reports it
 
-  await pmap(relPaths, async (rel) => {
-    const lang = await new Promise((resolve) => {
-      execFile('enry', ['-json', rel], { cwd, timeout: 10_000, maxBuffer: 4 * 1024 * 1024 },
-        (err, stdout) => {
-          if (err && !stdout) return resolve(null);
-          try {
-            const parsed = JSON.parse(String(stdout));
-            resolve(parsed.language || null);
-          } catch { resolve(null); }
-        });
-    });
-    if (!lang) { out.set(rel, null); return; }
-    const mapped = LINGUIST_TO_CTAGS.has(lang) ? LINGUIST_TO_CTAGS.get(lang) : lang;
-    out.set(rel, mapped);
-  }, 12);
+  // ENRY'S "Binary" TYPE IS A CONTENT SNIFF (does the file contain a NUL byte near the start),
+  // NOT A VERDICT THAT THE FILE HOLDS NO SOURCE.
+  //
+  // MEASURED (bench50, r11-a-cs/wt-nul): a real, compiling C# file whose only unusual content is
+  // a literal NUL byte inside a trailing `//` comment comes back from enry as
+  // `{"language":"","type":"Binary"}` — indistinguishable, to a reader of `language` alone, from
+  // an actual compiled binary. ctags, run on the IDENTICAL bytes, extracts both declarations
+  // cleanly (verified directly: `class` + `method` tags, both present). Treating that Binary
+  // verdict as authoritative silently zeroed uniqueWork()'s symbol count for the file, across
+  // every ambiguous-extension language in the corpus that plants a NUL byte — reported by the
+  // tool that exists to say "this is unique" as "nothing here is unique".
+  //
+  // The fix reclassifies on a NUL-stripped COPY, used for classification only — ctags always
+  // reads the real on-disk bytes (symbolsOnDisk/ctagsBatch never touch this temp copy). A naive
+  // fallback to plain extension-based ctags (no language-force) is NOT enough here: two of holt's
+  // "gap" languages (FSharp, Prolog) live at ambiguous extensions ctags maps by DEFAULT to a
+  // different language entirely (measured: bare ctags maps `.fs` to Forth and extracts nothing
+  // from real F#), so skipping enry's classification would silently reintroduce the same
+  // zero-symbols failure for exactly those two languages. Reclassifying keeps the real language
+  // name flowing into `forcedName()` the same way a non-NUL file already does.
+  let sanitizedRoot = null;
+  const ensureSanitizedRoot = async () => {
+    if (!sanitizedRoot) sanitizedRoot = await fs.mkdtemp(path.join(scratchDir(), 'holt-enry-nul-'));
+    return sanitizedRoot;
+  };
+
+  try {
+    await pmap(relPaths, async (rel) => {
+      let parsed = await classifyWithEnry(cwd, rel);
+
+      if (parsed && parsed.type === 'Binary') {
+        const root = await ensureSanitizedRoot();
+        const sanitizedAbs = await sanitizedCopyForClassification(cwd, rel, root);
+        if (sanitizedAbs) parsed = (await classifyWithEnry(root, rel)) ?? parsed;
+      }
+
+      if (!parsed) { out.set(rel, null); return; }
+
+      // Still no verdict after stripping NUL bytes (a genuinely binary file, or enry could not
+      // read even the sanitized copy): treat exactly like enry being unavailable — leave `rel`
+      // UNSET, which sends it through `symbolsOnDisk`'s `lang === undefined` path into plain
+      // extension-based ctags detection, rather than the `lang === null` "not-code" path. A truly
+      // binary file still yields no tags from ctags; it only gets the chance to be read.
+      if (parsed.type === 'Binary') return;
+
+      if (!parsed.language) { out.set(rel, null); return; }
+      const mapped = LINGUIST_TO_CTAGS.has(parsed.language) ? LINGUIST_TO_CTAGS.get(parsed.language) : parsed.language;
+      out.set(rel, mapped);
+    }, 12);
+  } finally {
+    if (sanitizedRoot) await fs.rm(sanitizedRoot, { recursive: true, force: true }).catch(() => {});
+  }
 
   return out;
 }
@@ -904,6 +992,25 @@ export function argSafePath(p) {
   return `./${s}`;
 }
 
+// One `git cat-file --batch` process handles this many specs before holt starts a fresh one.
+// There is no argv-length reason to chunk here (specs travel on stdin, not argv, unlike ctags'
+// CTAGS chunking) — this bounds how much of the batch is lost if a single process hiccups
+// (killed, OOM-killed, hits `timeout`) to one chunk's worth of files rather than the whole scan,
+// while still cutting a 94,852-file union from 94,852 process spawns to ~19.
+const CAT_FILE_BATCH_CHUNK = 5000;
+
+/**
+ * Symbols for files as they exist at `baseOid`.
+ *
+ * Blobs are materialised into a temp directory OUTSIDE the repository — never into the
+ * user's tree — so one batched ctags run can cover them all. The temp dir is always removed.
+ *
+ * MEASURED: this used to spawn one `git cat-file -p <oid>:<rel>` PROCESS PER FILE (concurrency
+ * 12). Profiled with --cpu-prof against a synthetic 40k-file repository with a 5,500-file
+ * uncommitted delta: 64.7% of the scan's wall-clock time was inside `spawn` alone, almost all of
+ * it this loop. Replaced with `catFileBatch()` (src/git.mjs) — ONE streaming `cat-file --batch`
+ * process per chunk instead of one process per file. See BENCHMARKS.md for the before/after.
+ */
 export async function symbolsAtBase(repoRoot, baseOid, relPaths, backend) {
   const result = new Map();
   if (relPaths.length === 0) return result;
@@ -911,14 +1018,43 @@ export async function symbolsAtBase(repoRoot, baseOid, relPaths, backend) {
   const tmp = await fs.mkdtemp(path.join(scratchDir(), 'holt-base-'));
   try {
     const materialised = [];
-    await pmap(relPaths, async (rel) => {
-      const r = await git(['cat-file', '-p', `${baseOid}:${rel}`], { cwd: repoRoot });
-      if (r.code !== 0) { result.set(rel, []); return; }  // absent at base = wholly new file
-      const dest = path.join(tmp, rel);
-      await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.writeFile(dest, r.stdout);
-      materialised.push(rel);
-    }, 12);
+    // Caches the MKDIR PROMISE, not a boolean. onRecord fires per record without waiting for the
+    // previous one (drain() does not await it — that is the whole point of streaming), so two
+    // records destined for the same directory can be in flight together. A boolean "already
+    // requested" flag lets the second writer's `writeFile` race ahead of the first writer's
+    // still-pending `mkdir` and fail ENOENT — reproduced while building this. Caching the promise
+    // itself means every writer for a directory awaits the SAME single mkdir call.
+    const dirReady = new Map();
+    const ensureDir = (dir) => {
+      let p = dirReady.get(dir);
+      if (!p) {
+        p = fs.mkdir(dir, { recursive: true });
+        dirReady.set(dir, p);
+      }
+      return p;
+    };
+
+    for (let i = 0; i < relPaths.length; i += CAT_FILE_BATCH_CHUNK) {
+      const group = relPaths.slice(i, i + CAT_FILE_BATCH_CHUNK);
+      const specs = group.map((rel) => `${baseOid}:${rel}`);
+      try {
+        await catFileBatch(specs, { cwd: repoRoot }, async (_spec, content, idx) => {
+          const rel = group[idx];
+          if (content === null) { result.set(rel, []); return; } // absent at base = wholly new file
+          const dest = path.join(tmp, rel);
+          await ensureDir(path.dirname(dest));
+          await fs.writeFile(dest, content);
+          materialised.push(rel);
+        });
+      } catch {
+        // The whole CHUNK's batch process failed to run (spawn error, timeout). Same fallback
+        // the old per-file call made on an individual failure: treat as absent-at-base rather
+        // than crashing the scan. A read that could not happen is not evidence of anything —
+        // but this mirrors the prior behavior exactly rather than upgrading it, which is a
+        // separate, out-of-scope fix.
+        for (const rel of group) if (!result.has(rel)) result.set(rel, []);
+      }
+    }
 
     const found = await symbolsOnDisk(tmp, materialised, backend);
     for (const [f, syms] of found) result.set(f, syms);
