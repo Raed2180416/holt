@@ -132,21 +132,34 @@ async function hostileRepo() {
   const wtRoot = path.join(fx.root, '..', 'wt');
   await fs.mkdir(wtRoot, { recursive: true });
 
-  // DIRECTORY NAMES ARE LIMITED BY THE FILESYSTEM, the payload fields are not. Windows reserves
-  // `" * : < > ? |` in a path component, so the hostile DIRECTORY name is built from the pieces
-  // this platform can represent while the BRANCH names below keep the full payload — a branch
-  // name is a git ref, not a path component, so every platform can carry the whole thing. The
-  // injection property is therefore still exercised in full on Windows, through the field that
-  // can actually hold it.
+  // EVERYTHING GIT NAMES IS BACKED BY A FILE, INCLUDING REFS.
+  //
+  // The first version of this comment claimed a branch name could carry the full payload on every
+  // platform because "a ref is not a path component". CI corrected it: git stores a loose ref AS A
+  // FILE, so `refs/heads/agent/</script><svg...>` needs a directory named `</script><svg` and
+  // Windows refuses to create it —
+  //   fatal: cannot lock ref ... unable to create directory for .git/refs/heads/...
+  //
+  // So BOTH the directory and the branch are trimmed to what this platform can represent, and the
+  // parts Windows cannot hold are carried where the filesystem has no say: inside file CONTENT,
+  // which is where the RLO and the script-closing payload land as symbol and path text in the
+  // report. The property under test — no element exists in the document that the renderer did not
+  // write — is asserted identically on every platform; only the delivery vehicle differs.
   const viaPath = path.join(wtRoot, creatableComponent(['evil', '</script>', 'x']) || 'evil-x');
   await fs.mkdir(path.dirname(viaPath), { recursive: true });
-  await fx.git(['worktree', 'add', '-q', '-b', 'agent/</script><svg/onload=HOLT_XSS()>', viaPath, 'main']);
-  await fs.writeFile(path.join(viaPath, 'only.js'), 'export function HOSTILE_PATH_ONLY() {}\n');
+  await fx.git(['worktree', 'add', '-q', '-b',
+    `agent/${creatableComponent(['</script>', '<svg/onload=HOLT_XSS()>']) || 'plain'}`, viaPath, 'main']);
+  // File CONTENT is where the untrimmable payload rides on every platform: a filesystem has no
+  // opinion about bytes inside a file, so the script-closing sequence and the bidi override reach
+  // the renderer here even where they cannot appear in a name.
+  await fs.writeFile(path.join(viaPath, 'only.js'),
+    `export function HOSTILE_PATH_ONLY() {}\n// ${PAYLOAD}\n`);
 
   // Quotes, angle brackets and a right-to-left override in a single directory component.
   const viaName = path.join(wtRoot,
     creatableComponent(['a', '"', '><img src=x onerror=HOLT_XSS()>', RLO, 'gnp.js']) || `a${RLO}gnp.js`);
-  await fx.git(['worktree', 'add', '-q', '-b', 'agent/quoted"name', viaName, 'main']);
+  await fx.git(['worktree', 'add', '-q', '-b',
+    `agent/${creatableComponent(['quoted', '"', 'name']) || 'quotedname'}`, viaName, 'main']);
   await fs.writeFile(path.join(viaName, 'other.js'), 'export function HOSTILE_NAME_ONLY() {}\n');
 
   return fx;

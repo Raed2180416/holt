@@ -21,6 +21,12 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { newRepo } from '../fixtures.mjs';
+import { samePathAsync } from '../../src/paths.mjs';
+
+// findRepos returns ABSOLUTE paths; the relative form is this test's own display convention. Built
+// with path.relative it carries the OS separator, so Windows produced 'nested\\two' against an
+// expectation of 'nested/two' — a failure of the assertion's spelling, not of the product.
+const posixRel = (root, p) => path.relative(root, p).split(path.sep).join('/');
 import { findRepos } from '../../src/team/fleet.mjs';
 import { evaluatePolicy } from '../../src/team/policy.mjs';
 import { discover } from '../../src/discover.mjs';
@@ -93,7 +99,7 @@ test('FLEET: a linked worktree is the SAME repository, not another one', async (
   }
   assert.equal(found.length, identities.size,
     `fleet reported ${found.length} repositories where git reports ${identities.size}: ${found.join(', ')}`);
-  assert.deepEqual(found.map((p) => path.relative(root, p)).sort(), ['alpha', 'beta', 'gamma']);
+  assert.deepEqual(found.map((p) => posixRel(root, p)).sort(), ['alpha', 'beta', 'gamma']);
   assert.ok(found.includes(alpha), 'the MAIN working tree is the one kept, not a linked one');
 });
 
@@ -110,7 +116,7 @@ test('FLEET NEVER-WORSE: distinct repositories are never merged, and an unidenti
   await fs.mkdir(path.join(root, 'broken'), { recursive: true });
   await fs.writeFile(path.join(root, 'broken', '.git'), 'gitdir: /nowhere/at/all\n');
 
-  const found = (await findRepos([root], { maxDepth: 4 })).map((p) => path.relative(root, p)).sort();
+  const found = (await findRepos([root], { maxDepth: 4 })).map((p) => posixRel(root, p)).sort();
   assert.deepEqual(found, ['broken', 'nested/two', 'one', 'one-clone']);
 });
 
@@ -223,7 +229,13 @@ test('JOURNAL: unprotect — the action that REMOVES protection — is recorded 
     assert.ok(k in prot, `protect entry is missing '${k}'`);
   }
   assert.equal(rec.id, 'agent-1');
-  assert.equal(path.resolve(rec.path), path.resolve(wtPath));
+  // COMPARED THROUGH paths.mjs, NOT path.resolve. The journal records the CANONICAL path holt
+  // resolved (/private/var/... on macOS) while the fixture holds what mkdtemp returned
+  // (/var/...), so path.resolve — which makes a path absolute but does not follow symlinks —
+  // reports two different strings for one directory. Fourth instance of this class in test code
+  // this session; the guard that keeps src/ honest does not reach here.
+  assert.ok(await samePathAsync(rec.path, wtPath),
+    `the journal must record this worktree: ${rec.path} vs ${wtPath}`);
   assert.equal(rec.forced, false);
   assert.equal(rec.foreignLock, false);
 });
