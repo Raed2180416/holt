@@ -200,3 +200,102 @@ test('EVAL VALIDITY: the runner refuses to print a lift it cannot support', asyn
   assert.ok(/NO RESULT|NO LIFT REPORTED|NO TRIALS RAN/.test(out),
     `with no valid trials the runner must decline to report. Got:\n${out.slice(0, 600)}`);
 });
+
+/* ==================================================================================
+ * THE ENTERPRISE BENCHMARK — the same fail-open defect, one directory over
+ * ================================================================================== */
+
+/**
+ * eval/enterprise-bench.mjs published wrong numbers to BENCHMARKS.md § 9 and reported
+ * "✓ NO ISSUES FOUND" while doing it. The mechanism is the one this file was written about:
+ *
+ *     const s = report.safe?.find((x) => x.id?.endsWith(id) || x.id === id);
+ *     if (s?.safe) errors.push(`at-risk ${id}: called SAFE but has uncommitted-only content`);
+ *
+ * A workstream holt never reported on yields `undefined`. `undefined?.safe` is `undefined`, which
+ * is falsy, so no error was recorded — for any of the four categories. A run in which holt found
+ * NOTHING therefore graded perfectly. That is not a weaker version of "an unrun trial is INVALID,
+ * never SAFE"; it is the identical defect, six weeks later, in the same directory.
+ */
+const bench = await import('../../eval/enterprise-bench.mjs');
+
+const PLANTED = {
+  atRisk: ['ent-0002'], hold: ['ent-0000'], disposable: ['ent-0007'], gitignored: ['ent-0004'],
+  binary: [], huge: [],
+};
+
+test('ENTERPRISE BENCH: a report holt never produced is not a passing grade', () => {
+  // The exact shape of the runs that reached BENCHMARKS.md: the worktrees were gone, holt
+  // reported on none of them, and every category was silently skipped.
+  const v = bench.verifyCorrectness({ safe: [] }, PLANTED);
+  assert.ok(v.errors.length > 0,
+    'a run that graded nothing must be an error, not a clean bill');
+  assert.match(v.errors.join('\n'), /do not appear in holt's report at all/,
+    `the error must say WHY: ${JSON.stringify(v.errors)}`);
+  assert.equal(v.gradedTotal, 0, 'and it must report that nothing was graded');
+});
+
+test('ENTERPRISE BENCH: a PARTIAL report is graded on what it graded, not on what was planted', () => {
+  // The subtler half. Half the worktrees present used to mean half the categories silently
+  // skipped and a rate computed over the planted total — a denominator including cases nobody
+  // looked at, which flatters or damns holt at random depending on which half survived.
+  const v = bench.verifyCorrectness({
+    safe: [{ id: 'ent-0007', safe: true }],
+  }, PLANTED);
+  assert.equal(v.gradedTotal, 1, 'only the workstream actually present was graded');
+  assert.equal(v.disposableTotal, 1, 'the disposable denominator counts graded cases only');
+  assert.equal(v.disposableRight, 1);
+  assert.equal(v.plantedTotal, 4, 'and the planted total stays visible beside it');
+  assert.ok(v.errors.some((e) => /3 of 4/.test(e)), `the gap must be named: ${JSON.stringify(v.errors)}`);
+});
+
+test('ENTERPRISE BENCH: ANTI-VACUITY — a real wrong verdict is still caught', () => {
+  // Without this, every assertion above is satisfied by a verifier that returns errors always.
+  const v = bench.verifyCorrectness({
+    safe: [
+      { id: 'ent-0000', safe: true },   // holds committed-ahead work — calling it safe is a loss
+      { id: 'ent-0002', safe: true },   // uncommitted-only — the headline safety claim
+      { id: 'ent-0004', safe: true },   // gitignored-only
+      { id: 'ent-0007', safe: true },   // genuinely disposable — correct
+    ],
+  }, PLANTED);
+  assert.equal(v.gradedTotal, 4, 'everything planted was found, so nothing is excused as missing');
+  assert.ok(!v.errors.some((e) => /do not appear/.test(e)), 'nothing is missing here');
+  for (const want of ['hold ent-0000', 'atRisk ent-0002', 'gitignored ent-0004']) {
+    assert.ok(v.errors.some((e) => e.startsWith(want)),
+      `${want} must be reported as a critical wrong verdict: ${JSON.stringify(v.errors)}`);
+  }
+  assert.equal(v.disposableRight, 1, 'and the genuinely disposable one is still counted correct');
+});
+
+test('ENTERPRISE BENCH: ANTI-VACUITY — a fully correct report produces no errors', () => {
+  // The never-worse control: a verifier rewritten to fail on everything would pass all three
+  // tests above and make the benchmark useless in the other direction.
+  const v = bench.verifyCorrectness({
+    safe: [
+      { id: 'ent-0000', safe: false, reasons: ['committed ahead'] },
+      { id: 'ent-0002', safe: false, reasons: ['uncommitted only'] },
+      { id: 'ent-0004', safe: false, reasons: ['gitignored only'] },
+      { id: 'ent-0007', safe: true },
+    ],
+  }, PLANTED);
+  assert.deepEqual(v.errors, [], `a correct report must grade clean: ${JSON.stringify(v.errors)}`);
+  assert.equal(v.disposableRight, 1);
+  assert.equal(v.disposableTotal, 1);
+});
+
+test('ENTERPRISE BENCH: percentiles are nearest-rank and never invent a value', () => {
+  assert.equal(bench.percentile([5, 1, 3], 50), 3);
+  assert.equal(bench.percentile([5, 1, 3], 0), 1);
+  assert.equal(bench.percentile([5, 1, 3], 100), 5);
+  assert.equal(bench.percentile([], 50), null, 'no samples means no number, never 0');
+  assert.equal(bench.percentile([undefined, NaN], 50), null, 'a failed run contributes nothing');
+});
+
+test('ENTERPRISE BENCH: importing the harness must not RUN it', () => {
+  // The entry guard is what makes every test above possible, and the naive spellings of it are
+  // inert on Windows and on paths containing a space. If it were inert here, importing this
+  // module would have started cloning PostgreSQL.
+  assert.equal(typeof bench.verifyCorrectness, 'function', 'the harness exports its grader');
+  assert.equal(typeof bench.percentile, 'function');
+});

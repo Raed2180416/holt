@@ -401,37 +401,72 @@ run to run is a stable, closed defect just because its magnitude (2 of 50) looks
 agreement is not "correct" — it is exactly the number of claims checked, with the disagreements
 named, not averaged away.
 
-## 9 · Enterprise benchmark — real repos, real mess, real scale
+## 10 · Enterprise benchmark — real repos, real mess, real scale
 
 **What this measures:** holt's full pipeline (discover → scan → analyze) and every CLI command
 against REAL repositories with messy worktrees containing uncommitted files, gitignored secrets,
 binary files, huge files (>2MiB), and landed duplicates. Unlike §1's synthetic fixture, this tests
 against real codebases with real file types, real symbol extraction, and real git operations.
 
-**Fixture:** `eval/enterprise-bench.mjs` clones a real repo (or uses a local clone for holt-self),
-creates N worktrees with noise-level 2 (the maximum: includes binary files, huge files, gitignored
-content, and landed duplicates), runs the full pipeline, verifies correctness against planted
-ground truth, and tests every CLI command (`status`, `risk`, `collisions`, `graph`, `clean`,
-`doctor`, `stash`) for valid output and correct exit codes.
+**Fixture:** `eval/enterprise-bench.mjs` fetches a real repo once into a read-only cache, then
+takes a DISPOSABLE local clone per run, creates N worktrees with noise-level 2 (the maximum:
+binary files, huge files, gitignored content, and landed duplicates), runs the full pipeline,
+grades every verdict against planted ground truth, and drives every CLI command (`status`, `risk`,
+`collisions`, `graph`, `clean`, `doctor`, `stash`) for valid output and correct exit codes. One
+warmup run is discarded and reported separately; the figures below are the median and p90 of three
+measured runs.
 
-| repo | files | worktrees | total | scan | RSS | safe | at-risk | issues |
-|---|---|---|---|---|---|---|---|---|
-| holt-self | 20,172 | 30 | 974 ms | 729 ms | 73 MB | 15 | 30 | 0 |
-| redis | 1,861 | 30 | 2.78 s | 1.81 s | 1.2 GB | 15 | 30 | 0 |
-| postgres | 7,677 | 30 | 12.2 s | 9.20 s | 1.2 GB | 15 | 30 | 0 |
+### The numbers this section used to carry were wrong, and how
 
-**Verdict:** zero correctness failures across all three repos. Every planted at-risk worktree
-flagged, every planted disposable correctly identified, every CLI command produced valid output.
-RSS scales with file count (73 MB → 1.2 GB from 20K → 7.7K files with 30 worktrees each), and
-scan time grows with both file count and worktree count. The enterprise benchmark is the
-dogfooding case — holt testing itself on itself at scale, plus real-world C codebases.
+| repo | files | wt | **total p50** | p90 | cold | **scan p50** | **peak RSS** | graded | disposable |
+|---|---|---|---|---|---|---|---|---|---|
+| redis | 1,861 | 31 | **2.22 s** | 3.10 s | 0.73 s | **1.63 s** | **222 MB** | 30/30 | 15/15 |
+| postgres | 7,680 | 31 | **5.01 s** | 5.39 s | 3.71 s | **3.67 s** | **422 MB** | 30/30 | 15/15 |
+| holt-self† | 20,176 | 31 | **10.1 s** | 17.1 s | 19.3 s | **7.05 s** | **845 MB** | 30/30 | 15/15 |
 
-Reproduce: `node eval/enterprise-bench.mjs all --worktrees 30 --noise-level 2`
+† `holt-self` is NOT a 20,176-file codebase. holt is 111 JavaScript files and 41,321 lines; the
+repository also tracks a `manyfiles/` directory of 20,000 one-line fixture files committed by
+accident in c2019447a. This row therefore measures git and holt against 20,000 trivial files, not
+against holt's own source, and it is kept only as the "many small files" shape. Read the redis and
+postgres rows for the realistic picture.
+
+The table that stood here previously read `holt-self 974 ms / 73 MB`, `redis 2.78 s / 1.2 GB`,
+`postgres 12.2 s / 1.2 GB`, and its own prose described that as "RSS scales with file count
+(73 MB → 1.2 GB from 20K → 7.7K files)" — more files producing less memory. It was not a scaling
+law; it was a broken harness, and the sentence explaining it should have been the tell. Four
+defects produced it, every one of them the same shape as the bug holt exists to catch — a
+measurement that cannot tell *nothing was wrong* from *nothing was measured*:
+
+1. **The grader passed when holt found nothing.** `report.safe.find(...)?.safe` is `undefined` for
+   a workstream holt never reported on, `undefined` is falsy, and no error was recorded — for any
+   of the four planted categories. Runs against stale worktree registrations, where holt correctly
+   reported on nothing at all, printed `✓ NO ISSUES FOUND`. The 1.2 GB figures are that error
+   path: holt trying to scan 30 directories that were not there.
+2. **The workstream column was always zero.** The harness read `disc.worktrees`; `discover()`
+   returns `workstreams`. The field never existed.
+3. **"Peak RSS" was a single sample taken after the pipeline had finished.**
+4. **The clone was cached and then committed into.** The landed-duplicate case has to commit to
+   base, so each run inherited the previous run's commits: "median of three runs" was the median
+   of three different repositories.
+
+All four are fixed, and `test/unit/eval-validity.test.mjs` now grades the grader — including the
+case where holt reports nothing, which is the one that produced the numbers above.
+
+**Verdict:** on the corrected harness, 30 of 30 planted workstreams are *found and graded* in
+every repo, with zero wrong verdicts and 15/15 disposables correctly identified. Cost is real and
+worth stating plainly: **peak RSS is hundreds of megabytes**, roughly 0.04–0.12 MB per tracked file
+per 31 worktrees, and a 2 GB CI container running holt over a large monorepo with many worktrees
+is a configuration to test before relying on. Wall-clock grows sublinearly in file count (4.1×
+the files costs 2.3× the time from redis to postgres).
+
+Reproduce: `node eval/enterprise-bench.mjs all --worktrees 30 --noise-level 2 --runs 3`
 
 **Does not mean:** 30 worktrees is the ceiling (§1 tests up to 1000), the repos represent every
-ecosystem (C and JavaScript only — Rust, Go, Python, Java, and monorepos are future work), and
+ecosystem (C and JavaScript only — Rust, Go, Python, Java, and monorepos are future work), or that
 "zero issues" means holt is bug-free — it means the planted ground truth was correctly identified
-at this scale, with this noise level, on these repos.
+at this scale, with this noise level, on these repos. The measurements were taken on a loaded
+14 GiB developer machine; the redis samples spanned 0.73–3.10 s, so treat p50 as an order of
+magnitude, not a precise figure.
 
 ## Falsification policy
 
