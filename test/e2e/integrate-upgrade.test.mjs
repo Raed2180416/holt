@@ -32,6 +32,23 @@ import {
   installClaudeCode, claudeCodeHooks, integrate, uninstall,
   legacyMcpTargets, retireLegacyMcp, mcpTargets, installMcp, installGitHooks,
 } from '../../src/integrate/adapters.mjs';
+import { receiptPath } from '../../src/integrate/receipt.mjs';
+
+/**
+ * Real git, at module scope. '/dev/null' NOT os.devNull — git-for-windows is MSYS and translates
+ * '/dev/null', but rejects the native '\\.\nul' with "fatal: unable to access '//./nul'".
+ */
+const gitIn = (args, cwd) => new Promise((resolve, reject) => {
+  execFile('git', args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'holt test', GIT_AUTHOR_EMAIL: 'test@holt.invalid',
+      GIT_COMMITTER_NAME: 'holt test', GIT_COMMITTER_EMAIL: 'test@holt.invalid',
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C',
+    },
+  }, (e, out, err) => (e ? reject(new Error(String(err || e.message))) : resolve(String(out))));
+});
 
 const FIXTURES = fileURLToPath(new URL('../fixtures/upgrade/', import.meta.url));
 
@@ -1020,5 +1037,116 @@ test('RETIREMENT: NEVER-WORSE — a foreign hook that merely NAMES holt is not t
   const afterUninstall = commandsIn(JSON.parse(await fs.readFile(file, 'utf8')), 'Notification');
   for (const c of foreign) {
     assert.ok(afterUninstall.includes(c), `uninstall must not delete a foreign hook: ${c}`);
+  }
+});
+
+/* ------------------------------------------------ ownership by receipt, not by residue ---- */
+//
+// uninstall runs in a DIFFERENT PROCESS from integrate, so `created` was computed and thrown
+// away. With no record, uninstall had to infer ownership from what the residue looked like — and
+// that inference is wrong in both directions, both reproduced:
+//
+//   too shy   -> `.cursor/`, `.claude/`, `.junie/` survive a full uninstall, and because host
+//                detection keys off those very markers, re-integrating a FULLY UNINSTALLED repo
+//                on a machine with zero agents installed reported 13 hosts, all self-detected
+//                off holt's own leftovers.
+//   too eager -> a user's own git-tracked `.cursor/hooks.json` containing exactly {"version": 1}
+//                was deleted, because `cfg.version ??= 1` is a no-op when the user already set it
+//                and so leaves holt no trace distinguishing its default from theirs.
+//
+// src/integrate/receipt.mjs records what integrate CREATED, with the hash of the bytes it left.
+// These tests pin both directions at once, which is the only way this stays fixed: a change that
+// cures one by worsening the other fails here.
+
+/** A HOME carrying the real host markers, so integrate actually detects hosts and writes files. */
+async function seededHome(t) {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-home-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }).catch(() => {}));
+  for (const d of ['.cursor', '.claude', '.config/opencode']) {
+    await fs.mkdir(path.join(home, d), { recursive: true });
+  }
+  return home;
+}
+
+async function entriesUnder(root) {
+  const out = [];
+  async function walk(d, base = '') {
+    for (const e of await fs.readdir(d, { withFileTypes: true })) {
+      if (e.name === '.git') continue;
+      const rel = base ? `${base}/${e.name}` : e.name;
+      if (e.isDirectory()) { out.push(`${rel}/`); await walk(path.join(d, e.name), rel); }
+      else out.push(rel);
+    }
+  }
+  await walk(root);
+  return out.sort();
+}
+
+test('RECEIPT: a full integrate/uninstall cycle leaves NO residue for holt to self-detect', async (t) => {
+  const home = await seededHome(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-rcpt-cycle-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }).catch(() => {}));
+  await gitIn(['init', '-q', '-b', 'main'], root);
+  await fs.writeFile(path.join(root, 'a.js'), 'export const a = 1;\n');
+  await gitIn(['add', '-A'], root);
+  await gitIn(['commit', '-qm', 'base'], root);
+
+  const before = await entriesUnder(root);
+  await integrate(root, { bin: 'holt', scope: 'project', home });
+  await integrate(root, { bin: 'holt', scope: 'project', home });   // re-run, as reported
+  await uninstall(root, { scope: 'project', home });
+  const after = await entriesUnder(root);
+
+  const leftover = after.filter((x) => !before.includes(x));
+  assert.deepEqual(leftover, [],
+    `uninstall must leave nothing behind; these survived and are host-detection markers: ${leftover.join(', ')}`);
+});
+
+test('RECEIPT: a user file IDENTICAL to holt\'s own default is never deleted', async (t) => {
+  const home = await seededHome(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-rcpt-over-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }).catch(() => {}));
+  await gitIn(['init', '-q', '-b', 'main'], root);
+  // The two exact shapes the previous fix destroyed. Both are git-trackable and arrive by clone.
+  await fs.mkdir(path.join(root, '.cursor'), { recursive: true });
+  await fs.writeFile(path.join(root, '.cursor/hooks.json'), '{\n  "version": 1\n}\n');
+  await fs.writeFile(path.join(root, 'AGENTS.md'),
+    '# AGENTS.md\n\nInstructions for AI coding agents working in this repository.\n\n');
+  await gitIn(['add', '-A'], root);
+  await gitIn(['commit', '-qm', 'the user\'s own files'], root);
+
+  await integrate(root, { bin: 'holt', scope: 'project', home });
+  await uninstall(root, { scope: 'project', home });
+
+  assert.ok(await fs.readFile(path.join(root, '.cursor/hooks.json'), 'utf8').catch(() => null),
+    'a user-authored hooks.json whose content equals holt\'s default must survive uninstall');
+  assert.ok(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8').catch(() => null),
+    'a user-authored AGENTS.md byte-identical to holt\'s preamble must survive uninstall');
+});
+
+test('RECEIPT: an unreadable receipt means own NOTHING, never own everything', async (t) => {
+  const home = await seededHome(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-rcpt-corrupt-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }).catch(() => {}));
+  await gitIn(['init', '-q', '-b', 'main'], root);
+  await fs.writeFile(path.join(root, 'a.js'), 'export const a = 1;\n');
+  await gitIn(['add', '-A'], root);
+  await gitIn(['commit', '-qm', 'base'], root);
+
+  await integrate(root, { bin: 'holt', scope: 'project', home });
+  // Corrupt the receipt. "holt could not look" must not collapse into "holt owns all of it" —
+  // that is the absence-of-evidence mistake this whole project keeps finding, and here it would
+  // mean deleting files on a guess.
+  const rp = await receiptPath(root);
+  assert.ok(rp, 'premise: the receipt must have a resolvable location');
+  await fs.writeFile(rp, '{ this is not json', 'utf8');
+
+  const before = await entriesUnder(root);
+  await uninstall(root, { scope: 'project', home });
+  const after = await entriesUnder(root);
+  const deleted = before.filter((x) => !after.includes(x) && !x.endsWith('/'));
+  for (const d of deleted) {
+    assert.ok(!d.includes('.cursor') && !d.includes('.claude'),
+      `with an unreadable receipt holt must not delete on a guess, but removed ${d}`);
   }
 });

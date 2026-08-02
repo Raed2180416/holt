@@ -1443,7 +1443,7 @@ async function main() {
       out(`    ${paint('bold', String(b.worktreesReclaimed).padStart(4))}  disposable worktree(s) reclaimed`);
       out(`    ${paint('bold', String(b.branchesDeleted).padStart(4))}  landed branch(es) cleaned up`);
       out(`    ${paint('bold', String(b.protectionsReleased).padStart(4))}  protection(s) released (recorded with who released them)`);
-      out(`\n  ${paint('grey', `~${s.estimatedHoursSaved}h saved (conservative planning estimate) · ${s.events} events since ${s.since ? s.since.slice(0,10) : '—'}`)}`);
+      out(`\n  ${paint('grey', `${s.events} events since ${s.since ? s.since.slice(0, 10) : '—'}`)}`);
       out(`  ${paint('grey', s.note)}\n`);
       return;
     }

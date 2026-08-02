@@ -13,8 +13,13 @@
  * the whole product runs on.
  */
 
-const HOURS_PER_RECLAIM = 0.25; // a reclaimed worktree saves ~15 min of manual verify-and-delete
-const HOURS_PER_PREVENTED_LOSS = 2; // re-doing lost uncommitted work — a conservative floor
+// THERE IS NO HOURS FIGURE HERE, DELIBERATELY. This module used to publish
+// `estimatedHoursSaved = preventedLosses * 2h + reclaimed * 0.25h`, labelled "a conservative,
+// clearly-labelled estimate". Both multipliers were invented. holt cannot know what an hour of
+// your time is worth, how long the lost work would have taken to redo, or whether you would have
+// redone it at all — and a number that cannot be defended is exactly the gotcha this project
+// refuses to ship. The COUNTS below are real: every one is a row in the journal, stamped with who
+// did it and when, and a reader can audit them with `holt journal --export json`.
 
 export function summarizeJournal(events, { now = null } = {}) {
   const list = Array.isArray(events) ? events.filter((e) => e && !e.corrupt) : [];
@@ -50,15 +55,12 @@ export function summarizeJournal(events, { now = null } = {}) {
       branchesDeleted,
       protectionsReleased: released,
     },
-    // A conservative, clearly-labelled estimate — never presented as measured fact.
-    estimatedHoursSaved: Math.round((preventedLosses * HOURS_PER_PREVENTED_LOSS
-      + cleaned * HOURS_PER_RECLAIM) * 10) / 10,
     headline: preventedLosses > 0
       ? `holt refused ${blocked} destructive command(s) and preserved ${rescued} workstream(s) that existed nowhere else`
       : (protectedWt > 0
         ? `holt is protecting ${protectedWt} workstream(s) that hold work found nowhere else`
         : 'no prevented losses recorded yet — the record starts the first time something is protected, rescued, or refused'),
-    note: 'estimatedHoursSaved is a conservative planning figure (2h per prevented loss, 15m per '
-      + 'reclaim), not a measurement. preventedLosses counts events that actually fired.',
+    note: 'Every figure here is a count of events that actually fired, taken from the journal. '
+      + 'Audit them with `holt journal --export json`.',
   };
 }

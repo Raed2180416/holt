@@ -90,6 +90,16 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "ownership-inferred-not-recorded",
+    "defect": "uninstall goes back to inferring ownership from the residue instead of the install receipt — it either leaves .cursor/.claude/.junie behind (so a fully-uninstalled repo self-detects 13 agent hosts) or deletes a user's own file that merely looks like holt's default",
+    "file": "src/integrate/adapters.mjs",
+    "find": "      const ours = await holtOwnsFile(repoRoot, 'AGENTS.md', receipt);",
+    "replace": "      const ours = false; // mutated: ownership inferred from residue again",
+    "tests": [
+      "test/e2e/integrate-upgrade.test.mjs"
+    ]
+  },
+  {
     "id": "hook-retirement-blind",
     "defect": "uninstall walks holt's table of known events again — a hook holt wired on an event it has since retired is never looked at, so `holt uninstall` leaves it pointing at a binary the user is about to delete",
     "file": "src/integrate/adapters.mjs",

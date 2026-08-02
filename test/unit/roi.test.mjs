@@ -11,7 +11,6 @@ import { summarizeJournal } from '../../src/roi.mjs';
 test('roi: an empty journal reports nothing prevented, not a fabricated number', () => {
   const s = summarizeJournal([]);
   assert.equal(s.preventedLosses, 0);
-  assert.equal(s.estimatedHoursSaved, 0);
   assert.match(s.headline, /no prevented losses recorded yet/);
 });
 
@@ -39,7 +38,7 @@ test('roi: prevented losses count blocks and verified rescues, and only those', 
   assert.equal(s.breakdown.branchesDeleted, 1);
   assert.equal(s.preventedLosses, 3, 'blocks(2) + rescues(1); protects/cleans are not "prevented losses"');
   assert.match(s.headline, /refused 2 destructive command/);
-  assert.match(s.note, /not a measurement/);
+  assert.match(s.note, /count of events that actually fired/);
 });
 
 test('roi: a corrupt journal line is ignored, never counted', () => {
@@ -48,9 +47,20 @@ test('roi: a corrupt journal line is ignored, never counted', () => {
   assert.equal(s.events, 1);
 });
 
-test('roi: the hours estimate is conservative and labelled as an estimate', () => {
-  const s = summarizeJournal([{ at: 'x', action: 'blocked' }, { at: 'y', action: 'clean-remove' }]);
-  // 1 prevented loss * 2h + 1 reclaim * 0.25h = 2.25h, rounded to 1 decimal = 2.3
-  assert.equal(s.estimatedHoursSaved, 2.3);
-  assert.match(s.note, /conservative planning figure/);
+test('roi: no fabricated hours figure is published', () => {
+  // This module used to return `estimatedHoursSaved = preventedLosses * 2h + reclaimed * 0.25h`.
+  // Both multipliers were invented — holt cannot know what an hour of your time is worth or how
+  // long the lost work would have taken to redo — and an indefensible number is precisely the
+  // gotcha this project refuses to ship. The counts stay because every one is a journal row.
+  const s = summarizeJournal([
+    { at: '2026-07-02T00:00:00Z', action: 'blocked', command: 'git worktree remove --force x' },
+    { at: '2026-07-03T00:00:00Z', action: 'rescue', id: 'wt1' },
+    { at: '2026-07-04T00:00:00Z', action: 'clean-remove', id: 'junk1' },
+  ]);
+  assert.equal(s.estimatedHoursSaved, undefined,
+    'holt must not publish an hours-saved figure it cannot defend');
+  assert.doesNotMatch(JSON.stringify(s), /hours?Saved|hours saved/i,
+    'no field or note may reintroduce an hours estimate under another name');
+  assert.ok(Number.isInteger(s.preventedLosses),
+    'the real, auditable counts must survive the removal');
 });

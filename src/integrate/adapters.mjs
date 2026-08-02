@@ -32,6 +32,28 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { parse as jsoncParse, modify as jsoncModify, applyEdits as jsoncApplyEdits } from 'jsonc-parser';
 import { HOSTS, getHost, strengthLabel, CLOUD_CAVEAT } from './hosts.mjs';
+import { recordCreated, readReceipt, holtOwnsFile, clearReceipt } from './receipt.mjs';
+import { relativeWithinAsync } from '../paths.mjs';
+
+// The receipt's paths go through relativeWithinAsync (src/paths.mjs), which canonicalises BOTH
+// sides before comparing. A private `path.relative(repoRoot, abs)` here was the raw form the path
+// guard hunts: on macOS a repo under /var resolves to /private/var, so the two spellings of the
+// same file produce two different receipt keys and holt stops recognising what it created.
+
+/**
+ * Every directory holt had to bring into being to write `rel`, deepest first.
+ *
+ * `fs.mkdir(..., {recursive: true})` silently creates ANCESTORS too, so recording only the
+ * immediate parent leaves the grandparent behind — measured: `.junie/mcp/mcp.json` cleaned up
+ * `.junie/mcp` and left `.junie/`, which is itself a host-detection marker, so the self-detection
+ * bug survived in miniature.
+ */
+function ancestorDirs(rel) {
+  const parts = rel.split('/').slice(0, -1);
+  const out = [];
+  for (let i = parts.length; i > 0; i--) out.push(parts.slice(0, i).join('/'));
+  return out;
+}
 
 const HOLT_BEGIN = '<!-- BEGIN holt -->';
 const HOLT_END = '<!-- END holt -->';
@@ -148,6 +170,10 @@ export async function installAgentsMd(repoRoot, { bin = 'holt', filename = 'AGEN
     : `${header}${block}\n`;
 
   await fs.writeFile(file, next, 'utf8');
+  // RECORD, DO NOT INFER. uninstall runs in a different process and cannot see `created` unless
+  // it is written down. Inferring ownership from the residue instead deleted a user's own
+  // AGENTS.md that happened to be byte-identical to holt's preamble. See src/integrate/receipt.mjs.
+  if (created) await recordCreated(repoRoot, { files: [filename] });
   const hadBlock = existing.includes(HOLT_BEGIN);
   return {
     adapter: 'agents-md', path: file, created,
@@ -644,6 +670,8 @@ export async function installMcp(repoRoot, {
       const had = /^\s*\[mcp_servers\.holt\]\s*$/m.test(existing);
       await fs.mkdir(path.dirname(t.file), { recursive: true });
       await fs.writeFile(t.file, tomlWithHoltServer(existing, bin), 'utf8');
+      // Record creation so uninstall can prove this file is holt's rather than inferring it.
+      if (!hadFile) { const rel = await relativeWithinAsync(repoRoot, t.file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
       results.push({
         adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
         action: !hadFile ? 'created' : had ? 'updated' : 'added',
@@ -703,6 +731,7 @@ export async function installMcp(repoRoot, {
       output = `${JSON.stringify(cfg, null, 2)}\n`;
     }
     await fs.writeFile(t.file, output, 'utf8');
+    if (!exists) { const rel = await relativeWithinAsync(repoRoot, t.file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
     results.push({
       adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
       action: !exists ? 'created' : already ? 'updated' : 'added',
@@ -1000,6 +1029,10 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
     : reconciled ? `reconciled ${reconciled} stale hook(s)${installed ? `, installed ${installed} new` : ''}`
     : installed ? `installed ${installed} new hook(s) (rest already present)`
     : 'already present';
+  // `cfg.version ??= 1` is a NO-OP when the user already set it, so it leaves holt no trace of
+  // whether that key is holt's default or theirs. The receipt is that trace. Without it, uninstall
+  // deleted a user's own git-tracked hooks.json whose content was exactly {"version": 1}.
+  if (created) { const rel = await relativeWithinAsync(repoRoot, file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
   return { adapter: 'cursor', path: file, created, installed, reconciled, unchanged, action };
 }
 
@@ -1251,6 +1284,7 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
     output = `${JSON.stringify(cfg, null, 2)}\n`;
   }
   await fs.writeFile(file, output, 'utf8');
+  if (created) { const rel = await relativeWithinAsync(repoRoot, file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
   const retiredNote = retired ? `retired ${retired} hook(s) on event(s) holt no longer uses` : '';
   const action = [
     installed && !reconciled && !unchanged ? 'installed'
@@ -1397,7 +1431,9 @@ export async function installOpenCode(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(repoRoot, '.opencode', 'plugins', 'holt.js');
   await fs.mkdir(path.dirname(file), { recursive: true });
   const esm = await repoIsEsm(repoRoot);
+  const openCodeExisted = await fs.access(file).then(() => true, () => false);
   await fs.writeFile(file, opencodePlugin(bin, { esm }), 'utf8');
+  if (!openCodeExisted) { const rel = await relativeWithinAsync(repoRoot, file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
   return { adapter: 'opencode', path: file, action: 'installed', dialect: esm ? 'esm' : 'commonjs' };
 }
 
@@ -1626,17 +1662,30 @@ export async function integrate(repoRoot, {
  */
 export async function uninstall(repoRoot, { home = os.homedir(), scope = 'project' } = {}) {
   const results = [];
+  // OWNERSHIP COMES FROM THE RECEIPT, NOT FROM THE RESIDUE. `null` means holt could not read it,
+  // which must mean "own nothing" — every unlink below is gated on a positive answer, so an
+  // unreadable receipt leaves files in place rather than taking a guess at whose they are.
+  const receipt = await readReceipt(repoRoot);
 
-  // ---- AGENTS.md: strip holt's block; remove the file only if that was its entire content ----
+  // ---- AGENTS.md: strip holt's block; remove the file only if holt CREATED it and still owns it -
   {
     const file = path.join(repoRoot, 'AGENTS.md');
     try {
       const existing = await fs.readFile(file, 'utf8');
       if (existing.includes(HOLT_BEGIN)) {
         const stripped = stripHoltBlock(existing).trim();
-        if (!stripped) {
+        // Two failures live here, in opposite directions, and both were reproduced:
+        //   - deleting when `stripped` is empty MISSED the file holt itself created, because
+        //     installAgentsMd writes a preamble that stripHoltBlock does not remove — so the
+        //     stub survived uninstall and then made the repo self-detect as an agent host;
+        //   - deleting when the text matched holt's preamble EXACTLY destroyed a user's own,
+        //     git-tracked AGENTS.md that happened to be byte-identical to it.
+        // The receipt answers the question both attempts were guessing at: did holt make this
+        // file, and are these still holt's bytes?
+        const ours = await holtOwnsFile(repoRoot, 'AGENTS.md', receipt);
+        if (ours || !stripped) {
           await fs.rm(file, { force: true });
-          results.push({ adapter: 'agents-md', path: file, action: 'removed (holt-only content)' });
+          results.push({ adapter: 'agents-md', path: file, action: 'removed (holt created it)' });
         } else {
           await fs.writeFile(file, `${stripped}\n`, 'utf8');
           results.push({ adapter: 'agents-md', path: file, action: "holt's block removed, your content kept" });
@@ -1697,7 +1746,12 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
       // survives an empty object and does not survive `fs.rm`.
       let output = jsoncWrite(rawText, [[[t.key], cfg[t.key] ?? undefined]], { tabSize: 2, insertSpaces: true });
       if (!output.endsWith('\n')) output += '\n';
-      if (emptied && nothingButAnEmptyObject(output)) {
+      // The provenance the comment above says holt does not have, it now has: the receipt records
+      // what integrate CREATED. Unlink when holt made the file and still owns its bytes, or when
+      // the remaining text is provably nothing but holt's. Both conditions are positive evidence;
+      // neither infers ownership from what the residue happens to look like.
+      const ownsMcpFile = await holtOwnsFile(repoRoot, await relativeWithinAsync(repoRoot, t.file), receipt);
+      if (ownsMcpFile || (receipt !== null && emptied && nothingButAnEmptyObject(output))) {
         await fs.rm(t.file, { force: true });
         results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'removed (holt-only content)' });
       } else {
@@ -1788,7 +1842,7 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
           // An empty JSON object is not an empty FILE: a `// Team policy` comment above it is
           // user content that fs.rm destroys and a preserved text keeps.
           if (!result.endsWith('\n')) result += '\n';
-          if (nothingButAnEmptyObject(result)) {
+          if (receipt !== null && nothingButAnEmptyObject(result)) {
             await fs.rm(file, { force: true });
             results.push({ adapter: 'claude-code', path: file, action: 'removed (holt-only content)' });
           } else {
@@ -1834,9 +1888,14 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
           result = jsoncWrite(result, [[['hooks'], undefined]], { tabSize: 2, insertSpaces: true });
         }
         {
-          // Same rule as everywhere else in uninstall — see nothingButAnEmptyObject.
+          // Same rule as everywhere else in uninstall — see nothingButAnEmptyObject — plus the
+          // receipt. `cfg.version ??= 1` leaves the residue `{"version": 1}`, which is not an
+          // empty object, so the text test alone left this file behind and the leftover `.cursor/`
+          // then made the repo self-detect as a Cursor host. The receipt says whether holt made
+          // the file; a user's own identical file is not in it and is therefore kept.
           if (!result.endsWith('\n')) result += '\n';
-          if (nothingButAnEmptyObject(result)) {
+          const ownsCursorFile = await holtOwnsFile(repoRoot, await relativeWithinAsync(repoRoot, file), receipt);
+          if (ownsCursorFile || (receipt !== null && nothingButAnEmptyObject(result))) {
             await fs.rm(file, { force: true });
             results.push({ adapter: 'cursor', path: file, action: 'removed (holt-only content)' });
           } else {
@@ -1874,6 +1933,24 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
         results.push({ adapter: 'git-hooks', path: file, action: 'left in place (not holt-authored, or edited since)' });
       }
     } catch { /* no pre-commit hook */ }
+  }
+
+  // ---- empty directories holt created, and then the receipt itself -------------------------
+  // The leftover that made a fully-uninstalled repo self-detect 13 agent hosts was a set of EMPTY
+  // directories — `.cursor/`, `.claude/` — which host detection keys off. They are removed only
+  // when the receipt says holt created them AND they are still empty: a directory the user has
+  // since put something in is theirs, and `rmdir` refuses a non-empty directory anyway, which
+  // makes that the safe primitive rather than `rm -rf`.
+  if (receipt) {
+    // Deepest first, so `.claude/hooks` is gone before `.claude` is considered.
+    for (const rel of [...receipt.dirs].sort((a, b) => b.split('/').length - a.split('/').length)) {
+      if (!rel || rel === '.' || rel.startsWith('..')) continue;
+      try {
+        await fs.rmdir(path.join(repoRoot, rel));
+        results.push({ adapter: 'dirs', path: path.join(repoRoot, rel), action: 'removed (empty, holt created it)' });
+      } catch { /* not empty, not there, or not ours to remove — all mean leave it */ }
+    }
+    await clearReceipt(repoRoot);
   }
 
   return results;
