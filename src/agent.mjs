@@ -1056,8 +1056,10 @@ const WRAPPERS = new Set(['sudo', 'command', 'nohup', 'time', 'env', 'exec', 'ni
  *
  * @returns {Array<{words:string[], truncated:string[]}>}
  */
-export function lexSegments(command) {
+export function lexSegments(command, depth = 0) {
   const segments = [];
+  // Inner commands found inside $(…) / `…`, lexed separately and appended. See the note below.
+  const nested = [];
   let words = [];
   let truncated = [];
   let buf = '';
@@ -1139,6 +1141,41 @@ export function lexSegments(command) {
       continue;
     }
 
+    // A COMMAND SUBSTITUTION IS ONE WORD TO THE OUTER COMMAND, AND A COMMAND OF ITS OWN.
+    //
+    // `|`, `;` and `&` inside `$(…)` were treated as outer segment separators, so
+    //
+    //     ID=$(echo $R | cut -d' ' -f1); gh run view $ID
+    //
+    // split at the inner pipe, the assignment-stripper consumed `ID=$(echo`, and the NEXT word —
+    // `$R`, an argument to echo — was read as a command VERB. holt then refused the whole thing
+    // with "the command name comes from a substitution or variable". Measured against holt's own
+    // guard while it was guarding this repository: an ordinary `gh run view` was blocked, and a
+    // refusal an agent cannot act on costs a turn and teaches it to ignore the next one.
+    //
+    // The substitution's text is kept in the current WORD, so the outer verb is read correctly and
+    // a verb that genuinely IS a substitution still trips the check below. Its contents are then
+    // lexed as commands in their own right and appended, so `$(rm -rf x)` is still seen: this
+    // narrows a false positive without narrowing what holt can find.
+    if ((ch === '$' && command[i + 1] === '(') || ch === '`') {
+      const backtick = ch === '`';
+      const openLen = backtick ? 1 : 2;
+      let j = i + openLen;
+      let dep = 1;
+      for (; j < command.length; j++) {
+        if (command[j] === '\\') { j++; continue; }
+        if (backtick) { if (command[j] === '`') { dep = 0; break; } continue; }
+        if (command[j] === '(') dep++;
+        else if (command[j] === ')') { dep--; if (dep === 0) break; }
+      }
+      const inner = command.slice(i + openLen, j);
+      buf += command.slice(i, Math.min(j + 1, command.length));
+      has = true;
+      if (depth < 4 && inner.trim()) nested.push(...lexSegments(inner, depth + 1));
+      i = Math.min(j, command.length - 1);
+      continue;
+    }
+
     if (ch === '&' && command[i + 1] === '&') { flushSeg(); i++; continue; }
     if (ch === '&' && command[i + 1] === '>') { i++; ch = '>'; }  // `&>file` / `&>>file`
 
@@ -1178,7 +1215,7 @@ export function lexSegments(command) {
     has = true;
   }
   flushSeg();
-  return segments;
+  return segments.concat(nested);
 }
 
 /** The spelling of `opt` that appears in `valueOpts`, ignoring case. PowerShell params fold. */

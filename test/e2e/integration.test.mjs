@@ -2017,3 +2017,64 @@ test('NEWLINE: a worktree whose DIRECTORY NAME contains a newline is still guard
       `${shape}: a newline in the path must not disarm the guard: ${JSON.stringify(v)}`);
   }
 });
+
+/* -------------------------- a substitution in an ARGUMENT is not a substituted VERB ---- */
+
+/**
+ * MEASURED AGAINST holt WHILE IT WAS GUARDING THIS REPOSITORY.
+ *
+ * An ordinary `gh run view` was refused with "the command name comes from a substitution or
+ * variable". Every verb in it was literal — `gh`, `echo`, `cut`, `timeout`, `sort`, `head`. Only
+ * the ARGUMENTS came from substitutions.
+ *
+ * lexSegments treated `|`, `;` and `&` inside `$(…)` as outer segment separators, so
+ *
+ *     ID=$(echo $R | cut -d' ' -f1); gh run view $ID
+ *
+ * split at the INNER pipe, the assignment-stripper consumed `ID=$(echo`, and the next word — `$R`,
+ * an argument to echo — was read as a command VERB.
+ *
+ * OVER-REFUSAL IS A DEFECT, NOT CAUTION. A refusal an agent cannot act on costs it a turn and
+ * teaches it to discount the next message — including the true ones. But the fix must not buy that
+ * by going blind: a substitution's contents are commands in their own right, and `$(rm -rf x)`
+ * genuinely does run `rm`. So the substitution is ONE WORD to the outer command AND is lexed as
+ * commands of its own, and both halves are asserted here.
+ */
+test('SUBSTITUTION: literal verbs with substituted arguments are not refused', async (t) => {
+  const fx = await newRepo('subst-args');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('holder');
+  await fx.write('only.js', 'export function SUBST_SOLE() {}\n', wt);
+
+  for (const cmd of [
+    "R=$(gh run list --limit 3); ID=$(echo $R | cut -d' ' -f1); timeout 240 gh run view $ID | sort | head -14",
+    'for c in $(git log --format=%h -5); do git show --stat $c; done',
+    'echo "branch: $(git rev-parse --abbrev-ref HEAD)"',
+    "test -n \"$(git status --porcelain)\" && echo dirty",
+  ]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.ok(!v || v.decision === 'allow',
+      `every verb here is literal; refusing it is an over-refusal: ${cmd}\n${JSON.stringify(v)}`);
+  }
+});
+
+test('SUBSTITUTION: NEVER-WORSE — a destructive command inside a substitution is still caught', async (t) => {
+  const fx = await newRepo('subst-hidden');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('holder');
+  await fx.write('only.js', 'export function SUBST_HIDDEN_SOLE() {}\n', wt);
+  const p = fx.wt('holder');
+
+  for (const [why, cmd] of [
+    ['rm hidden in $( )', `X=$(rm -rf ${p}); echo $X`],
+    ['rm hidden in backticks', `X=\`rm -rf ${p}\`; echo $X`],
+    ['a verb resolved from a literal assignment', `x=rm; $x -rf ${p}`],
+    ['a verb that cannot be resolved at all', `$UNKNOWN_CMD -rf ${p}`],
+    ['eval', `eval "rm -rf ${p}"`],
+    ['the plain form', `rm -rf ${p}`],
+  ]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.ok(v && v.decision !== 'allow',
+      `${why}: must NOT be allowed — the fix must narrow false positives, not coverage: ${JSON.stringify(v)}`);
+  }
+});
