@@ -90,6 +90,16 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "containment-ancestor-dropped",
+    "defect": "a target that CONTAINS the worktrees (rm -rf .., rm -rf ../wt-*) is dropped as not-holt's-to-defend instead of destroying them — the mergify 29-worktree incident, in the spelling it took",
+    "file": "src/agent.mjs",
+    "find": "      for (const reached of rootsReachedFromAbove(roots, abs, suffix)) {",
+    "replace": "      for (const reached of []) { void rootsReachedFromAbove; // mutated: ancestor targets dropped",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
     "id": "primary-removability-read-as-content",
     "defect": "the content verbs read the primary's `safe` flag (which means \"not removable\") instead of contentReproducible, so in a single-clone repo — the layout almost every repository has — `git reset --hard`, `git clean -fdx` and `git checkout -- .` are DENIED FOREVER, even on a byte-clean tree, with no escape hatch",
     "file": "src/agent.mjs",

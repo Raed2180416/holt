@@ -2222,3 +2222,50 @@ test('PRIMARY: NEVER-WORSE — rm -rf of the repository root is still refused', 
   assert.notEqual(v.decision, 'allow',
     'deleting the main working tree destroys .git and must be refused even on a clean tree');
 });
+
+/* ------------------- a command that CONTAINS a worktree destroys it, same as one inside it ---- */
+//
+// deepestRoot() asked only "is the target INSIDE a worktree", so a target that is an ANCESTOR of
+// the worktrees — the parent that holds them, or a glob whose prefix is that parent — matched
+// nothing and was dropped as "not holt's to defend". REPRODUCED, and it is the incident this
+// product exists for, in the spelling it took (mergify.com/blog/the-day-my-ai-agent-deleted-29-
+// git-worktrees):
+//
+//   rm -rf ../wt/uniqueUncommitted   -> deny   (single, resolved — the control)
+//   rm -rf ../wt/*                   -> ALLOW  (the glob)
+//   rm -rf ../wt                     -> ALLOW  (the parent of every worktree)
+//
+// Both directions are pinned. The never-worse half matters as much: a glob that matches no
+// worktree, and a path outside every worktree, must stay allowed, or the fix is just a new
+// over-refusal.
+
+test('CONTAINMENT: a glob whose prefix is above the worktrees denies, naming the sole copy', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  // ../wt/* from the primary matches every linked worktree, including uniqueUncommitted, which
+  // holds the only copy of a symbol. git worktree remove of the single one is the control.
+  const single = await assessCommand(`rm -rf ${fx.wt('uniqueUncommitted')}`, fx.root);
+  assert.notEqual(single.decision, 'allow', 'control: the resolved single target must already deny');
+
+  const glob = await assessCommand('rm -rf ../wt/*', fx.root);
+  assert.notEqual(glob.decision, 'allow',
+    'a glob whose expansion includes a worktree holding the only copy must not be allowed');
+});
+
+test('CONTAINMENT: the parent directory of all worktrees is not a safe target', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const parent = await assessCommand('rm -rf ../wt', fx.root);
+  assert.notEqual(parent.decision, 'allow',
+    'removing the directory that contains every worktree destroys them all');
+});
+
+test('CONTAINMENT: NEVER-WORSE — a non-matching glob and an outside path stay allowed', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  for (const cmd of ['rm -rf ../wt/nomatch-*', 'rm -rf /tmp/holt-not-a-worktree-xyz', 'rm -rf ./build']) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow',
+      `${cmd} reaches no worktree and must stay allowed — the fix must not manufacture refusals (got ${v.decision})`);
+  }
+});

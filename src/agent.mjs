@@ -1436,6 +1436,43 @@ function deepestRoot(roots, abs) {
   return best;
 }
 
+/**
+ * The worktree roots this target DESTROYS BY CONTAINING THEM — the other direction from deepestRoot.
+ *
+ * deepestRoot answers "is the target inside a worktree". It was the only question asked, so a
+ * target that is an ANCESTOR of the worktrees — `..`, `../wt-*`, the parent that holds them all —
+ * matched nothing and was dropped as "not holt's to defend". But a command that contains a
+ * worktree destroys it exactly as surely as one inside it. REPRODUCED, and it is the incident this
+ * product exists for, in the spelling it actually took:
+ *
+ *   rm -rf ../wt-a                          -> deny   (single, resolved)
+ *   rm -rf ../wt-*                          -> ALLOW  (the glob)
+ *   for d in ../wt-*; do rm -rf $d; done    -> ALLOW  (the mergify loop, verbatim)
+ *   rm -rf ..                               -> ALLOW  (the parent of every worktree)
+ *
+ * @param abs   the canonical, glob-free directory prefix of the target
+ * @param suffix the globby remainder of the raw target after that prefix ('' when there is none)
+ * @returns the roots the command reaches from above — precise, not "every root under the prefix":
+ *   a glob is matched against each root (and its ancestors, since rm -rf of a matched directory
+ *   takes everything under it) so `../wt-*` hits wt-a and wt-b but never their sibling `base`.
+ */
+function rootsReachedFromAbove(roots, abs, suffix) {
+  if (!suffix) {
+    // A plain directory target (`rm -rf ..`) destroys every worktree inside it.
+    return roots.filter((r) => underOrEqual(r, abs));
+  }
+  // A glob (`../wt-*`): a root is reached only if the absolute pattern selects it or an ancestor
+  // of it. Built from holt's own pathMatcher so the glob semantics are identical everywhere.
+  const { re } = pathMatcher(`${abs}/${suffix}`.replace(/\/+/g, '/'));
+  return roots.filter((r) => {
+    for (let p = r; p.length >= abs.length; p = path.dirname(p)) {
+      if (re.test(p)) return true;
+      if (path.dirname(p) === p) break;
+    }
+    return false;
+  });
+}
+
 /** The glob-free directory prefix of a pattern — where ownership of a glob target is decided. */
 function globFreePrefix(p) {
   if (!GLOBBY.test(p)) return p;
@@ -1472,7 +1509,19 @@ async function assessFileTargets(targets, cwd, ctx) {
     const base = t.baseDir ? path.resolve(cwd, t.baseDir) : cwd;
     const abs = await canonicalPath(path.resolve(base, globFreePrefix(t.raw)));
     const root = deepestRoot(roots, abs);
-    if (!root) continue;
+    if (!root) {
+      // Not INSIDE a worktree — but it may CONTAIN one. A directory-destroying target that is an
+      // ancestor of worktree roots (`..`, `../wt-*`) takes them with it; each such root goes in at
+      // full '**' scope. A target that reaches nothing (`/tmp/scratch`) still resolves here to the
+      // empty set and is dropped exactly as before, which is what keeps ordinary removals quiet.
+      const suffix = GLOBBY.test(t.raw)
+        ? t.raw.slice((globFreePrefix(t.raw) === '.' && !t.raw.startsWith('.')) ? 0 : globFreePrefix(t.raw).length).replace(/^\/+/, '')
+        : '';
+      for (const reached of rootsReachedFromAbove(roots, abs, suffix)) {
+        items.push({ ...t, root: reached, rel: '**', matcher: pathMatcher('**') });
+      }
+      continue;
+    }
 
     if (t.role === 'move-src') {
       // A move INSIDE the same worktree is a rename: the content does not go anywhere, and
