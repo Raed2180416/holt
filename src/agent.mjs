@@ -33,7 +33,7 @@ import {
   underOrEqualAsync, canonicalPath, foldCase, CASE_INSENSITIVE_FS,
   samePathSync, underOrEqualSync, relativeWithinAsync, findByPath,
 } from './paths.mjs';
-import { discover, repoAbsenceError } from './discover.mjs';
+import { discover, repoAbsenceError, parseWorktreePorcelain } from './discover.mjs';
 import { scan, atRiskFiles, atRiskFromStatus, generatedEvidence } from './scan.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
 import { scratchDir } from './symbols.mjs';
@@ -870,10 +870,25 @@ function newProbeCtx(cwd) {
         roots.set('roots', (async () => {
           const r = await git(['worktree', 'list', '--porcelain'], { cwd }).catch(() => null);
           if (!r || r.code !== 0) return null; // cannot tell — the caller must not read this as "none"
+          // parseWorktreePorcelain, not a second hand-rolled reader of the same format.
+          //
+          // This one split on '\n' and kept lines beginning `worktree `, so a worktree whose
+          // DIRECTORY NAME contains a newline — which git permits and reports across two physical
+          // lines — was recorded TRUNCATED at the newline. The truncated path matched nothing, so
+          // targetIsWorktree() returned false and the guard stood aside entirely.
+          //
+          // Measured: `holt risk` REPORTED that worktree as holding work found nowhere else,
+          // naming it, and the guard ALLOWED `rm -rf` of it in the same repository at the same
+          // moment. holt knew, and let it go. `.trim()` compounded it by eating meaningful
+          // leading and trailing whitespace in a path.
+          //
+          // src/discover.mjs already parses this format correctly, with a test pinning exactly
+          // this case. Two readers of one format is one reader too many; this is now the same one.
+          const recs = parseWorktreePorcelain(r.stdout);
           const out = [];
-          for (const line of r.stdout.split('\n')) {
-            if (!line.startsWith('worktree ')) continue;
-            out.push(await canonicalPath(line.slice('worktree '.length).trim()));
+          for (const rec of recs) {
+            if (!rec?.path || rec.bare) continue;
+            out.push(await canonicalPath(rec.path));
           }
           return out;
         })());

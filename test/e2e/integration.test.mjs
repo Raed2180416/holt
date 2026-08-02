@@ -1978,3 +1978,42 @@ test('PRIMARY: `rm -rf <repo root>` is refused because .git is inside it', async
   assert.ok(!linked || linked.decision === 'allow',
     `an empty linked worktree must stay removable: ${JSON.stringify(linked)}`);
 });
+
+test('NEWLINE: a worktree whose DIRECTORY NAME contains a newline is still guarded', async (t) => {
+  // holt had TWO readers of `git worktree list --porcelain`. src/discover.mjs parses it correctly
+  // (a path may span physical lines) and is pinned by a test. The guard had its own, which split
+  // on '\n' and kept lines beginning `worktree ` — so such a path was recorded TRUNCATED at the
+  // newline, matched nothing, and targetIsWorktree() returned false, standing the guard down.
+  //
+  // Measured in one repository at one moment: `holt risk` REPORTED that worktree as holding work
+  // found nowhere else, naming it — and the guard ALLOWED `rm -rf` of it. holt knew, and let it
+  // go. Two readers of one format is one reader too many.
+  const fx = await newRepo('newline-guard');
+  t.after(() => fx.cleanup());
+
+  const weird = path.join(fx.root, '..', 'weird\nwt');
+  try {
+    await fx.git(['worktree', 'add', '-q', '--detach', weird]);
+  } catch {
+    assert.equal(process.platform, 'win32', 'a newline-named directory must be creatable off Windows');
+    return;
+  }
+  await fs.writeFile(path.join(weird, 'only.js'), 'export function NEWLINE_SOLE() {}\n');
+
+  // ANTI-VACUITY: holt must actually see the work, or "deny" below is right for the wrong reason.
+  const { report } = await cachedReport(fx.root, { includePrimary: true });
+  const row = report.unique.find((u) => u.id.includes('weird'));
+  assert.ok(row && row.uncommittedOnlyCount > 0,
+    `holt must see the work in the newline-named worktree: ${JSON.stringify(report.unique.map((u) => u.id))}`);
+
+  // Every spelling a shell would actually deliver.
+  for (const [shape, cmd] of [
+    ['single-quoted', `rm -rf '${weird}'`],
+    ['double-quoted', `rm -rf "${weird}"`],
+    ['backslash-escaped', `rm -rf ${weird.replace('\n', '\\\n')}`],
+  ]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.ok(v && v.decision !== 'allow',
+      `${shape}: a newline in the path must not disarm the guard: ${JSON.stringify(v)}`);
+  }
+});
