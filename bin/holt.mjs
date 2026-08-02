@@ -10,6 +10,7 @@
 import process from 'node:process';
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { discover, repoAbsenceError } from '../src/discover.mjs';
 import { scan } from '../src/scan.mjs';
@@ -25,7 +26,9 @@ import { renderHtml } from '../src/graph-html.mjs';
 import { renderClusters } from '../src/ascii-graph.mjs';
 import { assessCommand, buildBrief, cachedReport } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
-import { integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext } from '../src/integrate/adapters.mjs';
+import {
+  integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext, mcpTargets,
+} from '../src/integrate/adapters.mjs';
 import { protect, unprotect, rescue, rescues, clean, discard, auto } from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
@@ -892,7 +895,70 @@ async function cmdIntegrate(opts) {
       out(paint('grey', `      ${r.path}`));
     }
     out('');
-    out(paint('grey', "  Only holt's own entries were touched — anything else in these files was left as-is."));
+    // COMPUTED, NOT ASSERTED. This line was printed unconditionally, and it was false in both
+    // reproduced data-loss paths — it appeared verbatim over "removed (holt-only content)" for
+    // sixteen third-party MCP files in a repository holt had never been installed into. A
+    // reassurance the code cannot substantiate is worse than no reassurance, because it is the
+    // sentence a user reads instead of checking.
+    const removedFiles = results.filter((r) => /^removed/.test(r.action));
+    const leftAlone = results.filter((r) => /left (in place|alone)/.test(r.action));
+    if (removedFiles.length) {
+      out(paint('grey', `  ${removedFiles.length} file(s) were deleted because nothing but holt's own content remained in them:`));
+      for (const r of removedFiles) out(paint('grey', `      ${r.path}`));
+    }
+    if (leftAlone.length) {
+      out(paint('grey', `  ${leftAlone.length} file(s) were left untouched — holt could not prove that content was its own.`));
+    }
+    out(paint('grey', '  Everything else was edited in place: holt\'s entries removed, the rest of each file kept.'));
+    out('');
+    return;
+  }
+
+  // `--dry-run` USED TO BE ACCEPTED AND IGNORED, and then integrate wrote 21 files.
+  //
+  // The flag is documented for protect/rescue/discard/clean, so a user has every reason to expect
+  // it here — and this is the command that touches the most files by an order of magnitude. It
+  // was silently swallowed by the global argument parser: `holt integrate --dry-run` exited 0
+  // having created .mcp.json, installed a git pre-commit hook, and edited AGENTS.md, while
+  // printing "created"/"refreshed" in the past tense as though it had been previewing.
+  //
+  // A safety flag that is accepted and ignored is worse than one that is rejected, and worse
+  // still than one that works. This is the one that works: every target integrate can touch is
+  // computed from the same pure planners integrate itself uses, each is stat'd to say whether it
+  // would be CREATED or EDITED, and nothing is written. It doubles as the upfront preview that
+  // `holt setup` — which writes ~21 files — never offered.
+  if (opts.dryRun) {
+    const detected = await detectHosts(disc.root, os.homedir());
+    const present = detected.all ?? detected;
+    const planned = [
+      { adapter: 'agents-md', file: path.join(disc.root, 'AGENTS.md') },
+      ...mcpTargets(disc.root, os.homedir(), { scope }).map((t) => ({ adapter: `mcp/${t.host}`, file: t.file, scope: t.scope })),
+      ...(present.includes('claude-code') ? [{ adapter: 'claude-code', file: path.join(disc.root, '.claude', 'settings.json') }] : []),
+      ...(present.includes('cursor') ? [{ adapter: 'cursor', file: path.join(disc.root, '.cursor', 'hooks.json') }] : []),
+      ...(present.includes('opencode') ? [{ adapter: 'opencode', file: path.join(disc.root, '.opencode', 'plugins', 'holt.js') }] : []),
+      { adapter: 'git-hooks', file: path.join(disc.root, '.git', 'hooks', 'pre-commit') },
+    ];
+    const rows = [];
+    for (const p of planned) {
+      const exists = await fs.stat(p.file).then(() => true).catch(() => false);
+      rows.push({ ...p, exists, action: exists ? 'edit in place (holt\'s entries only)' : 'create' });
+    }
+    if (opts.json) return emitJson({ dryRun: true, scope, detected, planned: rows });
+
+    out(paint('bold', 'holt integrate') + paint('grey', `  (${scope} scope) `) + paint('yellow', 'DRY RUN — nothing was written'));
+    out('');
+    out(`  in this repo     ${detected.project.length ? detected.project.join(', ') : paint('grey', 'none')}`);
+    out(`  on this machine  ${detected.user.length ? detected.user.join(', ') : paint('grey', 'none')}`);
+    out('');
+    const created = rows.filter((r) => !r.exists);
+    const edited = rows.filter((r) => r.exists);
+    out(paint('grey', `  would CREATE ${created.length} file(s):`));
+    for (const r of created) out(`    ${paint('green', '+')} ${(r.adapter + '                ').slice(0, 18)} ${paint('grey', r.file)}`);
+    out('');
+    out(paint('grey', `  would EDIT ${edited.length} existing file(s), removing and rewriting only holt's own entries:`));
+    for (const r of edited) out(`    ${paint('yellow', '~')} ${(r.adapter + '                ').slice(0, 18)} ${paint('grey', r.file)}`);
+    out('');
+    out(paint('grey', '  Re-run without --dry-run to apply. `holt uninstall` reverses it.'));
     out('');
     return;
   }

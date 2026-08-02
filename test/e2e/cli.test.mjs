@@ -534,3 +534,38 @@ test('FIRST RUN: `holt brief` never fabricates a clean bill when the scan could 
     assert.notEqual(broken.code, 0, `${what}: and it must not exit 0 while unable to vouch`);
   }
 });
+
+test('INTEGRATE: --dry-run writes NOTHING, and says what it would have written', async (t) => {
+  // `--dry-run` was accepted by the global argument parser and ignored. `holt integrate
+  // --dry-run` exited 0 having created .mcp.json, installed a git pre-commit hook and edited
+  // AGENTS.md — 21 files — while printing "created"/"refreshed" in the past tense as though it
+  // were previewing. The flag is documented on protect/rescue/discard/clean, so a user has every
+  // reason to expect it on the command that touches the most files by an order of magnitude.
+  const fx = await newRepo('integrate-dry');
+  t.after(() => fx.cleanup());
+
+  const before = (await fs.readdir(fx.root)).sort();
+  const r = await holt(['integrate', '--dry-run', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 0, `dry run must succeed: ${r.stdout} ${r.stderr}`);
+
+  // GRADE FROM THE FILESYSTEM. The claim is about what is on disk, not about what was printed.
+  assert.deepEqual((await fs.readdir(fx.root)).sort(), before,
+    'a dry run must not create a single file in the repository root');
+  for (const f of ['.mcp.json', 'AGENTS.md', '.claude/settings.json', '.git/hooks/pre-commit']) {
+    await assert.rejects(fs.stat(path.join(fx.root, f)), `${f} must not exist after a dry run`);
+  }
+
+  // ANTI-VACUITY: it must have actually planned something, or "wrote nothing" is trivially true.
+  assert.match(r.stdout, /DRY RUN/, r.stdout);
+  assert.match(r.stdout, /would CREATE \d+ file\(s\)/, r.stdout);
+  assert.match(r.stdout, /\.mcp\.json/, `the plan must name the files: ${r.stdout}`);
+  assert.match(r.stdout, /pre-commit/, `including the git hook: ${r.stdout}`);
+
+  // And --json carries the same plan, so a wrapper can gate on it.
+  const j = await holt(['integrate', '--dry-run', '--json', '--cwd', fx.root], fx.root);
+  const plan = JSON.parse(j.stdout);
+  assert.equal(plan.dryRun, true);
+  assert.ok(plan.planned.length > 5, `the JSON plan must list targets: ${j.stdout.slice(0, 300)}`);
+  assert.ok(plan.planned.every((p) => p.file && p.action), 'every planned row names a file and an action');
+  assert.deepEqual((await fs.readdir(fx.root)).sort(), before, 'the --json dry run must also write nothing');
+});
