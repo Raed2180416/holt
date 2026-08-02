@@ -1304,8 +1304,31 @@ exit 0
 `;
 }
 
+
+/** Where a repository's SHARED git directory lives — the same for the main tree and every linked one. */
+async function gitCommonDir(cwd) {
+  try {
+    const r = await new Promise((resolve) => {
+      execFile('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, timeout: 10_000 },
+        (err, stdout) => resolve(err ? null : String(stdout).trim()));
+    });
+    return r || null;
+  } catch { return null; }
+}
+
 export async function installGitHooks(repoRoot, { bin = 'holt' } = {}) {
-  const dir = path.join(repoRoot, '.git', 'hooks');
+  // `.git` IS A FILE IN A LINKED WORKTREE, not a directory — it holds `gitdir: …`. Joining
+  // '.git/hooks' onto a worktree root therefore fails with ENOTDIR, which is exactly what happened
+  // the first time integrate was taught to wire the worktrees agents actually run in.
+  //
+  // Hooks are SHARED across every worktree of a repository: git resolves them from the common git
+  // directory. So the right answer is to ask git where that is and write there once — the same
+  // file every worktree already executes — rather than to skip linked worktrees and leave them
+  // half-wired.
+  let hooksRoot = path.join(repoRoot, '.git');
+  const common = await gitCommonDir(repoRoot);
+  if (common) hooksRoot = common;
+  const dir = path.join(hooksRoot, 'hooks');
   const file = path.join(dir, 'pre-commit');
   try {
     const existing = await fs.readFile(file, 'utf8');

@@ -26,6 +26,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   installClaudeCode, claudeCodeHooks, integrate, uninstall,
@@ -33,6 +34,18 @@ import {
 } from '../../src/integrate/adapters.mjs';
 
 const FIXTURES = fileURLToPath(new URL('../fixtures/upgrade/', import.meta.url));
+
+const BIN = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
+function holtBin(args, cwd) {
+  return new Promise((resolve) => {
+    execFile(process.execPath, [BIN, ...args], {
+      cwd, timeout: 180_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, NO_COLOR: '1' },
+    }, (err, stdout, stderr) => resolve({
+      code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''),
+    }));
+  });
+}
+
 
 async function tmp(label) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), `holt-${label}-`));
@@ -766,4 +779,65 @@ test('JSONC: NEVER-WORSE — a genuinely absent config is still created in proje
   await installMcp(dir, { bin: 'holt', home: path.join(dir, 'home'), scope: 'project', hosts: ['claude-code'] });
   const cfg = JSON.parse(await fs.readFile(path.join(dir, '.mcp.json'), 'utf8'));
   assert.ok(cfg.mcpServers.holt, 'a fresh repo must still get wired');
+});
+
+/* ------------------------------ the worktrees agents actually run in ---- */
+
+/**
+ * `holt integrate` WIRED THE ONE TREE THAT WAS NEVER THE RISK.
+ *
+ * Every host reads its project configuration relative to the directory it is running in, and
+ * `git worktree add` copies no untracked files. So integrate wired the MAIN worktree and stopped,
+ * and a dispatched agent — working in a linked worktree, which is the entire reason holt exists —
+ * had no `.claude/settings.json`, no `.mcp.json` and no `AGENTS.md`.
+ *
+ * Measured on a fresh repository: the primary came back with all five hook events wired and the
+ * worktree beside it had none of the three files. The product's central claim, failing in exactly
+ * the configuration the product is FOR.
+ *
+ * Git hooks are the one exception and had to be handled separately: `.git` is a FILE in a linked
+ * worktree, so joining `.git/hooks` onto its root fails with ENOTDIR. Hooks are SHARED across
+ * every worktree of a repository, so the shared git directory is resolved from git itself and the
+ * hook is written there once.
+ */
+test('WORKTREES: integrate wires every linked worktree, not just the primary', async (t) => {
+  const dir = await tmp('wire-worktrees');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const repo = path.join(dir, 'repo');
+  await fs.mkdir(repo, { recursive: true });
+
+  const git = (args, cwd = repo) => new Promise((resolve, reject) => {
+    execFile('git', args, {
+      cwd,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_SYSTEM: os.devNull },
+    }, (e, out, err) => (e ? reject(new Error(String(err || e.message))) : resolve(String(out))));
+  });
+  await git(['init', '-q', '-b', 'main', '.']);
+  await git(['config', 'user.email', 'p@p.test']);
+  await git(['config', 'user.name', 'p']);
+  await fs.writeFile(path.join(repo, 'R.md'), 'base\n');
+  await git(['add', '-A']);
+  await git(['commit', '-qm', 'base']);
+  await git(['worktree', 'add', '-q', '--detach', path.join(dir, 'agent-a')]);
+  await git(['worktree', 'add', '-q', '--detach', path.join(dir, 'agent-b')]);
+
+  const r = await holtBin(['integrate', '--cwd', repo], repo);
+  assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+
+  // GRADE FROM THE FILESYSTEM. Every tree an agent could run in must carry the project config.
+  for (const wt of [repo, path.join(dir, 'agent-a'), path.join(dir, 'agent-b')]) {
+    for (const f of ['.claude/settings.json', '.mcp.json', 'AGENTS.md']) {
+      await assert.doesNotReject(fs.stat(path.join(wt, f)),
+        `${path.basename(wt)} must have ${f} — a host reads its config where it runs`);
+    }
+  }
+  // Hooks are shared, so exactly one file, in the common git directory.
+  await assert.doesNotReject(fs.stat(path.join(repo, '.git', 'hooks', 'pre-commit')),
+    'the shared pre-commit hook must be installed');
+
+  // ANTI-VACUITY: the hooks written into a worktree must be REAL — the guard has to answer from
+  // there, not merely have a file present.
+  await fs.writeFile(path.join(dir, 'agent-a', 'only.js'), 'export function WIRED_SOLE() {}\n');
+  const settings = JSON.parse(await fs.readFile(path.join(dir, 'agent-a', '.claude', 'settings.json'), 'utf8'));
+  assert.ok(settings.hooks?.PreToolUse?.length, `the worktree's own PreToolUse hook must exist: ${JSON.stringify(settings)}`);
 });

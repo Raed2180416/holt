@@ -1027,7 +1027,34 @@ async function cmdIntegrate(opts) {
   }
 
   const { detected, results } = await integrate(disc.root, { bin: opts.bin, scope });
-  if (opts.json) return emitJson({ detected, scope, results });
+
+  // WIRE THE WORKTREES THE AGENTS ACTUALLY RUN IN.
+  //
+  // `holt integrate` wired the MAIN worktree and stopped. Every host reads its project config
+  // relative to the directory it is running in, and `git worktree add` copies no untracked files —
+  // so a dispatched agent, working in a linked worktree, had no .claude/settings.json, no
+  // .mcp.json and no AGENTS.md. Measured on a fresh repo: the primary came back with all five hook
+  // events wired and the worktree beside it had none of the three files.
+  //
+  // That is the product's central claim failing in the exact configuration the product is FOR.
+  // holt exists because agents run in parallel worktrees; protecting only the one the human sits
+  // in protects the one tree that was never the risk.
+  //
+  // Project scope only for the extras: the user-scope work is machine-wide and was already done
+  // once above, and repeating it per worktree would rewrite $HOME configs N times.
+  const linked = (disc.workstreams ?? []).filter((w) => !w.isPrimary && w.path);
+  const worktreeResults = [];
+  for (const w of linked) {
+    try {
+      // eslint-disable-next-line no-await-in-loop -- each worktree writes its own files
+      const r = await integrate(w.path, { bin: opts.bin, scope: 'project' });
+      worktreeResults.push({ worktree: w.id, results: r.results });
+    } catch (e) {
+      worktreeResults.push({ worktree: w.id, error: e.message });
+    }
+  }
+
+  if (opts.json) return emitJson({ detected, scope, results, worktrees: worktreeResults });
 
   out(paint('bold', 'holt integrate') + paint('grey', `  (${scope} scope)`));
   out('');
@@ -1042,6 +1069,13 @@ async function cmdIntegrate(opts) {
     if (!skipped) out(paint('grey', `      ${r.path}`));
   }
   out('');
+  if (worktreeResults.length) {
+    const failed = worktreeResults.filter((w) => w.error);
+    out(paint('grey', `  + wired ${worktreeResults.length - failed.length} linked worktree(s) — `
+      + 'agents run there, and a host reads its config relative to where it runs.'));
+    for (const f of failed) out(paint('yellow', `  ! ${f.worktree}: ${f.error}`));
+    out('');
+  }
   out(paint('grey', '  AGENTS.md and MCP reach every agent that reads them; hooks add enforcement where supported.'));
   if (!opts.global) {
     out(paint('grey', '  Project scope only — nothing outside this repository was modified. Use --global to also'));
