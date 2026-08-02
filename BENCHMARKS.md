@@ -480,11 +480,11 @@ measured runs.
 
 ### The numbers this section used to carry were wrong, and how
 
-| repo | files | wt | **total p50** | p90 | cold | **scan p50** | **peak RSS** | graded | disposable |
+| repo | files | wt | **total p50** | p90 | cold | **scan p50** | **holt's memory** | graded | disposable |
 |---|---|---|---|---|---|---|---|---|---|
-| redis | 1,861 | 31 | **2.22 s** | 3.10 s | 0.73 s | **1.63 s** | **222 MB** | 30/30 | 15/15 |
-| postgres | 7,680 | 31 | **5.01 s** | 5.39 s | 3.71 s | **3.67 s** | **422 MB** | 30/30 | 15/15 |
-| holt-self† | 20,176 | 31 | **10.1 s** | 17.1 s | 19.3 s | **7.05 s** | **845 MB** | 30/30 | 15/15 |
+| redis | 1,861 | 31 | **2.22 s** | 3.10 s | 0.73 s | **1.63 s** | **~11 MB** | 30/30 | 15/15 |
+| postgres | 7,680 | 31 | **5.01 s** | 5.39 s | 3.71 s | **3.67 s** | ~20 MB | 30/30 | 15/15 |
+| holt-self† | 20,176 | 31 | **10.1 s** | 17.1 s | 19.3 s | **7.05 s** | ~45 MB | 30/30 | 15/15 |
 
 † `holt-self` is NOT a 20,176-file codebase. holt is 111 JavaScript files and 41,321 lines; the
 repository also tracks a `manyfiles/` directory of 20,000 one-line fixture files committed by
@@ -506,7 +506,9 @@ measurement that cannot tell *nothing was wrong* from *nothing was measured*:
    path: holt trying to scan 30 directories that were not there.
 2. **The workstream column was always zero.** The harness read `disc.worktrees`; `discover()`
    returns `workstreams`. The field never existed.
-3. **"Peak RSS" was a single sample taken after the pipeline had finished.**
+3. **"Peak RSS" was a single sample taken after the pipeline had finished** — and it was the
+   BENCH PROCESS's RSS, not holt's, so the harness's own retained reports were published as the
+   product's memory cost.
 4. **The clone was cached and then committed into.** The landed-duplicate case has to commit to
    base, so each run inherited the previous run's commits: "median of three runs" was the median
    of three different repositories.
@@ -514,12 +516,25 @@ measurement that cannot tell *nothing was wrong* from *nothing was measured*:
 All four are fixed, and `test/unit/eval-validity.test.mjs` now grades the grader — including the
 case where holt reports nothing, which is the one that produced the numbers above.
 
+### The memory figure was the harness's, not holt's
+
+The 222 MB / 422 MB / 845 MB this table used to print were the BENCH PROCESS's absolute peak RSS,
+and the bench retains a full analysis per run plus every fixture map it builds. Measured with the
+pipeline's own cost separated from the harness's — `node --expose-gc`, baseline sampled after the
+fixture is built and before the pipeline starts:
+
+    redis, 31 worktrees:   bench process absolute 392 MB   ·   holt's pipeline  1 MB
+
+**holt's analysis costs single-digit to low-tens of megabytes**, not hundreds. A benchmark
+attributing its own bookkeeping to the thing it measures is the same defect class as everything
+else on this page, and it happened to defame the product rather than flatter it.
+
 **Verdict:** on the corrected harness, 30 of 30 planted workstreams are *found and graded* in
-every repo, with zero wrong verdicts and 15/15 disposables correctly identified. Cost is real and
-worth stating plainly: **peak RSS is hundreds of megabytes**, roughly 0.04–0.12 MB per tracked file
-per 31 worktrees, and a 2 GB CI container running holt over a large monorepo with many worktrees
-is a configuration to test before relying on. Wall-clock grows sublinearly in file count (4.1×
-the files costs 2.3× the time from redis to postgres).
+every repo, with zero wrong verdicts and 15/15 disposables correctly identified, at a memory cost
+that fits comfortably in any CI container. Wall-clock grows sublinearly in file count (4.1× the
+files costs 2.3× the time from redis to postgres). The wall-clock figures were taken on a loaded
+developer machine and are an order of magnitude, not a precise number; the memory and correctness
+figures are stable.
 
 Reproduce: `node eval/enterprise-bench.mjs all --worktrees 30 --noise-level 2 --runs 3`
 

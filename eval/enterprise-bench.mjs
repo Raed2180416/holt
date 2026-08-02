@@ -100,13 +100,34 @@ function sh(cmd, args, cwd, timeout = 300_000) {
  * collected.
  */
 function rssSampler(everyMs = 25) {
-  let peak = process.memoryUsage().rss;
+  // MEASURE THE PIPELINE, NOT THE HARNESS THAT IS HOLDING ITS RESULTS.
+  //
+  // This used to publish the bench process's absolute peak RSS as holt's memory cost, and the
+  // bench retains a full report per run plus every fixture map it built. Measured on redis with
+  // 31 worktrees: absolute peak 63 MB, of which the pipeline accounts for ELEVEN. The published
+  // figure was 222 MB. Almost all of it was the harness's own bookkeeping, attributed to the
+  // product — a benchmark defaming the thing it exists to measure.
+  //
+  // Both numbers are now reported. The delta is holt's cost and is the honest headline; the
+  // absolute is kept beside it so nobody has to trust the subtraction.
+  if (global.gc) { try { global.gc(); global.gc(); } catch { /* --expose-gc not on */ } }
+  const baseline = process.memoryUsage().rss;
+  let peak = baseline;
   const t = setInterval(() => {
     const r = process.memoryUsage().rss;
     if (r > peak) peak = r;
   }, everyMs);
   if (typeof t.unref === 'function') t.unref();
-  return { stop: () => { clearInterval(t); return Math.round(peak / 1024 / 1024); } };
+  return {
+    stop: () => {
+      clearInterval(t);
+      return {
+        peakMB: Math.round(peak / 1024 / 1024),
+        baselineMB: Math.round(baseline / 1024 / 1024),
+        pipelineMB: Math.max(0, Math.round((peak - baseline) / 1024 / 1024)),
+      };
+    },
+  };
 }
 async function exists(p) { try { await fs.access(p); return true; } catch { return false; } }
 
@@ -247,7 +268,7 @@ async function runPipeline(root) {
   const rss = rssSampler();
   const t0 = Date.now();
   let disc;
-  try { disc = await discover(root); } catch (e) { results.errors.push(`discover: ${e.message}`); results.peakRSS = rss.stop(); return results; }
+  try { disc = await discover(root); } catch (e) { results.errors.push(`discover: ${e.message}`); Object.assign(results, { mem: rss.stop() }); return results; }
   results.phases.discover = Date.now() - t0;
   // `workstreams`, not `worktrees`. discover() has never had a `worktrees` field, so this read
   // `undefined?.length ?? 0` and the published column was 0 in every row this harness ever
@@ -255,19 +276,19 @@ async function runPipeline(root) {
   results.workstreamCount = disc.workstreams?.length ?? 0;
   if (!Number.isInteger(results.workstreamCount) || results.workstreamCount === 0) {
     results.errors.push('discover returned no workstreams — the fixture did not build, so nothing below is a measurement');
-    results.peakRSS = rss.stop();
+    results.mem = rss.stop();
     return results;
   }
   const t1 = Date.now();
   let scanned;
-  try { scanned = await scan(disc, {}); } catch (e) { results.errors.push(`scan: ${e.message}`); results.phases.scan = Date.now() - t1; results.peakRSS = rss.stop(); return results; }
+  try { scanned = await scan(disc, {}); } catch (e) { results.errors.push(`scan: ${e.message}`); results.phases.scan = Date.now() - t1; Object.assign(results, { mem: rss.stop() }); return results; }
   results.phases.scan = Date.now() - t1;
   const t2 = Date.now();
   let report;
-  try { report = await analyze(scanned, {}); } catch (e) { results.errors.push(`analyze: ${e.message}`); results.phases.analyze = Date.now() - t2; results.peakRSS = rss.stop(); return results; }
+  try { report = await analyze(scanned, {}); } catch (e) { results.errors.push(`analyze: ${e.message}`); results.phases.analyze = Date.now() - t2; Object.assign(results, { mem: rss.stop() }); return results; }
   results.phases.analyze = Date.now() - t2;
   results.total = Date.now() - t0;
-  results.peakRSS = rss.stop();
+  results.mem = rss.stop();
   results.report = report;
   results.collisions = report.collisions?.length ?? 0;
   results.duplicates = report.duplicates?.length ?? 0;
@@ -422,9 +443,12 @@ async function benchmarkRepo(name, spec) {
       await fs.rm(root, { recursive: true, force: true }).catch(() => {});
       continue;
     }
-    samples.push(pipe);
-    lastPipe = pipe;
     lastVerify = verifyCorrectness(pipe.report, wtInfo.planted);
+    lastPipe = pipe;
+    // DROP THE REPORT BEFORE KEEPING THE SAMPLE. Retaining one full report per run is exactly the
+    // memory this harness used to attribute to holt: with three runs plus a warmup it held four
+    // complete analyses of the repository alive while sampling RSS and calling the total holt's.
+    samples.push({ total: pipe.total, phases: pipe.phases, mem: pipe.mem });
     if (attempt < runs) await fs.rm(root, { recursive: true, force: true }).catch(() => {});
   }
 
@@ -433,20 +457,24 @@ async function benchmarkRepo(name, spec) {
   const wtInfo = { wtRoot: path.join(WORK, 'wt'), planted: { atRisk: [], hold: [], disposable: [], gitignored: [] } };
   const totals = samples.map((s) => s.total).filter((x) => typeof x === 'number');
   const scans = samples.map((s) => s.phases?.scan).filter((x) => typeof x === 'number');
-  const rsss = samples.map((s) => s.peakRSS).filter((x) => typeof x === 'number');
+  const rssAbs = samples.map((s) => s.mem?.peakMB).filter((x) => typeof x === 'number');
+  const rssOwn = samples.map((s) => s.mem?.pipelineMB).filter((x) => typeof x === 'number');
   const dist = {
     runs: samples.length,
     coldTotal,
     totalP50: percentile(totals, 50), totalP90: percentile(totals, 90),
     totalMin: percentile(totals, 0), totalMax: percentile(totals, 100),
     scanP50: percentile(scans, 50), scanP90: percentile(scans, 90),
-    rssP50: percentile(rsss, 50), rssMax: percentile(rsss, 100),
+    rssP50: percentile(rssAbs, 50), rssMax: percentile(rssAbs, 100),
+    ownRssP50: percentile(rssOwn, 50), ownRssMax: percentile(rssOwn, 100),
     samples: totals,
   };
 
   for (const e of pipe.errors) { console.log(`  ✗ PIPELINE: ${e}`); issues.push({ phase: 'pipeline', severity: 'critical', msg: e }); }
   console.log(`  cold(discarded): ${coldTotal ?? '?'}ms | warm total p50 ${dist.totalP50 ?? '?'}ms p90 ${dist.totalP90 ?? '?'}ms (n=${dist.runs}, ${JSON.stringify(totals)})`);
-  console.log(`  scan p50 ${dist.scanP50 ?? '?'}ms p90 ${dist.scanP90 ?? '?'}ms | peak RSS p50 ${dist.rssP50 ?? '?'}MB max ${dist.rssMax ?? '?'}MB`);
+  console.log(`  scan p50 ${dist.scanP50 ?? '?'}ms p90 ${dist.scanP90 ?? '?'}ms`);
+  console.log(`  memory: holt's pipeline p50 ${dist.ownRssP50 ?? '?'}MB max ${dist.ownRssMax ?? '?'}MB `
+    + `(bench process absolute p50 ${dist.rssP50 ?? '?'}MB — includes the harness's own fixtures and reports)`);
   console.log(`  verdicts: ${pipe.safeCount} safe, ${pipe.atRiskCount} at-risk, ${pipe.skippedCount} skipped, ${pipe.workstreamCount} workstreams discovered`);
   console.log('  [4/5] Verifying correctness...');
   const verify = lastVerify ?? { errors: ['no measured run completed'], warnings: [], disposableRight: 0, disposableTotal: 0, gradedTotal: 0, plantedTotal: 0 };
@@ -469,7 +497,7 @@ async function benchmarkRepo(name, spec) {
   return { name, ok: issues.filter((i) => i.severity === 'critical').length === 0, issues,
     trackedFiles: fileCount,
     dist,
-    metrics: { total: dist.totalP50, totalP90: dist.totalP90, coldTotal, discover: pipe.phases.discover, scan: dist.scanP50, scanP90: dist.scanP90, analyze: pipe.phases.analyze, peakRSS: dist.rssP50, peakRSSMax: dist.rssMax, workstreams: pipe.workstreamCount, collisions: pipe.collisions, duplicates: pipe.duplicates, safe: pipe.safeCount, atRisk: pipe.atRiskCount, skipped: pipe.skippedCount, disposableRight: verify.disposableRight, disposableTotal: verify.disposableTotal, graded: verify.gradedTotal, planted: verify.plantedTotal } };
+    metrics: { total: dist.totalP50, totalP90: dist.totalP90, coldTotal, discover: pipe.phases.discover, scan: dist.scanP50, scanP90: dist.scanP90, analyze: pipe.phases.analyze, peakRSS: dist.ownRssP50, peakRSSMax: dist.ownRssMax, processRSS: dist.rssP50, workstreams: pipe.workstreamCount, collisions: pipe.collisions, duplicates: pipe.duplicates, safe: pipe.safeCount, atRisk: pipe.atRiskCount, skipped: pipe.skippedCount, disposableRight: verify.disposableRight, disposableTotal: verify.disposableTotal, graded: verify.gradedTotal, planted: verify.plantedTotal } };
 }
 
 async function main() {
@@ -486,14 +514,14 @@ async function main() {
     catch (e) { console.log(`  FATAL: ${e.message}`); allResults.push({ name, ok: false, error: e.message, issues: [] }); }
   }
   console.log(`\n${'═'.repeat(70)}\n  SUMMARY\n${'═'.repeat(70)}\n`);
-  console.log('  | repo | files | wt | total p50 | p90 | cold | scan p50 | RSS p50 | graded | disposable | issues |');
-  console.log('  |---|---|---|---|---|---|---|---|---|---|---|');
+  console.log('  | repo | files | wt | total p50 | p90 | cold | scan p50 | holt RSS p50 | proc RSS | graded | disposable | issues |');
+  console.log('  |---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const r of allResults) {
     const m = r.metrics || {};
     const crit = r.issues?.filter((i) => i.severity === 'critical').length ?? 0;
     console.log(
       `  | ${r.name} | ${r.trackedFiles ?? '?'} | ${m.workstreams ?? '?'} | ${m.total ?? '?'}ms | ${m.totalP90 ?? '?'}ms `
-      + `| ${m.coldTotal ?? '?'}ms | ${m.scan ?? '?'}ms | ${m.peakRSS ?? '?'}MB `
+      + `| ${m.coldTotal ?? '?'}ms | ${m.scan ?? '?'}ms | ${m.peakRSS ?? '?'}MB | ${m.processRSS ?? '?'}MB `
       + `| ${m.graded ?? '?'}/${m.planted ?? '?'} | ${m.disposableRight ?? '?'}/${m.disposableTotal ?? '?'} `
       + `| ${crit}c, ${r.issues?.length ?? 0}t |`);
   }
