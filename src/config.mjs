@@ -40,6 +40,31 @@ import { repoRoot } from './git.mjs';
 
 export const CONFIG_FILENAME = '.holtrc.json';
 
+
+/**
+ * Does this pattern contain a NESTED QUANTIFIER — the shape that makes a regex hang?
+ *
+ * REPRODUCED: a `.holtrc.json` containing `{"familyOverrides": ["^(a+)+$"]}` and a worktree named
+ * `aaaa…aaaX` made `holt status` hang indefinitely. Every command that reads config hangs the same
+ * way, INCLUDING the blocking PreToolUse guard — which means an agent frozen forever, by a config
+ * file a teammate committed. `inferFamily` already wraps the match in try/catch, and a catch does
+ * not help: catastrophic backtracking is not an exception, it is an unbounded loop inside a single
+ * atomic `String.match` call that nothing in JavaScript can interrupt.
+ *
+ * There is no way to time-bound a native RegExp, so the pattern is refused BEFORE it is ever run.
+ * The check is the well-known low-false-positive one: a group that is itself quantified and whose
+ * body already contains a quantifier — `(a+)+`, `(x*)*`, `([a-z]+)*`, `(\d{2,}){3,}`. Ordinary
+ * grouping is untouched: `(abc)+`, `(a|b)+` and `(\d+)` all have exactly one of the two halves.
+ *
+ * A rejected pattern is a WARNING, not a refusal of the whole product — the surrounding config
+ * gate's rule. holt says which pattern it declined and why, and carries on with the rest.
+ */
+export function hasNestedQuantifier(source) {
+  const src = String(source);
+  // A group whose CONTENT ends in a quantifier and which is ITSELF quantified.
+  return /\((?:\?[:=!]|\?<[=!a-zA-Z])?(?:[^()\\]|\\.)*(?:[+*]|\{\d+,\d*\})\s*\)\s*(?:[+*]|\{\d+,\d*\})/.test(src);
+}
+
 const KNOWN_KEYS = ['familyOverrides', 'maintenanceFloor', 'maintenanceRatio'];
 
 // Keys that are silently ignored — they are standard JSON config metadata, not holt settings.
@@ -91,6 +116,7 @@ function validate(raw, filePath) {
     if (!Array.isArray(v) || !v.every((x) => typeof x === 'string')) {
       throw new ConfigError(`${filePath}: "familyOverrides" must be an array of regex strings`, filePath);
     }
+    const safe = [];
     for (const pattern of v) {
       try { new RegExp(pattern); } catch (e) {
         throw new ConfigError(
@@ -98,8 +124,20 @@ function validate(raw, filePath) {
           filePath,
         );
       }
+      // A pattern that can hang is DECLINED, loudly, and the rest still apply. Killing the whole
+      // product over one bad entry is the failure mode the config gate exists to avoid; running it
+      // anyway freezes the agent forever. See hasNestedQuantifier.
+      if (hasNestedQuantifier(pattern)) {
+        process.stderr.write(
+          `holt: ignoring "familyOverrides" entry ${JSON.stringify(pattern)} — it contains a nested `
+          + 'quantifier, which can make a regular expression run without bound and would hang every '
+          + `holt command including the guard. Rewrite it without the nesting (${filePath}).\n`,
+        );
+        continue;
+      }
+      safe.push(pattern);
     }
-    out.familyOverrides = v;
+    out.familyOverrides = safe;
   }
 
   if ('maintenanceFloor' in raw) {

@@ -179,3 +179,51 @@ test('config: maintenanceRatio outside [0,1] -> throws', async (t) => {
   await fx.write(CONFIG_FILENAME, JSON.stringify({ maintenanceRatio: 1.5 }));
   await assert.rejects(() => loadConfig(fx.root), ConfigError);
 });
+
+/**
+ * A CONFIG FILE A TEAMMATE COMMITS MUST NOT BE ABLE TO FREEZE THE GUARD.
+ *
+ * REPRODUCED: `.holtrc.json` containing `{"familyOverrides": ["^(a+)+$"]}`, plus a worktree named
+ * `aaaa…aaaX`, made `holt status` hang indefinitely — and every command that reads config hangs
+ * the same way, INCLUDING the blocking PreToolUse hook. An agent frozen forever.
+ *
+ * `inferFamily` already wraps the match in try/catch and that does not help: catastrophic
+ * backtracking is not an exception, it is an unbounded loop inside a single atomic `String.match`
+ * that nothing in JavaScript can interrupt. There is no way to time-bound a native RegExp, so the
+ * pattern has to be refused BEFORE it is ever run.
+ */
+test('CONFIG: a pattern that can hang is declined, and the rest still apply', async (t) => {
+  const fx = await newRepo('config-redos');
+  t.after(() => fx.cleanup());
+  await fx.write(CONFIG_FILENAME, JSON.stringify({
+    familyOverrides: ['^(a+)+$', '^(shard-\\d+)-.*$'],
+  }));
+
+  const errs = [];
+  const realWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (s) => { errs.push(String(s)); return true; };
+  let r;
+  try { r = await loadConfig(fx.root); } finally { process.stderr.write = realWrite; }
+
+  assert.deepEqual(r.config.familyOverrides, ['^(shard-\\d+)-.*$'],
+    'the dangerous entry is dropped and the safe one survives');
+  assert.match(errs.join(''), /nested quantifier/i,
+    `and holt says which pattern it declined and why: ${errs.join('')}`);
+  assert.match(errs.join(''), /\^\(a\+\)\+\$/, 'naming the exact pattern');
+});
+
+test('CONFIG: ANTI-VACUITY — the detector flags the dangerous shapes and no ordinary ones', async () => {
+  const { hasNestedQuantifier } = await import('../../src/config.mjs');
+  // A group that is itself quantified AND whose body already contains a quantifier.
+  for (const bad of ['^(a+)+$', '(x*)*', '([a-z]+)*', '(\\d{2,}){3,}', '^(?:a+)+$']) {
+    assert.equal(hasNestedQuantifier(bad), true, `must be declined: ${bad}`);
+  }
+  // Ordinary grouping has exactly one of the two halves, and must be untouched — a detector that
+  // rejected these would break the feature it is protecting.
+  for (const ok of [
+    '^(feat)-(\\d+)$', '(abc)+', '(a|b)+', '(\\d+)',
+    '^wf_([0-9a-f]+)-\\d+$', '^(shard-\\d+)-.*$', '^agent-([a-z]+)$',
+  ]) {
+    assert.equal(hasNestedQuantifier(ok), false, `must be allowed: ${ok}`);
+  }
+});
