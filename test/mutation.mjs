@@ -90,6 +90,26 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "proxy-targets-every-string",
+    "defect": "the `rm -rf <str>` targeting proxy is applied to every quoted string again, so a path named only as a shelled-out command's cwd is read as a deletion target — `node -e \"execSync('git log',{cwd:'<repo>'})\"` is denied as rm -rf of the repository",
+    "file": "src/agent.mjs",
+    "find": "          : (namesADestroyer ? await viaWorktree(`rm -rf ${str}`) : null);",
+    "replace": "          : await viaWorktree(`rm -rf ${str}`); // mutated: proxy applied to every string",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
+    "id": "inline-shellout-misses-argv-forms",
+    "defect": "execFile/spawn/spawnSync drop out of the inline shell-out detector, so `node -e \"execFile('rm',['-rf','<repo>'])\"` matches no rule at all and is silently allowed",
+    "file": "src/agent.mjs",
+    "find": "\\b(?:execSync|execFile|execFileSync|spawn|spawnSync)\\s*\\(/",
+    "replace": "\\bexecSync\\s*\\(/",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
     "id": "ownership-inferred-not-recorded",
     "defect": "uninstall goes back to inferring ownership from the residue instead of the install receipt — it either leaves .cursor/.claude/.junie behind (so a fully-uninstalled repo self-detects 13 agent hosts) or deletes a user's own file that merely looks like holt's default",
     "file": "src/integrate/adapters.mjs",

@@ -603,6 +603,17 @@ const INLINE_CODE_FLAGS = new Set(['-e', '-c', '--eval', '-E', '--exec', '-p', '
  * shell verb. Deliberately a small list of the calls that actually remove or truncate: this is a
  * recogniser for the common case, not an attempt to understand arbitrary code.
  */
+/**
+ * Bare program names that destroy, for the case where a verb and its target arrive as SEPARATE
+ * quoted strings — `execFile('rm', ['-rf', dir])`, `spawn('shred', [path])`. classifyCommand can
+ * only judge a whole command line, and `'rm'` alone is not one, so it needs a token list.
+ *
+ * Kept deliberately short: every entry licenses treating other strings in the same program as
+ * deletion targets, so a false entry here is an over-refusal generator. Anything that needs
+ * arguments to be destructive (`git`, `npm`) is NOT here — classifyCommand judges those in full.
+ */
+const DESTROYER_TOKENS = new Set(['rm', 'rmdir', 'shred', 'truncate', 'unlink', 'del', 'erase']);
+
 const INLINE_DESTRUCTIVE = [
   { re: /\brmSync\s*\(|\brmdirSync\s*\(|\bunlinkSync\s*\(|\bfs\s*\.\s*(rm|rmdir|unlink)\s*\(/, what: 'a filesystem remove', role: 'remove' },
   { re: /\bshutil\s*\.\s*rmtree\s*\(|\bos\s*\.\s*(remove|unlink|rmdir)\s*\(/, what: 'a filesystem remove', role: 'remove' },
@@ -619,7 +630,13 @@ const INLINE_DESTRUCTIVE = [
   // distrust every other message it prints. Overwrites of at-risk files resolve to ASK, with a
   // label that says overwrite.
   { re: /\btruncateSync\s*\(|\bwriteFileSync\s*\(/, what: 'a filesystem overwrite', role: 'overwrite' },
-  { re: /\bos\s*\.\s*system\s*\(|\bsubprocess\s*\.|\bchild_process\b|\bexecSync\s*\(/, what: 'a shelled-out command', role: 'shell' },
+  // `execSync` was the only node spelling here, so `execFile`, `spawn`, `spawnSync` and
+  // `execFileSync` — the argv-array forms agents emit constantly — were INVISIBLE. Found while
+  // narrowing the over-refusal above: `node -e "execFile('rm',['-rf','<repo>'])"` came back ALLOW,
+  // because no rule matched at all. Bare `exec(` is deliberately NOT listed: `/re/.exec(s)` is
+  // ordinary and would over-refuse, and any genuine child_process.exec call names the module,
+  // which the `child_process` alternative already catches.
+  { re: /\bos\s*\.\s*system\s*\(|\bsubprocess\s*\.|\bchild_process\b|\b(?:execSync|execFile|execFileSync|spawn|spawnSync)\s*\(/, what: 'a shelled-out command', role: 'shell' },
   { re: /\bFile\s*\.\s*delete\b|\bFileUtils\s*\.\s*rm/, what: 'a filesystem remove', role: 'remove' },
 ];
 
@@ -1840,6 +1857,27 @@ async function assessWorktreeCommand(command, cwd, ctx) {
     // resolves it through the ordinary path and gives a real refusal that names the files:
     // `node -e "require('fs').rmSync('../feature', …)"` is judged exactly as `rm -rf ../feature`.
     if (blind?.inlineStrings) {
+      // THE `rm -rf <str>` PROXY BELOW NEEDS A DESTRUCTIVE VERB TO BE PRESENT, OR IT INVENTS ONE.
+      //
+      // For a REMOVE (`rmSync('../feature')`) the quoted string IS the removal target, so the
+      // proxy is exact. For a SHELLED-OUT command it is not: the strings are that command's
+      // ARGUMENTS — a cwd, an env value, a flag — and nothing is being removed at all.
+      //
+      // MEASURED, and it blocked this project's own maintenance twice in one session:
+      //   node -e "execSync('git show HEAD:site/index.html', { cwd: '/home/raed/grove' })"
+      // was DENIED as "rm -rf of the main working tree", because `/home/raed/grove` — the
+      // directory the read-only command runs IN — was fed to the proxy as a deletion target. Any
+      // script that so much as mentions a path in a `cwd:` option is refused. Over-refusal is the
+      // failure that gets a safety tool switched off, and this one refuses `git log`.
+      //
+      // Dropping the proxy for `shell` outright would open a real hole the other way, because a
+      // verb and its target can live in SEPARATE strings: `execFile('rm', ['-rf', dir])`. So the
+      // rule is neither "always" nor "never" — the proxy applies when some string actually names
+      // a destroyer, which is the evidence that makes the remaining strings targets.
+      const namesADestroyer = blind.inlineRole !== 'shell'
+        || blind.inlineStrings.some((s) => classifyCommand(s) || DESTROYER_TOKENS.has(
+          path.basename(String(s).trim().split(/\s+/)[0] ?? '').replace(/\.exe$/i, '').toLowerCase()));
+
       for (const str of blind.inlineStrings) {
         // Each quoted string is either a shell command (`os.system('rm -rf x')`) or a path
         // (`rmSync('../feature')`). Try it as a command first, then as a path — whichever resolves
@@ -1856,7 +1894,7 @@ async function assessWorktreeCommand(command, cwd, ctx) {
         const asCommand = classifyCommand(str) ? await viaWorktree(str) : null;
         const resolved = asCommand && asCommand.decision !== 'allow'
           ? asCommand
-          : await viaWorktree(`rm -rf ${str}`);
+          : (namesADestroyer ? await viaWorktree(`rm -rf ${str}`) : null);
         if (resolved && resolved.decision !== 'allow') {
           // The `rm -rf` resolution above is a TARGETING proxy — it answers "would this path's
           // loss matter", not "what is this program doing". For a REMOVE the two coincide. For an

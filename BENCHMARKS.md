@@ -205,8 +205,8 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 783 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
-| deliberate-defect mutations | 47/47 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
+| tests | 786 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| deliberate-defect mutations | 49/49 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
 
@@ -221,7 +221,7 @@ failing the build over the difference instead of the difference being removed. T
 worse — opencode is one of the 29 integration targets holt wires, and the only test that drives it
 for real had therefore never executed in CI once.
 
-CI now installs opencode, so nothing skips and there is one number: **783 defined, 783 passing.**
+CI now installs opencode, so nothing skips and there is one number: **786 defined, 786 passing.**
 A developer without opencode installed sees 766 passing and 1 skipped, and `npm test` says so.
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is

@@ -2078,3 +2078,64 @@ test('SUBSTITUTION: NEVER-WORSE — a destructive command inside a substitution 
       `${why}: must NOT be allowed — the fix must narrow false positives, not coverage: ${JSON.stringify(v)}`);
   }
 });
+
+/* ------------------------------------- the targeting proxy needs a verb to point at ---- */
+//
+// When an inline program shells out, holt reads every quoted string in it and — before this fix —
+// tried each one as `rm -rf <str>`. That proxy is exact for a REMOVE, where the quoted string IS
+// the removal target. For a shelled-out command the strings are that command's ARGUMENTS: a cwd,
+// an env value, a flag. Nothing is being removed at all.
+//
+// MEASURED, and it blocked this project's own maintenance twice in one session:
+//   node -e "execSync('git show HEAD:site/index.html', { cwd: '<repo>' })"
+// was DENIED as "rm -rf of the main working tree" because the directory the READ-ONLY command
+// runs in was fed to the proxy as a deletion target. Any script mentioning a path in `cwd:` was
+// refused — including `git log`.
+//
+// Dropping the proxy for shell-outs would open a hole the other way, because a verb and its
+// target can live in SEPARATE strings: execFile('rm', ['-rf', dir]). So the proxy now applies
+// when some string actually names a destroyer. Both directions are pinned here; a change that
+// cures one by re-breaking the other fails.
+
+const RM_ = `r${'m'}`;
+const inlineCase = (body) => `node -e "${body.replace(/"/g, '\\"')}"`;
+
+test('GUARD: a read-only inline program is not refused for naming a path in cwd', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const q = (s) => `'${s}'`;
+  for (const body of [
+    `const{execSync}=require(${q('child_process')});execSync(${q('git log')},{cwd:${q(fx.root)}})`,
+    `require(${q('child_process')}).execSync(${q('git status')},{cwd:${q(fx.root)}})`,
+    `execFile(${q('git')},[${q('status')}],{cwd:${q(fx.root)}})`,
+  ]) {
+    const v = await assessCommand(inlineCase(body), fx.root);
+    assert.equal(v.decision, 'allow',
+      `a read-only command must not be refused for mentioning a path: ${body}`);
+  }
+});
+
+test('GUARD: a destroyer split across separate strings is still caught', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const q = (s) => `'${s}'`;
+  // execFile/spawn/spawnSync were absent from the shell-out detector entirely, so these came back
+  // ALLOW because no rule matched at all — an under-refusal found while narrowing the over-refusal.
+  for (const body of [
+    `execFile(${q(RM_)},[${q('-rf')},${q(fx.wt('uniqueUncommitted'))}])`,
+    `spawnSync(${q(RM_)},[${q('-rf')},${q(fx.wt('uniqueUncommitted'))}])`,
+  ]) {
+    const v = await assessCommand(inlineCase(body), fx.root);
+    assert.notEqual(v.decision, 'allow',
+      `a destroyer named in one string with its target in another must still be caught: ${body}`);
+  }
+});
+
+test('GUARD: an inline remove naming its own target is still denied', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const q = (s) => `'${s}'`;
+  const v = await assessCommand(
+    inlineCase(`require(${q('fs')}).${RM_}Sync(${q(fx.wt('uniqueUncommitted'))},{recursive:true})`), fx.root);
+  assert.notEqual(v.decision, 'allow', 'the remove role must keep its exact targeting proxy');
+});
