@@ -809,7 +809,12 @@ test('WORKTREES: integrate wires every linked worktree, not just the primary', a
   const git = (args, cwd = repo) => new Promise((resolve, reject) => {
     execFile('git', args, {
       cwd,
-      env: { ...process.env, GIT_CONFIG_GLOBAL: os.devNull, GIT_CONFIG_SYSTEM: os.devNull },
+      // '/dev/null', NOT os.devNull. git-for-windows is MSYS and translates '/dev/null'; it
+      // rejects the native '\\.\nul' outright with "fatal: unable to access '//./nul': Invalid
+      // argument", which is how this fixture died on Windows CI while testing something else
+      // entirely. (jj is the opposite case and needs os.devNull — see src/jj.mjs. Which one is
+      // right depends on whether the tool goes through MSYS, so it is not a style choice.)
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' },
     }, (e, out, err) => (e ? reject(new Error(String(err || e.message))) : resolve(String(out))));
   });
   await git(['init', '-q', '-b', 'main', '.']);
