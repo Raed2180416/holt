@@ -83,7 +83,7 @@ const MUTATIONS = [
     "id": "mutation-verbs-uncovered",
     "defect": "the reset --hard rule is removed — holt blocks worktree DELETION but allows the command that destroys the same work in place",
     "file": "src/agent.mjs",
-    "find": "  { re: new RegExp(`\\\\bgit\\\\s+${GIT_GLOBALS}reset\\\\s+(?:[^\\\\s;|&]+\\\\s+)*--hard\\\\b`), kind: 'git reset --hard (discards uncommitted work)', cwdTarget: true },",
+    "find": "  { re: new RegExp(`\\\\bgit\\\\s+${GIT_GLOBALS}reset\\\\s+(?:${TARGET}\\\\s+)*--hard\\\\b`), kind: 'git reset --hard (discards uncommitted work)', cwdTarget: true },",
     "replace": "  // mutated: mutation verb uncovered",
     "tests": [
       "test/e2e/integration.test.mjs"

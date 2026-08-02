@@ -29,7 +29,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   installClaudeCode, claudeCodeHooks, integrate, uninstall,
-  legacyMcpTargets, retireLegacyMcp, mcpTargets, installMcp,
+  legacyMcpTargets, retireLegacyMcp, mcpTargets, installMcp, installGitHooks,
 } from '../../src/integrate/adapters.mjs';
 
 const FIXTURES = fileURLToPath(new URL('../fixtures/upgrade/', import.meta.url));
@@ -441,20 +441,39 @@ test('OWNERSHIP: foreign tool with "hook pre-tool-use" is NOT claimed as holt\'s
     'holt hook must be installed without clobbering the foreign tool');
 });
 
-test('OWNERSHIP: renamed binary (no "holt" in name) is still recognised via --host flag', async (t) => {
+/**
+ * THIS TEST USED TO ASSERT THE DEFECT, AND WAS THE REASON IT SURVIVED REVIEW.
+ *
+ * It was titled "renamed binary (no 'holt' in name) is still recognised via --host flag" and it
+ * required `my-guard hook pre-tool-use --host claude-code --old-flag` to be claimed as holt's and
+ * removed. `--host` is not a holt-specific flag in any sense — it is two ordinary words — so the
+ * predicate that satisfied this test also claimed, and DELETED:
+ *
+ *     /opt/acme/guardrail hook pre-tool-use --host acme-prod    (a corporate guardrail)
+ *     npx holt-lint hook pre-tool-use                           (via \bholt\b)
+ *     node /home/holt/tools/audit.mjs hook pre-tool-use         (via a USERNAME)
+ *
+ * Measured: a fixture with those three plus four other foreign entries came back from
+ * `holt integrate` holding ONE entry, reported as "reconciled 1 stale hook(s) from a prior
+ * version". A test that pins a convenience cannot also be the thing that guards a data-loss
+ * boundary, and when they conflict the boundary wins.
+ *
+ * The convenience is genuinely lost: a user who renames the binary gets a duplicate hook on
+ * re-integrate instead of a reconcile. That is visible, harmless and fixable by hand. Deleting
+ * somebody's security tooling is none of those things.
+ */
+test('OWNERSHIP: a renamed binary is NOT claimed — an unrecognised hook is left alone, never removed', async (t) => {
   const dir = await tmp('renamed-bin');
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
-  // A prior install used a renamed binary (e.g. a symlink called "my-guard"). The command
-  // does NOT contain "holt" but DOES contain "--host claude-code" — holt's distinctive flag.
-  // isHoltHookCommand must recognise this as holt's and reconcile it, not duplicate it.
+  const foreign = 'my-guard hook pre-tool-use --host claude-code --old-flag';
   const original = `{
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "my-guard hook pre-tool-use --host claude-code --old-flag", "timeout": 120 }
+          { "type": "command", "command": ${JSON.stringify(foreign)}, "timeout": 120 }
         ]
       }
     ]
@@ -465,16 +484,34 @@ test('OWNERSHIP: renamed binary (no "holt" in name) is still recognised via --ho
   await installClaudeCode(dir, { bin: 'holt' });
   const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
   const allCommands = after.hooks.PreToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
-  // The old entry with --old-flag must be GONE (reconciled, not duplicated)
-  assert.ok(!allCommands.some((c) => c?.includes('--old-flag')),
-    `old renamed-binary entry must be reconciled (removed), got: ${JSON.stringify(allCommands)}`);
-  // The new holt entry must be present
-  assert.ok(allCommands.some((c) => c?.includes('holt hook pre-tool-use --host claude-code')),
-    'new holt entry must be installed');
-  // There must be exactly ONE holt pre-tool-use command
-  const holtCmds = allCommands.filter((c) => c?.includes('hook pre-tool-use') && (c?.includes('--host') || c?.includes('holt')));
-  assert.equal(holtCmds.length, 1,
-    `exactly one holt pre-tool-use command after reconcile, got: ${JSON.stringify(holtCmds)}`);
+
+  assert.ok(allCommands.includes(foreign),
+    `a command holt cannot prove is its own must survive untouched, got: ${JSON.stringify(allCommands)}`);
+  assert.ok(allCommands.some((c) => c === 'holt hook pre-tool-use --host claude-code'),
+    `and holt's own entry must be installed beside it, got: ${JSON.stringify(allCommands)}`);
+});
+
+test('OWNERSHIP: every shape holt itself writes IS recognised — the never-worse control', async (t) => {
+  // The other half. A predicate tightened until it recognises nothing would satisfy the test
+  // above perfectly and make `integrate` append a duplicate hook on every run — the exact defect
+  // (`every Bash call now fires BOTH`) that the entry-reconciliation logic was written to fix.
+  for (const bin of ['holt', '/usr/local/bin/holt', 'node /opt/holt/bin/holt.mjs', 'npx holt']) {
+    const dir = await tmp(`selfshape-${bin.replace(/\W+/g, '-')}`);
+    t.after(() => fs.rm(dir, { recursive: true, force: true }));
+    await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+
+    await installClaudeCode(dir, { bin });
+    const once = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+    const cmdsOnce = once.hooks.PreToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
+    assert.equal(cmdsOnce.length, 1, `${bin}: one entry after the first install, got ${JSON.stringify(cmdsOnce)}`);
+
+    // Idempotence is the property that matters: a second integrate must reconcile, not append.
+    await installClaudeCode(dir, { bin });
+    const twice = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+    const cmdsTwice = twice.hooks.PreToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
+    assert.deepEqual(cmdsTwice, cmdsOnce,
+      `${bin}: re-integrating must recognise holt's own entry and leave one, got ${JSON.stringify(cmdsTwice)}`);
+  }
 });
 
 test('OWNERSHIP: uninstall preserves user commands in a user-widened holt entry', async (t) => {
@@ -552,4 +589,112 @@ test('OWNERSHIP: uninstall preserves JSONC comments when user content remains', 
   // before the removed element stays, but the comment before the next element may be lost.
   // The important guarantees are: user content survives, top-level comments survive, and
   // holt's hooks are removed.
+});
+
+/* ============================ ownership, seeded adversarially ============================ */
+
+/**
+ * THE "NEVER TOUCHES A HOOK holt DID NOT WRITE" TESTS WERE VACUOUS.
+ *
+ * Every foreign hook they planted was `my-own-linter --check` — a command with no overlap at all
+ * with holt's ownership grammar. It could not have been claimed by any predicate, so the tests
+ * passed against a predicate that claimed almost everything. Re-seeded here with the shapes that
+ * were actually destroyed, measured on a real fixture:
+ *
+ *   BEFORE  7 foreign PreToolUse entries        AFTER (old predicate)  1 entry
+ *
+ * Each of these is a real tool's real hook command, and each was claimed by one of the three
+ * substring signals the predicate used to accept.
+ */
+const ADVERSARIAL_FOREIGN = [
+  ['a corporate guardrail carrying --host',  '/opt/acme/guardrail hook pre-tool-use --host acme-prod'],
+  ['an npm package whose name starts holt-', 'npx holt-lint hook pre-tool-use'],
+  ['a path containing the USERNAME holt',    'node /home/holt/tools/audit.mjs hook pre-tool-use'],
+  ['a tool using the same subcommand words', 'security-audit-cli hook pre-tool-use'],
+  ['a script literally named hook',          '.claude/hooks/hook pre-tool-use'],
+  ['a binary ending in -hook',               'my-guard-hook pre-tool-use'],
+  ['another tool with its own flags',        'corp-audit hook pre-tool-use --verbose'],
+];
+
+test('OWNERSHIP (adversarial): integrate claims none of the seven shapes that overlap holt\'s grammar', async (t) => {
+  const dir = await tmp('adversarial-own');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), JSON.stringify({
+    hooks: {
+      PreToolUse: ADVERSARIAL_FOREIGN.map(([, cmd]) => ({
+        matcher: 'Bash', hooks: [{ type: 'command', command: cmd, timeout: 45 }],
+      })),
+    },
+  }, null, 2));
+
+  await installClaudeCode(dir, { bin: 'holt' });
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  const cmds = after.hooks.PreToolUse.flatMap((e) => e.hooks || []).map((h) => h.command);
+
+  for (const [why, cmd] of ADVERSARIAL_FOREIGN) {
+    assert.ok(cmds.includes(cmd), `${why}: must survive integrate — got ${JSON.stringify(cmds)}`);
+  }
+  assert.ok(cmds.includes('holt hook pre-tool-use --host claude-code'),
+    `and holt's own hook must be installed alongside all seven: ${JSON.stringify(cmds)}`);
+  assert.equal(cmds.length, ADVERSARIAL_FOREIGN.length + 1, `nothing added, nothing lost: ${JSON.stringify(cmds)}`);
+});
+
+test('OWNERSHIP (adversarial): uninstall removes none of them either', async (t) => {
+  const dir = await tmp('adversarial-uninst');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), JSON.stringify({
+    hooks: {
+      PreToolUse: ADVERSARIAL_FOREIGN.map(([, cmd]) => ({
+        matcher: 'Bash', hooks: [{ type: 'command', command: cmd, timeout: 45 }],
+      })),
+    },
+  }, null, 2));
+
+  await uninstall(dir, {});
+  const exists = await fs.access(path.join(dir, '.claude', 'settings.json')).then(() => true).catch(() => false);
+  assert.ok(exists, 'uninstall must not delete a settings.json holt never wrote to');
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  const cmds = (after.hooks?.PreToolUse ?? []).flatMap((e) => e.hooks || []).map((h) => h.command);
+  for (const [why, cmd] of ADVERSARIAL_FOREIGN) {
+    assert.ok(cmds.includes(cmd), `${why}: must survive uninstall — got ${JSON.stringify(cmds)}`);
+  }
+});
+
+test('OWNERSHIP (adversarial): a third-party MCP server merely NAMED holt is not holt\'s', async (t) => {
+  // Reproduced across all 16 project MCP targets in a repository holt had never run in: each was
+  // seeded with one third-party server named `holt`, and `holt uninstall` DELETED every file
+  // while printing "Only holt's own entries were touched".
+  const dir = await tmp('adversarial-mcp');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '.mcp.json');
+  const foreign = { mcpServers: { holt: { command: '/opt/holtind/inventory-mcp', args: ['--tenant', 'eu'] } } };
+  await fs.writeFile(file, JSON.stringify(foreign, null, 2));
+
+  await uninstall(dir, {});
+
+  const exists = await fs.access(file).then(() => true).catch(() => false);
+  assert.ok(exists, 'a file holding somebody else\'s server must not be deleted');
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), foreign,
+    'and its contents must be byte-for-byte untouched');
+});
+
+test('OWNERSHIP (adversarial): a hand-written pre-commit hook that MENTIONS holt survives', async (t) => {
+  // Ownership was `text.includes('holt —')`, which is prose. A pre-commit hook is often the only
+  // copy of a team's local policy, and integrate OVERWROTE it while uninstall DELETED it.
+  const dir = await tmp('adversarial-precommit');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.git', 'hooks'), { recursive: true });
+  const file = path.join(dir, '.git', 'hooks', 'pre-commit');
+  const userHook = '#!/bin/sh\n# our policy — holt — checks worktree collisions, see the wiki\nexec make lint\n';
+  await fs.writeFile(file, userHook, { mode: 0o755 });
+
+  await installGitHooks(dir, { bin: 'holt' });
+  assert.equal(await fs.readFile(file, 'utf8'), userHook,
+    'integrate must not overwrite a hook it did not write');
+
+  await uninstall(dir, {});
+  assert.equal(await fs.readFile(file, 'utf8'), userHook,
+    'uninstall must not delete a hook it did not write');
 });

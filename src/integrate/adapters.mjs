@@ -327,6 +327,40 @@ export async function retireLegacyMcp(repoRoot, { home = os.homedir(), scope = '
 }
 
 /**
+ * DOES THIS MCP SERVER ENTRY ACTUALLY RUN HOLT?
+ *
+ * OWNERSHIP BY KEY NAME ALONE DELETED OTHER PEOPLE'S CONFIG FILES. `holt uninstall` matched on
+ * `cfg[t.key].holt` — the KEY — with no look at what the entry runs, then removed it, and then
+ * removed the whole FILE if nothing else was left. Reproduced across all 16 project MCP targets
+ * in a repository holt had never been integrated into, each seeded with a single third-party
+ * server that merely happened to be named `holt`:
+ *
+ *     {"mcpServers": {"holt": {"command": "/opt/holtind/inventory-mcp", "args": ["--tenant","eu"]}}}
+ *
+ * Every one of those files was deleted, and the run printed "Only holt's own entries were
+ * touched — anything else in these files was left as-is."
+ *
+ * The entry must therefore RUN holt: its executable (or the first element of a `command` array)
+ * must have a holt basename, and `mcp` must be among its arguments — which is the only shape
+ * mcpServerEntry() below ever produces. Anything else belongs to somebody else.
+ */
+export function isHoltMcpEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const cmd = Array.isArray(entry.command) ? entry.command[0] : entry.command;
+  if (typeof cmd !== 'string' || !cmd.trim()) return false;
+  const argv = [
+    ...String(cmd).trim().split(/\s+/),
+    ...(Array.isArray(entry.command) ? entry.command.slice(1) : []),
+    ...(Array.isArray(entry.args) ? entry.args : []),
+  ].filter((x) => typeof x === 'string');
+  let i = 0;
+  while (i < argv.length && (LAUNCHERS.has(path.basename(argv[i]).toLowerCase()) || argv[i].startsWith('-')
+    || (i > 0 && ['dlx', 'exec', 'run'].includes(argv[i])))) i++;
+  if (i >= argv.length || !HOLT_BINARY.test(path.basename(argv[i]))) return false;
+  return argv.slice(i + 1).includes('mcp');
+}
+
+/**
  * The server entry, in whichever shape the host expects.
  *
  * `bin` may carry arguments ("node /path/holt.mjs", "npx holt"), so it is split rather than
@@ -645,13 +679,83 @@ export async function installMcp(repoRoot, {
  * `npx holt`, even a renamed binary all match via the flags) but does not match foreign tools
  * that happen to use the same subcommand naming convention without holt's flags.
  */
+/** Split a hook command into argv, respecting quotes. A path may contain spaces. */
+function argvOf(command) {
+  const out = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  for (let m = re.exec(command); m; m = re.exec(command)) out.push(m[1] ?? m[2] ?? m[3]);
+  return out;
+}
+
+/** Launchers that put the real program in the NEXT argument. */
+const LAUNCHERS = new Set(['node', 'node.exe', 'bun', 'deno', 'npx', 'pnpm', 'yarn', 'bunx', 'sh', 'bash', 'cmd', 'cmd.exe']);
+
+/** The basenames holt's own executable can legitimately have. */
+const HOLT_BINARY = /^holt(\.(mjs|cjs|js|cmd|exe|bat|ps1))?$/i;
+
+/**
+ * IS THIS HOOK COMMAND HOLT'S OWN?
+ *
+ * OWNERSHIP DECIDED BY SUBSTRING DELETED THIRD-PARTY HOOKS. The predicate was
+ *
+ *     /\bhook\s+<sub>\b/ AND ( /\bholt\b/ OR /--host\b/ OR /--autoprotect\b/ )
+ *
+ * and each of those three signals is something a foreign tool legitimately carries. `--host` is
+ * not holt-specific in any way; `\bholt\b` matches any path segment or package name containing
+ * the word, hyphen included. Measured against a fixture holding three foreign PreToolUse entries,
+ * `holt integrate` reported "reconciled 1 stale hook(s) from a prior version" and left ONE entry
+ * where there had been four:
+ *
+ *     /opt/acme/guardrail hook pre-tool-use --host acme-prod   <- claimed via --host
+ *     npx holt-lint hook pre-tool-use                          <- claimed via \bholt\b
+ *     node /home/holt/tools/audit.mjs hook pre-tool-use        <- claimed via a USERNAME
+ *
+ * A corporate guardrail silently uninstalled by the tool you added to protect your work is the
+ * one bug that makes "plug and play" false for the user who hits it, and the same predicate
+ * decides what `holt uninstall` deletes.
+ *
+ * OWNERSHIP IS NOW ARGV-SHAPED, not textual: the program being executed must BE holt — argv[0]
+ * (after any launcher) with a basename of exactly holt/holt.mjs/holt.cmd/holt.exe — and `hook
+ * <subcommand>` must be its first two arguments, which is the only shape holt ever writes.
+ *
+ * The direction of the residual risk is deliberate. A user who renames the binary to `my-holt`
+ * is no longer recognised, so `integrate` appends rather than reconciles and `uninstall` leaves
+ * the entry behind: an annoyance, visible, and fixable by hand. The other direction destroys
+ * someone else's security tooling. When ownership is uncertain, not touching it is the only
+ * defensible default.
+ */
 function isHoltHookCommand(command, subcommand) {
   if (typeof command !== 'string') return false;
-  if (!new RegExp(`\\bhook\\s+${subcommand}\\b`).test(command)) return false;
-  // Must also reference holt — by name, or by one of holt's distinctive flags. The `--host`
-  // and `--autoprotect` flags are holt-specific and appear in every hook command holt writes,
-  // regardless of what the binary is called. This covers the renamed-binary edge case.
-  return /\bholt\b/.test(command) || /--host\b/.test(command) || /--autoprotect\b/.test(command);
+  const argv = argvOf(command);
+  let i = 0;
+  // Skip launchers and their flags: `npx -y holt …`, `node /path/holt.mjs …`, `pnpm dlx holt …`.
+  while (i < argv.length && (LAUNCHERS.has(path.basename(argv[i]).toLowerCase()) || argv[i].startsWith('-')
+    || (i > 0 && ['dlx', 'exec', 'run', '-c'].includes(argv[i])))) i++;
+  if (i >= argv.length) return false;
+  if (!HOLT_BINARY.test(path.basename(argv[i]))) return false;
+  return argv[i + 1] === 'hook' && argv[i + 2] === subcommand;
+}
+
+/**
+ * Is this all that is left of a config file — an empty object and nothing else?
+ *
+ * THE RULE UNINSTALL NEEDED AND DID NOT HAVE. It used to ask whether the PARSED object was empty
+ * and then `fs.rm` the file, which conflates two different questions:
+ *
+ *   "the JSON is now empty"   — true of `{ // Team policy\n }`, whose comment is user content
+ *   "the FILE was all ours"   — the only thing that justifies deleting it
+ *
+ * Reproduced both ways: a settings.json holding a `// Team policy` comment above holt's hook was
+ * deleted comment and all, and 16 project MCP files in a repository holt had never run in were
+ * deleted because a third-party server merely NAMED holt left the object empty once removed.
+ * (That second case is now stopped earlier, by isHoltMcpEntry.)
+ *
+ * So the text itself is the evidence. Nothing but `{}` and whitespace means holt wrote every byte
+ * that is left; anything else — a comment, another key, a stray blank object property — means
+ * somebody else's content is in there and the file stays.
+ */
+function nothingButAnEmptyObject(text) {
+  return String(text ?? '').replace(/\s+/g, '') === '{}';
 }
 
 /** Every literal `command` string nested under a Claude Code hook-list entry. */
@@ -1116,6 +1220,17 @@ export async function installOpenCode(repoRoot, { bin = 'holt' } = {}) {
  * is refuse to let a branch whose worktree holds unique uncommitted work be quietly discarded,
  * and warn loudly on checkout. Honest about its own limits rather than implying full coverage.
  */
+/**
+ * THE EXACT LINE holt WRITES INTO .git/hooks/pre-commit, and the only thing that proves the file
+ * is holt's own.
+ *
+ * Ownership used to be `text.includes('holt —')`, which is PROSE. A hand-written pre-commit hook
+ * whose comments mention holt — `# run holt — checks worktree collisions` is the obvious way to
+ * write that — was claimed by `holt integrate` (which then OVERWROTE it) and by `holt uninstall`
+ * (which then DELETED it). A pre-commit hook is often the only copy of a team's local policy.
+ */
+const PRE_COMMIT_MARKER = '# holt — pre-commit warning (generated by `holt integrate`).';
+
 export function preCommitHook(bin = 'holt') {
   return `#!/bin/sh
 # holt — pre-commit warning (generated by \`holt integrate\`).
@@ -1134,7 +1249,7 @@ export async function installGitHooks(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(dir, 'pre-commit');
   try {
     const existing = await fs.readFile(file, 'utf8');
-    if (!existing.includes('holt —')) {
+    if (!existing.includes(PRE_COMMIT_MARKER)) {
       return { adapter: 'git-hooks', path: file, action: 'skipped (a pre-commit hook already exists)' };
     }
   } catch { /* none yet */ }
@@ -1343,17 +1458,44 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
       cfg = JSON.parse(stripJsonComments(rawText));
     } catch { continue; }
     if (!cfg[t.key] || !cfg[t.key].holt) continue;
+    // A server merely NAMED holt is not holt's. See isHoltMcpEntry.
+    if (!isHoltMcpEntry(cfg[t.key].holt)) {
+      results.push({
+        adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+        action: 'left alone — the "holt" entry here runs something else, so it is not ours to remove',
+      });
+      continue;
+    }
     delete cfg[t.key].holt;
     if (Object.keys(cfg[t.key]).length === 0) delete cfg[t.key];
+    let emptied = false;
     if (Object.keys(cfg).length === 0) {
-      await fs.rm(t.file, { force: true });
-      results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'removed (holt-only content)' });
-    } else {
-      // JSONC-PRESERVING WRITE: surgically remove the holt key, preserving comments.
+      emptied = true;
+    }
+    {
+      // ONE WRITE PATH — JSONC-preserving. The file is unlinked only when its ENTIRE remaining
+      // text was holt's (see nothingButAnEmptyObject); otherwise it stays, emptied.
+      //
+      // Deleting the file was wrong twice over. holt records no provenance at install time, so it
+      // cannot prove it CREATED this file, and unlinking something you merely edited is deleting
+      // a stranger's config rather than uninstalling — reproduced across all 16 project MCP
+      // targets in a repository holt had never run in. And "the JSON is now empty" is not "the
+      // FILE is now empty": a `// Team policy` comment above the object is user content that
+      // survives an empty object and does not survive `fs.rm`.
       let output = jsoncWrite(rawText, [[[t.key], cfg[t.key] ?? undefined]], { tabSize: 2, insertSpaces: true });
       if (!output.endsWith('\n')) output += '\n';
-      await fs.writeFile(t.file, output, 'utf8');
-      results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: "holt's entry removed, your other settings kept" });
+      if (emptied && nothingButAnEmptyObject(output)) {
+        await fs.rm(t.file, { force: true });
+        results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'removed (holt-only content)' });
+      } else {
+        await fs.writeFile(t.file, output, 'utf8');
+        results.push({
+          adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+          action: emptied
+            ? "holt's entry removed; the rest of the file is yours and was left in place"
+            : "holt's entry removed, your other settings kept",
+        });
+      }
     }
   }
 
@@ -1421,15 +1563,18 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
         if (parsedResult.hooks != null && Object.keys(parsedResult.hooks).length === 0) {
           result = jsoncWrite(result, [[['hooks'], undefined]], { tabSize: 2, insertSpaces: true });
         }
-        // Check if the file is now empty (only whitespace/comments) — if so, delete it
-        const finalParsed = JSON.parse(stripJsonComments(result));
-        if (Object.keys(finalParsed).length === 0) {
-          await fs.rm(file, { force: true });
-          results.push({ adapter: 'claude-code', path: file, action: 'removed (holt-only content)' });
-        } else {
+        {
+          // Unlink ONLY when the entire remaining text was holt's — see nothingButAnEmptyObject.
+          // An empty JSON object is not an empty FILE: a `// Team policy` comment above it is
+          // user content that fs.rm destroys and a preserved text keeps.
           if (!result.endsWith('\n')) result += '\n';
-          await fs.writeFile(file, result, 'utf8');
-          results.push({ adapter: 'claude-code', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+          if (nothingButAnEmptyObject(result)) {
+            await fs.rm(file, { force: true });
+            results.push({ adapter: 'claude-code', path: file, action: 'removed (holt-only content)' });
+          } else {
+            await fs.writeFile(file, result, 'utf8');
+            results.push({ adapter: 'claude-code', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+          }
         }
       }
     } catch { /* no settings.json */ }
@@ -1465,17 +1610,16 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
         if (parsedResult.hooks != null && Object.keys(parsedResult.hooks).length === 0) {
           result = jsoncWrite(result, [[['hooks'], undefined]], { tabSize: 2, insertSpaces: true });
         }
-        // Check if only version remains
-        const finalParsed = JSON.parse(stripJsonComments(result));
-        const onlyVersionLeft = Object.keys(finalParsed).length === 0
-          || (Object.keys(finalParsed).length === 1 && 'version' in finalParsed);
-        if (onlyVersionLeft) {
-          await fs.rm(file, { force: true });
-          results.push({ adapter: 'cursor', path: file, action: 'removed (holt-only content)' });
-        } else {
+        {
+          // Same rule as everywhere else in uninstall — see nothingButAnEmptyObject.
           if (!result.endsWith('\n')) result += '\n';
-          await fs.writeFile(file, result, 'utf8');
-          results.push({ adapter: 'cursor', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+          if (nothingButAnEmptyObject(result)) {
+            await fs.rm(file, { force: true });
+            results.push({ adapter: 'cursor', path: file, action: 'removed (holt-only content)' });
+          } else {
+            await fs.writeFile(file, result, 'utf8');
+            results.push({ adapter: 'cursor', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+          }
         }
       }
     } catch { /* no hooks.json */ }
@@ -1500,7 +1644,7 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
     const file = path.join(repoRoot, '.git', 'hooks', 'pre-commit');
     try {
       const text = await fs.readFile(file, 'utf8');
-      if (text.includes('holt —')) {
+      if (text.includes(PRE_COMMIT_MARKER)) {
         await fs.rm(file, { force: true });
         results.push({ adapter: 'git-hooks', path: file, action: 'removed' });
       } else {

@@ -83,8 +83,64 @@ async function fingerprint(root) {
   return h.digest('hex').slice(0, 32);
 }
 
-function cachePath(root) {
-  const key = createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 16);
+/**
+ * Options that cannot change the ANSWER — only how long it takes or how it is printed.
+ *
+ * A DENYLIST, NOT AN ALLOWLIST, and that direction is the whole point. An allowlist of
+ * result-affecting options is correct only until someone adds the next one and forgets to list
+ * it, at which point two different analyses silently share a cache entry again. With a denylist
+ * the default for anything new is "part of the identity": a genuinely inert option that nobody
+ * adds here costs a redundant scan, which is a performance bug. The other direction costs work.
+ */
+const CACHE_INERT_OPTS = new Set(['timeout', 'json', 'plain', 'quiet', 'verbose', 'debug', 'cwd']);
+
+/**
+ * DEFENCE IN DEPTH: does this cached analysis actually contain what the caller asked about?
+ *
+ * The key derivation above is the fix; this is the belt beside it, because the failure mode is
+ * a guard that says `allow` about work it never looked at, and one hash function is a thin thing
+ * to stake that on. If `includePrimary` was requested and the cached scan holds no primary
+ * workstream, the cache cannot answer the question — and a cache that cannot answer must be a
+ * MISS, never a permission.
+ */
+function cacheAnswers(cached, opts) {
+  if (!opts.includePrimary) return true;
+  const ws = cached?.scanned?.workstreams;
+  if (!Array.isArray(ws)) return false;
+  return ws.some((w) => w?.isPrimary);
+}
+
+/**
+ * The identity of a cached analysis: WHICH repository, and WHAT WAS ASKED OF IT.
+ *
+ * THE SECOND HALF WAS MISSING AND IT TURNED THE GUARD OFF. `holt integrate` wires three hooks for
+ * claude-code: PreToolUse (the blocking guard, which asks for `includePrimary: true`), plus
+ * SessionStart and UserPromptSubmit (the brief, which does not). Both call cachedReport(); the
+ * cache key hashed only the repo root and the fingerprint only worktree state, so the brief's
+ * answer — computed WITHOUT the primary worktree — was served to the guard as though it were the
+ * guard's own.
+ *
+ * Reproduced end to end on a repository whose primary worktree held the only copy of a symbol:
+ * on a cold cache `git clean -fd` is DENIED with the symbol named; run the UserPromptSubmit hook
+ * first — which the installed configuration does on every single user message — and the identical
+ * command is ALLOWED. `git reset --hard`, `git checkout -- .` and `git stash push -u` go the same
+ * way. That is holt's central promise failing open, in the exact configuration holt installs, on
+ * the most common host it supports.
+ *
+ * Distinct option sets get distinct FILES rather than sharing one and evicting each other,
+ * because a shared entry would make the brief and the guard miss alternately and turn every hook
+ * call into a cold scan — a 20-second stall in the agent's critical path, which is the cost this
+ * cache exists to avoid.
+ */
+function cachePath(root, opts = {}) {
+  const shape = Object.keys(opts)
+    .filter((k) => !CACHE_INERT_OPTS.has(k) && opts[k] !== undefined)
+    .sort()
+    .map((k) => `${k}=${JSON.stringify(opts[k])}`)
+    .join('&');
+  const key = createHash('sha256')
+    .update(path.resolve(root)).update('\0').update(shape)
+    .digest('hex').slice(0, 16);
   return path.join(scratchDir(), `holt-cache-${key}.json`);
 }
 
@@ -93,11 +149,11 @@ export async function cachedReport(cwd, opts = {}) {
   if (!disc.root) throw repoAbsenceError(disc, cwd);
 
   const fp = await fingerprint(disc.root);
-  const file = cachePath(disc.root);
+  const file = cachePath(disc.root, opts);
 
   try {
     const cached = JSON.parse(await fs.readFile(file, 'utf8'));
-    if (cached.fingerprint === fp && cached.version === 1) {
+    if (cached.fingerprint === fp && cached.version === 1 && cacheAnswers(cached, opts)) {
       return { report: cached.report, scanned: cached.scanned, fingerprint: fp, root: disc.root, fromCache: true };
     }
   } catch { /* no usable cache */ }
@@ -120,10 +176,48 @@ export async function cachedReport(cwd, opts = {}) {
  * deleted in practice, not just `git worktree remove`.
  */
 /**
+ * ONE COMMAND-LINE OPERAND — quoted or not. Every destructive rule's target goes through this.
+ *
+ * IT USED TO BE `[^\s;|&]+`, WHICH TURNED THE GUARD OFF FOR ANYONE WHOSE CHECKOUT PATH CONTAINS
+ * A SPACE. That capture stops at the first whitespace whether or not the operand is quoted, so
+ * `git worktree remove "/Users/x/My Drive/repo/wt1"` captured `"/Users/x/My` — a path that
+ * matches no worktree, so findWorkstream returned null and the verdict fell through to ALLOW.
+ * Measured on two byte-identical fixtures differing only by a space in the parent directory
+ * name, against a worktree provably holding the only copy of a symbol:
+ *
+ *   git -C <wt> checkout -- .      deny -> allow      git worktree remove <wt>        deny -> allow
+ *   git -C <wt> restore .          deny -> allow      git worktree remove -f -f <wt>  deny -> allow
+ *   git -C <wt> reset --hard       deny -> allow      git worktree unlock <wt>        deny -> allow
+ *   git -C <wt> clean -fd          deny -> allow      git -C <wt> stash push -u       ask  -> allow
+ *
+ * Eight of nine forms. Only `rm` survived, and only because a separate quote-aware tokeniser
+ * rescues it downstream. `C:\Users\First Last\project` and `~/My Drive/project` are ordinary
+ * paths on the two platforms holt is least proven on, so this was the core guarantee being off
+ * for a whole population of users while every test on a space-free CI path stayed green.
+ *
+ * A backslash-escaped space is accepted too, because that is how a POSIX shell spells the same
+ * thing unquoted. A lone backslash is NOT treated as an escape, so `C:\src\wt` still parses as
+ * one operand on Windows.
+ */
+const TARGET = '(?:"[^"]*"|\'[^\']*\'|(?:\\\\ |[^\\s;|&])+)';
+
+/** Strip one layer of surrounding quotes and unescape `\ ` — the inverse of TARGET. */
+function unquoteTarget(raw) {
+  if (raw == null) return null;
+  const s = String(raw);
+  const quoted = /^"(.*)"$/s.exec(s) ?? /^'(.*)'$/s.exec(s);
+  return (quoted ? quoted[1] : s).replace(/\\ /g, ' ');
+}
+
+/**
  * Global git options may take a VALUE (`git -C /repo …`, `git -c k=v …`, `--git-dir <p>`), so a
  * pattern that only skips flag tokens misses `git -C /repo worktree remove`. Found by test.
+ *
+ * `-C` takes a PATH, so its value is a TARGET and not `\S+`: with `\S+` the whole rule failed to
+ * match `git -C "has space/wt1" checkout -- .` at all — the globals ate `-C "has ` and then
+ * `checkout` did not follow — and a rule that does not match is a command that is allowed.
  */
-const GIT_GLOBALS = '(?:-[cC]\\s+\\S+\\s+|--(?:git-dir|work-tree|namespace|exec-path)(?:=\\S+|\\s+\\S+)\\s+|-[a-zA-Z]+\\s+|--[a-z-]+\\s+)*';
+const GIT_GLOBALS = `(?:-[cC]\\s+${TARGET}\\s+|--(?:git-dir|work-tree|namespace|exec-path)(?:=${TARGET}|\\s+${TARGET})\\s+|-[a-zA-Z]+\\s+|--[a-z-]+\\s+)*`;
 
 // ORDER MATTERS: the first match wins, so the more specific patterns come first. The general
 // `remove` pattern's `(?:--force|-f)*` also matches `-f -f`, which would mislabel the override.
@@ -226,11 +320,11 @@ const DESTRUCTIVE = [
   //
   // These are caught with the SAME evidence-bearing refusal as a delete, because by the time
   // someone is unlocking, the interesting question is already "do you know what is in there?".
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+unlock\\s+(?<target>[^\\s;|&]+)`), kind: 'git worktree unlock (disarms protection)' },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+unlock\\s+(?<target>${TARGET})`), kind: 'git worktree unlock (disarms protection)' },
   // `remove -f -f` is git's documented override for a locked worktree. Same treatment.
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+remove\\s+(?:(?:--force|-f)\\s+){2,}(?<target>[^\\s;|&]+)`), kind: 'git worktree remove --force --force (overrides the lock)' },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+remove\\s+(?:(?:--force|-f)\\s+){2,}(?<target>${TARGET})`), kind: 'git worktree remove --force --force (overrides the lock)' },
 
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+remove\\s+(?:(?:--force|-f)\\s+)*(?<target>[^\\s;|&]+)`), kind: 'git worktree remove' },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+remove\\s+(?:(?:--force|-f)\\s+)*(?<target>${TARGET})`), kind: 'git worktree remove' },
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}worktree\\s+prune\\b`), kind: 'git worktree prune', all: true },
   // MATCH ANY rm TARGET, then let resolution decide. This rule previously required the path to
   // contain 'worktree', '.worktrees' or 'wt' — so `rm -rf ../my-feature`, the most natural way to
@@ -238,7 +332,7 @@ const DESTRUCTIVE = [
   // cannot stop a filesystem delete). Broadening is safe because the target is resolved against
   // the actual worktree list below: a path that is not a worktree finds nothing and is allowed,
   // so `rm -rf node_modules` and `rm -rf dist` are unaffected.
-  { re: /\brm\s+(?:-[a-zA-Z]+\s+)*(?<target>[^\s;|&]+)/, kind: 'rm of a worktree path' },
+  { re: new RegExp(`\\brm\\s+(?:-[a-zA-Z]+\\s+)*(?<target>${TARGET})`), kind: 'rm of a worktree path' },
 
   // ---- CONTENT-MUTATING VERBS ------------------------------------------------------------
   // A lock stops `git worktree remove`. It does NOT stop the commands that destroy the SAME
@@ -249,7 +343,7 @@ const DESTRUCTIVE = [
   // These carry no path argument: they act on the worktree they RUN IN, or wherever `git -C`
   // points. Resolution still decides — a clean worktree has nothing to lose, so the verdict is
   // allow and a developer never notices the rule exists.
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}reset\\s+(?:[^\\s;|&]+\\s+)*--hard\\b`), kind: 'git reset --hard (discards uncommitted work)', cwdTarget: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}reset\\s+(?:${TARGET}\\s+)*--hard\\b`), kind: 'git reset --hard (discards uncommitted work)', cwdTarget: true },
   // `-n` and `--dry-run` make this command PRINT what it would delete and delete nothing. Refusing
   // a dry run is refusing the exact thing a careful developer does BEFORE the destructive form —
   // the guard was punishing the caution it exists to encourage, and `-fdn` reads as destructive to
@@ -270,12 +364,12 @@ const DESTRUCTIVE = [
   // git's unambiguous pathspec separator, and a trailing bare `.` is the whole working tree. Neither
   // matches `git checkout -b feature`, `git checkout main`, or `git restore --source=x` (where the
   // dashes belong to a long option, not a separator) — branch work stays untouched.
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:[^\\s;|&]+\\s+)*--\\s`), kind: 'git checkout/restore of a pathspec (overwrites uncommitted changes)', cwdTarget: true, unless: unstageOnly },
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:[^\\s;|&]+\\s+)*\\.\\s*$`), kind: 'git checkout/restore . (overwrites the whole working tree)', cwdTarget: true, unless: unstageOnly },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:${TARGET}\\s+)*--\\s`), kind: 'git checkout/restore of a pathspec (overwrites uncommitted changes)', cwdTarget: true, unless: unstageOnly },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}(?:checkout|restore)\\s+(?:${TARGET}\\s+)*\\.\\s*$`), kind: 'git checkout/restore . (overwrites the whole working tree)', cwdTarget: true, unless: unstageOnly },
   // `--staged` ALONE only unstages: the content stays in the working tree and nothing is lost, so
   // denying it was a false positive on an operation people run all day. `--worktree` (with or
   // without --staged) is the one that overwrites files, and a bare pathspec defaults to it.
-  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}restore\\s+(?:[^\\s;|&]+\\s+)*--worktree\\b`), kind: 'git restore --worktree (discards changes)', cwdTarget: true },
+  { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}restore\\s+(?:${TARGET}\\s+)*--worktree\\b`), kind: 'git restore --worktree (discards changes)', cwdTarget: true },
 
   // ---- THE STASH, WHICH THIS GUARD ASSUMED IT ALREADY UNDERSTOOD ---------------------------
   // The refusal message below this table literally reads "No commit, index entry or stash holds
@@ -364,18 +458,18 @@ const DESTRUCTIVE = [
   // Breadth is safe here for the same reason it is safe for `rm`: the target is resolved against
   // the real worktree list, and a path that is not a worktree finds nothing and is allowed.
   {
-    re: /\b(?:Remove-Item|ri|rd|rmdir|erase)\b(?:\s+(?:\/[a-zA-Z]+|-[A-Za-z]+))*\s+(?<target>[^\s;|&]+)/i,
+    re: new RegExp(`\\b(?:Remove-Item|ri|rd|rmdir|erase)\\b(?:\\s+(?:/[a-zA-Z]+|-[A-Za-z]+))*\\s+(?<target>${TARGET})`, 'i'),
     kind: 'Remove-Item / rd / rmdir (deletes the worktree directory)',
   },
   // `del` is separated only so its kind names the command the user typed.
   {
-    re: /\bdel\b(?:\s+(?:\/[a-zA-Z]+|-[A-Za-z]+))*\s+(?<target>[^\s;|&]+)/i,
+    re: new RegExp(`\\bdel\\b(?:\\s+(?:/[a-zA-Z]+|-[A-Za-z]+))*\\s+(?<target>${TARGET})`, 'i'),
     kind: 'del (deletes the path)',
   },
   // `robocopy <src> <dst> /MIR` mirrors, and mirroring DELETES whatever is in the destination
   // that is not in the source. The destination is the second operand.
   {
-    re: /\brobocopy\s+(?:[^\s;|&]+)\s+(?<target>[^\s;|&]+)(?=[\s\S]*\/(?:MIR|PURGE)\b)/i,
+    re: new RegExp(`\\brobocopy\\s+${TARGET}\\s+(?<target>${TARGET})(?=[\\s\\S]*/(?:MIR|PURGE)\\b)`, 'i'),
     kind: 'robocopy /MIR (mirrors, deleting anything the source lacks)',
   },
 ];
@@ -678,7 +772,7 @@ export function classifyCommand(command) {
     if (m) {
       return {
         kind,
-        target: m.groups?.target ? m.groups.target.replace(/^['"]|['"]$/g, '') : null,
+        target: m.groups?.target ? unquoteTarget(m.groups.target) : null,
         all: !!all,
         cwdTarget: !!cwdTarget,
         // Which store this rule destroys. `'entries'` means the STASH — read the stash itself for
@@ -700,8 +794,8 @@ export function classifyCommand(command) {
 
 /** `git -C <path> …` redirects which worktree a path-less verb acts on. */
 function gitCFlag(command) {
-  const m = /\bgit\s+(?:[^\s]+\s+)*?-C\s+([^\s;|&]+)/.exec(command);
-  return m ? m[1].replace(/^['"]|['"]$/g, '') : null;
+  const m = new RegExp(`\\bgit\\s+(?:${TARGET}\\s+)*?-C\\s+(${TARGET})`).exec(command);
+  return m ? unquoteTarget(m[1]) : null;
 }
 
 /** The worktree CONTAINING this directory — for verbs that act on wherever they are run. */

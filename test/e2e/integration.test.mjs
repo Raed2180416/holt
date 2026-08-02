@@ -1732,3 +1732,169 @@ test('GUARD: an inline OVERWRITE of at-risk content asks with an honest label �
   assert.equal(elsewhere?.decision ?? 'allow', 'allow',
     `a write outside the repo puts nothing at risk: ${JSON.stringify(elsewhere)}`);
 });
+
+/* --------------------------------------- the cache must not answer for another question ---- */
+
+/**
+ * THE GUARD FAILED OPEN IN THE EXACT CONFIGURATION `holt integrate` INSTALLS.
+ *
+ * For claude-code, integrate wires three hooks: PreToolUse (the blocking guard, which asks for
+ * `includePrimary: true` because the human's own worktree is the one most likely to hold
+ * uncommitted work), plus SessionStart and UserPromptSubmit (the brief, which does not).
+ *
+ * Both go through cachedReport(). The cache key hashed the repository root; the fingerprint
+ * hashed worktree state. Neither hashed WHAT WAS ASKED. So the brief's answer — computed with the
+ * primary worktree excluded — was handed to the guard as though it were the guard's own, the
+ * guard found no primary workstream in it, and it allowed.
+ *
+ * Reproduced end to end before the fix, on a repository whose primary worktree held the only copy
+ * of a symbol: cold cache DENIES `git clean -fd` and names the symbol; run the UserPromptSubmit
+ * hook first — which the installed configuration does on every user message — and the identical
+ * command is ALLOWED. `git reset --hard`, `git checkout -- .` and `git stash push -u` likewise.
+ *
+ * This test runs in the `core` CI job on all three operating systems.
+ */
+test('CACHE: an analysis computed WITHOUT the primary must never authorise a command against it', async (t) => {
+  const fx = await newRepo('cache-identity');
+  t.after(() => fx.cleanup());
+  await fx.worktree('sib');
+  // The ONLY copy of this symbol is uncommitted, in the PRIMARY worktree.
+  await fx.write('primary_only.js', 'export function primaryOnlySecretHelper() { return 42; }\n');
+
+  const DESTROYERS = ['git clean -fd', 'git reset --hard', 'git checkout -- .'];
+
+  // ANTI-VACUITY: on a cold cache the guard must already refuse, or this test proves nothing
+  // about caching — it would pass identically against a guard that refuses everything or one
+  // that has no work to protect.
+  for (const cmd of DESTROYERS) {
+    const cold = await assessCommand(cmd, fx.root);
+    assert.equal(cold?.decision, 'deny', `cold cache: ${cmd} must be refused, got ${JSON.stringify(cold)}`);
+    assert.match(cold.reason, /primaryOnlySecretHelper/,
+      `and the refusal must name the work at stake: ${cold.reason}`);
+  }
+
+  // Now the brief's shape — no includePrimary — exactly as `hook user-prompt-submit` asks for it.
+  const brief = await cachedReport(fx.root, {});
+  assert.ok(!brief.scanned.workstreams.some((w) => w.isPrimary),
+    'ANTI-VACUITY: the brief\'s analysis really must exclude the primary, or there is nothing to poison with');
+
+  // The guard must still refuse. Before the fix, every one of these came back `allow`.
+  for (const cmd of DESTROYERS) {
+    const after = await assessCommand(cmd, fx.root);
+    assert.equal(after?.decision, 'deny',
+      `after the brief hook ran, ${cmd} must STILL be refused, got ${JSON.stringify(after)}`);
+    assert.match(after.reason, /primaryOnlySecretHelper/,
+      `and it must still name the work at stake: ${after.reason}`);
+  }
+
+  // And the reverse direction: the guard's analysis must not be served to the brief either.
+  const guard = await cachedReport(fx.root, { includePrimary: true });
+  assert.ok(guard.scanned.workstreams.some((w) => w.isPrimary), 'the guard\'s analysis includes the primary');
+  const brief2 = await cachedReport(fx.root, {});
+  assert.ok(!brief2.scanned.workstreams.some((w) => w.isPrimary),
+    'the brief must not be handed the guard\'s wider analysis either — one cache entry per question');
+});
+
+test('CACHE: NEVER-WORSE — the cache still HITS when the same question is asked twice', async (t) => {
+  // Without this, the fix above is satisfied by disabling the cache, which would put a full cold
+  // scan in the agent's critical path on every single tool call — the 20-second stall this cache
+  // exists to prevent, and the thing that gets a hook uninstalled.
+  const fx = await newRepo('cache-still-hits');
+  t.after(() => fx.cleanup());
+  await fx.worktree('sib');
+  await fx.write('a.js', 'export function cacheHitProbe() {}\n', fx.wt('sib'));
+
+  const first = await cachedReport(fx.root, { includePrimary: true });
+  assert.equal(first.fromCache, false, 'the first call computes');
+  const second = await cachedReport(fx.root, { includePrimary: true });
+  assert.equal(second.fromCache, true, 'the identical question must be served from cache');
+
+  const briefFirst = await cachedReport(fx.root, {});
+  assert.equal(briefFirst.fromCache, false, 'a different question computes its own answer');
+  const briefSecond = await cachedReport(fx.root, {});
+  assert.equal(briefSecond.fromCache, true, 'and then caches independently — no thrashing between the two');
+});
+
+/* ------------------------------------- the guard must survive a space in the path ---- */
+
+/**
+ * `C:\Users\First Last\project` AND `~/My Drive/project` ARE ORDINARY PATHS.
+ *
+ * Every destructive rule captured its target with `[^\s;|&]+`, which stops at the first
+ * whitespace whether or not the operand is quoted. `git worktree remove "/x/My Drive/wt1"`
+ * captured `"/x/My`, that matched no worktree, findWorkstream returned null, and the verdict fell
+ * through to ALLOW. Measured on two byte-identical fixtures differing only by a space in the
+ * parent directory name, against a worktree provably holding the only copy of a symbol, EIGHT of
+ * nine forms lost the guard — only `rm` survived, and only because a separate quote-aware
+ * tokeniser rescues it downstream.
+ *
+ * This is holt's core guarantee being off for an entire population of users, invisible to every
+ * test because CI paths never contain a space. So the fixture here puts one in on purpose.
+ */
+test('SPACES: a worktree whose path contains a space is guarded exactly as one without', async (t) => {
+  const spaced = await newRepo('has space');
+  t.after(() => spaced.cleanup());
+  await spaced.worktree('wt1');
+  await spaced.write('only.js', 'export function SOLE_COPY_SPACED() { return 1; }\n', spaced.wt('wt1'));
+
+  const wt = spaced.wt('wt1');
+  assert.ok(wt.includes(' '), `ANTI-VACUITY: the fixture path must really contain a space: ${wt}`);
+
+  // ANTI-VACUITY: the worktree must genuinely hold work nothing else has, or "deny" below would
+  // be the right answer for the wrong reason.
+  const { report } = await cachedReport(spaced.root, { includePrimary: true });
+  const row = report.safe.find((s) => s.id.includes('wt1'));
+  assert.equal(row?.safe, false, `the spaced worktree must hold unique work: ${JSON.stringify(row)}`);
+
+  const q = JSON.stringify(wt);   // the operand as a shell would carry it: double-quoted
+  const mustRefuse = [
+    `git -C ${q} checkout -- .`,
+    `git -C ${q} restore .`,
+    `git -C ${q} reset --hard`,
+    `git -C ${q} clean -fd`,
+    `git -C ${q} stash push -u`,
+    `git worktree remove ${q}`,
+    `git worktree remove -f -f ${q}`,
+    `git worktree unlock ${q}`,
+    `rm -rf ${q}`,
+    `Remove-Item -Recurse -Force ${q}`,
+  ];
+  for (const cmd of mustRefuse) {
+    const v = await assessCommand(cmd, spaced.root);
+    assert.ok(v && v.decision !== 'allow',
+      `a space in the path must not disarm the guard: ${cmd} -> ${JSON.stringify(v)}`);
+  }
+
+  // The POSIX unquoted spelling of the same thing.
+  const escaped = wt.replace(/ /g, '\\ ');
+  const vEsc = await assessCommand(`rm -rf ${escaped}`, spaced.root);
+  assert.ok(vEsc && vEsc.decision !== 'allow',
+    `a backslash-escaped space must be read as one operand: ${JSON.stringify(vEsc)}`);
+});
+
+test('SPACES: NEVER-WORSE — quoting must not make the guard refuse things it should allow', async (t) => {
+  // The other direction, and the one that gets a guard uninstalled. Widening the operand pattern
+  // to accept quoted runs must not turn ordinary commands into refusals, and must not let one
+  // operand swallow the rest of the line.
+  const spaced = await newRepo('has space allow');
+  t.after(() => spaced.cleanup());
+  await spaced.worktree('wt1');
+  await spaced.write('only.js', 'export function KEEP_ME_SPACED() {}\n', spaced.wt('wt1'));
+
+  const outside = path.join(spaced.root, 'node_modules');
+  await fs.mkdir(outside, { recursive: true });
+
+  for (const cmd of [
+    `rm -rf ${JSON.stringify(outside)}`,          // a real directory that is not a worktree
+    'rm -rf dist',
+    'rm -rf ./build/*.map',
+    'git status',
+    'git log --oneline -5',
+    'echo "hello world"',
+    'npm run build -- --watch',
+  ]) {
+    const v = await assessCommand(cmd, spaced.root);
+    assert.ok(!v || v.decision === 'allow',
+      `must stay allowed: ${cmd} -> ${JSON.stringify(v)}`);
+  }
+});
