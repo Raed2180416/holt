@@ -9,6 +9,19 @@ on:
     branches: [main]
   pull_request:
 
+# LEAST PRIVILEGE, DECLARED RATHER THAN INHERITED. With no `permissions:` key the GITHUB_TOKEN
+# handed to every job here takes the enterprise/organisation/repository default, which on a
+# repository that has never been tightened is write access on every scope — for a workflow whose
+# entire job is to check out the code and run tests. GitHub's hardening guidance is to set the
+# default to read and raise it per job where a job genuinely needs more; nothing in this file
+# needs more, so nothing here gets more. `pull_request` from a fork already downgrades the token,
+# but that is a property of the event, not of this workflow, and it does not cover `push`.
+#
+# scripts/check-ci-hardening.mjs fails the build if any workflow in this repository stops
+# declaring this.
+permissions:
+  contents: read
+
 jobs:
 
   matrix:
@@ -19,8 +32,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: '22' }
       - run: npm ci
       # The portable core: safety classifier, detection against ground truth, the CLI as a
@@ -41,7 +54,28 @@ jobs:
       #
       # Full cross-platform coverage of the REST of the suite is the `full suite on <os>` job
       # below, which installs the backends on all three operating systems.
-      - run: node --test test/unit/safety.test.mjs test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/actions.test.mjs test/e2e/fuzz-invariant.test.mjs test/e2e/integration.test.mjs
+      #
+      # THE LIST IS NOW DATA, IN .github/guard-corpus.txt, AND IT IS LONGER.
+      #
+      # It used to be typed here, and test/e2e/adversarial.test.mjs was not on it — nor were
+      # break-it, strict-read-only, unprotect-force, stash-evidence or verify. Those six reached
+      # Windows and macOS only by being swept up in `npm test`'s `test/**/*.test.mjs` glob in the
+      # `full suite on <os>` job. That is coverage by accident, and its failure mode is silent:
+      #
+      #     $ node --test "test/nonexistent/**/*.test.mjs" ; echo $?
+      #     ℹ pass 0
+      #     0
+      #
+      # A glob that matches nothing exits 0, so a green `npm test` is not evidence that any named
+      # file ran. The adversarial corpus is the suite most likely to expose the FIFTH Windows path
+      # bug in a project that has already found four, and it was the one nothing named here.
+      #
+      # scripts/run-guard-corpus.mjs names every file and refuses to start if one is missing or
+      # empty. Each entry is proven to pass with no optional backends installed, which is this
+      # job's contract. scripts/check-ci-hardening.mjs fails the build if this step ever stops
+      # running on ubuntu-latest, macos-latest AND windows-latest.
+      - name: the guard corpus, named explicitly, on this OS
+        run: node scripts/run-guard-corpus.mjs
       - run: node bin/holt.mjs doctor --json
       - name: the tool must run against its own repository on this OS
         run: node bin/holt.mjs status --json
@@ -74,8 +108,8 @@ jobs:
     name: no optional backends (degradation path)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: '22' }
       - name: assert the optional tools really are absent
         run: |
@@ -100,10 +134,10 @@ jobs:
     env:
       HOLT_REAL_REPOS: ${{ github.workspace }}/.holt-fixtures
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: '22' }
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with: { go-version: 'stable' }
 
       - name: install universal-ctags
@@ -225,8 +259,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: '22' }
 
       - name: install universal-ctags (linux)
@@ -244,7 +278,7 @@ jobs:
       # the F# corpus case resolved as Forth and yielded nothing, which is what this job caught on
       # macOS and Windows the first time it ran. Content-based detection is what makes the
       # language claim true, so the platforms that assert it must have it.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with: { go-version: 'stable' }
       - name: install enry (content-based language detection)
         shell: bash
@@ -267,8 +301,8 @@ jobs:
     # next regression, and lowers its own ceiling whenever debt is paid down.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: '22' }
       - run: npm ci
       - run: npm run typecheck
@@ -278,13 +312,26 @@ jobs:
         # the checked-in file and what the generator produces from HOSTS/strengthLabel() must be
         # byte-identical, or the build fails with the regenerate command to run.
         run: npm run hosts:check
+      - name: the workflows themselves must stay hardened
+        # Three defects, each a SHAPE rather than an instance, and each one that comes back the
+        # next time somebody adds a job:
+        #   - a workflow with no `permissions:` block, inheriting a token broader than it needs;
+        #   - an action pinned to a tag its owner can repoint under us (GitHub Docs: a full-length
+        #     commit SHA "is currently the only way to use an action as an immutable release");
+        #   - the guard corpus running on fewer than all three operating systems, or a test file
+        #     named so that `test/**/*.test.mjs` can never see it.
+        # `--self-test` plants one violation of each rule in a scratch copy first and requires the
+        # checker to go RED on every one, so a gate that has quietly stopped checking fails the
+        # build instead of passing it. It also asserts GREEN on the unmodified tree, because a
+        # gate that fails a legitimate change gets deleted.
+        run: node scripts/check-ci-hardening.mjs --self-test
 
   package:
     name: packaging
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: '22' }
       - run: npm ci
       - name: every checked-in release body must carry an install command
@@ -344,8 +391,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: '22' }
       - run: npm ci
       # The paid path is money and reputation, so it is tested on every OS the buyer might run

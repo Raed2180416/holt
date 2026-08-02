@@ -6,6 +6,11 @@ on:
     paths: ['site/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 
+# ALREADY LEAST PRIVILEGE, AND DELIBERATELY NOT WIDENED. `pages: write` is what deploy-pages needs
+# to publish, `id-token: write` is what it needs to prove the deployment came from this workflow,
+# and `contents: read` is what checkout needs. Nothing here gets `contents: write` — a workflow
+# that publishes a site has no business being able to push to the repository. This block is not a
+# copy of ci.yml's; each workflow states the minimum it genuinely needs.
 permissions:
   contents: read
   pages: write
@@ -22,7 +27,7 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Verify the site is self-contained
         # A landing page that silently reaches out to a CDN contradicts the product's central
         # promise. This fails the deploy rather than shipping a page that does.
@@ -72,9 +77,9 @@ jobs:
           else
             echo "HOLT_API_URL not set — the Team button keeps its mailto: fallback"
           fi
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: site
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

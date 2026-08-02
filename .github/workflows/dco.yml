@@ -9,11 +9,20 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# This workflow reads commit messages and writes nothing. It reported its verdict through the
+# check's exit status, never through the API — so it never needed `checks: write`, `statuses:
+# write` or `pull-requests: write`, and with no `permissions:` block it was being handed whatever
+# the repository default happens to be. It runs on `pull_request`, which means a fork's token is
+# already read-only, but the default applies on every other path and a repository default is not
+# something this file should depend on.
+permissions:
+  contents: read
+
 jobs:
   dco:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: { fetch-depth: 0 }
       - name: every commit must be signed off
         run: |

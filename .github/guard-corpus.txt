@@ -1,0 +1,42 @@
+# holt — THE GUARD CORPUS.
+#
+# These are the test files that prove holt does not destroy work: the destructive-command
+# classifier, the in-place-destruction guards (reset --hard, clean -fd, checkout -- ., restore),
+# the read-only contract, the lock/unprotect path, the stash evidence trail, the verify
+# interaction engine, the invariant fuzzer, and the adversarial corpus that puts the repository
+# into states nobody designed for.
+#
+# WHY A FILE AND NOT A LIST INSIDE ci.yml. The list used to be hand-typed into one `node --test`
+# line in one job. test/e2e/adversarial.test.mjs was not on it, so the single most
+# platform-sensitive suite in the repository reached Windows and macOS only by being swept up in
+# `npm test`'s `test/**/*.test.mjs` glob in a different job. That is coverage by accident, and it
+# is the kind that disappears without a failing build:
+#
+#   $ node --test "test/nonexistent/**/*.test.mjs"; echo $?
+#   ℹ pass 0
+#   0
+#
+# A glob that matches nothing exits 0. A green `npm test` is therefore not evidence that any
+# particular file ran. scripts/run-guard-corpus.mjs reads THIS file, refuses to start if any
+# entry is missing, and runs the named files explicitly on every OS in the matrix.
+# scripts/check-ci-hardening.mjs fails the build if that step is not wired into a job that runs on
+# ubuntu-latest, macos-latest AND windows-latest.
+#
+# FOUR distinct Windows path bugs have been found in this project. This is where a fifth shows up.
+#
+# Every file below is proven to pass with NO optional backends installed (no ctags, no enry, no
+# jscpd, no jj), because the job that runs this corpus is the degraded-core job. A file that needs
+# a backend belongs in the full-suite job instead.
+
+test/unit/safety.test.mjs
+test/e2e/detection.test.mjs
+test/e2e/cli.test.mjs
+test/e2e/actions.test.mjs
+test/e2e/fuzz-invariant.test.mjs
+test/e2e/integration.test.mjs
+test/e2e/adversarial.test.mjs
+test/e2e/break-it.test.mjs
+test/e2e/strict-read-only.test.mjs
+test/e2e/unprotect-force.test.mjs
+test/e2e/stash-evidence.test.mjs
+test/e2e/verify.test.mjs

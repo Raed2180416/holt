@@ -16,6 +16,8 @@ on:
         description: 'Tag of an existing release to re-check, e.g. v0.2.0'
         required: true
 
+# `gh release view --json body` reads a release, which is the `contents` scope at READ. This
+# workflow judges a body; it never edits one, so it must not be able to.
 permissions:
   contents: read
 
@@ -24,8 +26,8 @@ jobs:
     name: the release body must tell a reader how to install it
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with: { node-version: '22' }
 
       - name: check the published body
