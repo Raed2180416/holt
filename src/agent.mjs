@@ -2027,9 +2027,17 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   if (here) {
     const d = contextDigest(scanned, here.id);
     if (d.ok) {
+      // THE "YOU ARE HERE" HEADER IS ORIENTATION, NOT NEWS, so it only earns its place when
+      // there is news beside it. On a clean single-worktree repository it was the entire brief:
+      // "You are working in workstream 'x' (family x, via primary-worktree)" — a sentence whose
+      // whole content is the name of the directory the reader is already in — fired on every
+      // Stop and every user message, forever. `whenNews` defers it until something else lands.
+      const whenNews = lines.length;
       lines.push(`You are working in workstream '${d.workstream}' (family ${d.family}, via ${d.familyRule}).`);
       if (d.siblings.length) lines.push(`Siblings from the same dispatch: ${d.siblings.join(', ')}.`);
       for (const a of d.advice) lines.push(`- ${a}`);
+      // Drop the header again if it turned out to be all there was.
+      if (lines.length === whenNews + 1 && !d.duplicatedSymbols.length) lines.length = whenNews;
       if (d.duplicatedSymbols.length) {
         lines.push('Symbols you added that ALSO exist elsewhere (check before building further):');
         for (const x of d.duplicatedSymbols.slice(0, 5)) {

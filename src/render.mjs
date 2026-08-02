@@ -107,6 +107,17 @@ function noSiblingsNote(report) {
     return c('grey', '  no other worktrees yet — holt relates parallel workstreams, and this repo has '
       + 'only the primary. `git worktree add ../<name> <branch>`, then re-run.');
   }
+  // THE SOLO REPOSITORY: the risk verdict is earned, the COMPARISON is not.
+  //
+  // holt now scans the primary when it is the only worktree, so "nothing at risk" here is a real
+  // measurement rather than a statement about worktrees that do not exist. But collisions,
+  // duplicates, families and landing order are still necessarily zero, and zero-because-nothing-
+  // to-compare looks exactly like zero-because-verified from the output alone.
+  if (report.soloPrimary) {
+    return c('grey', '  this repo has only the primary worktree, so holt scanned it directly — the verdict '
+      + 'below is real. Cross-worktree findings (collisions, duplicates) are empty because there is '
+      + 'nothing to compare against yet: `git worktree add ../<name> <branch>`.');
+  }
   if (report.counts.scanned === 0) {
     return c('red', `  none of the ${report.counts.workstreams} workstream(s) could be scanned — `
       + 'every verdict below is about NOTHING. See the skip reasons above; holt cannot vouch for '
@@ -331,6 +342,16 @@ export function renderRisk(report) {
     out.push('', c('yellow', `UNKNOWN (${unknown.length}) — holt could not scan these, so they are NOT safe`));
     for (const s of unknown.slice(0, 10)) out.push(c('grey', `  ? ${pad(s.id, 40)} ${s.reasons[0]}`));
   }
+  // THE CAVEAT BELONGS ON THE PATH PEOPLE ACTUALLY READ, TOO.
+  //
+  // Both calls to primaryCaveat() sat in the EMPTY-findings branch above, so "a dirty unscanned
+  // primary is named beside every verdict that could read as 'holt checked everything'" was true
+  // of the all-clear and false of every report with findings in it — which is the report anyone
+  // with a fan-out running actually looks at. Reproduced: a repo with one sibling holding one
+  // uncommitted symbol and a primary holding another printed the sibling's row and said nothing
+  // whatsoever about the primary's, with no caveat anywhere in the output.
+  const caveat = primaryCaveat(report);
+  if (caveat.length) out.push('', ...caveat);
   out.push('');
   return out.join('\n');
 }

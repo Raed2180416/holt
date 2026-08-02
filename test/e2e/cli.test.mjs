@@ -287,25 +287,45 @@ test('FIRST RUN: no worktrees yet gets an honest message, never a silent all-cle
   const fx = await newRepo('no-siblings');
   t.after(() => fx.cleanup());
 
+  // THE CONTRACT CHANGED, AND FOR THE BETTER: holt now SCANS the only worktree, so the risk
+  // verdict here is earned rather than vacuous. What is still empty for a reason unrelated to the
+  // repository's health is the COMPARISON — collisions, duplicates, families — and that is what
+  // has to be said out loud, because zero-because-nothing-to-compare and zero-because-verified
+  // look identical in the output.
   const risk = await holt(['risk', '--cwd', fx.root], fx.root);
   assert.equal(risk.code, 0, `risk exited ${risk.code}: ${risk.stderr}`);
-  assert.match(risk.stdout, /no other worktrees yet/i,
-    `risk must say WHY everything is zero — and "no OTHER worktrees": the primary exists and the reader is in it, got: ${risk.stdout}`);
-  assert.ok(!/Nothing unique anywhere/.test(risk.stdout),
-    'must not print the "verified clean" verdict when nothing was ever compared');
+  assert.match(risk.stdout, /only the primary worktree/i,
+    `risk must say the repo has no siblings yet, got: ${risk.stdout}`);
+  assert.match(risk.stdout, /nothing to compare against yet/i,
+    `and WHY the cross-worktree findings are empty, got: ${risk.stdout}`);
+  assert.match(risk.stdout, /scanned\s+1\/1/,
+    `the one worktree must actually have been scanned, got: ${risk.stdout}`);
 
   const status = await holt(['status', '--cwd', fx.root], fx.root);
   assert.equal(status.code, 0, `status exited ${status.code}: ${status.stderr}`);
-  assert.match(status.stdout, /no other worktrees yet/i,
-    `status must say WHY every DECISIONS row is zero, got: ${status.stdout}`);
+  assert.match(status.stdout, /only the primary worktree/i,
+    `status must say WHY every comparison row is zero, got: ${status.stdout}`);
 
-  // `holt brief` collapses onto the same fixed sentence regardless of WHY there was nothing to
-  // say — indistinguishable from "not a repo" and from "genuinely nothing to report".
+  // TWO DIFFERENT AUDIENCES, TWO DIFFERENT CONTRACTS.
+  //
+  // A human who typed `holt brief` asked a question and deserves an answer, so one line of
+  // orientation is right — provided it does not claim an all-clear it did not earn.
   const brief = await holt(['brief', '--cwd', fx.root], fx.root);
   assert.equal(brief.code, 0);
   assert.match(brief.stdout, /no other worktrees yet/i, `brief got: ${brief.stdout}`);
   assert.ok(!/no parallel workstream findings/.test(brief.stdout),
     'the old fixed sentence must be gone');
+
+  // The HOOKS are injected into an agent's context unprompted, on every message and every turn,
+  // forever. There, orientation with no news is noise, and noise on a clean repo is how a hook
+  // gets uninstalled — which costs all of the protection it was providing. Every event must be
+  // completely silent when there is nothing to say.
+  for (const event of ['user-prompt-submit', 'session-start', 'stop']) {
+    const h = await holt(['hook', event, '--host', 'claude-code', '--cwd', fx.root], fx.root);
+    assert.equal(h.code, 0, `hook ${event} must exit 0 on a clean repo: ${h.stderr}`);
+    assert.equal(h.stdout.trim(), '',
+      `hook ${event} must be SILENT on a clean solo repo, got: ${JSON.stringify(h.stdout)}`);
+  }
 });
 
 test('FIRST RUN: `setup` outside a repository fails fast, not mid-sentence', async (t) => {
@@ -456,15 +476,24 @@ test('FIRST RUN: the solo-repo caveat — a dirty, unscanned primary is NAMED be
   t.after(() => fx.cleanup());
   await fx.write('newfile.mjs', 'export function UNCOMMITTED_CRITICAL() {}\n');
 
+  // SOLO: there is no caveat to print any more, because there is nothing unaudited — holt scans
+  // the only worktree and reports its at-risk work directly. A caveat pointing at a flag was
+  // always the second-best answer; measuring the thing is the best one.
   const solo = await holt(['risk', '--cwd', fx.root], fx.root);
-  assert.match(solo.stdout, /primary worktree .* holds 1 uncommitted change/,
-    `solo: the dirty primary must be named: ${solo.stdout}`);
-  assert.match(solo.stdout, /--include-primary/, 'and the covering command must be named');
+  assert.match(solo.stdout, /UNCOMMITTED_CRITICAL|unique-work-uncommitted/,
+    `solo: the primary's at-risk work must be reported directly, no flag required: ${solo.stdout}`);
+  assert.doesNotMatch(solo.stdout, /is NOT auditing/,
+    `and nothing should be declared unaudited when it was audited: ${solo.stdout}`);
 
+  // WITH A SIBLING the original design applies again: the primary drops out of the verdict so the
+  // agent signal is not buried, and the caveat carries it instead — on the path with findings in
+  // it, which is the one anybody with a fan-out running actually reads.
   await fx.git(['worktree', 'add', '-q', '-b', 'spawned', path.join(fx.root, '..', 'solo-caveat-sib'), 'main']);
+  await fx.write('sib.mjs', 'export function SIB_WORK() {}\n', path.join(fx.root, '..', 'solo-caveat-sib'));
   const withSib = await holt(['risk', '--cwd', fx.root], fx.root);
   assert.match(withSib.stdout, /primary worktree .* holds 1 uncommitted change/,
     `with a sibling: the caveat must survive beside the real verdict: ${withSib.stdout}`);
+  assert.match(withSib.stdout, /--include-primary/, 'and the covering command must be named');
 
   // And --include-primary actually covers it — the caveat is a pointer, not a dead end.
   const covered = await holt(['risk', '--include-primary', '--cwd', fx.root], fx.root);
@@ -635,4 +664,89 @@ test('HOOK: NEVER-WORSE — a closed pipe still gets the right verdict, deny inc
   const v = JSON.parse(denied.out);
   assert.equal(v.decision, 'deny', `destroying the only copy must be refused: ${denied.out}`);
   assert.match(v.reason, /HOOK_SOLE_COPY|nowhere else/, `and the refusal must name the work: ${v.reason}`);
+});
+
+/* ------------------------------------------- the solo repository is the common shape ---- */
+
+/**
+ * A REPOSITORY WITH ONE WORKTREE IS NOT A REPOSITORY WITH NOTHING IN IT.
+ *
+ * holt excludes the primary worktree from its scan, because in a fan-out the primary is the
+ * human's tree rather than a dispatched agent and reporting on it buries the signal about the
+ * agents. That reasoning is void when there are no agents — and one worktree is the commonest
+ * shape there is, the shape of every first run, and the shape a user is in on the day they
+ * install holt.
+ *
+ * MEASURED on a real repository belonging to another team, at one moment, two commands apart:
+ *
+ *   holt risk                    ->  scanned 0/0 workstreams · nothing at risk
+ *   holt risk --include-primary  ->  ● interactive-textbook  9 uniq  24 uncomm
+ *
+ * The engineer reading the first one concluded holt reported no risk. The caveat WAS printed —
+ * grey, parenthesised, under a headline that read as an all-clear — and that is the only test of
+ * a caveat that matters. Hiding a repository's real risk behind a flag the user has to know to
+ * pass is not a default; it is a trap with documentation.
+ */
+test('SOLO REPO: the only worktree is scanned by default, without a flag', async (t) => {
+  const fx = await newRepo('solo-default');
+  t.after(() => fx.cleanup());
+  await fx.write('src/only.js', 'export function SOLO_ONLY_COPY() { return 1; }\n');
+
+  // PRECONDITION: this really is a one-worktree repository.
+  const wl = await fx.git(['worktree', 'list']);
+  assert.equal(wl.trim().split('\n').length, 1, `PRECONDITION: exactly one worktree, got:\n${wl}`);
+
+  const r = await holt(['risk', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 0, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.counts.scanned, 1, `the one worktree must be scanned: ${JSON.stringify(j.counts)}`);
+  assert.ok(j.unique.length >= 1,
+    `uncommitted work in the only worktree must be reported as at risk: ${JSON.stringify(j.unique)}`);
+  assert.ok(JSON.stringify(j.unique).includes('SOLO_ONLY_COPY'),
+    `and the symbol that exists nowhere else must be named: ${JSON.stringify(j.unique).slice(0, 400)}`);
+
+  // The human-readable surface must agree — this is the one the engineer actually read.
+  const human = await holt(['risk', '--cwd', fx.root], fx.root);
+  assert.doesNotMatch(human.stdout, /no other worktrees yet/,
+    `a solo repo must not be told its answer is about worktrees that do not exist: ${human.stdout}`);
+  assert.match(human.stdout, /unique-work-uncommitted|SOLO_ONLY_COPY|uncomm/,
+    `and it must show the risk: ${human.stdout}`);
+});
+
+test('SOLO REPO: NEVER-WORSE — a clean solo repo still reports nothing at risk', async (t) => {
+  // The other direction. Scanning the primary must not invent risk where there is none, or the
+  // first thing every new user sees is a false alarm.
+  const fx = await newRepo('solo-clean');
+  t.after(() => fx.cleanup());
+
+  const j = JSON.parse((await holt(['risk', '--json', '--cwd', fx.root], fx.root)).stdout);
+  assert.equal(j.counts.scanned, 1, 'the primary is scanned');
+  assert.equal(j.counts.atRisk, 0, `a clean repo has nothing at risk: ${JSON.stringify(j.counts)}`);
+  assert.deepEqual(j.unique.map((u) => u.verdict), ['nothing-unique'],
+    `and the one workstream is reported as holding nothing unique: ${JSON.stringify(j.unique.map((u) => u.verdict))}`);
+});
+
+test('SOLO REPO: NEVER-WORSE — with siblings, the primary is still excluded and still named', async (t) => {
+  // The original design holds the moment there is a fan-out to report on: the primary drops out
+  // of the verdict and the caveat carries it instead. A fix for the solo case that also changed
+  // this would bury the agent signal under the human's own working tree.
+  const fx = await newRepo('solo-with-sibs');
+  t.after(() => fx.cleanup());
+  await fx.worktree('agent1');
+  await fx.write('src/primary_work.js', 'export function PRIMARY_UNCOMMITTED() {}\n');
+  await fx.write('src/agent_work.js', 'export function AGENT_UNCOMMITTED() {}\n', fx.wt('agent1'));
+
+  const j = JSON.parse((await holt(['risk', '--json', '--cwd', fx.root], fx.root)).stdout);
+  assert.equal(j.counts.scanned, 1, `only the sibling is scanned: ${JSON.stringify(j.counts)}`);
+  assert.ok(!JSON.stringify(j.unique).includes('PRIMARY_UNCOMMITTED'),
+    'the primary must stay out of the verdict when there are agents to report on');
+  assert.ok(JSON.stringify(j.unique).includes('AGENT_UNCOMMITTED'),
+    `the sibling's work must be reported: ${JSON.stringify(j.unique).slice(0, 300)}`);
+
+  // ...and the thing holt is NOT auditing must still be named, with the covering command.
+  const st = JSON.parse((await holt(['status', '--json', '--cwd', fx.root], fx.root)).stdout);
+  assert.ok(st.primaryUnscanned, `the unscanned primary must still be declared: ${JSON.stringify(st).slice(0, 400)}`);
+  assert.ok(st.primaryUnscanned.dirtyFiles >= 1, 'and it must say the primary is dirty');
+  const human = await holt(['risk', '--cwd', fx.root], fx.root);
+  assert.match(human.stdout, /--include-primary/, `the covering command must be named: ${human.stdout}`);
 });

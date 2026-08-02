@@ -1416,11 +1416,14 @@ export function contextDigest(scanResult, workstreamId, { maxItems = 12 } = {}) 
     siblings,
     contestedFiles: contested.slice(0, maxItems),
     duplicatedSymbols: alreadyBuilt.slice(0, maxItems),
-    advice: buildAdvice(contested, alreadyBuilt),
+    // `hasPeers` is what makes "nothing to report" different from "nothing to report ABOUT".
+    // With no other live workstream there is no relationship to describe, and the reassurance
+    // below would be a sentence about worktrees that do not exist. See buildAdvice.
+    advice: buildAdvice(contested, alreadyBuilt, live.length > 1),
   };
 }
 
-function buildAdvice(contested, alreadyBuilt) {
+function buildAdvice(contested, alreadyBuilt, hasPeers = true) {
   const out = [];
   if (alreadyBuilt.length) {
     const top = alreadyBuilt[0];
@@ -1434,7 +1437,17 @@ function buildAdvice(contested, alreadyBuilt) {
       `'${top.workstream}' is editing ${top.fileCount} of the same file(s)${top.hasUncommitted ? ' with uncommitted changes' : ''} — highest contention: ${top.files[0]}`,
     );
   }
-  if (!out.length) out.push('no contested files and no duplicated symbols against any other workstream');
+  // SILENCE WHEN THERE IS NOTHING TO BE SILENT ABOUT.
+  //
+  // "no contested files and no duplicated symbols against any other workstream" is a useful
+  // all-clear when there ARE other workstreams and holt checked them. In a repository with one
+  // worktree it is a sentence about nothing, and it turned the Stop hook — which is supposed to
+  // be silent on a clean repo — into something that fires on every single turn of every solo
+  // project. Noise on a clean repo is how a hook gets uninstalled, and an uninstalled hook
+  // protects nothing.
+  if (!out.length && hasPeers) {
+    out.push('no contested files and no duplicated symbols against any other workstream');
+  }
   return out;
 }
 
@@ -1742,6 +1755,7 @@ export async function analyze(scanResult, opts = {}) {
     // dirtyFiles null when even the status read failed. Surfaces exist to say what holt is not
     // vouching for; see the comment at the collection site in scan.mjs.
     primaryUnscanned: scanResult.primaryUnscanned ?? null,
+    soloPrimary: !!scanResult.soloPrimary,
     filtering: {
       rule: `a symbol carried by more than ${limit} of ${live.length} workstream(s) is treated as boilerplate and excluded from PAIR evidence only`,
       droppedCount: dropped.length,

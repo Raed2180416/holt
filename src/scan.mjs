@@ -868,7 +868,30 @@ export async function scan(disc, opts = {}) {
     timeout: opts.timeout ?? 60_000,
   };
 
-  const targets = disc.workstreams.filter((w) => !w.isPrimary || opts.includePrimary);
+  // THE PRIMARY IS EXCLUDED ONLY WHEN THERE IS SOMETHING ELSE TO TALK ABOUT.
+  //
+  // Excluding it is right in a fan-out: the human's own worktree is not a dispatched agent, and
+  // reporting on it would bury the signal about the agents. That rationale is void when there are
+  // no agents — and a repository with one worktree is the commonest shape there is, the shape of
+  // every first run, and the shape a user is in on the day they install holt.
+  //
+  // MEASURED on a real repository belonging to another team, at one moment, two commands apart:
+  //
+  //   holt risk                    scanned 0/0 workstreams · nothing at risk
+  //   holt risk --include-primary  ● interactive-textbook  9 uniq  24 uncomm  unique-work-uncommitted
+  //
+  // The default answered a question about worktrees that did not exist while 24 uncommitted
+  // changes and 9 symbols that live nowhere else sat in the one worktree that did. The caveat WAS
+  // printed — in grey, in parentheses, below a headline that read as an all-clear — and the
+  // engineer reading it still concluded holt reported no risk, which is the only test of a
+  // caveat that matters. Hiding a repository's real risk behind a flag the user has to know to
+  // pass is not a default; it is a trap with documentation.
+  //
+  // So: if the primary is the ONLY workstream, it IS the workstream. Nothing changes for a repo
+  // with siblings, where the original reasoning still holds and the caveat still prints.
+  const soloPrimary = disc.workstreams.length === 1 && disc.workstreams[0]?.isPrimary;
+  const includePrimary = opts.includePrimary || soloPrimary;
+  const targets = disc.workstreams.filter((w) => !w.isPrimary || includePrimary);
 
   // WHAT HOLT IS NOT AUDITING MUST STILL BE NAMED. The primary worktree is excluded from the
   // scan by default — it is where the human lives, not a dispatched agent — but excluded is not
@@ -880,7 +903,7 @@ export async function scan(disc, opts = {}) {
   // vouching for instead of implying it checked.
   let primaryUnscanned = null;
   const primary = disc.workstreams.find((w) => w.isPrimary);
-  if (primary && !opts.includePrimary) {
+  if (primary && !includePrimary) {
     const st = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: primary.path })
       .catch(() => null);
     const entries = st && st.code === 0 ? st.stdout.split('\0').filter(Boolean).length : null;
@@ -929,6 +952,12 @@ export async function scan(disc, opts = {}) {
     workstreams: scanned,
     skipped: scanned.filter((w) => !w.ok).map((w) => ({ id: w.id, reason: w.reason })),
     primaryUnscanned,
+    // The reader is in a repository with no fan-out yet. The risk verdict is now EARNED here (the
+    // one worktree IS scanned), but every CROSS-worktree finding — collisions, duplicates,
+    // families, landing order — is necessarily empty for a reason that has nothing to do with the
+    // repository's health, and a reader who has simply not run `git worktree add` yet cannot tell
+    // those two empty states apart from the output alone.
+    soloPrimary,
     strictReadOnly: ctx.strictReadOnly,
   };
 }
