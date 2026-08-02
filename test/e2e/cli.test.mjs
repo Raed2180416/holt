@@ -838,3 +838,38 @@ test('HOOK PAYLOADS: every host shape reaches the same verdict', async (t) => {
       `${host}: a benign command must still be allowed, got: ${allowed}`);
   }
 });
+
+test('DOCTOR: a worktree created after integrate is reported as unwired, not silently unguarded', async (t) => {
+  // integrate wires every worktree that exists WHEN IT RUNS. One created afterwards has no hooks,
+  // because `git worktree add` copies no untracked files — and an agent dispatched into it runs
+  // unprotected while the repository still looks integrated. Making that visible is the
+  // difference between a gap and a silent one.
+  const fx = await newRepo('doctor-unwired');
+  t.after(() => fx.cleanup());
+
+  const before = await holt(['doctor', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(before.code, 0, before.stderr);
+  assert.ok(Array.isArray(JSON.parse(before.stdout).unwiredWorktrees),
+    'doctor must report which worktrees are wired');
+
+  await holt(['integrate', '--cwd', fx.root], fx.root);
+  const wired = JSON.parse((await holt(['doctor', '--json', '--cwd', fx.root], fx.root)).stdout);
+  assert.deepEqual(wired.unwiredWorktrees, [],
+    `after integrate nothing is unwired: ${JSON.stringify(wired.unwiredWorktrees)}`);
+
+  // The worktree an agent gets dispatched into ten minutes later.
+  await fx.worktree('late');
+  const after = await holt(['doctor', '--json', '--cwd', fx.root], fx.root);
+  const j = JSON.parse(after.stdout);
+  assert.ok(j.unwiredWorktrees.includes('late'),
+    `a worktree created after integrate must be named: ${JSON.stringify(j.unwiredWorktrees)}`);
+
+  const human = await holt(['doctor', '--cwd', fx.root], fx.root);
+  assert.match(human.stdout, /NOT guarded/, `and said plainly: ${human.stdout}`);
+  assert.match(human.stdout, /holt integrate/, 'with the command that fixes it');
+
+  // ...and running integrate again closes it, which is what the message promises.
+  await holt(['integrate', '--cwd', fx.root], fx.root);
+  const fixed = JSON.parse((await holt(['doctor', '--json', '--cwd', fx.root], fx.root)).stdout);
+  assert.deepEqual(fixed.unwiredWorktrees, [], 'the prescribed fix must actually work');
+});

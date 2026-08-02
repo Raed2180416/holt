@@ -390,6 +390,25 @@ async function cmdDoctor(opts) {
       : `extension mapping only (${enry.reason}) — ambiguous extensions (.fs .m .h .pl) may resolve to the wrong language`,
     deepDuplicates: jscpd.available ? `jscpd ${jscpd.version}` : `unavailable (${jscpd.reason})`,
     safetyContract: probes,
+    // WHICH WORKTREES ARE ACTUALLY WIRED, because "integrate ran once" is not the same fact.
+    //
+    // Every host reads its project config relative to where it runs, and `git worktree add`
+    // copies no untracked files — so a worktree created AFTER integrate has no hooks, and an
+    // agent dispatched into it runs unprotected while the repository looks integrated. integrate
+    // now wires every worktree that exists when it runs; this is what makes the ones created
+    // afterwards visible instead of silently unguarded.
+    unwiredWorktrees: await (async () => {
+      const rows = [];
+      for (const w of disc.workstreams ?? []) {
+        if (!w.path) continue;
+        // eslint-disable-next-line no-await-in-loop -- one stat per worktree, bounded by the repo
+        const wired = await fs.stat(path.join(w.path, '.claude', 'settings.json')).then(() => true).catch(() => false);
+        // eslint-disable-next-line no-await-in-loop
+        const mcp = await fs.stat(path.join(w.path, '.mcp.json')).then(() => true).catch(() => false);
+        if (!wired && !mcp) rows.push(w.id);
+      }
+      return rows;
+    })(),
   };
 
   if (opts.json) return emitJson(info);
@@ -399,6 +418,13 @@ async function cmdDoctor(opts) {
   out(`  node              ${info.node}`);
   out(`  repository        ${info.repo ?? paint('red', info.bare ? 'bare repository (no working tree) — holt needs a checkout' : 'not a git repository')}`);
   out(`  workstreams       ${info.workstreams}  (${info.workstreams - 1} linked + 1 primary)`);
+  if (info.unwiredWorktrees.length) {
+    out(`  ${paint('yellow', 'unwired')}           ${info.unwiredWorktrees.length} worktree(s) have no holt config — an agent working there is `
+      + 'NOT guarded');
+    out(paint('grey', `                    ${info.unwiredWorktrees.slice(0, 5).join(', ')}`
+      + `${info.unwiredWorktrees.length > 5 ? ` … +${info.unwiredWorktrees.length - 5}` : ''}`));
+    out(paint('grey', '                    fix: `holt integrate`  (it wires every worktree that exists when it runs)'));
+  }
   out(`  jj backend        ${info.jj}`);
   out(`  symbol backend    ${ctags.available ? paint('green', info.symbolBackend) : paint('yellow', info.symbolBackend)}`);
   // Never claim language coverage the INSTALLED toolchain cannot deliver: distro ctags packages
