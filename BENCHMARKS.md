@@ -201,7 +201,7 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 755 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| tests | 757 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
 | deliberate-defect mutations | 43/43 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
@@ -217,8 +217,8 @@ failing the build over the difference instead of the difference being removed. T
 worse — opencode is one of the 29 integration targets holt wires, and the only test that drives it
 for real had therefore never executed in CI once.
 
-CI now installs opencode, so nothing skips and there is one number: **755 defined, 755 passing.**
-A developer without opencode installed sees 754 passing and 1 skipped, and `npm test` says so.
+CI now installs opencode, so nothing skips and there is one number: **757 defined, 757 passing.**
+A developer without opencode installed sees 756 passing and 1 skipped, and `npm test` says so.
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
 broken, not merely observed to be green. **Does not mean:** 42 hand-picked mutations amount to full
@@ -429,7 +429,41 @@ run to run is a stable, closed defect just because its magnitude (2 of 50) looks
 agreement is not "correct" — it is exactly the number of claims checked, with the disagreements
 named, not averaged away.
 
-## 10 · Enterprise benchmark — real repos, real mess, real scale
+## 10 · What the guard costs an agent, per tool call
+
+**What this measures:** the thing that decides whether holt survives contact with a real agent
+session. The PreToolUse hook runs *before every Bash command an agent issues*. If it is slow, it
+does not matter how correct it is — it gets uninstalled, and an uninstalled guard protects nothing.
+
+**Fixture:** redis (1,861 tracked files) with 31 worktrees, each holding uncommitted work. The
+ordinary-command sample is an ordinary build invocation; the destructive sample is an `rm -rf` of
+a sibling worktree. The
+real binary is driven over stdin exactly as a host drives it, and the wall clock is measured
+around the whole process — spawn, scan, verdict, exit.
+
+| what the agent runs | p50 | p90 |
+|---|---|---|
+| an ordinary command — anything that cannot destroy work | **65 ms** | 73 ms |
+| a command that could destroy work (`rm -rf <worktree>`) | 993 ms | 1.89 s |
+
+**The ordinary-command cost does not grow with the repository.** 65 ms on a 60-file fixture with
+12 worktrees; 65 ms on redis with 31. That is the cheap gate doing its job: a command that cannot
+destroy anything is answered from `git worktree list` plus one `git status`, and never pays for a
+scan. Only a command that *could* lose work buys the evidence to say so.
+
+Under an ACTIVE FAN-OUT — a sibling worktree writing a file between every single call, so the
+cache is cold every time — ordinary commands went from 64 ms to 72 ms p50 and destructive ones
+from 165 ms to 346 ms on the 12-worktree fixture. The cache helps; it is not what makes the
+common path fast.
+
+Reproduce: `node eval/hook-latency.mjs <worktrees> <calls>`
+
+**Means:** the protection is affordable on the path agents actually spend their time on, and the
+cost of certainty is paid only where work is at stake. **Does not mean:** every host invokes hooks
+the same way — a host that spawns the hook with a cold Node process per call pays Node's own
+startup (~40 ms of the 65) regardless of what holt does.
+
+## 11 · Enterprise benchmark — real repos, real mess, real scale
 
 **What this measures:** holt's full pipeline (discover → scan → analyze) and every CLI command
 against REAL repositories with messy worktrees containing uncommitted files, gitignored secrets,

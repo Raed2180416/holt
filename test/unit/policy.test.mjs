@@ -231,3 +231,73 @@ test('POLICY AUTHORITY: the branch under review cannot supply the rules that jud
     'an unreadable base policy must refuse, never pass',
   );
 });
+
+/**
+ * A COMMENT STRIPPER THAT CANNOT SEE STRINGS DELETES POLICY.
+ *
+ * validatePolicy tolerated `//` and `/* *​/` with two regexes, and a regex does not know it is
+ * inside a string literal. A byte-for-byte VALID policy containing an ordinary path glob was
+ * truncated mid-string at the ` //`:
+ *
+ *     "paths": ["secrets/**", "docs/a // b.md"]   ->   "docs/a
+ *
+ * `holt ci` — the merge gate an organisation relies on — then refused to run at all with
+ * POLICY_PARSE. Where the truncation happened to leave valid JSON it was worse than a refusal: a
+ * rule silently disappeared and the gate passed exactly what it was installed to block.
+ */
+test('POLICY: a path containing " //" is policy, not a comment', async () => {
+  // Drive it through the real entry point rather than a private one.
+  const os2 = await import('node:os');
+  const fs2 = await import('node:fs/promises');
+  const path2 = await import('node:path');
+  const { loadPolicy } = await import('../../src/team/policy.mjs');
+
+  const dir = await fs2.mkdtemp(path2.join(process.env.HOLT_TMPDIR || os2.tmpdir(), 'holt-policy-'));
+  try {
+    await fs2.mkdir(path2.join(dir, '.holt'), { recursive: true });
+    const policy = {
+      version: 1,
+      rules: [
+        { id: 'no-secrets', type: 'protected-paths', paths: ['secrets/**', 'docs/a // b.md'] },
+        { id: 'protect-infra', type: 'protected-paths', paths: ['infra/**'] },
+      ],
+    };
+    await fs2.writeFile(path2.join(dir, '.holt', 'policy.json'), JSON.stringify(policy, null, 2));
+
+    const loaded = await loadPolicy(dir);
+    const doc = loaded?.doc ?? loaded?.policy ?? loaded;
+    assert.ok(Array.isArray(doc?.rules), `a valid policy must load: ${JSON.stringify(loaded).slice(0, 300)}`);
+    assert.equal(doc.rules.length, 2, 'BOTH rules must survive — a lost rule is a gate that passes');
+    assert.deepEqual(doc.rules[0].paths, ['secrets/**', 'docs/a // b.md'],
+      'the glob must survive byte-for-byte, comment marker and all');
+  } finally {
+    await fs2.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('POLICY: NEVER-WORSE — a real comment is still tolerated', async () => {
+  // The reason the stripper existed: a policy should be able to explain itself to reviewers.
+  const os2 = await import('node:os');
+  const fs2 = await import('node:fs/promises');
+  const path2 = await import('node:path');
+  const { loadPolicy } = await import('../../src/team/policy.mjs');
+
+  const dir = await fs2.mkdtemp(path2.join(process.env.HOLT_TMPDIR || os2.tmpdir(), 'holt-policy-c-'));
+  try {
+    await fs2.mkdir(path2.join(dir, '.holt'), { recursive: true });
+    await fs2.writeFile(path2.join(dir, '.holt', 'policy.json'), `{
+  // why this exists: nobody may land infra changes unreviewed
+  "version": 1,
+  /* block comments too */
+  "rules": [
+    { "id": "protect-infra", "type": "protected-paths", "paths": ["infra/**"] }
+  ]
+}
+`);
+    const loaded = await loadPolicy(dir);
+    const doc = loaded?.doc ?? loaded?.policy ?? loaded;
+    assert.equal(doc.rules.length, 1, `comments must still be tolerated: ${JSON.stringify(loaded).slice(0, 300)}`);
+  } finally {
+    await fs2.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});

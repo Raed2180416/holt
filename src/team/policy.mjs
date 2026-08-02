@@ -31,6 +31,7 @@
  */
 
 import fs from 'node:fs/promises';
+import { parse as jsoncParse } from 'jsonc-parser';
 import path from 'node:path';
 
 export const POLICY_PATHS = ['.holt/policy.json', '.holt/policy.jsonc'];
@@ -127,11 +128,28 @@ export async function loadPolicyFrom(readAt) {
  */
 function validatePolicy(raw, rel) {
     let doc;
-    try {
-      // Tolerate // and /* */ comments so a policy can explain itself to reviewers.
-      doc = JSON.parse(raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1'));
-    } catch (e) {
-      throw Object.assign(new Error(`${rel} is not valid JSON (${e.message}) — refusing to run with a policy nobody can read`), { code: 'POLICY_PARSE' });
+    {
+      // A COMMENT STRIPPER THAT CANNOT SEE STRINGS DELETES POLICY.
+      //
+      // This tolerated `//` and `/* */` with two regexes, and a regex does not know it is inside a
+      // string literal. A byte-for-byte VALID policy containing a path glob like
+      //
+      //     "paths": ["secrets/**", "docs/a // b.md"]
+      //
+      // was truncated mid-string at the ` //`, and `holt ci` — the merge gate an organisation
+      // relies on — then refused to run at all with POLICY_PARSE. Where the truncation happened
+      // to leave valid JSON it was worse than a refusal: a rule silently disappeared and the gate
+      // passed what it was installed to block.
+      //
+      // jsonc-parser is already a dependency and understands both comments and string context.
+      const errors = [];
+      doc = jsoncParse(raw, errors, { allowTrailingComma: true, disallowComments: false });
+      if (errors.length || doc === undefined) {
+        throw Object.assign(
+          new Error(`${rel} is not valid JSON/JSONC (${errors.length} parse error(s)) — refusing to run with a policy nobody can read`),
+          { code: 'POLICY_PARSE' },
+        );
+      }
     }
     if (doc?.version !== 1) {
       throw Object.assign(new Error(`${rel}: unsupported policy version ${JSON.stringify(doc?.version)} — upgrade holt rather than run an unenforced policy`), { code: 'POLICY_VERSION' });
