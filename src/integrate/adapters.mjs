@@ -300,7 +300,7 @@ export async function retireLegacyMcp(repoRoot, { home = os.homedir(), scope = '
     let cfg, rawText;
     try {
       rawText = await fs.readFile(t.file, 'utf8');
-      cfg = JSON.parse(stripJsonComments(rawText));
+      cfg = readJsoncOrThrow(rawText);
     } catch {
       continue; // no file (the common case) — nothing to retire, nothing to say
     }
@@ -387,6 +387,49 @@ export function mcpServerEntry(bin = 'holt', shape = 'standard') {
  * project scope, silently REPLACE their config — so comments are stripped for reading only.
  * String-aware, or a `//` inside a Windows path or a URL would truncate the document.
  */
+
+/**
+ * Read a JSON/JSONC config the way every host that reads it does.
+ *
+ * A LEGAL TRAILING COMMA COST A TEAM THEIR ENTIRE MCP CONFIGURATION. `.mcp.json`,
+ * `.vscode/mcp.json`, `.cursor/mcp.json` and friends are JSONC — VS Code, Cursor and Claude Code
+ * all accept comments and trailing commas — and holt read them with a hand-rolled comment
+ * stripper followed by `JSON.parse`, which does not. So this perfectly valid file:
+ *
+ *     { // our team's servers
+ *       "mcpServers": {
+ *         "acme-inventory": { "command": "/opt/acme/mcp" },
+ *         "acme-billing":   { "command": "/opt/acme/billing-mcp" },   <- trailing comma
+ *       }
+ *     }
+ *
+ * threw, the catch recorded `exists = false`, and project scope then CREATED the file — writing a
+ * config containing only holt's server. Both third-party servers were deleted by an `integrate`
+ * that believed it was writing into empty space.
+ *
+ * jsonc-parser is already a dependency and is what the hosts themselves use. It handles both.
+ *
+ * And ABSENT is not the same as UNREADABLE. The two were conflated by one `catch`, and only one
+ * of them makes it safe to write. A file that exists and cannot be understood is somebody's
+ * configuration; it is never holt's to replace.
+ */
+function parseJsonc(rawText) {
+  const errors = [];
+  const value = jsoncParse(rawText, errors, { allowTrailingComma: true, disallowComments: false });
+  if (errors.length || value === undefined) {
+    return { ok: false, value: null, why: `${errors.length} parse error(s)` };
+  }
+  return { ok: true, value, why: null };
+}
+
+
+/** The throwing form, for call sites whose surrounding try/catch already means "leave it alone". */
+function readJsoncOrThrow(rawText) {
+  const r = parseJsonc(rawText);
+  if (!r.ok) throw new Error(`unparseable JSON/JSONC: ${r.why}`);
+  return r.value;
+}
+
 function stripJsonComments(text) {
   let out = ''; let inStr = false; let esc = false; let line = false; let block = false;
   for (let i = 0; i < text.length; i++) {
@@ -448,7 +491,7 @@ function jsoncWrite(text, edits, { tabSize = 2, insertSpaces = true } = {}) {
  */
 function jsoncReconcileArray(text, arrayPath, isMineEntry, newEntries, { tabSize = 2, insertSpaces = true } = {}) {
   const fmt = { tabSize, insertSpaces, eol: '\n' };
-  const cfg = JSON.parse(stripJsonComments(text));
+  const cfg = readJsoncOrThrow(text);
   // Navigate to the array
   let arr = cfg;
   for (const seg of arrayPath) {
@@ -476,7 +519,7 @@ function jsoncReconcileArray(text, arrayPath, isMineEntry, newEntries, { tabSize
   // Append new entries at the end
   if (newEntries && newEntries.length > 0) {
     // After removals, the array length has changed. Re-parse to find the new length.
-    const newCfg = JSON.parse(stripJsonComments(result));
+    const newCfg = readJsoncOrThrow(result);
     let newArr = newCfg;
     for (const seg of arrayPath) newArr = newArr?.[seg];
     const startIdx = Array.isArray(newArr) ? newArr.length : 0;
@@ -496,7 +539,7 @@ function jsoncReconcileArray(text, arrayPath, isMineEntry, newEntries, { tabSize
 async function readJsonc(file) {
   let text;
   try { text = await fs.readFile(file, 'utf8'); } catch { return { cfg: null, text: null }; }
-  const cfg = JSON.parse(stripJsonComments(text));
+  const cfg = readJsoncOrThrow(text);
   return { cfg, text };
 }
 
@@ -611,11 +654,28 @@ export async function installMcp(repoRoot, {
     let cfg = {};
     let exists = true;
     let rawText = null;
+    // ABSENT AND UNREADABLE ARE NOT THE SAME STATE, and only one of them makes it safe to write.
+    // Conflating them in a single catch is what let a legal trailing comma cost a team both of
+    // their MCP servers: the parse threw, `exists` went false, and project scope CREATED the file
+    // it had just failed to read. A config holt cannot understand is somebody's configuration.
     try {
       rawText = await fs.readFile(t.file, 'utf8');
-      cfg = JSON.parse(stripJsonComments(rawText));
     } catch {
+      rawText = null;
       exists = false;
+    }
+    if (rawText !== null) {
+      const parsed = parseJsonc(rawText);
+      if (!parsed.ok) {
+        results.push({
+          adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+          action: `left alone — holt could not parse this file (${parsed.why}) and will not overwrite a config it cannot read`,
+        });
+        continue;
+      }
+      cfg = parsed.value ?? {};
+    }
+    if (!exists) {
       // Project scope: creating the file is the point — it is how you wire a repo.
       // User scope: never create. Adding holt to a config the user does not have is
       // indistinguishable from installing software they did not ask for.
@@ -813,7 +873,7 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   let created = true;
   try {
     rawText = await fs.readFile(file, 'utf8');
-    cfg = JSON.parse(stripJsonComments(rawText));
+    cfg = readJsoncOrThrow(rawText);
     created = false;
   } catch { /* new file */ }
 
@@ -851,13 +911,13 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   let output;
   if (rawText != null) {
     let result = rawText;
-    const parsedRaw = JSON.parse(stripJsonComments(rawText));
+    const parsedRaw = readJsoncOrThrow(rawText);
     if (parsedRaw.hooks == null) {
       result = jsoncWrite(rawText, [[['hooks'], {}]], { tabSize: 2, insertSpaces: true });
     }
     for (const [event, entries] of Object.entries(wanted)) {
       const sub = CURSOR_EVENT_SUBCOMMAND[event];
-      const parsedResult = JSON.parse(stripJsonComments(result));
+      const parsedResult = readJsoncOrThrow(result);
       const eventArr = parsedResult.hooks?.[event];
       if (Array.isArray(eventArr)) {
         const isMine = (h) => isHoltHookCommand(h?.command, sub);
@@ -952,7 +1012,7 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
   let created = true;
   try {
     rawText = await fs.readFile(file, 'utf8');
-    cfg = JSON.parse(stripJsonComments(rawText));
+    cfg = readJsoncOrThrow(rawText);
     created = false;
   } catch { /* new file */ }
 
@@ -1008,7 +1068,7 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
   if (rawText != null) {
     // First, ensure cfg.hooks exists in the text (it may not if the user file had no hooks key)
     let textWithHooks = rawText;
-    const parsedRaw = JSON.parse(stripJsonComments(rawText));
+    const parsedRaw = readJsoncOrThrow(rawText);
     if (parsedRaw.hooks == null) {
       // No hooks key in the original — add it
       textWithHooks = jsoncWrite(rawText, [[['hooks'], {}]], { tabSize: 2, insertSpaces: true });
@@ -1018,7 +1078,7 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
     let result = textWithHooks;
     for (const [event, entries] of Object.entries(wanted)) {
       const sub = CLAUDE_EVENT_SUBCOMMAND[event];
-      const parsedResult = JSON.parse(stripJsonComments(result));
+      const parsedResult = readJsoncOrThrow(result);
       const eventArr = parsedResult.hooks?.[event];
 
       if (Array.isArray(eventArr)) {
@@ -1037,7 +1097,7 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
         // Handle user-widened entries: entries that have BOTH holt's and user's commands
         // need holt's old commands stripped from them (the new holt entry is appended above).
         // We replace each widened entry with a version that only has the user's commands.
-        const parsedAfterReconcile = JSON.parse(stripJsonComments(result));
+        const parsedAfterReconcile = readJsoncOrThrow(result);
         const arrAfterReconcile = parsedAfterReconcile.hooks?.[event] || [];
         for (let i = 0; i < arrAfterReconcile.length; i++) {
           const entry = arrAfterReconcile[i];
@@ -1455,7 +1515,7 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
     let cfg, rawText;
     try {
       rawText = await fs.readFile(t.file, 'utf8');
-      cfg = JSON.parse(stripJsonComments(rawText));
+      cfg = readJsoncOrThrow(rawText);
     } catch { continue; }
     if (!cfg[t.key] || !cfg[t.key].holt) continue;
     // A server merely NAMED holt is not holt's. See isHoltMcpEntry.
@@ -1504,7 +1564,7 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
     const file = path.join(repoRoot, '.claude', 'settings.json');
     try {
       const rawText = await fs.readFile(file, 'utf8');
-      const cfg = JSON.parse(stripJsonComments(rawText));
+      const cfg = readJsoncOrThrow(rawText);
       let removed = 0;
       let result = rawText;
       for (const [event, sub] of Object.entries(CLAUDE_EVENT_SUBCOMMAND)) {
@@ -1537,7 +1597,7 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
 
         // Handle widened entries: replace each with a version that only has user's commands
         if (widenedCount > 0) {
-          const parsedResult = JSON.parse(stripJsonComments(result));
+          const parsedResult = readJsoncOrThrow(result);
           const currentArr = parsedResult.hooks?.[event] || [];
           for (let i = 0; i < currentArr.length; i++) {
             const entry = currentArr[i];
@@ -1552,14 +1612,14 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
         }
 
         // Check if the array is now empty — if so, remove the event key
-        const parsedResult = JSON.parse(stripJsonComments(result));
+        const parsedResult = readJsoncOrThrow(result);
         if (parsedResult.hooks?.[event] != null && Array.isArray(parsedResult.hooks[event]) && parsedResult.hooks[event].length === 0) {
           result = jsoncWrite(result, [[['hooks', event], undefined]], { tabSize: 2, insertSpaces: true });
         }
       }
       if (removed > 0) {
         // Check if hooks is now empty — if so, remove the hooks key
-        const parsedResult = JSON.parse(stripJsonComments(result));
+        const parsedResult = readJsoncOrThrow(result);
         if (parsedResult.hooks != null && Object.keys(parsedResult.hooks).length === 0) {
           result = jsoncWrite(result, [[['hooks'], undefined]], { tabSize: 2, insertSpaces: true });
         }
@@ -1585,7 +1645,7 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
     const file = path.join(repoRoot, '.cursor', 'hooks.json');
     try {
       const rawText = await fs.readFile(file, 'utf8');
-      const cfg = JSON.parse(stripJsonComments(rawText));
+      const cfg = readJsoncOrThrow(rawText);
       let removed = 0;
       let result = rawText;
       for (const [event, sub] of Object.entries(CURSOR_EVENT_SUBCOMMAND)) {
@@ -1599,14 +1659,14 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
         if (reconciled != null) result = reconciled;
 
         // Check if the array is now empty — if so, remove the event key
-        const parsedResult = JSON.parse(stripJsonComments(result));
+        const parsedResult = readJsoncOrThrow(result);
         if (parsedResult.hooks?.[event] != null && Array.isArray(parsedResult.hooks[event]) && parsedResult.hooks[event].length === 0) {
           result = jsoncWrite(result, [[['hooks', event], undefined]], { tabSize: 2, insertSpaces: true });
         }
       }
       if (removed > 0) {
         // Check if hooks is now empty
-        const parsedResult = JSON.parse(stripJsonComments(result));
+        const parsedResult = readJsoncOrThrow(result);
         if (parsedResult.hooks != null && Object.keys(parsedResult.hooks).length === 0) {
           result = jsoncWrite(result, [[['hooks'], undefined]], { tabSize: 2, insertSpaces: true });
         }

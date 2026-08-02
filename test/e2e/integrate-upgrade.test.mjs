@@ -698,3 +698,72 @@ test('OWNERSHIP (adversarial): a hand-written pre-commit hook that MENTIONS holt
   assert.equal(await fs.readFile(file, 'utf8'), userHook,
     'uninstall must not delete a hook it did not write');
 });
+
+/* --------------------------------------- a config holt cannot read is not holt's to write ---- */
+
+/**
+ * A LEGAL TRAILING COMMA COST A TEAM THEIR ENTIRE MCP CONFIGURATION.
+ *
+ * `.mcp.json`, `.vscode/mcp.json` and `.cursor/mcp.json` are JSONC — VS Code, Cursor and Claude
+ * Code all accept comments and trailing commas. holt read them with a hand-rolled comment
+ * stripper followed by `JSON.parse`, which does not. The parse threw, the catch recorded
+ * `exists = false`, and project scope then CREATED the file it had just failed to read — writing
+ * a config containing only holt's server.
+ *
+ * Measured: a file holding `acme-inventory` and `acme-billing` came back holding neither.
+ *
+ * jsonc-parser was already a dependency and is what the hosts themselves use.
+ */
+test('JSONC: a legal trailing comma does not cost the user their other MCP servers', async (t) => {
+  const dir = await tmp('jsonc-comma');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '.mcp.json');
+  await fs.writeFile(file, `{
+  // our team's servers
+  "mcpServers": {
+    "acme-inventory": { "command": "/opt/acme/mcp", "args": ["--tenant", "eu"] },
+    "acme-billing": { "command": "/opt/acme/billing-mcp" },
+  }
+}
+`);
+
+  await installMcp(dir, { bin: 'holt', home: path.join(dir, 'home'), scope: 'project', hosts: ['claude-code'] });
+
+  const after = await fs.readFile(file, 'utf8');
+  const cfg = JSON.parse(after.replace(/\/\/[^\n]*/g, ''));
+  assert.ok(cfg.mcpServers['acme-inventory'], `the team's server must survive: ${after}`);
+  assert.ok(cfg.mcpServers['acme-billing'], `both of them: ${after}`);
+  assert.equal(cfg.mcpServers['acme-inventory'].command, '/opt/acme/mcp', 'unmodified');
+  assert.ok(cfg.mcpServers.holt, `and holt's own must be added: ${after}`);
+  assert.match(after, /our team's servers/, `the comment must survive too: ${after}`);
+});
+
+test('JSONC: a file holt CANNOT parse is left byte-for-byte alone, and says so', async (t) => {
+  // ABSENT and UNREADABLE were one catch, and only one of them makes it safe to write. A config
+  // holt cannot understand is somebody's configuration; it is never holt's to replace.
+  const dir = await tmp('jsonc-broken');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, '.mcp.json');
+  const broken = '{ "mcpServers": { "acme": { "command": "x" }\n';
+  await fs.writeFile(file, broken);
+
+  const results = await installMcp(dir, { bin: 'holt', home: path.join(dir, 'home'), scope: 'project', hosts: ['claude-code'] });
+
+  assert.equal(await fs.readFile(file, 'utf8'), broken,
+    'an unparseable config must not be touched at all');
+  const row = results.find((r) => r.path === file);
+  assert.ok(row, `the file must still be reported on: ${JSON.stringify(results)}`);
+  assert.match(row.action, /could not parse|left alone/i,
+    `and the report must say why rather than claiming success: ${row.action}`);
+});
+
+test('JSONC: NEVER-WORSE — a genuinely absent config is still created in project scope', async (t) => {
+  // Wiring a repo is the point of integrate. A fix that refused to create anything would make
+  // `holt setup` a no-op on every fresh repository.
+  const dir = await tmp('jsonc-absent');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+
+  await installMcp(dir, { bin: 'holt', home: path.join(dir, 'home'), scope: 'project', hosts: ['claude-code'] });
+  const cfg = JSON.parse(await fs.readFile(path.join(dir, '.mcp.json'), 'utf8'));
+  assert.ok(cfg.mcpServers.holt, 'a fresh repo must still get wired');
+});
