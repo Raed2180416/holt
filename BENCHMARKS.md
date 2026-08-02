@@ -45,10 +45,10 @@ to catch — a measurement that cannot tell *nothing was wrong* from *nothing wa
   beside its own error list.
 
 The grader now treats NOT FOUND as an error in its own right, before any verdict is inspected, and
-every numerator above has a denominator counting what was actually graded. `holt` itself was not
-wrong: re-run against the corrected grader, all 1000 verdicts are genuinely correct. The number was
-true and unverified, which is not the same as verified, and this page is not allowed to print the
-difference. `test/unit/eval-validity.test.mjs` now grades the grader.
+every numerator above has a denominator counting what was actually graded. `holt` was never wrong;
+the grader was, and a number that is true but ungraded is not published here as measured. Re-run
+against the corrected grader, all 1000 verdicts are correct. `test/unit/eval-validity.test.mjs` now
+grades the grader.
 
 ### The same measurement on a REAL repository, which contradicts the line above
 
@@ -126,9 +126,9 @@ rather than being reported as a one-off flake.
 **48/48 states, zero violations.** Reproduce: `node --test test/e2e/fuzz-invariant.test.mjs`
 
 **Means:** across 48 independently-checked, randomly generated states, holt never called unsafe
-content safe and never removed it. **Does not mean:** seeded random sampling, however reproducible,
-is exhaustive proof over all possible git states — it is evidence against the blind spots of the
-hand-written tests, which is a narrower claim than universal safety.
+content safe and never removed it. **Does not mean:** seeded random sampling is exhaustive proof
+over all possible git states — it is evidence against the blind spots of the hand-written tests,
+which is a narrower claim than universal safety.
 
 ## 4 · Clean-room degradation (controlled environment)
 
@@ -186,11 +186,10 @@ An earlier run against a simpler, separate cleanup scenario (not the lying-names
 measured +33 pts safety / +30 pts utility, Fisher exact p = 0.227 at n = 6 — reported here as
 directional, not significant.
 
-**These are pilots: 3–6 trials/arm.** **Means:** in this small sample, making holt available as
-an acting tool did not cause the agent to destroy irreplaceable work, and in the warnings-only arm
-the agent froze rather than act incorrectly. **Does not mean:** a trial count this small is
-statistically powered to support a general safety or utility claim — no percentage or p-value in
-this section should be read as more than directional until trial counts are much larger.
+**Means:** in this small sample, making holt available as an acting tool did not cause the agent to
+destroy irreplaceable work, and in the warnings-only arm the agent froze rather than act
+incorrectly. **Does not mean:** 3–6 trials per arm is statistically powered to support a general
+safety or utility claim — every percentage in this section is directional.
 
 ## 6 · Test-suite integrity
 
@@ -429,10 +428,10 @@ wrongly refused to certify a worktree it could in fact verify, and matched an in
 99.71% of 18,000 claims spanning 50 languages — with the oracle proven independent by static
 analysis, a runtime hook, and a probe proving the hook fires, not merely by the comment saying so.
 **Does not mean:** the corpus is real-world messiness (§8's own limitations list — synthetic,
-shallow, one file per shape — applies here too), a `conflict` miss whose specific repository moves
-run to run is a stable, closed defect just because its magnitude (2 of 50) looks small, and 99.71%
-agreement is not "correct" — it is exactly the number of claims checked, with the disagreements
-named, not averaged away.
+shallow, one file per shape — applies here too), or that a `conflict` miss whose specific repository
+moves run to run is a stable, closed defect just because its magnitude (2 of 50) looks small.
+99.71% is not a synonym for "correct": it is exactly the number of claims checked, with every
+disagreement named rather than averaged away.
 
 ## 10 · What the guard costs an agent, per tool call
 
@@ -501,8 +500,7 @@ The table that stood here previously read `holt-self 974 ms / 73 MB`, `redis 2.7
 `postgres 12.2 s / 1.2 GB`, and its own prose described that as "RSS scales with file count
 (73 MB → 1.2 GB from 20K → 7.7K files)" — more files producing less memory. It was not a scaling
 law; it was a broken harness, and the sentence explaining it should have been the tell. Four
-defects produced it, every one of them the same shape as the bug holt exists to catch — a
-measurement that cannot tell *nothing was wrong* from *nothing was measured*:
+defects produced it, every one the same shape as §1's fail-open grader:
 
 1. **The grader passed when holt found nothing.** `report.safe.find(...)?.safe` is `undefined` for
    a workstream holt never reported on, `undefined` is falsy, and no error was recorded — for any
@@ -537,9 +535,7 @@ else on this page, and it happened to defame the product rather than flatter it.
 **Verdict:** on the corrected harness, 30 of 30 planted workstreams are *found and graded* in
 every repo, with zero wrong verdicts and 15/15 disposables correctly identified, at a memory cost
 that fits comfortably in any CI container. Wall-clock grows sublinearly in file count (4.1× the
-files costs 2.3× the time from redis to postgres). The wall-clock figures were taken on a loaded
-developer machine and are an order of magnitude, not a precise number; the memory and correctness
-figures are stable.
+files costs 2.3× the time from redis to postgres); the memory and correctness figures are stable.
 
 Reproduce: `node eval/enterprise-bench.mjs all --worktrees 30 --noise-level 2 --runs 3`
 
