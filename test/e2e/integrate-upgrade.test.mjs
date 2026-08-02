@@ -931,3 +931,94 @@ test('OWNERSHIP: NEVER-WORSE — a genuinely stale COMMAND is still reconciled',
   assert.deepEqual(cmds, ['holt hook pre-tool-use --host claude-code'],
     `a stale command must be replaced, exactly once: ${JSON.stringify(cmds)}`);
 });
+
+/* ------------------------------------------------------- hook-event retirement ---- */
+//
+// RECONCILIATION THAT ONLY LOOKS AT TODAY'S WISHLIST CANNOT RETIRE ANYTHING. Both the reconcile
+// loop and uninstall walked holt's table of events. A hook holt wired in an earlier version, on
+// an event it has since dropped, is not in that table — so it was never visited: it survived
+// every upgrade, still firing at a `holt hook <event>` subcommand that may no longer exist. And
+// because uninstall shared the blind spot, holt's own advice ("run uninstall BEFORE removing the
+// holt package, or every agent wired to it is left pointing at a binary that is gone") did not
+// hold for exactly that entry.
+//
+// Each test carries a user's own hook on the SAME retired event. Sweeping by event is only
+// correct if ownership stays narrow — over-deleting here is the 7-foreign-hooks-to-1 bug.
+
+/** A settings.json with holt's hook on an event holt does not wire, beside a user's own. */
+async function repoWithRetiredHook(t, name) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), `holt-${name}-`));
+  t.after(() => fs.rm(root, { recursive: true, force: true }).catch(() => {}));
+  await fs.mkdir(path.join(root, '.claude'), { recursive: true });
+  const file = path.join(root, '.claude', 'settings.json');
+  await fs.writeFile(file, `${JSON.stringify({
+    hooks: {
+      Notification: [
+        { hooks: [{ type: 'command', command: 'holt hook notification --host claude-code', timeout: 60 }] },
+        { hooks: [{ type: 'command', command: 'my-own-notifier.sh', timeout: 30 }] },
+      ],
+    },
+  }, null, 2)}\n`);
+
+  // Premise: this event really is one holt no longer wires. If holt ever adds it back, this
+  // fixture stops testing retirement and must move to another event.
+  assert.ok(!('Notification' in claudeCodeHooks('holt')),
+    'premise: the fixture must use an event holt does NOT wire');
+  return { root, file };
+}
+
+const commandsIn = (cfg, event) =>
+  (cfg.hooks?.[event] ?? []).flatMap((e) => (e.hooks ?? []).map((h) => h.command));
+
+test('RETIREMENT: integrate removes holt\'s hook from an event holt no longer wires', async (t) => {
+  const { root, file } = await repoWithRetiredHook(t, 'retire-integrate');
+  await installClaudeCode(root, { bin: 'holt' });
+  const cfg = JSON.parse(await fs.readFile(file, 'utf8'));
+  const cmds = commandsIn(cfg, 'Notification');
+  assert.ok(!cmds.some((c) => c.includes('holt hook notification')),
+    'a hook on a retired event must not survive reconciliation forever');
+  assert.ok(cmds.some((c) => c.includes('my-own-notifier')),
+    'the user\'s own hook on the same event must be untouched');
+  // The live events must still be wired — retirement must not eat the install.
+  assert.ok(commandsIn(cfg, 'PreToolUse').some((c) => c.includes('holt hook pre-tool-use')),
+    'the blocking hook must still be installed');
+});
+
+test('RETIREMENT: uninstall leaves no holt hook pointing at a removed binary', async (t) => {
+  const { root, file } = await repoWithRetiredHook(t, 'retire-uninstall');
+  await uninstall(root, { scope: 'project' });
+  const cfg = JSON.parse(await fs.readFile(file, 'utf8'));
+  const cmds = commandsIn(cfg, 'Notification');
+  assert.ok(!cmds.some((c) => c.includes('holt hook')),
+    'uninstall promises to remove every hook holt wrote — including on events it has retired');
+  assert.ok(cmds.some((c) => c.includes('my-own-notifier')),
+    'the user\'s own hook must survive uninstall');
+});
+
+test('RETIREMENT: NEVER-WORSE — a foreign hook that merely NAMES holt is not touched', async (t) => {
+  // The ownership rule must not widen along with the event sweep. These are the exact shapes
+  // that were destroyed 7-to-1 before binary-token ownership landed.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-retire-foreign-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }).catch(() => {}));
+  await fs.mkdir(path.join(root, '.claude'), { recursive: true });
+  const file = path.join(root, '.claude', 'settings.json');
+  const foreign = [
+    'npx holt-lint --fix',                       // a package whose NAME starts with holt
+    'node /home/holt/tools/audit.mjs',           // a path containing a USERNAME
+    'corp-guard --host claude-code --strict',    // shares a flag with holt's own command
+  ];
+  await fs.writeFile(file, `${JSON.stringify({
+    hooks: { Notification: foreign.map((c) => ({ hooks: [{ type: 'command', command: c }] })) },
+  }, null, 2)}\n`);
+
+  await installClaudeCode(root, { bin: 'holt' });
+  const afterInstall = commandsIn(JSON.parse(await fs.readFile(file, 'utf8')), 'Notification');
+  for (const c of foreign) {
+    assert.ok(afterInstall.includes(c), `integrate must not claim a foreign hook: ${c}`);
+  }
+  await uninstall(root, { scope: 'project' });
+  const afterUninstall = commandsIn(JSON.parse(await fs.readFile(file, 'utf8')), 'Notification');
+  for (const c of foreign) {
+    assert.ok(afterUninstall.includes(c), `uninstall must not delete a foreign hook: ${c}`);
+  }
+});

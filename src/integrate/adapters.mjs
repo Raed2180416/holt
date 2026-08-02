@@ -797,6 +797,66 @@ function isHoltHookCommand(command, subcommand) {
 }
 
 /**
+ * Is this holt's hook on ANY event — including one holt no longer wires?
+ *
+ * THE RETIREMENT HOLE. Reconciliation walks the events holt wants TODAY, so an event holt has
+ * since dropped is never visited and its hook survives every upgrade. Worse, `uninstall` walked
+ * the same list: holt's own help says to run it BEFORE removing the package, and it left a
+ * `holt hook <retired-event>` entry pointing at a binary that was about to disappear — the exact
+ * outcome that advice exists to prevent. REPRODUCED both ways against a settings.json holding a
+ * hook on a retired event.
+ *
+ * Ownership is unchanged and just as narrow as `isHoltHookCommand`: the argv head must BE the
+ * holt binary and its first argument must be `hook`. A third-party command that merely mentions
+ * holt is not matched — that conflation is what deleted other people's hooks 7-to-1.
+ */
+function isAnyHoltHookCommand(command) {
+  if (typeof command !== 'string') return false;
+  const argv = argvOf(command);
+  let i = 0;
+  while (i < argv.length && (LAUNCHERS.has(path.basename(argv[i]).toLowerCase()) || argv[i].startsWith('-')
+    || (i > 0 && ['dlx', 'exec', 'run', '-c'].includes(argv[i])))) i++;
+  if (i >= argv.length) return false;
+  if (!HOLT_BINARY.test(path.basename(argv[i]))) return false;
+  return argv[i + 1] === 'hook' && typeof argv[i + 2] === 'string' && argv[i + 2].length > 0;
+}
+
+/**
+ * Which events hold a holt hook that holt no longer wires, and what should be left in each.
+ *
+ * Returns a PLAN rather than mutating, because two writers have to apply the same decision: the
+ * in-memory object (used for a brand-new file) and the JSONC surgical-edit path (used whenever
+ * there is existing text to keep comments in). Computing it twice is how the two drift apart.
+ *
+ * @param {Record<string, any>} hooks  the `hooks` object from a Claude Code settings file
+ * @param {Set<string>} wantedEvents   events holt still wires (handled by the reconcile loop)
+ * @returns {Array<{event: string, kept: any[]|null}>} `kept: null` means remove the event key
+ */
+function planHoltHookRetirement(hooks, wantedEvents) {
+  const plan = [];
+  for (const event of Object.keys(hooks ?? {})) {
+    if (wantedEvents.has(event)) continue;
+    const existing = hooks[event];
+    if (!Array.isArray(existing)) continue;
+    const kept = [];
+    let touched = false;
+    for (const entry of existing) {
+      const cmds = commandsOf(entry);
+      if (!cmds.some((c) => isAnyHoltHookCommand(c))) { kept.push(entry); continue; }
+      touched = true;
+      // A USER'S OWN COMMAND SHARING THE ENTRY STILL SURVIVES — the same command-level
+      // granularity the live events get. Only what is entirely holt's disappears.
+      const userHooks = (entry.hooks ?? []).filter((h) => !isAnyHoltHookCommand(h?.command));
+      if (userHooks.length > 0) kept.push({ ...entry, hooks: userHooks });
+    }
+    // An event left with nothing is holt's leftover key, not the user's — drop it rather than
+    // leaving `"Notification": []` behind as litter.
+    if (touched) plan.push({ event, kept: kept.length > 0 ? kept : null });
+  }
+  return plan;
+}
+
+/**
  * Is this all that is left of a config file — an empty object and nothing else?
  *
  * THE RULE UNINSTALL NEEDED AND DID NOT HAVE. It used to ask whether the PARSED object was empty
@@ -1091,6 +1151,16 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
     cfg.hooks[event] = [...preserved, ...(nonArrayRemnant ? [nonArrayRemnant] : []), ...stillNeeded];
   }
 
+  // RETIREMENT IS DRIVEN BY THE FILE, NOT BY THE WISHLIST. The loop above can only ever visit
+  // events holt still wants; a hook holt wired in an earlier version on an event it has since
+  // dropped is invisible to it and survives every reconcile, firing forever at a subcommand that
+  // may no longer exist. Sweeping what is actually THERE is the only way to see it.
+  const retirement = planHoltHookRetirement(cfg.hooks, new Set(Object.keys(wanted)));
+  for (const { event, kept } of retirement) {
+    if (kept) cfg.hooks[event] = kept; else delete cfg.hooks[event];
+  }
+  const retired = retirement.length;
+
   await fs.mkdir(path.dirname(file), { recursive: true });
 
   // JSONC-PRESERVING WRITE: if we have the original text, use element-level reconciliation
@@ -1106,6 +1176,9 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
     }
 
     // For each event, use element-level reconciliation
+    // Annotated because jsoncWrite's declared return widens this to `never` on reassignment,
+    // which made every `result = <edited text>` below a diagnostic about a string that is fine.
+    /** @type {string} */
     let result = textWithHooks;
     for (const [event, entries] of Object.entries(wanted)) {
       const sub = CLAUDE_EVENT_SUBCOMMAND[event];
@@ -1163,17 +1236,30 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
         result = jsoncWrite(result, [[['hooks', event], entries]], { tabSize: 2, insertSpaces: true });
       }
     }
+    // The same retirement, applied to the text so comments survive it. Recomputed from `result`
+    // rather than reusing the in-memory plan because the surgical edits above have already moved
+    // things around; the DECISION comes from one function, the subject is whatever is there now.
+    for (const { event, kept } of planHoltHookRetirement(
+      readJsoncOrThrow(result).hooks ?? {}, new Set(Object.keys(wanted)),
+    )) {
+      const edited = jsoncWrite(result, [[['hooks', event], kept ?? undefined]], { tabSize: 2, insertSpaces: true });
+      if (edited != null) result = edited;
+    }
     output = result;
     if (!output.endsWith('\n')) output += '\n';
   } else {
     output = `${JSON.stringify(cfg, null, 2)}\n`;
   }
   await fs.writeFile(file, output, 'utf8');
-  const action = installed && !reconciled && !unchanged ? 'installed'
-    : reconciled ? `reconciled ${reconciled} stale hook(s) from a prior version${installed ? `, installed ${installed} new` : ''}`
-    : installed ? `installed ${installed} new hook(s) (rest already present)`
-    : 'already present';
-  return { adapter: 'claude-code', path: file, created, installed, reconciled, unchanged, action };
+  const retiredNote = retired ? `retired ${retired} hook(s) on event(s) holt no longer uses` : '';
+  const action = [
+    installed && !reconciled && !unchanged ? 'installed'
+      : reconciled ? `reconciled ${reconciled} stale hook(s) from a prior version${installed ? `, installed ${installed} new` : ''}`
+      : installed ? `installed ${installed} new hook(s) (rest already present)`
+      : 'already present',
+    retiredNote,
+  ].filter(Boolean).join(', ');
+  return { adapter: 'claude-code', path: file, created, installed, reconciled, unchanged, retired, action };
 }
 
 /* --------------------------------------------------------------------- OpenCode ---- */
@@ -1634,19 +1720,26 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
       const cfg = readJsoncOrThrow(rawText);
       let removed = 0;
       let result = rawText;
-      for (const [event, sub] of Object.entries(CLAUDE_EVENT_SUBCOMMAND)) {
+      // EVERY EVENT IN THE FILE, NOT EVERY EVENT HOLT KNOWS ABOUT. Iterating the known-events
+      // table meant a hook holt wired on an event it has since retired was never looked at — and
+      // holt's own help tells people to run uninstall BEFORE removing the package, so what it
+      // left behind was a hook pointing at a binary that was about to vanish. Ownership does not
+      // widen: isAnyHoltHookCommand still requires the argv head to BE the holt binary with
+      // `hook` as its first argument, which is what keeps third-party commands that merely
+      // mention holt out of it.
+      for (const event of Object.keys(cfg.hooks ?? {})) {
         if (!Array.isArray(cfg.hooks?.[event])) continue;
         const isMine = (entry) => {
           const cmds = commandsOf(entry);
-          const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
-          const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
+          const holtCmds = cmds.filter((c) => isAnyHoltHookCommand(c));
+          const userCmds = cmds.filter((c) => !isAnyHoltHookCommand(c));
           // Entirely holt's entry (no user commands) — remove it
           return holtCmds.length > 0 && userCmds.length === 0;
         };
         const isWidened = (entry) => {
           const cmds = commandsOf(entry);
-          const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
-          const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
+          const holtCmds = cmds.filter((c) => isAnyHoltHookCommand(c));
+          const userCmds = cmds.filter((c) => !isAnyHoltHookCommand(c));
           // Widened entry: has BOTH holt's and user's commands — strip holt's, keep user's
           return holtCmds.length > 0 && userCmds.length > 0;
         };
@@ -1669,9 +1762,9 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
           for (let i = 0; i < currentArr.length; i++) {
             const entry = currentArr[i];
             const cmds = commandsOf(entry);
-            const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
+            const holtCmds = cmds.filter((c) => isAnyHoltHookCommand(c));
             if (holtCmds.length > 0) {
-              const userHooks = (entry.hooks || []).filter((h) => !isHoltHookCommand(h?.command, sub));
+              const userHooks = (entry.hooks || []).filter((h) => !isAnyHoltHookCommand(h?.command));
               const strippedEntry = { ...entry, hooks: userHooks };
               result = jsoncWrite(result, [[['hooks', event, i], strippedEntry]], { tabSize: 2, insertSpaces: true });
             }
@@ -1715,9 +1808,12 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
       const cfg = readJsoncOrThrow(rawText);
       let removed = 0;
       let result = rawText;
-      for (const [event, sub] of Object.entries(CURSOR_EVENT_SUBCOMMAND)) {
+      // Same retirement hole as the Claude Code path above, same fix: sweep the events that are
+      // actually in the file, so a hook from a version that wired an event holt has since dropped
+      // is removed rather than left pointing at a binary the user is about to delete.
+      for (const event of Object.keys(cfg.hooks ?? {})) {
         if (!Array.isArray(cfg.hooks?.[event])) continue;
-        const isMine = (h) => isHoltHookCommand(h?.command, sub);
+        const isMine = (h) => isAnyHoltHookCommand(h?.command);
         const list = cfg.hooks[event];
         const mineCount = list.filter(isMine).length;
         if (mineCount === 0) continue;

@@ -90,6 +90,16 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "hook-retirement-blind",
+    "defect": "uninstall walks holt's table of known events again — a hook holt wired on an event it has since retired is never looked at, so `holt uninstall` leaves it pointing at a binary the user is about to delete",
+    "file": "src/integrate/adapters.mjs",
+    "find": "      for (const event of Object.keys(cfg.hooks ?? {})) {\n        if (!Array.isArray(cfg.hooks?.[event])) continue;\n        const isMine = (entry) => {",
+    "replace": "      for (const event of Object.keys(CLAUDE_EVENT_SUBCOMMAND)) { // mutated: retirement blind spot\n        if (!Array.isArray(cfg.hooks?.[event])) continue;\n        const isMine = (entry) => {",
+    "tests": [
+      "test/e2e/integrate-upgrade.test.mjs"
+    ]
+  },
+  {
     "id": "user-regex-runs-unbounded",
     "defect": "familyOverrides are matched on the main thread again — a `.holtrc.json` regex with catastrophic backtracking hangs every holt command including the blocking guard, and nothing in JS can interrupt it",
     "file": "src/discover.mjs",
