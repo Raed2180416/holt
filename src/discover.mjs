@@ -104,10 +104,6 @@ export function unquotePorcelain(s) {
  * singletons and can be the exact same fan-out. A human-readable name is not evidence of a
  * shared dispatch. Git's own history is:
  *
- *   FORK POINT     `git merge-base <base> <head>`. Workstreams dispatched together all fork
- *                  from the SAME commit — that is what "dispatched together" means. Two
- *                  efforts that just happen to share a naming convention essentially never
- *                  share an exact fork commit.
  *   CREATION TIME  when the workstream came into existence. VERIFIED empirically (see
  *                  creationTimeMs below) on Linux: the mtime of a linked worktree's private
  *                  `gitdir` file and the worktree's own per-worktree HEAD reflog entry agree
@@ -117,10 +113,23 @@ export function unquotePorcelain(s) {
  *                  primary signal for exactly that reason (it is a direct, single-purpose
  *                  measurement); the reflog read is the fallback when mtime is unavailable.
  *
- * CLUSTERING groups workstreams that share a fork point, then single-links them by creation
- * time within FAMILY_WINDOW_MS — so a fan-out dispatched over a couple of minutes (agents do
- * not all start in the same millisecond) still lands in one family, while two unrelated
- * dispatches that happen to fork from the same commit months apart do not.
+ * FORK POINT WAS TRIED AS THE PRIMARY SIGNAL AND IS GONE. `git merge-base <base> <head>` reads
+ * like the perfect witness — "workstreams dispatched together all fork from the same commit" —
+ * and adversarial review refuted it in both directions on ordinary repositories. Every worktree
+ * cut from an unchanged trunk shares a fork point whether or not it shares a dispatch, so a busy
+ * repo collapses into one enormous family; and a fan-out dispatched while trunk is MOVING (the
+ * normal case when agents run for hours and anything lands) forks from three different commits
+ * and splits into three. Requiring a shared fork point before clustering therefore both
+ * over-merged and under-merged, and the second is the expensive one: a real fan-out split into
+ * halves turns every duplicate pair between them from 'expected-fanout' into a confidently wrong
+ * 'cross-dispatch-waste'.
+ *
+ * CLUSTERING is therefore creation-burst first: single-linkage over creation time within
+ * FAMILY_WINDOW_MS, across the whole repository, so a fan-out dispatched over a couple of minutes
+ * (agents do not all start in the same millisecond) lands in one family however trunk moved
+ * underneath it. A shared fan-out naming STEM then bridges two bursts up to
+ * STEM_BRIDGE_WINDOW_MS apart — a second, independent witness, and the one thing that can span
+ * the gap a long stagger opens.
  *
  * NAMING IS A FALLBACK, used only when history genuinely cannot answer (no branch, no
  * reflog, no worktree metadata — e.g. some jj layouts, or a worktree whose metadata was lost).
@@ -132,8 +141,8 @@ export function unquotePorcelain(s) {
  */
 
 /**
- * The fork-point + creation-time window: how far apart two workstreams forked from the SAME
- * commit may have been created and still count as one dispatch.
+ * The creation-burst window: how far apart two workstreams may have been created and still
+ * count as one dispatch.
  *
  * 60 minutes. The first version of this was 5 minutes, justified by how fast a scripted
  * fan-out loop runs — and adversarial review refuted it with an entirely ordinary fixture: a
@@ -144,10 +153,10 @@ export function unquotePorcelain(s) {
  * "what gap separates one staggered dispatch from two unrelated efforts" — and that gap is
  * hours-to-days, not minutes. 60 minutes of single-linkage keeps every ordinary stagger in one
  * family (a chain of creations each within an hour of the previous stays whole, however long
- * the chain) while day-apart efforts sharing a fork point still split. Same-fork-point clusters
- * whose members share a fan-out naming stem merge across even this window — see the
- * corroboration step in assignFamilies. Configurable via `discover(cwd, { familyWindowMs })`
- * for repositories where this default is wrong.
+ * the chain) while day-apart efforts still split. Clusters whose members share a fan-out naming
+ * stem merge across even this window, bounded by STEM_BRIDGE_WINDOW_MS — see the corroboration
+ * step in assignFamilies. Configurable via `discover(cwd, { familyWindowMs })` for repositories
+ * where this default is wrong.
  */
 export const DEFAULT_FAMILY_WINDOW_MS = 60 * 60 * 1000;
 
@@ -198,15 +207,12 @@ export function inferFamily(name, overrides = []) {
   return { family: name, rule: 'singleton' };
 }
 
-/** The commit two workstreams (or a workstream and `base`) diverged from, or null if unknown. */
-async function forkPoint(root, baseOid, headOid) {
-  if (!baseOid || !headOid) return null;
-  if (baseOid === headOid) return baseOid; // the workstream IS base (e.g. primary, on trunk)
-  const r = await git(['merge-base', baseOid, headOid], { cwd: root }).catch(() => null);
-  if (!r || r.code !== 0) return null;
-  const oid = r.stdout.trim();
-  return oid || null;
-}
+// forkPoint() lived here — `git merge-base <base> <head>`, the original primary family signal.
+// It is deleted rather than kept "in case", because it had been dead since the burst-clustering
+// redesign landed and a dead implementation of a REFUTED idea is worse than no implementation:
+// the next reader finds a plausible helper, the module header still described it as the primary
+// signal (it did, until this commit), and the refutation lives nowhere near either. The reasoning
+// for dropping it is now in the family-inference header above, which is where it is load-bearing.
 
 /**
  * When a workstream's worktree came into existence, in epoch milliseconds, or null if holt
