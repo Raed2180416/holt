@@ -869,7 +869,10 @@ async function targetWorkstreams(report, target, cwd) {
   const suffix = globby
     ? target.slice((globFreePrefix(target) === '.' && !target.startsWith('.')) ? 0 : globFreePrefix(target).length).replace(/^\/+/, '')
     : '';
-  const re = suffix ? pathMatcher(`${abs}/${suffix}`.replace(/\/+/g, '/')).re : null;
+  // Forward-slash space so the glob matches on Windows too — see rootsReachedFromAbove.
+  const fwd = (p) => p.replace(/\\/g, '/');
+  const absF = fwd(abs);
+  const re = suffix ? pathMatcher(`${absF}/${suffix}`.replace(/\/+/g, '/')).re : null;
   const out = [];
   for (const s of report.safe) {
     if (!s.path) continue;
@@ -879,9 +882,9 @@ async function targetWorkstreams(report, target, cwd) {
       if (underOrEqual(sp, abs) && !samePath(sp, abs)) out.push(s);
       continue;
     }
-    for (let p = sp; p.length >= abs.length; p = path.dirname(p)) {
+    for (let p = fwd(sp); re && p.length >= absF.length; p = p.replace(/\/[^/]*$/, '')) {
       if (re.test(p)) { out.push(s); break; }
-      if (path.dirname(p) === p) break;
+      if (!p.includes('/')) break;
     }
   }
   return out;
@@ -1128,7 +1131,8 @@ export function lexSegments(command, depth = 0) {
   let truncated = [];
   let buf = '';
   let has = false;
-  let pending = null; // 'trunc' | 'append' | 'input' — where the NEXT word goes
+  /** @type {'trunc'|'append'|'input'|null} where the NEXT word goes */
+  let pending = null;
 
   const flushWord = () => {
     if (!has) return;
@@ -1532,11 +1536,19 @@ function rootsReachedFromAbove(roots, abs, suffix) {
   }
   // A glob (`../wt-*`): a root is reached only if the absolute pattern selects it or an ancestor
   // of it. Built from holt's own pathMatcher so the glob semantics are identical everywhere.
-  const { re } = pathMatcher(`${abs}/${suffix}`.replace(/\/+/g, '/'));
+  //
+  // MATCH IN FORWARD-SLASH SPACE. pathMatcher splits on '/', and on Windows the canonical paths
+  // and roots use '\\', so a pattern built with '/' never matched a '\\' root — measured: every
+  // CONTAINMENT/LOOP glob test returned allow on windows-latest. Normalising both sides to '/'
+  // (and walking ancestors by trimming the last '/'-segment rather than via path.dirname, whose
+  // separator is platform-dependent) makes the match identical on every platform.
+  const fwd = (p) => p.replace(/\\/g, '/');
+  const absF = fwd(abs);
+  const { re } = pathMatcher(`${absF}/${suffix}`.replace(/\/+/g, '/'));
   return roots.filter((r) => {
-    for (let p = r; p.length >= abs.length; p = path.dirname(p)) {
+    for (let p = fwd(r); p.length >= absF.length; p = p.replace(/\/[^/]*$/, '')) {
       if (re.test(p)) return true;
-      if (path.dirname(p) === p) break;
+      if (!p.includes('/')) break;
     }
     return false;
   });
