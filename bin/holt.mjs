@@ -335,6 +335,28 @@ function cmdAction(result, opts = {}) {
     if (Array.isArray(v) && v.length) lines.push(paint('grey', `  ${k}: ${v.length}`));
     else if (typeof v === 'number' && v > 0) lines.push(paint('grey', `  ${k}: ${v}`));
   }
+  // THE RECOVERY ROUTE IS THE POINT OF `discard` AND `rescue`, AND IT WAS THE ONE THING THE
+  // HUMAN PATH DROPPED.
+  //
+  // `holt discard <path>` at a TTY printed exactly one grey line — "…the edits you threw away are
+  // captured in the ref above and recoverable" — with no ref above it. No ref, no commit, no
+  // restore command. A dangling reference to output that was never emitted, pointing the reader
+  // at something that is not there, immediately after destroying their work. The JSON payload had
+  // `ref`, `commit`, `restore` and `inspect` all along; only the renderer threw them away, and
+  // the renderer is what a person sees.
+  //
+  // This is what makes an aggressive guard tolerable: the escape hatch has to say how to escape.
+  for (const [key, label] of [['ref', 'captured to'], ['commit', 'commit'], ['restore', 'restore with'], ['inspect', 'inspect with']]) {
+    if (typeof result?.[key] === 'string' && result[key]) {
+      lines.push(`  ${paint('grey', `${label}:`)} ${result[key]}`);
+    }
+  }
+  for (const [key, label] of [['reverted', 'restored from HEAD'], ['discarded', 'removed']]) {
+    const v = result?.[key];
+    if (Array.isArray(v) && v.length) {
+      lines.push(paint('grey', `  ${label} (${v.length}): ${v.slice(0, 5).join(', ')}${v.length > 5 ? ` … +${v.length - 5}` : ''}`));
+    }
+  }
   if (result.note) lines.push(paint('grey', `\n  ${result.note}`));
   if (lines.length) out(lines.join('\n'));
   else emitJson(result);

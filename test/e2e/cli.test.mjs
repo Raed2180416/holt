@@ -750,3 +750,38 @@ test('SOLO REPO: NEVER-WORSE — with siblings, the primary is still excluded an
   const human = await holt(['risk', '--cwd', fx.root], fx.root);
   assert.match(human.stdout, /--include-primary/, `the covering command must be named: ${human.stdout}`);
 });
+
+test('DISCARD: the human path prints the recovery route, not a pointer to nothing', async (t) => {
+  // `holt discard` at a TTY printed exactly one grey line — "the edits you threw away are captured
+  // in the ref above and recoverable" — with NO ref above it. No ref, no commit, no restore
+  // command: a dangling reference to output that was never emitted, pointing the reader at
+  // something that is not there, immediately after destroying their work. The JSON payload
+  // carried `ref`, `commit`, `restore` and `inspect` all along; only the renderer dropped them,
+  // and the renderer is what a person sees.
+  //
+  // This is what makes an aggressive guard tolerable: the escape hatch has to say how to escape.
+  const fx = await newRepo('discard-ref');
+  t.after(() => fx.cleanup());
+  await fx.write('a.txt', 'committed\n');
+  await fx.commit('base');
+  await fx.write('a.txt', 'an hour of hand edits\n');
+  await fx.write('junk.js', 'export function THROWAWAY() {}\n');
+
+  // --plain forces the human renderer even though stdout is a pipe here.
+  const r = await holt(['discard', 'a.txt', 'junk.js', '--plain', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+
+  assert.match(r.stdout, /refs\/holt\/discard\//,
+    `the capture ref must be printed: ${r.stdout}`);
+  assert.match(r.stdout, /restore with:.*git checkout refs\/holt\/discard\//,
+    `and the exact command that brings it back: ${r.stdout}`);
+  assert.match(r.stdout, /commit:\s*[0-9a-f]{7,}/, `and the commit that holds it: ${r.stdout}`);
+  assert.match(r.stdout, /a\.txt/, `and which paths were touched: ${r.stdout}`);
+
+  // THE REF MUST ACTUALLY EXIST AND ACTUALLY HOLD THE CONTENT — grade from the filesystem, not
+  // from what was printed.
+  const ref = /refs\/holt\/discard\/[^\s]+/.exec(r.stdout)[0];
+  const show = await fx.git(['show', `${ref}:a.txt`]);
+  assert.match(show, /an hour of hand edits/,
+    `the printed ref must really hold the discarded content, got: ${JSON.stringify(show)}`);
+});
