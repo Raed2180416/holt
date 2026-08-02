@@ -39,7 +39,7 @@ runs:
         # silently start installing a stranger's package with our name on it. A 404 fallback is
         # not a safe default when the thing being fallen back FROM is unclaimed.
         # A tag is immutable to force-push, so a consumer's CI cannot be moved under it.
-        npm install -g "github:Raed2180416/holt#v0.3.0" >/dev/null 2>&1
+        npm install -g "github:Raed2180416/holt#v0.3.1" >/dev/null 2>&1
         ARGS=()
         [ "$HOLT_IN_FAIL" = "true" ] && ARGS+=(--fail-on-unlanded)
         [ -n "$HOLT_IN_AGE" ] && ARGS+=(--max-age-days "$HOLT_IN_AGE")

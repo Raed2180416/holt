@@ -3,7 +3,7 @@
 Every number on this page is reproducible from this repository with the command shown beside it.
 No number is published without its conditions. Each section states what was measured, how the
 fixture was constructed, the exact command to reproduce it, and one sentence on what the result
-does and does not establish. Runtime for the figures below: Linux, Node v24.18.0, holt v0.3.0.
+does and does not establish. Runtime for the figures below: Linux, Node v24.18.0, holt v0.3.1.
 
 ## 1 · Correctness at scale
 

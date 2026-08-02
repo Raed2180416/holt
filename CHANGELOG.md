@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.3.1
+
+**The safety guarantees are now true on every path we could find.** 0.3.0 made the claims; this
+release is where they hold. It exists because the instruments meant to be checking holt were
+themselves broken, and once they were fixed the product turned out to be failing open in several
+ordinary situations. Every item below was reproduced before it was fixed and re-checked red
+against the old code.
+
+**The guard was failing open**
+
+- The hooks `holt integrate` installs disarmed it: the blocking guard and the brief shared one
+  report cache keyed only on the repository root, so the brief's analysis — computed without your
+  own worktree — was served to the guard. `git clean -fd` went from refused to allowed the moment
+  the brief hook ran, which the installed configuration does on every user message.
+- A space anywhere in the path turned it off — eight of nine destructive forms flipped to allow.
+- A newline in a worktree name did the same, while `holt risk` named that worktree as holding work
+  found nowhere else.
+- `rm -rf <repository root>` was allowed. `.git` is inside that path.
+- The hook stalled every tool call for as long as the host held stdin open — 27 s measured, now
+  0.1 s.
+
+**holt was deleting files that were not its own**
+
+- `integrate` claimed and removed third-party hooks via `--host`, a package name containing
+  `holt`, or a username in a path. `uninstall` deleted config files in repositories holt had never
+  been installed into. A legal JSONC trailing comma made `integrate` replace a team's whole MCP
+  config. A hand-written `pre-commit` was deleted for mentioning holt in a comment.
+  `integrate --dry-run` wrote 21 files.
+- Ownership is now argv-shaped, and a config holt cannot parse is left alone rather than replaced.
+
+**Correctness**
+
+- A repository with one worktree reported zero risk while holding real risk; the primary is now
+  scanned when it is the only worktree, and is still never a deletion candidate.
+- Duplicate detection reported false positives without ctags.
+- `auto` announced a lock git had refused; `protect` exited 0 having failed; `discard` printed no
+  recovery ref; the guard refused ordinary commands whose arguments came from substitutions.
+
+**What checks holt is now checked**
+
+- 43% of the codebase never reached the no-telemetry and path-comparison gates. The no-telemetry
+  guarantee survived the widened scan.
+- The static-analysis ratchet wrote a zero and passed when the checker could not run.
+- Both benchmark harnesses reported "correct" for runs that graded nothing. §1's 1000/1000 is
+  still 1000/1000, now genuinely graded.
+
+
 ## 0.3.0
 
 **The guard closes the gaps that actually lose work, the product gets an escape hatch and an
