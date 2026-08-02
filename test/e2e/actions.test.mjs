@@ -1991,3 +1991,57 @@ test('JOURNAL FAILURE: never a reason to refuse — protect/rescue/discard/clean
   const r = await rescue(fx.root, 'important', {});
   assert.equal(r.ok, true, 'a journal failure must not turn a good rescue into a refusal');
 });
+
+/* -------------------------------- protection must be claimed only when it happened ---- */
+
+/**
+ * `holt auto` TOLD EVERY SOLO USER THEIR AT-RISK WORK WAS LOCKED, WHILE REPORTING protected: 0.
+ *
+ * The note was emitted whenever `atRisk` was non-empty — "locked — git itself now refuses to
+ * remove these" — two fields below `protected: 0` in the same JSON object. Both cannot be true,
+ * and `git worktree list --porcelain` showed no `locked` attribute at all.
+ *
+ * In a single-worktree repository this is permanent rather than a race: `git worktree lock`
+ * refuses the main working tree outright ("fatal: The main working tree cannot be locked or
+ * unlocked"). holt asked, git declined, holt recorded the failure in its own payload — and then
+ * announced the protection anyway. A false all-clear about protection is worse than no
+ * protection, because it is the one that gets acted on.
+ *
+ * And `holt protect` exited 0 with `failed: 1`, so `holt protect && <proceed>` proceeded.
+ */
+test('PROTECT: a lock git refused is never reported as a lock', async (t) => {
+  const fx = await newRepo('protect-truthful');
+  t.after(() => fx.cleanup());
+  await fx.write('only.js', 'export function PROTECT_TRUTH_SOLE() {}\n');
+
+  const a = await auto(fx.root, {});
+  assert.equal(a.did.protected, 0, 'PRECONDITION: git cannot lock a main working tree');
+  assert.equal(a.atRisk.count, 1, 'PRECONDITION: the work really is at risk');
+  assert.equal(a.atRisk.locked, 0, 'and nothing was locked');
+  assert.doesNotMatch(a.atRisk.note, /^locked —/,
+    `the note must not open by claiming a lock that did not happen: ${a.atRisk.note}`);
+  assert.match(a.atRisk.note, /could NOT be locked/i, a.atRisk.note);
+  assert.match(a.atRisk.note, /rescue|Commit/i,
+    `and it must say what DOES make the work durable: ${a.atRisk.note}`);
+
+  // The exit code is the contract scripts chain on.
+  const p = await protect(fx.root, {});
+  assert.equal(p.protected, 0);
+  assert.equal(p.failed, 1, `the failure must be recorded: ${JSON.stringify(p.actions)}`);
+});
+
+test('PROTECT: NEVER-WORSE — a linked worktree holding work is still locked, and says so', async (t) => {
+  // Without this, the fix above is satisfied by a `protect` that never claims anything.
+  const fx = await newRepo('protect-neverworse');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('holder');
+  await fx.write('w.js', 'export function LINKED_SOLE() {}\n', wt);
+
+  const p = await protect(fx.root, {});
+  assert.equal(p.failed, 0, `a linked worktree must lock cleanly: ${JSON.stringify(p.actions)}`);
+  assert.equal(p.protected, 1, `and be counted: ${JSON.stringify(p.actions)}`);
+
+  const a = await auto(fx.root, {});
+  assert.ok(a.atRisk.locked >= 1 || a.did.protected >= 1,
+    `auto must be able to report a real lock: ${JSON.stringify(a.atRisk)}`);
+});

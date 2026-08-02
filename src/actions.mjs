@@ -611,11 +611,37 @@ export async function auto(cwd, opts = {}) {
           + 'itself: deleting is final, and a verdict is only as good as the scan behind it.'
         : null,
     },
-    atRisk: {
-      count: atRisk.length,
-      ids: atRisk.map((u) => u.id),
-      note: atRisk.length ? 'locked — git itself now refuses to remove these' : null,
-    },
+    // THE NOTE IS COMPUTED FROM WHAT ACTUALLY HAPPENED, not from the fact that anything was at
+    // risk. It used to read "locked — git itself now refuses to remove these" whenever atRisk was
+    // non-empty, two fields below `protected: 0` in the same JSON object. Both cannot be true, and
+    // `git worktree list --porcelain` shows which one is not.
+    //
+    // In a single-worktree repository this is not a race, it is permanent: `git worktree lock`
+    // refuses the main working tree outright ("fatal: The main working tree cannot be locked or
+    // unlocked"), so `holt auto` told every solo user their at-risk work was protected by git when
+    // git had declined and holt knew it. A false all-clear about protection is worse than no
+    // protection, because it is acted on.
+    atRisk: (() => {
+      if (!atRisk.length) return { count: 0, ids: [], note: null };
+      const lockedNow = (p.actions ?? []).filter((a) => a.action === 'locked' || a.action === 'already-locked');
+      const unlockable = (p.actions ?? []).filter((a) => a.action === 'failed'
+        && /main working tree cannot be locked/i.test(a.reason ?? ''));
+      const parts = [];
+      if (lockedNow.length) parts.push(`${lockedNow.length} locked — git itself now refuses to remove those`);
+      if (unlockable.length) {
+        parts.push(`${unlockable.length} could NOT be locked: git refuses to lock a main working tree. `
+          + 'holt\'s own guard still refuses destructive commands against it, but git will not stop `rm`. '
+          + 'Commit, or `holt rescue <id>`, to make this work durable.');
+      }
+      const otherFailures = (p.actions ?? []).filter((a) => a.action === 'failed').length - unlockable.length;
+      if (otherFailures > 0) parts.push(`${otherFailures} lock attempt(s) FAILED — run \`holt protect\` to see why`);
+      return {
+        count: atRisk.length,
+        ids: atRisk.map((u) => u.id),
+        locked: lockedNow.length,
+        note: parts.length ? parts.join('; ') : 'at risk, and NOT locked — run `holt protect` to see why',
+      };
+    })(),
     unknown: unknown.map((u) => ({ id: u.id, why: u.reasons[0] })),
   };
 }

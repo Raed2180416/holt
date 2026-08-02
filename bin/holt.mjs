@@ -291,6 +291,18 @@ async function buildReport(opts) {
  * a human at a TTY gets prose. --json forces JSON; --plain forces prose.
  */
 function cmdAction(result, opts = {}) {
+  // AN ACTION THAT FAILED MUST NOT EXIT 0. Scripts and agents chain on these:
+  //
+  //     holt protect && <proceed as though the work is now safe>
+  //
+  // `holt protect` on a single-worktree repository exited 0 with `failed: 1` and the reason
+  // "fatal: The main working tree cannot be locked or unlocked" sitting inside its own payload —
+  // git refuses to lock a main working tree, permanently, so this is every solo repo rather than
+  // a race. The exit code said the protection succeeded. Anything downstream believed it.
+  //
+  // Set here rather than at each call site because every action command routes through this one
+  // renderer, and a rule enforced in six places is a rule enforced in five.
+  if (typeof result?.failed === 'number' && result.failed > 0) process.exitCode = 1;
   const wantJson = opts.json || (!process.stdout.isTTY && !opts.plain);
   if (wantJson) { emitJson(result); return result; }
   // Human-readable summary for action commands
