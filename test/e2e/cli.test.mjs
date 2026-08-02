@@ -569,3 +569,70 @@ test('INTEGRATE: --dry-run writes NOTHING, and says what it would have written',
   assert.ok(plan.planned.every((p) => p.file && p.action), 'every planned row names a file and an action');
   assert.deepEqual((await fs.readdir(fx.root)).sort(), before, 'the --json dry run must also write nothing');
 });
+
+test('HOOK: answers and EXITS while the host still holds stdin open', async (t) => {
+  // MEASURED: the verdict was computed and printed, and then holt sat there — the 'data'/'end'
+  // listeners keep the event loop alive for as long as the host holds the pipe. A producer that
+  // wrote the payload and kept stdin open for 25 seconds blocked holt for the full 25.
+  //
+  // Claude Code, Cursor and every other host that reuses one descriptor across a session does
+  // exactly that, so this was a guard that stalled EVERY tool call for as long as the host held
+  // the pipe. A guard that makes the agent unusable gets uninstalled the same day, which costs
+  // all of the protection it was providing.
+  const fx = await newRepo('hook-stdin');
+  t.after(() => fx.cleanup());
+  await fx.worktree('sib');
+
+  const payload = JSON.stringify({
+    tool_name: 'Bash', tool_input: { command: 'git status' }, cwd: fx.root,
+  });
+
+  const started = Date.now();
+  const { out, code } = await new Promise((resolve) => {
+    const child = execFile(process.execPath, [BIN, 'hook', 'pre-tool-use', '--cwd', fx.root], {
+      cwd: fx.root, timeout: 60_000, env: { ...process.env, NO_COLOR: '1' },
+    }, (err, stdout) => resolve({ out: String(stdout ?? ''), code: err ? (err.code ?? 1) : 0 }));
+    child.stdin.write(payload);
+    // DELIBERATELY NOT CLOSED. This is the whole test: the host is still holding the pipe.
+    const hold = setTimeout(() => { try { child.stdin.end(); } catch { /* already gone */ } }, 30_000);
+    child.on('exit', () => clearTimeout(hold));
+  });
+  const elapsed = Date.now() - started;
+
+  // THE THRESHOLD IS THE POINT, and a loose one made this test vacuous on the first attempt: at
+  // 15 s it passed against the unfixed code, which answered in 4.2 s — the readStdin timeout —
+  // and only hung indefinitely in some host shapes. The property that actually holds is stronger
+  // and always observable: a COMPLETE payload must never pay the stdin timeout at all. Unfixed
+  // that is ~4.2 s (the timeout, every time, on every tool call); fixed it is ~0.6 s.
+  assert.ok(elapsed < 2_500,
+    `a complete payload must be answered without waiting out the stdin timeout — took ${elapsed}ms `
+    + 'with the pipe held open (unfixed: ~4200ms, the full readStdin timeout)');
+  assert.ok(out.trim().length > 0, `and it must still answer: ${JSON.stringify(out)}`);
+  assert.doesNotThrow(() => JSON.parse(out), `the answer must be the usual JSON: ${out}`);
+  assert.equal(code, 0, 'a benign command is allowed, exit 0');
+});
+
+test('HOOK: NEVER-WORSE — a closed pipe still gets the right verdict, deny included', async (t) => {
+  // The other direction. A readStdin that resolved too eagerly — on the first chunk, say — would
+  // satisfy the timing test above and then grade a truncated payload, which is a guard reading
+  // half a command. Both the allow and the deny path are asserted on a normally-closed pipe.
+  const fx = await newRepo('hook-closed');
+  t.after(() => fx.cleanup());
+  await fx.worktree('sib');
+  await fx.write('only.js', 'export function HOOK_SOLE_COPY() {}\n', fx.wt('sib'));
+
+  const run = (command, cwd) => new Promise((resolve) => {
+    const child = execFile(process.execPath, [BIN, 'hook', 'pre-tool-use', '--cwd', fx.root], {
+      cwd: fx.root, timeout: 60_000, env: { ...process.env, NO_COLOR: '1' },
+    }, (err, stdout) => resolve({ out: String(stdout ?? ''), code: err ? (err.code ?? 1) : 0 }));
+    child.stdin.end(JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }));
+  });
+
+  const allowed = await run('git status', fx.root);
+  assert.equal(JSON.parse(allowed.out).decision, 'allow', `benign must be allowed: ${allowed.out}`);
+
+  const denied = await run(`rm -rf ${fx.wt('sib')}`, fx.root);
+  const v = JSON.parse(denied.out);
+  assert.equal(v.decision, 'deny', `destroying the only copy must be refused: ${denied.out}`);
+  assert.match(v.reason, /HOOK_SOLE_COPY|nowhere else/, `and the refusal must name the work: ${v.reason}`);
+});

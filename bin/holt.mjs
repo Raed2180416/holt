@@ -532,10 +532,39 @@ function readStdin(timeoutMs = 4000) {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) return resolve('');
     let data = '';
-    const done = (v) => { clearTimeout(timer); resolve(v); };
+    // TEAR THE READER DOWN BEFORE RESOLVING, or the process never exits.
+    //
+    // The timeout fired and the verdict was computed and printed — and then holt sat there,
+    // because the 'data'/'end' listeners keep the event loop alive for as long as the host holds
+    // the pipe open. Measured: a host that writes the payload and keeps stdin open blocked for
+    // 27 seconds on a call whose answer was ready in four. Claude Code, Cursor and every other
+    // host that reuses one pipe across a session do exactly that, so this is a hook that stalls
+    // EVERY tool call by however long the host keeps the descriptor — and a guard that makes the
+    // agent unusable gets uninstalled the same day, which costs all of the protection.
+    const done = (v) => {
+      clearTimeout(timer);
+      process.stdin.removeAllListeners('data');
+      process.stdin.removeAllListeners('end');
+      process.stdin.removeAllListeners('error');
+      process.stdin.pause();
+      resolve(v);
+    };
     const timer = setTimeout(() => done(data), timeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
     process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (c) => { data += c; });
+    // ANSWER AS SOON AS THE PAYLOAD IS COMPLETE, rather than waiting for end-of-stream.
+    //
+    // A hook payload is exactly one JSON object. Waiting for `end` means a host that keeps the
+    // pipe open across a session pays the full timeout on EVERY tool call — four seconds of
+    // stall, every time, for an answer that was ready immediately. Parsing to decide when the
+    // object is complete costs one JSON.parse per chunk on input that is a few hundred bytes.
+    process.stdin.on('data', (c) => {
+      data += c;
+      const t = data.trim();
+      if (!t.startsWith('{') && !t.startsWith('[')) return;   // not JSON; fall back to end/timeout
+      try { JSON.parse(t); } catch { return; }                 // still incomplete
+      done(data);
+    });
     process.stdin.on('end', () => done(data));
     process.stdin.on('error', () => done(data));
   });
