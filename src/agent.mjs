@@ -1697,6 +1697,10 @@ async function assessStashEntries(command, cwd, hit) {
   // `clear` is the one that genuinely takes them all, and it takes no selector at all — read
   // from the argv rather than by searching the string, so a stash MESSAGE containing the word
   // "clear" (`git stash push -m "clear the decks"`) cannot rewrite which entries are at stake.
+  // Can this command reach an entry the walk never scanned? `clear` takes every entry, so past
+  // the cap it always can. Anything narrower can only be cleared of that suspicion by RESOLVING
+  // to an entry holt actually read.
+  let reachesUnscanned = state.truncated;
   if (stashArgs(command)[0] !== 'clear') {
     const selector = stashSelector(command);
     // `undefined` is an operand holt could not resolve — NOT an absent one. The safe answers
@@ -1704,16 +1708,37 @@ async function assessStashEntries(command, cwd, hit) {
     // entry (holt does not know which is going), an absent one weighs exactly stash@{0}.
     if (selector !== undefined) {
       const one = state.entries.find((e) => e.selector === selector);
-      if (one) scoped = [one];
+      // A selector that names an entry holt READ is fully accounted for, cap or no cap — this is
+      // what keeps a bare `git stash drop` (which means stash@{0}) cheap and allowed.
+      if (one) { scoped = [one]; reachesUnscanned = false; }
       // A selector holt could not match means "not there" ONLY when holt saw the whole stash.
       // The walk is capped (MAX_ENTRIES), and beyond the cap an unmatched selector means "not
       // looked at" — so there, every entry is weighed rather than none.
-      else if (state.total < MAX_ENTRIES) scoped = [];
+      else if (!state.truncated) { scoped = []; reachesUnscanned = false; }
     }
   }
 
   const doomed = scoped.filter((e) => e.uniqueCount > 0);
   if (doomed.length === 0) {
+    // NOTHING AT RISK AMONG THE ENTRIES HOLT READ IS NOT NOTHING AT RISK. Past the cap the walk
+    // stops, and a sole copy sitting at stash@{30} produces exactly this empty result — every
+    // scanned entry provably safe, the one that matters never examined. Answering `allow` here
+    // reports the silence as an all-clear and destroys the content; the honest answer is that
+    // holt did not look, which is the same answer it gives when it cannot read the stash at all.
+    if (reachesUnscanned) {
+      return {
+        decision: 'ask',
+        kind: hit.kind,
+        targets: [],
+        reason: `holt is asking before this: ${hit.kind}. This repository has more than `
+          + `${MAX_ENTRIES} stash entries and holt scanned only the first ${MAX_ENTRIES}. Nothing `
+          + 'at risk was found among those — but this command can reach entries holt never '
+          + 'examined, so that is not an all-clear.\n'
+          + 'Run `git stash list` and check the entries past '
+          + `stash@{${MAX_ENTRIES - 1}} before proceeding, or `
+          + '`holt rescue` them to a ref first.',
+      };
+    }
     return { decision: 'allow', reason: null, kind: hit.kind, targets: [] };
   }
 

@@ -90,6 +90,26 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "user-regex-runs-unbounded",
+    "defect": "familyOverrides are matched on the main thread again — a `.holtrc.json` regex with catastrophic backtracking hangs every holt command including the blocking guard, and nothing in JS can interrupt it",
+    "file": "src/discover.mjs",
+    "find": "  const safeOverrides = await screenOverrides(familyOverrides, workstreams.map((w) => w.id), {",
+    "replace": "  const safeOverrides = familyOverrides; const _unused = ((x) => x)({ // mutated: user regex run unscreened",
+    "tests": [
+      "test/unit/saferegex.test.mjs"
+    ]
+  },
+  {
+    "id": "stash-cap-reads-as-all-clear",
+    "defect": "past MAX_ENTRIES the guard reports 'nothing at risk among the 25 I scanned' as a clean allow — `git stash clear` and a drop of stash@{30} destroy a sole copy holt never examined",
+    "file": "src/agent.mjs",
+    "find": "    if (reachesUnscanned) {",
+    "replace": "    if (false) { // mutated: the unscanned tail is treated as an all-clear",
+    "tests": [
+      "test/e2e/stash-evidence.test.mjs"
+    ]
+  },
+  {
     "id": "mutation-verbs-uncovered",
     "defect": "the reset --hard rule is removed — holt blocks worktree DELETION but allows the command that destroys the same work in place",
     "file": "src/agent.mjs",

@@ -445,6 +445,107 @@ test('STASH: more than MAX_ENTRIES entries → truncated flag is set and describ
   assert.match(desc, /review.*manually/i, 'describeStash must tell the user to review the rest manually');
 });
 
+/*
+ * PAST THE CAP, "NOTHING FOUND" IS NOT "NOTHING THERE".
+ *
+ * The walk stops at MAX_ENTRIES. Put the only copy of real work OLDER than that many stashes and
+ * it sits at stash@{30}, never examined — while every entry holt DID read is provably safe. The
+ * guard then computes an empty at-risk set and, before this was fixed, reported it as `allow`:
+ * holt watched the one command that destroys the content and waved it through.
+ *
+ * The entries stacked on top must be genuinely safe or the test proves nothing — it would deny on
+ * evidence from the scanned entries and look like it had caught this. holt's reachability walk is
+ * PATH-SCOPED, so "safe" means the SAME PATH committed with the SAME BLOB, which is what the loop
+ * below builds. The control at the end is the other half: a drop holt CAN account for must still
+ * be allowed, because refusing a provably safe command is its own bug.
+ */
+async function repoWithSoleCopyPastTheCap(t, name) {
+  const fx = await newRepo(name);
+  t.after(() => fx.cleanup());
+
+  await fs.writeFile(path.join(fx.root, 'treasure.js'), `export function ${ONLY_HERE}(){ return 42; }\n`);
+  assert.equal((await gitIn(['stash', 'push', '-u', '-m', 'THE ONLY COPY'], fx.root)).code, 0);
+
+  for (let i = 0; i < MAX_ENTRIES + 5; i++) {
+    const rel = `f${i}.js`;
+    const abs = path.join(fx.root, rel);
+    await fs.writeFile(abs, `export function f${i}(){ return 'A'; }\n`);
+    await gitIn(['add', rel], fx.root);
+    await gitIn(['commit', '-qm', `f${i} A`], fx.root);
+
+    const bodyB = `export function f${i}(){ return 'B'; }\n`;
+    await fs.writeFile(abs, bodyB);
+    assert.equal((await gitIn(['stash', 'push', '-m', `safe ${i}`], fx.root)).code, 0);
+    // Commit that identical blob at that identical path, so the entry holds nothing unique.
+    await fs.writeFile(abs, bodyB);
+    await gitIn(['add', rel], fx.root);
+    await gitIn(['commit', '-qm', `f${i} B`], fx.root);
+  }
+
+  const list = (await gitIn(['stash', 'list'], fx.root)).out.trim().split('\n');
+  const line = list.find((l) => l.includes('THE ONLY COPY'));
+  assert.ok(line, 'premise: the sole-copy entry must still be in the stash');
+  const selector = line.split(':')[0];
+  assert.ok(Number(/\{(\d+)\}/.exec(selector)[1]) >= MAX_ENTRIES,
+    `premise: the sole copy must sit PAST the cap, it is at ${selector}`);
+
+  // Premise: it really is the only copy — no ref introduces this content.
+  const inRefs = (await gitIn(['log', '--all', '-S', ONLY_HERE, '--oneline'], fx.root)).out.trim();
+  assert.equal(inRefs, '', 'premise: no ref may hold the sole-copy content');
+
+  // Premise: every entry holt actually scanned is safe, so an at-risk hit could only come from
+  // the unscanned tail. Without this the test would pass against the unfixed code.
+  const state = await stashState(fx.root);
+  assert.equal(state.truncated, true, 'premise: the scan must be truncated');
+  assert.equal(state.atRisk.length, 0,
+    `premise: every SCANNED entry must be provably safe, ${state.atRisk.length} were not`);
+
+  return { fx, selector };
+}
+
+test('STASH: dropping a sole-copy entry PAST the cap is not allowed', async (t) => {
+  const { fx, selector } = await repoWithSoleCopyPastTheCap(t, 'stash-cap-drop');
+  const v = await assessCommand(`git stash drop ${selector}`, fx.root);
+  assert.notEqual(v.decision, 'allow',
+    'holt scanned 25 of 31 entries, found nothing at risk among them, and allowed the drop of the one it never read');
+  assert.match(v.reason, /scanned only the first/i, 'the reason must say holt did not read them all');
+});
+
+test('STASH: `git stash clear` past the cap is not allowed', async (t) => {
+  const { fx } = await repoWithSoleCopyPastTheCap(t, 'stash-cap-clear');
+  const v = await assessCommand('git stash clear', fx.root);
+  assert.notEqual(v.decision, 'allow', 'clear takes every entry, including the ones holt never read');
+  assert.match(v.reason, /scanned only the first/i);
+});
+
+test('STASH: past the cap, a drop holt CAN account for stays allowed', async (t) => {
+  const { fx } = await repoWithSoleCopyPastTheCap(t, 'stash-cap-control');
+  // stash@{0} was scanned and is provably safe. Truncation elsewhere is not a licence to refuse
+  // a command holt has complete evidence about — over-refusal trains users to bypass the guard.
+  for (const cmd of ['git stash drop stash@{0}', 'git stash drop']) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow',
+      `${cmd} targets a scanned, provably safe entry and must not be refused (got ${v.decision})`);
+  }
+});
+
+test('STASH: exactly MAX_ENTRIES entries is a COMPLETE scan, not a truncated one', async (t) => {
+  const fx = await newRepo('stash-exactly-cap');
+  t.after(() => fx.cleanup());
+  // Hitting the limit is not evidence that anything lies beyond it. Inferring "there must be
+  // more" from "I stopped counting" made holt hedge about a stash it had in fact read in full.
+  for (let i = 0; i < MAX_ENTRIES; i++) {
+    await fs.writeFile(path.join(fx.root, `file-${i}.txt`), `unique content ${i}`);
+    assert.equal((await gitIn(['stash', 'push', '-u', '-m', `entry-${i}`], fx.root)).code, 0);
+  }
+  const state = await stashState(fx.root);
+  assert.equal(state.total, MAX_ENTRIES, 'all MAX_ENTRIES entries must be scanned');
+  assert.equal(state.truncated, false,
+    'exactly MAX_ENTRIES entries means holt read every one — truncated must be false');
+  assert.doesNotMatch(describeStash(state), /scanned only the first/i,
+    'holt must not warn about entries it did not skip');
+});
+
 test('STASH: fewer than MAX_ENTRIES entries → no truncation, no warning', async (t) => {
   const fx = await newRepo('stash-not-truncated');
   t.after(() => fx.cleanup());

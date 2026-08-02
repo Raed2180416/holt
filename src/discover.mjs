@@ -16,6 +16,7 @@ import { resolveBase } from './scan.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalPath, foldCase } from './paths.mjs';
+import { screenOverrides, declinedMessage } from './saferegex.mjs';
 
 /**
  * Build the error every "this call needed disc.root and it was null" call site throws.
@@ -320,10 +321,18 @@ export async function assignFamilies(root, workstreams, {
   stemBridgeWindowMs = STEM_BRIDGE_WINDOW_MS,
   base = null,
 } = {}) {
+  // USER REGEXES ARE SCREENED BEFORE THEY RUN ON THIS THREAD. A pattern that backtracks without
+  // bound cannot be interrupted once `match` has entered it, so it is first run against these
+  // exact names in a worker that CAN be killed; only what completes there is used here. Costs
+  // nothing when there are no overrides, which is the usual case. See src/saferegex.mjs.
+  const safeOverrides = await screenOverrides(familyOverrides, workstreams.map((w) => w.id), {
+    onDeclined: (declined) => process.stderr.write(declinedMessage(declined)),
+  });
+
   const results = new Map();
   const pending = [];
   for (const w of workstreams) {
-    const named = inferFamily(w.id, familyOverrides);
+    const named = inferFamily(w.id, safeOverrides);
     if (named.rule === 'user-override') {
       results.set(w.id, { family: named.family, familyRule: 'user-override' });
     } else if (w.isPrimary) {

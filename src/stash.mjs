@@ -66,8 +66,12 @@ export async function stashEntries(cwd, { timeout = 10_000 } = {}) {
     if (!line.trim()) continue;
     const [selector, message, oid] = line.split('\0');
     if (!selector || !oid) continue;
-    out.push({ selector, message: message ?? '', oid });
+    // Read ONE PAST THE CAP so "holt stopped at 25" stays distinguishable from "there are exactly
+    // 25". Concluding "there must be more" from "I hit the limit" is the same absence-of-evidence
+    // mistake this module exists to end, one scope down: it makes the guard hedge about a stash it
+    // did in fact read in full, and a hedge on a provably safe drop is over-refusal.
     if (out.length >= MAX_ENTRIES) { truncated = true; break; }
+    out.push({ selector, message: message ?? '', oid });
   }
   // LOUD BREAK: if the repo has more stash entries than MAX_ENTRIES, holt stops scanning at the
   // cap — and entries beyond the cap might hold the only copy of real work. Silently stopping
@@ -261,7 +265,13 @@ async function reachableBlobs(cwd, paths, { timeout }) {
  *                   unique: Array<{path: string, sha: string, layer: string}>,
  *                   uniqueCount: number, checked: boolean}>,
  *   atRisk: Array<object>, total: number, checked: boolean,
+ *   truncated: boolean,
  * }>}
+ *
+ * `truncated` — the walk stopped at MAX_ENTRIES and there is at least one entry beyond it that
+ * holt did NOT examine. It was already being returned and merely undeclared, which let callers
+ * read it while the checker insisted it did not exist; the guard depends on it to tell "nothing
+ * at risk" apart from "nothing at risk among the ones I read", so it is part of the contract.
  */
 export async function stashState(cwd, { timeout = 10_000 } = {}) {
   const empty = { entries: [], atRisk: [], total: 0, checked: true, truncated: false };
