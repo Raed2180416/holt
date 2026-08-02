@@ -542,8 +542,16 @@ test('FIRST RUN: `holt brief` never fabricates a clean bill when the scan could 
     assert.doesNotMatch(healthy.stdout, /clean right now/,
       'a repo with a dirty sibling must never read as clean');
 
-    if (pointerText === null) await fs.chmod(path.join(sib, '.git'), 0o000);
-    else await fs.writeFile(path.join(sib, '.git'), pointerText);
+    if (pointerText === null) {
+      await fs.chmod(path.join(sib, '.git'), 0o000);
+    } else {
+      // UNLINK FIRST. git creates a linked worktree's `.git` pointer as a HIDDEN file on Windows,
+      // and Node's fs.writeFile opens an existing hidden file with EPERM there — so the fixture
+      // died in setup on every Windows run, at the very first fault, and reported it as a failure
+      // of the brief. Removing then creating is allowed, and is a no-op difference elsewhere.
+      await fs.rm(path.join(sib, '.git'), { force: true });
+      await fs.writeFile(path.join(sib, '.git'), pointerText);
+    }
     t.after(() => fs.chmod(path.join(sib, '.git'), 0o644).catch(() => {}));
 
     // ANTI-VACUITY: prove the fault landed before grading the response to it.

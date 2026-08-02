@@ -44,8 +44,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const s = JSON.parse(fs.readFileSync(path.join(here, 'scenario.json'), 'utf8'));
-for (const l of s.lines) process.stdout.write(l + '\\n');
-process.exit(s.exit);
+// ONE WRITE, AND EXIT ONLY AFTER IT HAS FLUSHED. process.exit() abandons pending asynchronous
+// stdout writes, and stdout IS asynchronous when it is a pipe — which it always is here. Writing
+// 240 lines in a loop and exiting immediately delivered 172 of them on a CI runner, the gate read
+// 172 diagnostics as debt PAID DOWN from 230, and this test failed for a reason that had nothing
+// to do with the code under test. Which is, with some irony, the exact truncation class the test
+// exists to catch.
+process.stdout.write(s.lines.map((l) => l + '\\n').join(''), () => process.exit(s.exit));
 `;
 
 /**
