@@ -1289,6 +1289,39 @@ function optionValue(tokens, ...names) {
  * `role`:  delete | truncate | move-src (leaves its worktree) | overwrite (destination clobbered)
  * `baseDir`: relative paths resolve against it — `git -C <dir> rm x` targets <dir>/x, not ./x.
  */
+/**
+ * A `for VAR in LIST; do BODY; done` runs BODY once per item of LIST, so statically its danger is
+ * BODY with $VAR bound to LIST. `for d in ../wt-*; do rm -rf $d; done` — the mergify incident,
+ * verbatim — carries exactly the danger of `rm -rf ../wt-*`, which the containment rule already
+ * denies. But a compound for/do/done was never decomposed, so its body was invisible: measured,
+ * `resolveFileTargets('for d in ../wt-*; do rm -rf $d; done')` returned [] and the loop was ALLOWED.
+ *
+ * So the binding is made visible. This is EXPANSION, not a blanket block — it only ever shows holt
+ * exactly what the shell will execute, so it can never over-refuse. It is the approach Continue's
+ * agent guard takes (tokenize, expand variables, then match) and the case DCG's tree-sitter-bash
+ * grammar exists to see. A loop with no `in LIST` to bind (while/until) yields nothing here; its
+ * unresolved variable is the unknown-target case, which DCG's own model treats as block-worthy.
+ *
+ * @returns {string[]} each for-loop's body with its variable bound, for the caller to assess as an
+ *   ordinary command (empty for a command containing no for-loop).
+ */
+const FOR_LOOP = /\bfor\s+([A-Za-z_]\w*)\s+in\s+([^\n;]+?)\s*(?:;|\n)\s*do\b([\s\S]+?)(?:;|\n)?\s*done\b/g;
+export function expandForLoops(command) {
+  const out = [];
+  const src = String(command ?? '');
+  FOR_LOOP.lastIndex = 0;
+  let m;
+  while ((m = FOR_LOOP.exec(src)) !== null) {
+    const [, name, list, body] = m;
+    // $VAR / ${VAR} / "$VAR" / "${VAR}" -> the loop's list. The list may be a glob; the containment
+    // rule matches it against the worktrees, so quoting in the body cannot hide the destroyer.
+    const ref = new RegExp(`"?\\$\\{?${name}\\}?"?`, 'g');
+    const expanded = body.replace(ref, ` ${list.trim()} `).trim().replace(/\s+/g, ' ');
+    if (expanded && expanded !== body.trim()) out.push(expanded);
+  }
+  return out;
+}
+
 export function resolveFileTargets(command) {
   if (typeof command !== 'string' || !command.trim()) return [];
   const out = [];
@@ -1684,8 +1717,21 @@ export async function assessCommand(command, cwd = process.cwd()) {
   const fileTargets = resolveFileTargets(command);
   const fileVerdict = fileTargets.length ? await assessFileTargets(fileTargets, cwd, ctx) : null;
   if (fileVerdict?.decision === 'deny') return fileVerdict;
+
+  // LOOP BODIES. A `for VAR in LIST; do BODY; done` was never decomposed, so a destroyer hidden in
+  // the body ran unseen — the mergify incident in the spelling it took. expandForLoops binds the
+  // variable and hands back the body as an ordinary command; assessing it is a plain recursion
+  // that terminates because an expanded body contains no loop. A deny there is the loop's verdict.
+  let loopAsk = null;
+  for (const body of expandForLoops(command)) {
+    const v = await assessCommand(body, cwd);
+    if (v.decision === 'deny') return v;
+    if (v.decision === 'ask' && !loopAsk) loopAsk = v;
+  }
+
   if (wtVerdict?.decision === 'ask') return wtVerdict;
   if (fileVerdict?.decision === 'ask') return fileVerdict;
+  if (loopAsk) return loopAsk;
 
   return wtVerdict ?? fileVerdict ?? { decision: 'allow', reason: null, kind: null, targets: [] };
 }
