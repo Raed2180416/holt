@@ -39,6 +39,18 @@ function holt(args, cwd) {
   });
 }
 
+function hook(args, cwd, input) {
+  return new Promise((resolve) => {
+    const child = execFile(process.execPath, [BIN, ...args], {
+      cwd, timeout: 30_000, maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, NO_COLOR: '1' },
+    }, (err, stdout, stderr) => resolve({
+      code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''),
+    }));
+    child.stdin.end(input);
+  });
+}
+
 /** A repo with one disposable and one work-holding worktree. */
 async function fixture(label) {
   const fx = await newRepo(label);
@@ -90,7 +102,37 @@ test('CLI: --json output is parseable for every command that claims it', async (
   }
 });
 
+test('CLI HOOK: malformed and BOM-prefixed payloads fail closed', async (t) => {
+  const fx = await fixture('cli-hook-parse');
+  t.after(() => fx.cleanup());
+
+  for (const input of ['not json', `\uFEFF{"tool_name":"Bash","tool_input":{"command":"rm -rf ${fx.wt('holds')}"}}`]) {
+    const r = await hook(['hook', 'pre-tool-use', '--cwd', fx.root], fx.root, input);
+    assert.equal(r.code, 2, `malformed hook input must block: ${JSON.stringify(r)}`);
+    assert.match(r.stderr + r.stdout, /parse|payload|confirm|unreadable/i,
+      `the fail-closed reason must be actionable: ${r.stderr}${r.stdout}`);
+  }
+});
+
 /* ------------------------------------------------------------ exit codes ---- */
+
+test('CLI HOOK: guardAllow is human-configured, journalled, and discoverable', async (t) => {
+  const fx = await fixture('cli-guard-allow');
+  t.after(() => fx.cleanup());
+  const command = `rm -rf ${fx.wt('holds')}`;
+  const escaped = command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  await fx.write('.holtrc.json', JSON.stringify({ guardAllow: [`^${escaped}$`] }));
+
+  const r = await hook(['hook', 'pre-tool-use', '--host', 'generic', '--cwd', fx.root], fx.root,
+    JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: fx.root }));
+  assert.equal(r.code, 0, `a reviewed allowlisted command must proceed: ${r.stderr}`);
+  assert.match(r.stdout, /allow/);
+
+  const common = (await fx.git(['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+  const journal = await fs.readFile(path.join(common, 'holt', 'journal.jsonl'), 'utf8');
+  assert.match(journal, /"action":"allowlisted"/);
+  assert.match(journal, /guardAllow/);
+});
 
 test('CLI: `gate` exit codes are the documented contract', async (t) => {
   const fx = await fixture('cli-gate');
@@ -834,8 +876,12 @@ test('HOOK PAYLOADS: every host shape reaches the same verdict', async (t) => {
 
     // NEVER-WORSE: a benign command must still be allowed, or the fix is "refuse everything".
     const allowed = await drive(host, mk('git status'));
-    assert.match(allowed, /"(permissionDecision|permission|decision)"\s*:\s*"allow"/,
-      `${host}: a benign command must still be allowed, got: ${allowed}`);
+    if (host === 'claude-code') {
+      assert.equal(allowed.trim(), '', 'Claude allow must preserve the native permission flow by emitting silence');
+    } else {
+      assert.match(allowed, /"(permissionDecision|permission|decision)"\s*:\s*"allow"/,
+        `${host}: a benign command must still be allowed, got: ${allowed}`);
+    }
   }
 });
 

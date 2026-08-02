@@ -58,27 +58,54 @@ for (let i = 0; i < N_WT; i++) {
 
 function hook(cwd, command) {
   return new Promise((resolve) => {
-    const t0 = Date.now();
+    const started = Date.now();
     const child = execFile(process.execPath, [HOLT, 'hook', 'pre-tool-use', '--cwd', cwd], {
-      cwd, timeout: 300_000, env: { ...process.env, HOLT_TMPDIR: BASE },
-    }, () => resolve(Date.now() - t0));
+      cwd, timeout: 300_000, maxBuffer: 64 * 1024 * 1024,
+      env: { ...process.env, HOLT_TMPDIR: BASE },
+    }, (error, stdout, stderr) => {
+      const code = error ? (error.code ?? 1) : 0;
+      const text = String(stdout ?? '').trim();
+      let decision = null;
+      if (text) {
+        try {
+          const parsed = JSON.parse(text);
+          decision = parsed.decision ?? parsed.hookSpecificOutput?.permissionDecision ?? null;
+        } catch {
+          decision = 'invalid-json';
+        }
+      } else if (code === 0) {
+        decision = 'allow';
+      }
+      resolve({ elapsed: Date.now() - started, code, decision, stdout: text, stderr: String(stderr ?? '') });
+    });
     child.stdin.end(JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }));
   });
+}
+
+async function checkedHook(cwd, command, expected) {
+  const result = await hook(cwd, command);
+  const valid = expected === 'allow'
+    ? result.code === 0 && (result.decision === null || result.decision === 'allow')
+    : result.code !== 0 && result.decision === expected;
+  if (!valid) {
+    throw new Error(`hook verdict mismatch for ${JSON.stringify(command)}: expected ${expected}, got ${JSON.stringify(result)}`);
+  }
+  return result.elapsed;
 }
 
 const pct = (xs, p) => { const s = [...xs].sort((a, b) => a - b); return s[Math.min(s.length - 1, Math.ceil(p / 100 * s.length) - 1)]; };
 
 // ---- A: STEADY STATE — nothing changes between calls (best case, cache always hits) ----
-const cold = await hook(repo, 'git status');
+const cold = await checkedHook(repo, 'git status', 'allow');
 const warm = [];
-for (let i = 0; i < N_CALLS; i++) warm.push(await hook(repo, 'git status'));
+for (let i = 0; i < N_CALLS; i++) warm.push(await checkedHook(repo, 'git status', 'allow'));
 
 // ---- B: ACTIVE FAN-OUT — a different worktree writes a file before every call ----
 const churn = [];
 for (let i = 0; i < N_CALLS; i++) {
   const w = wts[i % wts.length];
   await fs.writeFile(path.join(w, 'src', `churn${i}.js`), `export function churn${i}(){return ${i};}\n`);
-  churn.push(await hook(repo, 'git status'));
+  churn.push(await checkedHook(repo, 'git status', 'allow'));
 }
 
 // ---- C: THE EXPENSIVE PATH — a DESTRUCTIVE command targeting a worktree, under churn.
@@ -88,12 +115,12 @@ const destructive = [];
 for (let i = 0; i < N_CALLS; i++) {
   const w = wts[i % wts.length];
   await fs.writeFile(path.join(w, 'src', `churn2_${i}.js`), `export function c2_${i}(){return ${i};}\n`);
-  destructive.push(await hook(repo, `rm -rf ${wts[(i + 1) % wts.length]}`));
+  destructive.push(await checkedHook(repo, `rm -rf ${wts[(i + 1) % wts.length]}`, 'deny'));
 }
 
 // ---- D: the same destructive command with NOTHING changing — pure cache-hit path ----
 const destructiveWarm = [];
-for (let i = 0; i < N_CALLS; i++) destructiveWarm.push(await hook(repo, `rm -rf ${wts[0]}`));
+for (let i = 0; i < N_CALLS; i++) destructiveWarm.push(await checkedHook(repo, `rm -rf ${wts[0]}`, 'deny'));
 
 console.log(JSON.stringify({
   worktrees: N_WT,

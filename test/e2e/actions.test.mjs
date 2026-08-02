@@ -853,6 +853,27 @@ test('DISCARD: content is captured and VERIFIED before anything is removed, and 
   assert.match(journal, /"action":"discard"/, `the discard must be journalled: ${journal.slice(-400)}`);
 });
 
+test('DISCARD: binary content is captured byte-for-byte before removal', async (t) => {
+  const fx = await newRepo('discard-binary');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('binary');
+  const bytes = Buffer.from([0, 1, 2, 13, 10, 255, 128, 42, 0, 99]);
+  const file = path.join(wt, 'blob.bin');
+  await fs.writeFile(file, bytes);
+
+  const r = await discard(fx.root, [file]);
+  assert.equal(r.ok, true, `binary discard must succeed: ${JSON.stringify(r)}`);
+  assert.equal(r.verified, true);
+  await assert.rejects(() => fs.lstat(file));
+
+  const captured = await new Promise((resolve, reject) => {
+    execFile('git', ['show', `${r.commit}:blob.bin`], { cwd: fx.root, encoding: 'buffer' }, (error, stdout) => {
+      if (error) reject(error); else resolve(stdout);
+    });
+  });
+  assert.ok(Buffer.from(captured).equals(bytes), 'the rescue ref must preserve every binary byte');
+});
+
 test('DISCARD: a capture that cannot be verified deletes NOTHING', async (t) => {
   // The safety property, and the only one that really matters. If verification is skipped or
   // wrong, `discard` becomes `rm` with extra steps and a false promise of recoverability — worse

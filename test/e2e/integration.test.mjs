@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 const HOLT_BIN = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
 import path from 'node:path';
 import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
+import * as agent from '../../src/agent.mjs';
 import {
   assessCommand, buildBrief, classifyCommand, resolveFileTargets, cachedReport, inlineStrings, expandForLoops,
 } from '../../src/agent.mjs';
@@ -65,6 +66,44 @@ test('command classifier: catches the ways worktrees actually get destroyed', ()
   }
 });
 
+test('command resolver: exposes layers, paths, and unresolved inputs without allowing ambiguity', () => {
+  const resolved = agent.resolveCommand('git reset --hard');
+  assert.match(resolved.verb, /reset/);
+  assert.ok(resolved.reachableLayers.includes('uncommitted'));
+  assert.ok(resolved.reachableLayers.includes('untracked'));
+  assert.deepEqual(resolved.unresolved, []);
+
+  const opaque = agent.resolveCommand('rm -rf $WORKTREE');
+  assert.ok(opaque.unresolved.some((item) => /WORKTREE/.test(item)),
+    `unresolved target must be named: ${JSON.stringify(opaque)}`);
+  const brace = agent.resolveCommand('rm -rf worktree/file{1,2}');
+  assert.ok(brace.unresolved.some((item) => /brace/i.test(item)),
+    `brace expansion must be explicit: ${JSON.stringify(brace)}`);
+  const directory = agent.resolveCommand('cd - && git reset --hard');
+  assert.ok(directory.unresolved.some((item) => /working-directory|directory/i.test(item)),
+    `ambiguous cd must be explicit: ${JSON.stringify(directory)}`);
+});
+
+test('command classifier: shell comments are data, but a later command is still assessed', () => {
+  assert.equal(classifyCommand('echo note # rm -rf wt/task-03'), null,
+    'a destroyer in a shell comment is not executable');
+  const later = classifyCommand('echo note # harmless\nrm -rf wt/task-03');
+  assert.ok(later, 'a destroyer after a comment newline remains executable');
+});
+
+test('FILE GATE: shell comments cannot nominate a file target', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const verdict = await assessCommand(`echo note # rm -rf ${fx.wt('uniqueUncommitted')}`, fx.root);
+  assert.equal(verdict.decision, 'allow', `comment text is not executable: ${JSON.stringify(verdict)}`);
+});
+
+test('command classifier: a BOM-prefixed command is unparseable, not trusted', () => {
+  const hit = classifyCommand('\uFEFFrm -rf wt/task-03');
+  assert.ok(hit?.unresolved?.some((item) => /BOM/i.test(item)),
+    `BOM must be reported as unresolved: ${JSON.stringify(hit)}`);
+});
+
 test('command classifier: DISARMING the protection counts as destructive', () => {
   // MEASURED: an agent hit `holt protect`, read the lock reason naming the exact symbol at
   // risk, ran `git worktree unlock`, and deleted anyway — justifying it from the worktree's NAME
@@ -90,6 +129,25 @@ test('command classifier: DISARMING the protection counts as destructive', () =>
 });
 
 /* --------------------------------------------------------- the deny gate ---- */
+
+test('GATE DENY: the strongest verdict wins across compound commands', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const verdict = await assessCommand(`git worktree remove ${fx.wt('empty')} && git worktree remove ${fx.wt('uniqueUncommitted')}`, fx.root);
+  assert.equal(verdict.decision, 'deny',
+    `a later destructive match must not be disarmed by an earlier ask: ${JSON.stringify(verdict)}`);
+  assert.match(verdict.reason, /UNCOMMITTED_ONLY_SYMBOL/);
+});
+
+test('GATE: a human guardAllow entry is the explicit escape hatch and is observable', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const command = `rm -rf ${fx.wt('uniqueUncommitted')}`;
+  const verdict = await assessCommand(command, fx.root, { guardAllow: [`^${command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`] });
+  assert.equal(verdict.decision, 'allow');
+  assert.equal(verdict.allowlisted, true);
+  assert.equal(verdict.kind, 'human guardAllow entry');
+});
 
 test('GATE DENY: destroying a worktree with uncommitted-only work is blocked, with evidence', async (t) => {
   const { fx } = await standardFixture();
@@ -143,6 +201,33 @@ test('GATE ASK: an unverifiable repository produces ask, never allow', async () 
   assert.match(verdict.reason, /could not verify/i);
 });
 
+test('GATE ASK: a BOM-prefixed destructive command is never trusted', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const verdict = await assessCommand(`\uFEFFrm -rf ${fx.wt('uniqueUncommitted')}`, fx.root);
+  assert.equal(verdict.decision, 'ask',
+    `an unparseable command must ask, never deny or allow: ${JSON.stringify(verdict)}`);
+  assert.match(verdict.reason, /BOM|parse|confirm/i);
+});
+
+test('GATE: shell cd changes the worktree layer as well as the file layer', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const verdict = await assessCommand(`cd ${fx.wt('uniqueUncommitted')} && git reset --hard`, fx.root);
+  assert.equal(verdict.decision, 'deny',
+    `cd must affect pathless git verbs too: ${JSON.stringify(verdict)}`);
+  assert.match(verdict.reason, /UNCOMMITTED_ONLY_SYMBOL/);
+});
+
+test('GATE ASK: cd - and popd are unresolved, never guessed', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  for (const command of ['cd - && git reset --hard', 'pushd . && popd && git reset --hard']) {
+    const verdict = await assessCommand(command, fx.root);
+    assert.equal(verdict.decision, 'ask', `${command}: ${JSON.stringify(verdict)}`);
+  }
+});
+
 test('GATE: `worktree prune` is evaluated against EVERY workstream, not one', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
@@ -191,6 +276,9 @@ test('ADAPTER: the same verdict renders correctly for each host', () => {
   const generic = formatVerdict(deny, { host: 'generic' });
   assert.equal(generic.decision, 'deny');
   assert.equal(generic.reason, 'because');
+
+  const allow = formatVerdict({ decision: 'allow', reason: null }, { host: 'claude-code' });
+  assert.deepEqual(allow, {}, 'allow must not emit permissionDecision and bypass native host permissions');
 
   // Context, both hosts.
   const ccCtx = formatContext('hello', { host: 'claude-code', eventName: 'SessionStart' });
@@ -1793,6 +1881,35 @@ test('CACHE: an analysis computed WITHOUT the primary must never authorise a com
   const brief2 = await cachedReport(fx.root, {});
   assert.ok(!brief2.scanned.workstreams.some((w) => w.isPrimary),
     'the brief must not be handed the guard\'s wider analysis either — one cache entry per question');
+});
+
+test('FILE GATE: unresolved brace expansion asks instead of silently allowing', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const target = fx.wt('uniqueUncommitted');
+  const verdict = await assessCommand(`rm -rf ${target}/only_uncommitted{.js,.bak}`, fx.root);
+  assert.equal(verdict.decision, 'ask',
+    `brace expansion is not statically resolved and must ask: ${JSON.stringify(verdict)}`);
+  assert.match(verdict.reason, /brace|resolve|confirm/i);
+});
+
+test('CACHE: ignored-file changes invalidate a warm analysis', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const wt = fx.wt('uniqueUncommitted');
+  await fx.write('.gitignore', 'secret.env\n', wt);
+  await fx.commit('ignore secret fixture', wt);
+  await fx.write('secret.env', 'one\n', wt);
+
+  const first = await cachedReport(fx.root, { includePrimary: true });
+  assert.equal(first.fromCache, false);
+  const second = await cachedReport(fx.root, { includePrimary: true });
+  assert.equal(second.fromCache, true);
+
+  await fs.writeFile(path.join(wt, 'secret.env'), 'two\n');
+  const changed = await cachedReport(fx.root, { includePrimary: true });
+  assert.equal(changed.fromCache, false,
+    'ignored content is part of the safety fingerprint and must not reuse the old report');
 });
 
 test('CACHE: NEVER-WORSE — the cache still HITS when the same question is asked twice', async (t) => {

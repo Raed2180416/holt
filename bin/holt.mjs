@@ -170,7 +170,7 @@ OPTIONS
   --plain             force human-readable output for action commands (default: JSON when piped)
 
 CONFIG (optional — see README.md#configuration)
-  .holtrc.json        in the repository root: familyOverrides, maintenanceFloor, maintenanceRatio
+  .holtrc.json        in the repository root: familyOverrides, guardAllow, maintenanceFloor, maintenanceRatio
                       absent is fine; present-and-invalid is a hard error (exit 2), never silent
 
 QUICK START
@@ -641,11 +641,31 @@ async function cmdHook(opts) {
   const raw = opts.command ? '' : await readStdin();
 
   let payload = {};
-  if (raw.trim()) { try { payload = JSON.parse(raw); } catch { payload = {}; } }
+  let payloadError;
+  if (raw.trim()) {
+    try {
+      payload = JSON.parse(raw);
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('payload must be a JSON object');
+    } catch (error) {
+      payload = {};
+      payloadError = error;
+    }
+  } else if (event === 'pre-tool-use' && !opts.command) {
+    payloadError = new Error('hook payload is empty');
+  }
 
   const cwd = payload.cwd || opts.cwd;
 
   if (event === 'pre-tool-use') {
+    if (payloadError) {
+      const verdict = {
+        decision: 'ask',
+        reason: `holt could not parse the hook payload (${payloadError.message}). Confirm the command manually before proceeding.`,
+      };
+      out(JSON.stringify(formatVerdict(verdict, { host: opts.host, eventName: 'PreToolUse' })));
+      process.stderr.write(`${verdict.reason}\n`);
+      process.exit(2);
+    }
     const toolName = payload.tool_name ?? payload.toolName;
     // EVERY HOST'S PAYLOAD SHAPE, because reading only one of them makes the hook inert on the
     // others while still reporting a decision.
@@ -668,20 +688,36 @@ async function cmdHook(opts) {
     // which keeps the hook off the critical path for the overwhelming majority of tool calls.
     const shellish = !toolName || /^(Bash|Shell|Terminal|run_command|execute)$/i.test(toolName);
     if (!shellish || !command) {
-      out(JSON.stringify(formatVerdict({ decision: 'allow', reason: null }, { host: opts.host })));
+      if (opts.host !== 'claude-code') {
+        out(JSON.stringify(formatVerdict({ decision: 'allow', reason: null }, { host: opts.host })));
+      }
       return;
     }
 
-    const verdict = await assessCommand(command, cwd);
+    const verdict = await assessCommand(command, cwd, { guardAllow: opts.guardAllow });
+    if (verdict.allowlisted) {
+      await appendEvent(cwd, {
+        action: 'allowlisted', source: 'guardAllow', command: String(command).slice(0, 200),
+        pattern: verdict.allowlistPattern ?? null,
+      }).catch(() => {});
+    }
     // Record a prevented loss, so `holt journal --summary` can show the champion a real number:
     // "N destructive commands refused." Best-effort — logging must never delay or alter the hook.
+    const renderedVerdict = verdict.decision === 'allow' || !verdict.reason
+      ? verdict
+      : {
+        ...verdict,
+        reason: `${verdict.reason}\nHuman escape: after reviewing this exact command, add a matching guardAllow pattern to .holtrc.json; its use will be journalled.`,
+      };
     if (verdict.decision === 'deny') {
       await appendEvent(cwd, {
         action: 'blocked', command: String(command).slice(0, 200),
-        reason: verdict.reason ?? null, kind: verdict.kind ?? null,
+        reason: renderedVerdict.reason ?? null, kind: verdict.kind ?? null,
       }).catch(() => {});
     }
-    out(JSON.stringify(formatVerdict(verdict, { host: opts.host, eventName: 'PreToolUse' })));
+    if (verdict.decision !== 'allow' || opts.host !== 'claude-code') {
+      out(JSON.stringify(formatVerdict(renderedVerdict, { host: opts.host, eventName: 'PreToolUse' })));
+    }
 
     // THE REFUSAL IS SAID THREE WAYS, BECAUSE ONE OF THEM WAS RELYING ON LUCK.
     //
@@ -1167,6 +1203,7 @@ async function main() {
     const cfg = await loadConfig(opts.cwd);
     configPath = cfg.path;
     if (cfg.config.familyOverrides !== undefined) opts.familyOverrides = cfg.config.familyOverrides;
+    if (cfg.config.guardAllow !== undefined) opts.guardAllow = cfg.config.guardAllow;
     if (cfg.config.maintenanceFloor !== undefined) opts.maintenanceFloor = cfg.config.maintenanceFloor;
     if (cfg.config.maintenanceRatio !== undefined) opts.maintenanceRatio = cfg.config.maintenanceRatio;
     // Surface warnings (unknown keys) to stderr — loud but non-fatal.

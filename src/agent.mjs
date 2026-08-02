@@ -34,11 +34,12 @@ import {
   samePathSync, underOrEqualSync, relativeWithinAsync, findByPath,
 } from './paths.mjs';
 import { discover, repoAbsenceError, parseWorktreePorcelain } from './discover.mjs';
-import { scan, atRiskFiles, atRiskFromStatus, generatedEvidence } from './scan.mjs';
+import { scan, atRiskFiles, atRiskFromStatus, generatedEvidence, looksGenerated } from './scan.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
 import { scratchDir } from './symbols.mjs';
 import { git } from './git.mjs';
 import { stashState, describeStash, MAX_ENTRIES } from './stash.mjs';
+import { guardAllowPattern } from './config.mjs';
 
 /* ------------------------------------------------------------------ cache ---- */
 
@@ -49,6 +50,39 @@ import { stashState, describeStash, MAX_ENTRIES } from './stash.mjs';
  * on changes. A time-based TTL alone would be wrong: answering "safe to delete" from a stale
  * scan is exactly the failure this tool exists to prevent.
  */
+async function hashIgnoredPath(hash, root, rel, absolute = path.join(root, rel)) {
+  const clean = rel.replace(/\\/g, '/').replace(/\/$/, '');
+  if (!clean || clean === '.git' || looksGenerated(clean)) return;
+  let stat;
+  try { stat = await fs.lstat(absolute); } catch (error) {
+    hash.update(`ignored-error:${clean}:${error.code ?? 'unknown'}\0`);
+    return;
+  }
+  hash.update(`ignored:${clean}:${stat.mode}:${stat.size}:${stat.mtimeMs}\0`);
+  if (stat.isSymbolicLink()) {
+    hash.update(`link:${await fs.readlink(absolute).catch(() => '')}\0`);
+    return;
+  }
+  if (stat.isFile()) {
+    hash.update(await fs.readFile(absolute).catch(() => Buffer.from('ignored-read-error')));
+    return;
+  }
+  if (!stat.isDirectory()) return;
+  let entries;
+  try { entries = await fs.readdir(absolute, { withFileTypes: true }); }
+  catch { hash.update(`ignored-error:${clean}:readdir\0`); return; }
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    await hashIgnoredPath(hash, root, `${clean}/${entry.name}`, path.join(absolute, entry.name));
+  }
+}
+
+async function hashIgnoredContent(hash, root, stdout) {
+  const paths = String(stdout).split('\0')
+    .filter((entry) => entry.startsWith('!! '))
+    .map((entry) => entry.slice(3));
+  for (const rel of paths) await hashIgnoredPath(hash, root, rel);
+}
+
 async function fingerprint(root) {
   const wl = await git(['worktree', 'list', '--porcelain'], { cwd: root });
   const h = createHash('sha256').update(wl.stdout);
@@ -58,9 +92,10 @@ async function fingerprint(root) {
     .map((l) => l.slice(9));
 
   for (const p of paths) {
-    const st = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: p })
+    const st = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'], { cwd: p })
       .catch(() => ({ code: 1, stdout: '' }));
     h.update(p).update(String(st.code)).update(st.stdout);
+    await hashIgnoredContent(h, p, st.stdout);
   }
 
   // THE STASH MOVES WITHOUT ANY WORKING TREE MOVING, and the report now reports on it.
@@ -503,6 +538,13 @@ export function maskedRegions(command, { quotes = true } = {}) {
   while (i < s.length) {
     const ch = s[i];
 
+    if (ch === '#' && (i === 0 || /[\s;&|]/.test(s[i - 1]))) {
+      const end = s.indexOf('\n', i);
+      out.push([i, end === -1 ? s.length - 1 : end - 1]);
+      i = end === -1 ? s.length : end;
+      continue;
+    }
+
     if (quotes && (ch === "'" || ch === '"')) {
       const start = i;
       const quote = ch;
@@ -780,43 +822,127 @@ export function indirectVerb(command) {
   return null;
 }
 
-export function classifyCommand(command) {
-  if (typeof command !== 'string' || !command.trim()) return null;
-  const masked = maskedRegions(command);
-  for (const { re, kind, all, cwdTarget, stashScope, unless, verdict, recovery } of DESTRUCTIVE) {
-    // A rule may declare an exemption that is not expressible as "the pattern should not have
-    // matched", because it depends on ANOTHER flag elsewhere in the command — `--dry-run` on a
-    // clean, `--staged` without `--worktree` on a restore. Encoding those as negative lookaheads
-    // inside an already dense regex is how the next reader gets it wrong.
-    if (unless && unless(command)) continue;
-    // Scan every occurrence, not just the first: `echo 'rm -rf a' && rm -rf b` must still be
-    // caught on the second one. Only a match whose VERB starts outside a data region counts.
-    const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-    let m = null;
-    for (let hit = scan.exec(command); hit; hit = scan.exec(command)) {
-      if (!insideMasked(masked, hit.index)) { m = hit; break; }
-      if (scan.lastIndex === hit.index) scan.lastIndex++;   // zero-width guard
-    }
-    if (m) {
-      return {
-        kind,
-        target: m.groups?.target ? unquoteTarget(m.groups.target) : null,
-        all: !!all,
-        cwdTarget: !!cwdTarget,
-        // Which store this rule destroys. `'entries'` means the STASH — read the stash itself for
-        // evidence (src/stash.mjs), because no worktree holds what a stash entry holds. Null on
-        // every other rule, and nothing without it pays a single git call for the stash.
-        stashScope: stashScope ?? null,
-        // A rule may cap its OWN verdict below the table's default 'deny' — stash is recoverable
-        // (the content lands in a stash commit, not nowhere), so its worst honest answer is
-        // "confirm before you do this", never a flat refusal. Absent on every other rule, where
-        // the default (assessWorktreeCommand falling through to 'deny') is unchanged.
-        verdict: verdict ?? null,
-        recovery: recovery ?? null,
-      };
+const CONTENT_LAYERS = Object.freeze(['committed', 'uncommitted', 'untracked', 'gitignored']);
+
+function declaredLayers(rule) {
+  if (rule.stashScope) return ['stash'];
+  if (rule.all || rule.cwdTarget || rule.re?.source.includes('(?<target>')) return [...CONTENT_LAYERS];
+  return [];
+}
+
+for (const rule of DESTRUCTIVE) rule.layers ??= declaredLayers(rule);
+
+function literalAssignments(command) {
+  const values = new Map();
+  for (const segment of lexSegments(command)) {
+    for (const word of segment.words) {
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(word);
+      if (m && !/[\\$`]/.test(m[2])) values.set(m[1], m[2]);
     }
   }
-  return null;
+  return values;
+}
+
+function expandShellTarget(raw, assignments = new Map()) {
+  let value = String(raw ?? '');
+  const variable = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/.exec(value);
+  if (variable) {
+    if (!assignments.has(variable[1])) return { value, unresolved: `unresolved variable $${variable[1]}` };
+    value = `${assignments.get(variable[1])}${value.slice(variable[0].length)}`;
+  }
+  if (value === '~') value = os.homedir();
+  else if (value.startsWith('~/')) value = path.join(os.homedir(), value.slice(2));
+  else if (value.startsWith('~')) return { value, unresolved: `unresolved home path ${value}` };
+  if (/[$`]|\$\(/.test(value)) return { value, unresolved: `unresolved substitution in ${value}` };
+  if (/(?<!\\)\{[^{}\n]*,[^{}\n]*\}/.test(value)) {
+    return { value, unresolved: `unresolved brace expansion in ${value}` };
+  }
+  return { value, unresolved: null };
+}
+
+function normaliseMatch(rule, match, command) {
+  const assignments = literalAssignments(command);
+  const rawTarget = match.groups?.target ? unquoteTarget(match.groups.target) : null;
+  const expanded = rawTarget == null ? { value: null, unresolved: null } : expandShellTarget(rawTarget, assignments);
+  return {
+    kind: rule.kind,
+    verb: rule.kind.split(' (', 1)[0],
+    target: expanded.value,
+    rawTarget,
+    all: !!rule.all,
+    cwdTarget: !!rule.cwdTarget,
+    layers: [...(rule.layers ?? declaredLayers(rule))],
+    stashScope: rule.stashScope ?? null,
+    verdict: rule.verdict ?? null,
+    recovery: rule.recovery ?? null,
+    unresolved: expanded.unresolved,
+  };
+}
+
+function commandMatches(command) {
+  const masked = maskedRegions(command);
+  const matches = [];
+  for (const rule of DESTRUCTIVE) {
+    if (rule.unless && rule.unless(command)) continue;
+    const scan = new RegExp(rule.re.source, rule.re.flags.includes('g') ? rule.re.flags : `${rule.re.flags}g`);
+    for (let hit = scan.exec(command); hit; hit = scan.exec(command)) {
+      if (insideMasked(masked, hit.index)) {
+        if (scan.lastIndex === hit.index) scan.lastIndex++;
+        continue;
+      }
+      matches.push(normaliseMatch(rule, hit, command));
+      if (scan.lastIndex === hit.index) scan.lastIndex++;
+    }
+  }
+  return matches;
+}
+
+export function resolveCommand(command) {
+  if (typeof command !== 'string' || !command.trim()) {
+    return { verb: null, reachableLayers: [], resolvedPaths: [], unresolved: [], matches: [] };
+  }
+  if (/^[\uFEFF\uFFFE]/.test(command)) {
+    const unresolved = ['leading BOM makes the command payload unparseable'];
+    return { verb: null, reachableLayers: [], resolvedPaths: [], unresolved, matches: [] };
+  }
+  const matches = commandMatches(command);
+  const filePaths = resolveFileTargets(command);
+  const resolvedPaths = [
+    ...matches.filter((m) => m.target != null).map((m) => ({ raw: m.rawTarget, path: m.target, kind: m.kind })),
+    ...filePaths.map((target) => ({ ...target, path: target.resolvedRaw ?? target.raw })),
+  ];
+  const boundLoopVars = new Set([...String(command).matchAll(/\bfor\s+([A-Za-z_]\w*)\s+in\b/g)].map((m) => m[1]));
+  const unresolved = matches.filter((m) => m.unresolved && ![...boundLoopVars].some((name) => m.unresolved.includes(`$${name}`)))
+    .map((m) => m.unresolved);
+  if (hasAmbiguousDirectoryChange(command)) unresolved.push('ambiguous shell working-directory change');
+  for (const target of filePaths) {
+    if (target.unresolved && ![...boundLoopVars].some((name) => target.unresolved.includes(`$${name}`))) {
+      unresolved.push(target.unresolved);
+    }
+  }
+  return {
+    verb: matches[0]?.verb ?? null,
+    reachableLayers: [...new Set(matches.flatMap((m) => m.layers))],
+    resolvedPaths,
+    unresolved: [...new Set(unresolved)],
+    matches,
+  };
+}
+
+export function classifyCommand(command) {
+  if (typeof command !== 'string' || !command.trim()) return null;
+  const resolved = resolveCommand(command);
+  if (resolved.unresolved.length && !resolved.matches.length) {
+    return {
+      kind: 'unparseable command payload', target: null, all: false, cwdTarget: false,
+      stashScope: null, verdict: null, recovery: null, layers: [],
+      unresolved: resolved.unresolved, matches: [], reachableLayers: [], resolvedPaths: [],
+    };
+  }
+  const first = resolved.matches[0];
+  if (!first) return null;
+  return { ...first, matches: resolved.matches, unresolved: resolved.unresolved,
+    reachableLayers: resolved.reachableLayers, resolvedPaths: resolved.resolvedPaths };
 }
 
 
@@ -1153,6 +1279,12 @@ export function lexSegments(command, depth = 0) {
   for (let i = 0; i < command.length; i++) {
     let ch = command[i];
 
+    if (ch === '#' && (i === 0 || /[\s;&|]/.test(command[i - 1]))) {
+      const end = command.indexOf('\n', i);
+      i = end === -1 ? command.length : end - 1;
+      continue;
+    }
+
     // A BACKSLASH IS AN ESCAPE IN A POSIX SHELL AND A PATH SEPARATOR ON WINDOWS, and treating it
     // as an escape unconditionally was a live safety hole:
     //
@@ -1450,7 +1582,45 @@ export function resolveFileTargets(command) {
       });
     }
   }
+  const assignments = literalAssignments(command);
+  for (const target of out) {
+    const expanded = expandShellTarget(target.raw, assignments);
+    target.resolvedRaw = expanded.value;
+    if (expanded.unresolved) target.unresolved = expanded.unresolved;
+  }
   return out;
+}
+
+function directoryOperand(tokens) {
+  return tokens.find((token) => token !== '--' && !/^-[A-Za-z]/.test(token));
+}
+
+function hasAmbiguousDirectoryChange(command) {
+  for (const segment of lexSegments(command)) {
+    const words = segment.words;
+    if (!['cd', 'pushd', 'popd'].includes(words[0])) continue;
+    if (words[0] === 'popd') return true;
+    const to = directoryOperand(words.slice(1));
+    if (to === '-' || /[$`]/.test(to ?? '')) return true;
+  }
+  return false;
+}
+
+function commandWorkingDirectory(command, cwd) {
+  let current = cwd;
+  for (const segment of lexSegments(command)) {
+    let words = segment.words;
+    let cut = 0;
+    while (cut < words.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(words[cut]) || WRAPPERS.has(words[cut]))) cut++;
+    words = words.slice(cut);
+    if (!words.length || !['cd', 'pushd', 'popd'].includes(words[0])) continue;
+    if (words[0] === 'popd') return null;
+    const to = directoryOperand(words.slice(1));
+    if (!to) { current = os.homedir(); continue; }
+    if (to === '-' || /[$`]/.test(to)) return null;
+    current = path.resolve(current, to);
+  }
+  return current;
 }
 
 const GLOBBY = /[*?[\]]/;
@@ -1569,6 +1739,16 @@ function globFreePrefix(p) {
  * @returns {Promise<object|null>} a verdict, or null when there is nothing to say
  */
 async function assessFileTargets(targets, cwd, ctx) {
+  const unresolved = targets.find((target) => target.unresolved);
+  if (unresolved) {
+    return {
+      decision: 'ask',
+      kind: unresolved.kind,
+      targets: [],
+      files: [],
+      reason: `holt could not resolve ${unresolved.unresolved}; confirm the exact target before proceeding.`,
+    };
+  }
   const roots = await ctx.worktreeRoots();
   if (roots === null) {
     return {
@@ -1587,16 +1767,17 @@ async function assessFileTargets(targets, cwd, ctx) {
   // keeps `rm -rf /tmp/scratch` off the expensive path entirely.
   const items = [];
   for (const t of targets) {
+    const raw = t.resolvedRaw ?? t.raw;
     const base = t.baseDir ? path.resolve(cwd, t.baseDir) : cwd;
-    const abs = await canonicalPath(path.resolve(base, globFreePrefix(t.raw)));
+    const abs = await canonicalPath(path.resolve(base, globFreePrefix(raw)));
     const root = deepestRoot(roots, abs);
     if (!root) {
       // Not INSIDE a worktree — but it may CONTAIN one. A directory-destroying target that is an
       // ancestor of worktree roots (`..`, `../wt-*`) takes them with it; each such root goes in at
       // full '**' scope. A target that reaches nothing (`/tmp/scratch`) still resolves here to the
       // empty set and is dropped exactly as before, which is what keeps ordinary removals quiet.
-      const suffix = GLOBBY.test(t.raw)
-        ? t.raw.slice((globFreePrefix(t.raw) === '.' && !t.raw.startsWith('.')) ? 0 : globFreePrefix(t.raw).length).replace(/^\/+/, '')
+      const suffix = GLOBBY.test(raw)
+        ? raw.slice((globFreePrefix(raw) === '.' && !raw.startsWith('.')) ? 0 : globFreePrefix(raw).length).replace(/^\/+/, '')
         : '';
       for (const reached of rootsReachedFromAbove(roots, abs, suffix)) {
         items.push({ ...t, root: reached, rel: '**', matcher: pathMatcher('**') });
@@ -1631,9 +1812,9 @@ async function assessFileTargets(targets, cwd, ctx) {
     // the shell would create one file literally named `?`. A target holt could not resolve was
     // being reported as a target that hits everything, which is the loudest possible false
     // positive and precisely how a guard gets switched off.
-    const gfp = globFreePrefix(t.raw);
-    const prefixLen = (gfp === '.' && !t.raw.startsWith('.')) ? 0 : gfp.length;
-    const suffix = GLOBBY.test(t.raw) ? t.raw.slice(prefixLen).replace(/^\/+/, '') : '';
+    const gfp = globFreePrefix(raw);
+    const prefixLen = (gfp === '.' && !raw.startsWith('.')) ? 0 : gfp.length;
+    const suffix = GLOBBY.test(raw) ? raw.slice(prefixLen).replace(/^\/+/, '') : '';
     const rel = suffix ? `${relPrefix ? `${relPrefix}/` : ''}${suffix}` : relPrefix;
 
     // '**' stays the default for a target that genuinely IS the worktree root — `rm -rf .` really
@@ -1749,7 +1930,24 @@ async function assessFileTargets(targets, cwd, ctx) {
  *
  * Agent-neutral by design. Adapters map:  allow/deny/ask -> whatever their host calls it.
  */
-export async function assessCommand(command, cwd = process.cwd()) {
+export async function assessCommand(command, cwd = process.cwd(), { guardAllow = [] } = {}) {
+  const allowlistPattern = guardAllowPattern(command, guardAllow);
+  if (allowlistPattern) {
+    return {
+      decision: 'allow', reason: null, kind: 'human guardAllow entry', targets: [], files: [],
+      allowlisted: true, allowlistPattern,
+    };
+  }
+  const structure = resolveCommand(command);
+  if (structure.unresolved.length) {
+    return {
+      decision: 'ask',
+      kind: structure.matches[0]?.kind ?? 'unparseable command payload',
+      targets: [],
+      files: [],
+      reason: `holt could not resolve the command safely: ${structure.unresolved.join('; ')}. Confirm manually before proceeding.`,
+    };
+  }
   const ctx = newProbeCtx(cwd);
 
   // TWO GRANULARITIES, BOTH ANSWERED. The worktree layer catches deleting or resetting a whole
@@ -1993,9 +2191,42 @@ async function describeQueued(dir) {
     + `holds:\n${describeStash(state)}\n`;
 }
 
-/** The worktree-granularity half: unchanged behaviour, returns null when no rule matches. */
+function strongestVerdict(verdicts) {
+  const rank = { allow: 0, ask: 1, deny: 2 };
+  return verdicts.filter(Boolean).sort((a, b) => (rank[b.decision] ?? 1) - (rank[a.decision] ?? 1))[0] ?? null;
+}
+
 async function assessWorktreeCommand(command, cwd, ctx) {
-  const hit = classifyCommand(command);
+  const structure = resolveCommand(command);
+  const commandCwd = commandWorkingDirectory(command, cwd);
+  if (commandCwd === null) {
+    return {
+      decision: 'ask',
+      kind: structure.matches[0]?.kind ?? 'unresolved directory change',
+      targets: [],
+      files: [],
+      reason: 'holt could not resolve the command working directory before execution. Confirm manually before proceeding.',
+    };
+  }
+  cwd = commandCwd;
+  if (structure.unresolved.length) {
+    return {
+      decision: 'ask',
+      kind: structure.matches[0]?.kind ?? 'unparseable command payload',
+      targets: [],
+      files: [],
+      reason: `holt could not resolve the command safely: ${structure.unresolved.join('; ')}. Confirm manually before proceeding.`,
+    };
+  }
+  if (!structure.matches.length) return assessWorktreeMatch(command, cwd, ctx);
+  const verdicts = [];
+  for (const hit of structure.matches) verdicts.push(await assessWorktreeMatch(command, cwd, ctx, hit));
+  return strongestVerdict(verdicts);
+}
+
+/** The worktree-granularity half for one structural match. */
+async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null) {
+  const hit = suppliedHit ?? classifyCommand(command);
   if (!hit) {
     // Nothing matched — but did holt actually get to READ the command? If the verb is supplied by
     // a substitution, a variable or an eval, "no rule matched" means "no rule could match", and
@@ -2171,7 +2402,9 @@ async function assessWorktreeCommand(command, cwd, ctx) {
     // includePrimary: git REFUSES to lock the main worktree, so for it the hook is the only
     // protection there is — and it was excluded from the scan entirely. The one tree that can
     // never be locked was also the one never watched.
-    ({ report } = await cachedReport(cwd, { includePrimary: true }));
+    const redirected = gitCFlag(command);
+    const analysisCwd = redirected ? path.resolve(cwd, redirected) : cwd;
+    ({ report } = await cachedReport(analysisCwd, { includePrimary: true }));
   } catch (err) {
     // holt could not measure. It must NOT silently allow a destructive command it failed to
     // check — but it must not hard-block work on its own bug either, so it asks.

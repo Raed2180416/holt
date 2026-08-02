@@ -26,7 +26,7 @@ import { execFile } from 'node:child_process';
 import { newRepo } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
-import { analyze } from '../../src/analyze.mjs';
+import { analyze, discriminativeSymbols } from '../../src/analyze.mjs';
 import { assessCommand } from '../../src/agent.mjs';
 
 function sh(cmd, args, cwd) {
@@ -222,6 +222,14 @@ test('ATTACK: an agent REVERTS what base has, which is real work', async (t) => 
 
   const report = await inspect(fx.root);
   mustNotBeSafe(report, 'reverter', 'a revert adds no new symbol names, only changes a body');
+});
+
+test('ATTACK: high-fanout symbols are actually removed from pair evidence', () => {
+  const live = Array.from({ length: 8 }, (_, i) => ({ id: `wt-${i}`, addedKeys: ['value:boilerplate', `value:unique-${i}`] }));
+  const filtered = discriminativeSymbols(live);
+  assert.ok(filtered.dropped.some((item) => item.symbol === 'value:boilerplate'));
+  assert.ok(!filtered.keep.has('value:boilerplate'));
+  assert.ok(filtered.keep.has('value:unique-0'));
 });
 
 test('ATTACK: coincidental common names must not fabricate duplicates', async (t) => {

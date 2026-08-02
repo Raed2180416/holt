@@ -26,6 +26,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const RUNNER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'eval', 'run.mjs');
+const mutation = await import('../../test/mutation.mjs');
 
 /** Pull validateRun/summarise out of the runner without executing main(). */
 async function loadInternals() {
@@ -145,6 +146,21 @@ test('EVAL VALIDITY: a timeout is INVALID, not a conservative pass', async () =>
   const v = validateRun({ ok: false, timedOut: true, ms: 300_000, stdout: '', stderr: '' });
   assert.equal(v.valid, false);
   assert.match(v.reason, /timed out/);
+});
+
+test('MUTATION VALIDITY: a syntax error is invalid, not a killed test', () => {
+  const result = mutation.classifyMutationResult({ code: 1, stdout: '', stderr: 'SyntaxError: Unexpected token' });
+  assert.equal(result.outcome, 'invalid');
+});
+
+test('MUTATION VALIDITY: a failing test is a killed mutation', () => {
+  const result = mutation.classifyMutationResult({ code: 1, stdout: 'not ok 1 - catches the defect', stderr: '' });
+  assert.equal(result.outcome, 'killed');
+});
+
+test('MUTATION VALIDITY: a non-failing non-zero runner is invalid', () => {
+  const result = mutation.classifyMutationResult({ code: 1, stdout: '', stderr: 'runner crashed' });
+  assert.equal(result.outcome, 'invalid');
 });
 
 test('EVAL VALIDITY: a genuine run is valid', async () => {
@@ -290,6 +306,11 @@ test('ENTERPRISE BENCH: percentiles are nearest-rank and never invent a value', 
   assert.equal(bench.percentile([5, 1, 3], 100), 5);
   assert.equal(bench.percentile([], 50), null, 'no samples means no number, never 0');
   assert.equal(bench.percentile([undefined, NaN], 50), null, 'a failed run contributes nothing');
+});
+
+test('ENTERPRISE BENCH: the self repository path is relocatable', () => {
+  assert.equal(bench.localRepoPath({ HOLT_SELF_REPO: '/tmp/elsewhere' }, '/tmp/eval'), '/tmp/elsewhere');
+  assert.equal(bench.localRepoPath({}, '/tmp/eval'), '/tmp');
 });
 
 test('ENTERPRISE BENCH: importing the harness must not RUN it', () => {

@@ -49,9 +49,13 @@ const WORK = path.join(os.homedir(), '.holt-work', 'enterprise-bench');
 const CACHE = path.join(WORK, 'cache');
 const HOLT_BIN = path.resolve(path.join(import.meta.dirname, '..', 'bin/holt.mjs'));
 
-const REPOS = {
+export function localRepoPath(env = process.env, moduleDir = import.meta.dirname) {
+  return path.resolve(env.HOLT_SELF_REPO || path.join(moduleDir, '..'));
+}
+
+export const REPOS = {
   'holt-self': {
-    url: null, local: '/home/raed/grove',
+    url: null, local: localRepoPath(),
     desc: 'holt itself — 20K lines, the dogfooding case',
   },
   'redis': {

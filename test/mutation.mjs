@@ -23,7 +23,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -41,7 +41,7 @@ const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
  */
 const COPY_SKIP = new Set(['.git', 'node_modules']);
 
-async function makeWorkCopy() {
+export async function makeWorkCopy() {
   const base = process.env.HOLT_TMPDIR ?? os.tmpdir();
   await fs.mkdir(base, { recursive: true });
   const work = await fs.mkdtemp(path.join(base, 'holt-mutation-'));
@@ -53,6 +53,12 @@ async function makeWorkCopy() {
       return !COPY_SKIP.has(rel.split(path.sep)[0]);
     },
   });
+  try {
+    await fs.symlink(path.join(ROOT, 'node_modules'), path.join(work, 'node_modules'),
+      process.platform === 'win32' ? 'junction' : 'dir');
+  } catch {
+    await fs.cp(path.join(ROOT, 'node_modules'), path.join(work, 'node_modules'), { recursive: true });
+  }
   return work;
 }
 
@@ -68,7 +74,7 @@ async function repoFingerprint() {
  * Each mutation states the DEFECT it simulates, so a survivor reads as a missing test rather
  * than a puzzle.
  */
-const MUTATIONS = [
+export const MUTATIONS = [
   {
     "id": "collisions-head-only",
     "defect": "collisions fall back to committed heads, so a conflict in UNCOMMITTED work — the flagship case — is reported as no collision",
@@ -233,8 +239,8 @@ const MUTATIONS = [
     "id": "primary-tree-unwatched",
     "defect": "the hook stops scanning the primary worktree — the one tree git REFUSES to lock, so the hook is its only protection",
     "file": "src/agent.mjs",
-    "find": "    ({ report } = await cachedReport(cwd, { includePrimary: true }));",
-    "replace": "    ({ report } = await cachedReport(cwd));",
+    "find": "    ({ report } = await cachedReport(analysisCwd, { includePrimary: true }));",
+    "replace": "    ({ report } = await cachedReport(analysisCwd));",
     "tests": [
       "test/e2e/integration.test.mjs"
     ]
@@ -361,7 +367,7 @@ const MUTATIONS = [
     defect: 'boilerplate symbols are not filtered, so every pair looks related',
     file: 'src/analyze.mjs',
     find: '    if (n <= limit) keep.add(k);',
-    replace: '    keep.add(k); if (false)',
+    replace: '    keep.add(k); if (false) keep.delete(k);',
     tests: ['test/e2e/break-it.test.mjs'],
   },
   {
@@ -551,9 +557,89 @@ const MUTATIONS = [
     replace: 'const committedCoverage = siblingCoverage(w, committedFiles, { durableOnly: false });',
     tests: ['test/e2e/detection.test.mjs', 'test/e2e/actions.test.mjs'],
   },
+  {
+    id: 'cache-ignores-ignored-bytes',
+    defect: 'the safety cache fingerprints ignored paths but not their bytes, so changing a gitignored secret reuses an old answer',
+    file: 'src/agent.mjs',
+    find: "const st = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'], { cwd: p })",
+    replace: "const st = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: p })",
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'shell-comment-destroyer-visible',
+    defect: 'a destroyer mentioned after an unquoted shell comment is treated as executable command text',
+    file: 'src/agent.mjs',
+    find: "    if (ch === '#' && (i === 0 || /[\\s;&|]/.test(s[i - 1]))) {",
+    replace: '    if (false) { // mutated: shell comments are scanned as commands',
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'bom-command-trusted',
+    defect: 'a BOM-prefixed hook command bypasses the parser and is allowed or misclassified instead of asking',
+    file: 'src/agent.mjs',
+    find: "  if (/^[\\uFEFF\\uFFFE]/.test(command)) {",
+    replace: '  if (false) { // mutated: BOM is treated as ordinary input',
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'brace-target-allowed',
+    defect: 'an unresolved shell brace expansion is treated as a literal path and silently allowed',
+    file: 'src/agent.mjs',
+    find: "  if (/(?<!\\\\)\\{[^{}\\n]*,[^{}\\n]*\\}/.test(value)) {",
+    replace: '  if (false) { // mutated: brace expansion is silently accepted',
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'compound-second-match-unseen',
+    defect: 'only the first destructive match in a compound command is assessed, so an ask or allow can disarm a later deny',
+    file: 'src/agent.mjs',
+    find: '  for (const hit of structure.matches) verdicts.push(await assessWorktreeMatch(command, cwd, ctx, hit));',
+    replace: '  for (const hit of structure.matches.slice(0, 1)) verdicts.push(await assessWorktreeMatch(command, cwd, ctx, hit));',
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'malformed-hook-allowed',
+    defect: 'a malformed or empty pre-tool hook payload falls through to the allow path',
+    file: 'bin/holt.mjs',
+    find: '    if (payloadError) {',
+    replace: '    if (false) { // mutated: malformed hook payload is treated as an empty allow',
+    tests: ['test/e2e/cli.test.mjs'],
+  },
+  {
+    id: 'cd-worktree-layer-ignored',
+    defect: 'pathless content verbs ignore a preceding literal cd and inspect the caller directory instead',
+    file: 'src/agent.mjs',
+    find: '  cwd = commandCwd;\n  if (structure.unresolved.length) {',
+    replace: '  if (structure.unresolved.length) {',
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'cd-ambiguity-allowed',
+    defect: 'cd - and popd are guessed instead of asking when the prior directory is not statically known',
+    file: 'src/agent.mjs',
+    find: "  if (hasAmbiguousDirectoryChange(command)) unresolved.push('ambiguous shell working-directory change');",
+    replace: "  if (false) unresolved.push('ambiguous shell working-directory change');",
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'guard-allowlist-ignored',
+    defect: 'a human-reviewed guardAllow entry is ignored, so the explicit escape hatch does not work',
+    file: 'src/agent.mjs',
+    find: '  if (allowlistPattern) {',
+    replace: '  if (false) { // mutated: guardAllow is ignored',
+    tests: ['test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'claude-allow-bypasses-native-permissions',
+    defect: 'Claude allow output emits permissionDecision:allow and bypasses the host native permission flow',
+    file: 'src/integrate/adapters.mjs',
+    find: "    if (verdict.decision === 'allow') return {};",
+    replace: "    if (verdict.decision === 'allow') return { hookSpecificOutput: { hookEventName: eventName, permissionDecision: 'allow' } };",
+    tests: ['test/e2e/integration.test.mjs'],
+  },
 ];
 
-function run(cmd, args, cwd, timeout = 600_000) {
+export function run(cmd, args, cwd, timeout = 600_000) {
   return new Promise((resolve) => {
     execFile(cmd, args, {
       cwd, timeout, maxBuffer: 64 * 1024 * 1024,
@@ -564,7 +650,7 @@ function run(cmd, args, cwd, timeout = 600_000) {
   });
 }
 
-async function applyMutation(work, m) {
+export async function applyMutation(work, m) {
   const file = path.join(work, m.file);
   const original = await fs.readFile(file, 'utf8');
   if (!original.includes(m.find)) {
@@ -572,6 +658,18 @@ async function applyMutation(work, m) {
   }
   await fs.writeFile(file, original.replace(m.find, m.replace), 'utf8');
   return { ok: true, original, file };
+}
+
+export function classifyMutationResult(result) {
+  const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  if (/SyntaxError|ERR_MODULE_NOT_FOUND|Cannot find module|Cannot use import statement outside a module/i.test(output)) {
+    return { outcome: 'invalid', detail: 'mutation caused a syntax or module-loading error' };
+  }
+  if (result.code === 0) return { outcome: 'survived', detail: 'all tests passed' };
+  if (/\bnot ok\b|# fail [1-9]\d*|\n✖\s|\bAssertionError\b.*\bat TestContext\b/is.test(output)) {
+    return { outcome: 'killed', detail: 'the test suite reported a failing test' };
+  }
+  return { outcome: 'invalid', detail: 'test runner exited without reporting a failing test' };
 }
 
 async function main() {
@@ -601,9 +699,14 @@ async function main() {
 
       try {
         const r = await run(process.execPath, ['--test', ...m.tests], work);
-        const killed = r.code !== 0;
-        console.log(killed ? 'killed  (tests caught it)' : 'SURVIVED  ← HOLE IN THE SUITE');
-        results.push({ ...m, outcome: killed ? 'killed' : 'survived' });
+        const classified = classifyMutationResult(r);
+        const label = classified.outcome === 'killed'
+          ? 'killed  (tests caught it)'
+          : classified.outcome === 'survived'
+            ? 'SURVIVED  ← HOLE IN THE SUITE'
+            : 'INVALID  (runner did not execute a failing test)';
+        console.log(label);
+        results.push({ ...m, ...classified });
       } finally {
         await fs.writeFile(path.join(work, m.file), applied.original, 'utf8');
       }
@@ -629,15 +732,24 @@ async function main() {
   const killed = results.filter((r) => r.outcome === 'killed').length;
   const survived = results.filter((r) => r.outcome === 'survived');
   const skipped = results.filter((r) => r.outcome === 'skipped');
+  const invalid = results.filter((r) => r.outcome === 'invalid');
   const scored = killed + survived.length;
 
   console.log(`\n  ${killed}/${scored} mutations killed`
     + (scored ? ` (${Math.round((killed / scored) * 100)}%)` : '')
-    + (skipped.length ? `  ·  ${skipped.length} skipped (anchor drifted)` : ''));
+    + (skipped.length ? `  ·  ${skipped.length} skipped (anchor drifted)` : '')
+    + (invalid.length ? `  ·  ${invalid.length} invalid (runner did not execute a failing test)` : ''));
 
   if (skipped.length) {
     console.log('\n  SKIPPED mutations prove NOTHING — their anchors no longer match the source:');
     for (const s of skipped) console.log(`    ${s.id}: ${s.detail}`);
+  }
+
+  if (invalid.length) {
+    console.log('\n  INVALID MUTATIONS — the runner did not execute a failing test:');
+    for (const item of invalid) console.log(`    ${item.id}: ${item.detail}`);
+    process.exitCode = 1;
+    return;
   }
 
   if (survived.length) {
@@ -649,4 +761,6 @@ async function main() {
   if (skipped.length) process.exitCode = 1;
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => { console.error(e); process.exit(1); });
+}

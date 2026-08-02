@@ -66,6 +66,25 @@ test('config: valid file -> familyOverrides parsed and returned', async (t) => {
   assert.deepEqual(r.config.familyOverrides, ['^(shard-\\d+)-.*$']);
 });
 
+test('config: valid guardAllow patterns are parsed and returned', async (t) => {
+  const fx = await newRepo('config-valid-guard-allow');
+  t.after(() => fx.cleanup());
+  await fx.write(CONFIG_FILENAME, JSON.stringify({ guardAllow: ['^git status$', '^rm -rf /tmp/'] }));
+
+  const r = await loadConfig(fx.root);
+  assert.deepEqual(r.config.guardAllow, ['^git status$', '^rm -rf /tmp/']);
+});
+
+test('config: guardAllow must be an array of valid regex strings', async (t) => {
+  const fx = await newRepo('config-bad-guard-allow');
+  t.after(() => fx.cleanup());
+  await fx.write(CONFIG_FILENAME, JSON.stringify({ guardAllow: [123] }));
+  await assert.rejects(() => loadConfig(fx.root), ConfigError);
+
+  await fx.write(CONFIG_FILENAME, JSON.stringify({ guardAllow: ['['] }));
+  await assert.rejects(() => loadConfig(fx.root), ConfigError);
+});
+
 test('config: valid file -> maintenanceFloor / maintenanceRatio parsed and returned', async (t) => {
   const fx = await newRepo('config-valid-maintenance');
   t.after(() => fx.cleanup());

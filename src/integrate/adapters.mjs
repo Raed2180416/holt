@@ -1995,6 +1995,7 @@ export function formatVerdict(verdict, { host = 'generic', eventName = 'PreToolU
   }
 
   if (host === 'claude-code') {
+    if (verdict.decision === 'allow') return {};
     const out = { hookEventName: eventName, permissionDecision: verdict.decision };
     if (verdict.reason) out.permissionDecisionReason = verdict.reason;
     return { hookSpecificOutput: out };

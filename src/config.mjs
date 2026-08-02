@@ -65,7 +65,7 @@ export function hasNestedQuantifier(source) {
   return /\((?:\?[:=!]|\?<[=!a-zA-Z])?(?:[^()\\]|\\.)*(?:[+*]|\{\d+,\d*\})\s*\)\s*(?:[+*]|\{\d+,\d*\})/.test(src);
 }
 
-const KNOWN_KEYS = ['familyOverrides', 'maintenanceFloor', 'maintenanceRatio'];
+const KNOWN_KEYS = ['familyOverrides', 'guardAllow', 'maintenanceFloor', 'maintenanceRatio'];
 
 // Keys that are silently ignored — they are standard JSON config metadata, not holt settings.
 // `$schema` is the JSON Schema standard self-reference key; any editor that supports JSON
@@ -140,6 +140,31 @@ function validate(raw, filePath) {
     out.familyOverrides = safe;
   }
 
+  if ('guardAllow' in raw) {
+    const v = raw.guardAllow;
+    if (!Array.isArray(v) || !v.every((x) => typeof x === 'string')) {
+      throw new ConfigError(`${filePath}: "guardAllow" must be an array of regex strings`, filePath);
+    }
+    const safe = [];
+    for (const pattern of v) {
+      try { new RegExp(pattern); } catch (e) {
+        throw new ConfigError(
+          `${filePath}: "guardAllow" entry ${JSON.stringify(pattern)} is not a valid regular expression (${e.message})`,
+          filePath,
+        );
+      }
+      if (hasNestedQuantifier(pattern)) {
+        process.stderr.write(
+          `holt: ignoring "guardAllow" entry ${JSON.stringify(pattern)} — it contains a nested `
+          + 'quantifier and would make the guard run without bound.\n',
+        );
+        continue;
+      }
+      safe.push(pattern);
+    }
+    out.guardAllow = safe;
+  }
+
   if ('maintenanceFloor' in raw) {
     const v = raw.maintenanceFloor;
     if (!Number.isInteger(v) || v < 0) {
@@ -167,6 +192,16 @@ function validate(raw, filePath) {
  * @throws {ConfigError} when the file exists but is structurally invalid (not JSON, not an
  *   object, wrong-type key). Unknown keys produce warnings, not errors.
  */
+export function guardAllowPattern(command, patterns = []) {
+  if (typeof command !== 'string') return null;
+  for (const source of patterns) {
+    try {
+      if (new RegExp(source).test(command)) return source;
+    } catch { return null; }
+  }
+  return null;
+}
+
 export async function loadConfig(cwd) {
   const root = await repoRoot(cwd);
   if (!root) return { found: false, path: null, config: {}, warnings: [] };
