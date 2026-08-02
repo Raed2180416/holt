@@ -851,6 +851,42 @@ async function findWorkstream(report, target, cwd) {
   return report.safe.find((s) => s.id === base || s.id.endsWith(`/${base}`)) ?? null;
 }
 
+/**
+ * The workstreams a worktree-level target reaches — the same containment question the file layer
+ * answers, at the worktree granularity. findWorkstream matches ONE exact path, so a glob or an
+ * ancestor (`git worktree remove -f ../wt-*`, the literal mergify verb) matched nothing and the
+ * command was allowed. Here a glob is matched — through holt's own pathMatcher — against each
+ * workstream's path and its ancestors, and a plain ancestor reaches every workstream inside it, so
+ * the worktree layer sees the same set the file layer already refuses to lose.
+ */
+async function targetWorkstreams(report, target, cwd) {
+  if (!target) return [];
+  const exact = await findWorkstream(report, target, cwd);
+  if (exact) return [exact];
+  const base = cwd || process.cwd();
+  const abs = await canonicalPath(path.resolve(base, globFreePrefix(target)));
+  const globby = GLOBBY.test(target);
+  const suffix = globby
+    ? target.slice((globFreePrefix(target) === '.' && !target.startsWith('.')) ? 0 : globFreePrefix(target).length).replace(/^\/+/, '')
+    : '';
+  const re = suffix ? pathMatcher(`${abs}/${suffix}`.replace(/\/+/g, '/')).re : null;
+  const out = [];
+  for (const s of report.safe) {
+    if (!s.path) continue;
+    const sp = await canonicalPath(s.path);
+    if (!globby) {
+      // A plain ancestor target (the directory that holds the worktrees) reaches every one under it.
+      if (underOrEqual(sp, abs) && !samePath(sp, abs)) out.push(s);
+      continue;
+    }
+    for (let p = sp; p.length >= abs.length; p = path.dirname(p)) {
+      if (re.test(p)) { out.push(s); break; }
+      if (path.dirname(p) === p) break;
+    }
+  }
+  return out;
+}
+
 
 
 /**
@@ -2146,7 +2182,7 @@ async function assessWorktreeCommand(command, cwd, ctx) {
     ? report.safe.filter((s) => !s.safe)
     : hit.cwdTarget
       ? [(await findWorkstream(report, assessedCwd, cwd)) ?? (await containingWorkstream(report, cwd))].filter(Boolean)
-      : [await findWorkstream(report, hit.target, cwd)].filter(Boolean);
+      : await targetWorkstreams(report, hit.target, cwd);
 
   // A sweep that reached here HAS something to take (the no-op case returned above), and the
   // report is consulted for ONE thing: the workstream's id, so the message can name it. Its

@@ -19,7 +19,7 @@ const HOLT_BIN = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
 import path from 'node:path';
 import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
 import {
-  assessCommand, buildBrief, classifyCommand, resolveFileTargets, cachedReport, inlineStrings,
+  assessCommand, buildBrief, classifyCommand, resolveFileTargets, cachedReport, inlineStrings, expandForLoops,
 } from '../../src/agent.mjs';
 import { atRiskFiles } from '../../src/scan.mjs';
 import {
@@ -2268,4 +2268,61 @@ test('CONTAINMENT: NEVER-WORSE — a non-matching glob and an outside path stay 
     assert.equal(v.decision, 'allow',
       `${cmd} reaches no worktree and must stay allowed — the fix must not manufacture refusals (got ${v.decision})`);
   }
+});
+
+/* --------------------- a for-loop over a glob is the incident, and must be seen ---------- */
+//
+// A compound `for VAR in LIST; do BODY; done` was never decomposed — measured,
+// resolveFileTargets returned [] for it — so a destroyer in the body ran unseen. This is the
+// mergify 29-worktree deletion in the spelling it actually took: a loop over `../wt-*` running
+// `git worktree remove --force` on each. expandForLoops binds the variable so the body is
+// assessed as `<verb> ../wt-*`, which the containment rule denies. It is pure expansion — it only
+// ever shows holt what the shell will run — so a benign body (echo, a build dir) stays allowed.
+// Grounded in how Continue's agent guard expands variables and DCG's tree-sitter-bash grammar
+// sees loop bodies; both refuse to let an unexpanded loop hide a destroyer.
+
+test('LOOP: `for d in ../wt-*; do rm -rf $d; done` is the incident and must deny', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  for (const cmd of [
+    'for d in ../wt/*; do rm -rf $d; done',
+    'for d in ../wt/*; do rm -rf "$d"; done',
+    'for d in ../wt/*; do git worktree remove -f $d; done',   // the literal mergify verb
+  ]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.notEqual(v.decision, 'allow',
+      `a loop that removes each match of a worktree glob must not be allowed: ${cmd}`);
+  }
+});
+
+test('LOOP: NEVER-WORSE — a loop whose body is harmless stays allowed', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  for (const cmd of ['for i in 1 2 3; do echo $i; done', 'for f in ./build/*; do rm -rf $f; done']) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow',
+      `expansion must never over-refuse a benign loop (got ${v.decision} for: ${cmd})`);
+  }
+});
+
+test('WORKTREE-GLOB: git worktree remove over a glob or ancestor reaches every match', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const single = await assessCommand(`git worktree remove -f ${fx.wt('uniqueUncommitted')}`, fx.root);
+  assert.notEqual(single.decision, 'allow', 'control: the resolved single target must deny');
+
+  const glob = await assessCommand('git worktree remove -f ../wt/*', fx.root);
+  assert.notEqual(glob.decision, 'allow',
+    'a glob that matches a worktree holding the only copy must not be allowed at the worktree layer');
+
+  const nomatch = await assessCommand('git worktree remove -f ../wt/nomatch-*', fx.root);
+  assert.equal(nomatch.decision, 'allow', 'a glob matching no worktree stays allowed');
+});
+
+test('EXPAND: expandForLoops binds the variable and never invents a body', () => {
+  // Unit-level, so the binding rule is pinned independently of the guard.
+  assert.deepEqual(expandForLoops('for d in ../wt-*; do rm -rf $d; done'), ['rm -rf ../wt-*']);
+  assert.deepEqual(expandForLoops('for d in ../wt-*; do rm -rf "$d"; done'), ['rm -rf ../wt-*']);
+  assert.deepEqual(expandForLoops('for i in 1 2 3; do echo $i; done'), ['echo 1 2 3']);
+  assert.deepEqual(expandForLoops('rm -rf x'), [], 'a command with no for-loop expands to nothing');
 });

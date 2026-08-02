@@ -90,6 +90,26 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "for-loop-body-unseen",
+    "defect": "a for-loop over a glob is not decomposed, so `for d in ../wt-*; do rm -rf $d; done` — the mergify incident verbatim — runs its destroyer body unseen and is ALLOWED",
+    "file": "src/agent.mjs",
+    "find": "  for (const body of expandForLoops(command)) {",
+    "replace": "  for (const body of []) { void expandForLoops; // mutated: loop bodies unseen",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
+    "id": "worktree-glob-target-dropped",
+    "defect": "the worktree layer resolves only ONE exact path, so `git worktree remove -f ../wt-*` (the literal mergify verb) matches no workstream and is allowed",
+    "file": "src/agent.mjs",
+    "find": "      : await targetWorkstreams(report, hit.target, cwd);",
+    "replace": "      : [await findWorkstream(report, hit.target, cwd)].filter(Boolean); // mutated: glob target dropped",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
     "id": "containment-ancestor-dropped",
     "defect": "a target that CONTAINS the worktrees (rm -rf .., rm -rf ../wt-*) is dropped as not-holt's-to-defend instead of destroying them — the mergify 29-worktree incident, in the spelling it took",
     "file": "src/agent.mjs",
