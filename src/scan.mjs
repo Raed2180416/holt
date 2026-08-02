@@ -850,7 +850,8 @@ async function scanFiles(ws, ctx) {
  * Scan every workstream.
  *
  * @param {object} disc  result of discover()
- * @param {object} opts  {base, strictReadOnly, concurrency, timeout, symbols, includePrimary}
+ * @param {{base?: string, strictReadOnly?: boolean, concurrency?: number, timeout?: number,
+ *          symbols?: boolean, includePrimary?: boolean, symbolBackend?: string}} [opts]
  */
 export async function scan(disc, opts = {}) {
   if (!disc.root) {

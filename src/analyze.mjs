@@ -560,6 +560,52 @@ export function safeToDelete(scanResult, unique = null) {
     if (!w.ok) {
       return { id: w.id, path: w.path, safe: false, confidence: 'unknown', reasons: [w.reason ?? 'not scanned'] };
     }
+
+    // THE MAIN WORKING TREE IS NEVER A DELETION CANDIDATE, whatever its contents say.
+    //
+    // A STRUCTURALLY INDEPENDENT FIRST GATE, evaluated before the content reasons are even
+    // collected, because "provably nothing to lose" is a statement about FILES and `safe: true`
+    // is read by every consumer as a statement about the WORKTREE.
+    //
+    // This was found the hard way and immediately: scanning the primary when it is the only
+    // worktree (the right fix for a repo reporting zero risk while holding real risk) made a
+    // clean solo repository's ONLY worktree "provably disposable", and every surface agreed at
+    // once — `holt gate <id>` exit 0, which is the documented green light for the chain the CLI
+    // itself prints, `holt gate $id && rm -rf $id`; MCP holt_check_workstream "safe to delete";
+    // holt_status disposable:1; `plan` listing it under DROP; `auto` prescribing
+    // `holt clean --apply`; and the PreToolUse guard ALLOWING `rm -rf <repo>`, correctly by its
+    // own rule, because a clean tree contains no file whose only copy is on disk.
+    //
+    // `git worktree remove` refuses the main working tree outright — which is the only reason
+    // `clean --apply` was not already destroying repositories. `rm -rf` has no such protection,
+    // and .git lives inside that path: every commit, branch, reflog, stash and rescue ref goes
+    // with it. git-worktree(1) draws exactly this line ("A repository has one main worktree and
+    // zero or more linked worktrees"), and lazygit keeps the same distinction as data rather than
+    // by exclusion (worktree_loader.go's `isMain`) so that callers can refuse destructive actions
+    // on it. No tool surveyed treats a main working tree as removable.
+    //
+    // The content verdict is NOT thrown away — `contentReproducible` carries it, so `risk` and
+    // `plan` can still say "nothing unique here" without any consumer reading that as permission.
+    if (w.isPrimary) {
+      const u0 = uniqById.get(w.id);
+      const risk0 = contentAtRisk(w);
+      const nothingUnique = !(u0?.uniqueSymbolCount > 0) && !(risk0?.count > 0)
+        && !(w.committed?.files?.length > 0);
+      return {
+        id: w.id,
+        path: w.path,
+        safe: false,
+        confidence: 'measured',
+        isPrimary: true,
+        contentReproducible: nothingUnique,
+        reasons: [nothingUnique
+          ? 'this is the repository\'s main working tree — its files are reproducible from base, '
+            + 'but it is not a removable worktree (git itself refuses `git worktree remove` here, '
+            + 'and .git lives inside it)'
+          : 'this is the repository\'s main working tree, and it holds work base lacks'],
+      };
+    }
+
     const u = uniqById.get(w.id);
     // ONE content computation, shared with rescue — see contentAtRisk(). Reading these fields
     // directly here is what let the two commands drift into opposite answers.

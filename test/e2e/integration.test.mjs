@@ -1898,3 +1898,83 @@ test('SPACES: NEVER-WORSE — quoting must not make the guard refuse things it s
       `must stay allowed: ${cmd} -> ${JSON.stringify(v)}`);
   }
 });
+
+/* ------------------------------------------ the main working tree is never disposable ---- */
+
+/**
+ * "PROVABLY NOTHING TO LOSE" IS A STATEMENT ABOUT FILES. `safe: true` IS READ AS ONE ABOUT THE
+ * WORKTREE.
+ *
+ * Scanning the primary when it is the only worktree — the right fix for a repo reporting zero risk
+ * while holding real risk — made a CLEAN solo repository's only worktree "provably disposable",
+ * and every surface agreed at once: `holt gate <id>` exit 0, which is the green light for the
+ * chain the CLI itself prints (`holt gate $id && rm -rf $id`); MCP holt_check_workstream
+ * "safe to delete"; holt_status disposable:1; `plan` listing it under DROP; `auto` prescribing
+ * `holt clean --apply`; and the PreToolUse guard ALLOWING `rm -rf <repo>` — correctly by its own
+ * rule, because a clean tree holds no file whose only copy is on disk.
+ *
+ * `git worktree remove` refuses the main working tree outright, which is the only reason
+ * `clean --apply` was not already destroying repositories. `rm -rf` has no such protection, and
+ * .git is inside that path: every commit, branch, reflog, stash and refs/holt/* rescue ref goes
+ * with it. git-worktree(1) draws exactly this line; lazygit keeps the same distinction as data
+ * (`isMain`) so callers can refuse destructive actions on it.
+ */
+test('PRIMARY: a clean solo repo\'s only worktree is NEVER reported disposable', async (t) => {
+  const fx = await newRepo('primary-not-disposable');
+  t.after(() => fx.cleanup());
+
+  const { report } = await cachedReport(fx.root, { includePrimary: true });
+  const row = report.safe.find((s) => s.isPrimary || s.path === fx.root);
+  assert.ok(row, `the primary must appear in the safe report: ${JSON.stringify(report.safe)}`);
+  assert.equal(row.safe, false,
+    `the main working tree must never be safe to delete: ${JSON.stringify(row)}`);
+  assert.equal(row.confidence, 'measured', 'and this is a measurement, not an unknown');
+  assert.match(row.reasons.join(' '), /main working tree/i,
+    `the reason must say why, not hedge: ${JSON.stringify(row.reasons)}`);
+
+  // ANTI-VACUITY: the content verdict is not thrown away — `risk`/`plan` must still be able to
+  // say "nothing unique here" without any consumer reading that as permission to delete.
+  assert.equal(row.contentReproducible, true,
+    `a clean primary's content really is reproducible, and that must stay visible: ${JSON.stringify(row)}`);
+
+  // ...and nothing downstream offers it up.
+  assert.ok(!report.plan?.drop?.some((d) => d.id === row.id),
+    `plan must not put the main working tree in DROP: ${JSON.stringify(report.plan?.drop)}`);
+});
+
+test('PRIMARY: NEVER-WORSE — a linked worktree with nothing unique is STILL disposable', async (t) => {
+  // The other direction, and the whole product depends on it: a fix that made everything
+  // undeletable would switch `holt clean` off entirely.
+  const fx = await newRepo('primary-neverworse');
+  t.after(() => fx.cleanup());
+  await fx.worktree('spent');
+
+  const { report } = await cachedReport(fx.root, { includePrimary: true });
+  const spent = report.safe.find((s) => s.id === 'spent');
+  assert.equal(spent?.safe, true,
+    `an empty LINKED worktree must remain disposable: ${JSON.stringify(spent)}`);
+});
+
+test('PRIMARY: `rm -rf <repo root>` is refused because .git is inside it', async (t) => {
+  const fx = await newRepo('rm-repo-root');
+  t.after(() => fx.cleanup());
+
+  const v = await assessCommand(`rm -rf ${fx.root}`, fx.root);
+  assert.equal(v?.decision, 'deny',
+    `deleting the repository root must be refused: ${JSON.stringify(v)}`);
+  assert.match(v.reason, /MAIN WORKING TREE/i, v.reason);
+  assert.match(v.reason, /\.git is inside/i, `and it must say WHY: ${v.reason}`);
+  assert.match(v.reason, /commit|reflog|stash/i,
+    `naming what is actually at stake: ${v.reason}`);
+
+  // NEVER-WORSE: ordinary deletes inside the repo are untouched, and an empty LINKED worktree
+  // stays removable — otherwise this guard has made holt refuse the work it exists to enable.
+  await fs.mkdir(path.join(fx.root, 'node_modules'), { recursive: true });
+  const nm = await assessCommand('rm -rf node_modules', fx.root);
+  assert.ok(!nm || nm.decision === 'allow', `rm -rf node_modules must stay allowed: ${JSON.stringify(nm)}`);
+
+  await fx.worktree('spent');
+  const linked = await assessCommand(`rm -rf ${fx.wt('spent')}`, fx.root);
+  assert.ok(!linked || linked.decision === 'allow',
+    `an empty linked worktree must stay removable: ${JSON.stringify(linked)}`);
+});

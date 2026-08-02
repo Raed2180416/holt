@@ -1827,6 +1827,37 @@ async function assessWorktreeCommand(command, cwd, ctx) {
   if (hit.kind === 'rm of a worktree path' && hit.target) {
     const isWt = await targetIsWorktree(hit.target, cwd, ctx);
     if (!isWt) return null;
+
+    // DELETING THE MAIN WORKING TREE DELETES .git, AND WITH IT EVERYTHING.
+    //
+    // Every check below this point asks "would this destroy content whose only copy is on disk".
+    // For a clean main working tree the honest answer is no — and `rm -rf <repo>` still takes
+    // every commit, every branch, every reflog, every stash and every refs/holt/* rescue ref that
+    // holt itself created, because .git is inside the path. The guard allowed it, correctly by
+    // its own rule and catastrophically in effect.
+    //
+    // `git worktree remove` refuses the main working tree outright, which is the only reason
+    // `holt clean --apply` was never able to do this. `rm` has no such protection. So this is
+    // answered here, from the repository's own layout, and it is answered the same way whether
+    // the tree is clean or dirty — the value at stake is the history, not the working files.
+    const abs = await canonicalPath(path.resolve(cwd || process.cwd(), hit.target));
+    const gitPath = path.join(abs, '.git');
+    const holdsGitDir = await fs.stat(gitPath).then((s) => s.isDirectory()).catch(() => false);
+    if (holdsGitDir) {
+      return {
+        decision: 'deny',
+        kind: 'rm of the repository root',
+        targets: [path.basename(abs)],
+        files: [],
+        reason:
+          `holt blocked this: ${hit.target} is the repository's MAIN WORKING TREE, and .git is inside it.\n`
+          + '  • every commit, branch, tag, reflog, stash and refs/holt/* rescue ref goes with it\n'
+          + 'This is not recoverable from the worktree, because the worktree is what holds the history.\n'
+          + '`git worktree remove` refuses the main working tree for the same reason; `rm` does not.\n'
+          + 'If you meant to remove a LINKED worktree, name that path instead. If you genuinely mean '
+          + 'to delete this repository, do it outside the agent session.',
+      };
+    }
   }
 
   // ---- A STASH VERB IS WEIGHED ONLY AGAINST WHAT A STASH CAN DESTROY ----------------------

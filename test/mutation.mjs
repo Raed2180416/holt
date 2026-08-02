@@ -80,6 +80,16 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "primary-is-disposable",
+    "defect": "the main-working-tree gate is removed — a clean solo repository's ONLY worktree is reported disposable, gate exits 0, and the chain `holt gate $id && rm -rf $id` deletes the repository including .git",
+    "file": "src/analyze.mjs",
+    "find": "    if (w.isPrimary) {",
+    "replace": "    if (false) { // mutated: main working tree offered as a deletion candidate",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
     "id": "mutation-verbs-uncovered",
     "defect": "the reset --hard rule is removed — holt blocks worktree DELETION but allows the command that destroys the same work in place",
     "file": "src/agent.mjs",
