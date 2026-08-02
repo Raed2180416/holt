@@ -90,6 +90,26 @@ const MUTATIONS = [
     ]
   },
   {
+    "id": "primary-removability-read-as-content",
+    "defect": "the content verbs read the primary's `safe` flag (which means \"not removable\") instead of contentReproducible, so in a single-clone repo — the layout almost every repository has — `git reset --hard`, `git clean -fdx` and `git checkout -- .` are DENIED FOREVER, even on a byte-clean tree, with no escape hatch",
+    "file": "src/agent.mjs",
+    "find": "    : targets.filter((s) => (s.isPrimary ? s.contentReproducible === false : !s.safe));",
+    "replace": "    : targets.filter((s) => !s.safe); // mutated: removability read as content",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
+    "id": "windows-path-not-unescaped",
+    "defect": "inline strings are taken as raw source, so a Windows path spelled correctly in JS (`'C:\\\\p\\\\wt'`) resolves to nothing and holt ALLOWS the removal — a silent under-refusal on Windows only",
+    "file": "src/agent.mjs",
+    "find": "    .map((m) => m[1].replace(/\\\\\\\\/g, '\\\\'));",
+    "replace": "    .map((m) => m[1]); // mutated: source spelling used as the path",
+    "tests": [
+      "test/e2e/integration.test.mjs"
+    ]
+  },
+  {
     "id": "proxy-targets-every-string",
     "defect": "the `rm -rf <str>` targeting proxy is applied to every quoted string again, so a path named only as a shelled-out command's cwd is read as a deletion target — `node -e \"execSync('git log',{cwd:'<repo>'})\"` is denied as rm -rf of the repository",
     "file": "src/agent.mjs",

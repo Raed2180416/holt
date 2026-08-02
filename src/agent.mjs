@@ -651,8 +651,19 @@ const INLINE_DESTRUCTIVE = [
  *
  * So: return them all, and let the caller try each as a command first and as a path second.
  */
-function inlineStrings(code) {
-  return [...String(code).matchAll(/['"`]([^'"`\n]+)['"`]/g)].map((m) => m[1]);
+export function inlineStrings(code) {
+  return [...String(code).matchAll(/['"`]([^'"`\n]+)['"`]/g)]
+    // A WINDOWS PATH IS SPELLED WITH DOUBLED BACKSLASHES IN SOURCE, and taking the raw text
+    // between the quotes gets the source spelling rather than the path. `fs.rmSync('C:\\p\\wt')`
+    // — the CORRECT way to write that path in JavaScript or Python — yielded the literal string
+    // `C:\\p\\wt`, which resolves to nothing, so holt found no target and ALLOWED the removal.
+    // A silent under-refusal on the one platform this project has already been bitten by twice.
+    //
+    // Only the doubled backslash is collapsed. Interpreting the rest of the escape table would
+    // turn `C:\new` into `C:` + a newline and invent paths nobody wrote; leaving those verbatim
+    // keeps the raw text, which is the closest thing to intent when the source is already
+    // malformed.
+    .map((m) => m[1].replace(/\\\\/g, '\\'));
 }
 
 export function indirectVerb(command) {
@@ -2049,7 +2060,28 @@ async function assessWorktreeCommand(command, cwd, ctx) {
   // question asked; the evidence is the status, not the id.
   const holding = sweep
     ? (targets.length ? targets : [{ id: null }])
-    : targets.filter((s) => !s.safe);
+    // `safe` ANSWERS "IS THIS WORKTREE REMOVABLE", AND THIS LINE IS ASKING "WOULD THIS COMMAND
+    // DESTROY CONTENT". For a linked worktree the two coincide — safe:true means provably
+    // disposable, so nothing is lost either way. FOR THE MAIN WORKING TREE THEY DO NOT, and
+    // conflating them made holt unusable in the layout almost every repository has.
+    //
+    // analyze.mjs sets safe:false for the primary unconditionally, and correctly: git itself
+    // refuses `git worktree remove` there and .git lives inside it, so it is never removable. But
+    // `git reset --hard` does not remove a worktree; it discards content. Reading removability as
+    // "holds irreplaceable work" meant that in a single-clone repository — no linked worktrees,
+    // the ordinary case — holt DENIED `git reset --hard`, `git clean -fdx`, `git checkout -- .`
+    // and `git restore --worktree .` FOREVER. MEASURED on a byte-clean fresh clone with zero
+    // dirty files: all four denied, while `git stash` on the same tree allowed, because the sweep
+    // path asks the content question directly and never touches this flag.
+    //
+    // No repository state satisfied it and there was no escape hatch: .holtrc.json cannot make
+    // holt less safe, and `holt discard` cannot help because the refusal names no file. The
+    // message even contradicted itself — "would destroy work that exists nowhere else", then
+    // "its files are reproducible from base" in the same breath. That is the hour-one uninstall.
+    //
+    // analyze.mjs already computes the right answer and carries it as `contentReproducible`
+    // precisely so this question can be asked without reading removability. Ask it.
+    : targets.filter((s) => (s.isPrimary ? s.contentReproducible === false : !s.safe));
   if (holding.length === 0) {
     return { decision: 'allow', reason: null, kind: hit.kind, targets: targets.map((t) => t.id) };
   }

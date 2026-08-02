@@ -19,7 +19,7 @@ const HOLT_BIN = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
 import path from 'node:path';
 import { standardFixture, emptyFixture, newRepo } from '../fixtures.mjs';
 import {
-  assessCommand, buildBrief, classifyCommand, resolveFileTargets, cachedReport,
+  assessCommand, buildBrief, classifyCommand, resolveFileTargets, cachedReport, inlineStrings,
 } from '../../src/agent.mjs';
 import { atRiskFiles } from '../../src/scan.mjs';
 import {
@@ -2099,15 +2099,19 @@ test('SUBSTITUTION: NEVER-WORSE — a destructive command inside a substitution 
 
 const RM_ = `r${'m'}`;
 const inlineCase = (body) => `node -e "${body.replace(/"/g, '\\"')}"`;
+// A Windows path embedded RAW into JS source is not the path — `C:\Users\x` makes `\U` and `\x`
+// escape sequences, so the program holt reads is corrupted before it is ever parsed. JSON.stringify
+// produces a valid JS string literal on every platform, which is what an agent would actually emit.
+const jsStr = (v) => JSON.stringify(String(v));
 
 test('GUARD: a read-only inline program is not refused for naming a path in cwd', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
   const q = (s) => `'${s}'`;
   for (const body of [
-    `const{execSync}=require(${q('child_process')});execSync(${q('git log')},{cwd:${q(fx.root)}})`,
-    `require(${q('child_process')}).execSync(${q('git status')},{cwd:${q(fx.root)}})`,
-    `execFile(${q('git')},[${q('status')}],{cwd:${q(fx.root)}})`,
+    `const{execSync}=require(${q('child_process')});execSync(${q('git log')},{cwd:${jsStr(fx.root)}})`,
+    `require(${q('child_process')}).execSync(${q('git status')},{cwd:${jsStr(fx.root)}})`,
+    `execFile(${q('git')},[${q('status')}],{cwd:${jsStr(fx.root)}})`,
   ]) {
     const v = await assessCommand(inlineCase(body), fx.root);
     assert.equal(v.decision, 'allow',
@@ -2122,8 +2126,8 @@ test('GUARD: a destroyer split across separate strings is still caught', async (
   // execFile/spawn/spawnSync were absent from the shell-out detector entirely, so these came back
   // ALLOW because no rule matched at all — an under-refusal found while narrowing the over-refusal.
   for (const body of [
-    `execFile(${q(RM_)},[${q('-rf')},${q(fx.wt('uniqueUncommitted'))}])`,
-    `spawnSync(${q(RM_)},[${q('-rf')},${q(fx.wt('uniqueUncommitted'))}])`,
+    `execFile(${q(RM_)},[${q('-rf')},${jsStr(fx.wt('uniqueUncommitted'))}])`,
+    `spawnSync(${q(RM_)},[${q('-rf')},${jsStr(fx.wt('uniqueUncommitted'))}])`,
   ]) {
     const v = await assessCommand(inlineCase(body), fx.root);
     assert.notEqual(v.decision, 'allow',
@@ -2131,11 +2135,90 @@ test('GUARD: a destroyer split across separate strings is still caught', async (
   }
 });
 
+test('GUARD: a doubled-backslash path — how Windows paths are written in source — is unescaped', () => {
+  // A Windows path spelled correctly in JS source uses DOUBLED backslashes. Taking the raw text
+  // between the quotes returned the SOURCE spelling rather than the path, so it resolved to
+  // nothing, holt found no target, and the removal was ALLOWED. A silent under-refusal on the
+  // one platform this project has already been bitten by twice.
+  //
+  // Asserted on the extractor rather than end to end, because faking a Windows path on POSIX
+  // proves nothing: path.sep is '/' here, so "doubling the separator" builds a string that is a
+  // path on neither platform — the first version of this test did exactly that and passed
+  // vacuously. Whether a resolved path then matches a worktree is ordinary path logic covered
+  // elsewhere; what changed here is the unescaping, so that is what this pins.
+  const src = String.raw`require('fs').rmSync('C:\\proj\\wt')`;
+  assert.deepEqual(inlineStrings(src), ['fs', String.raw`C:\proj\wt`],
+    'doubled backslashes in source must collapse to the single separators of the real path');
+
+  assert.deepEqual(inlineStrings("x('/home/u/wt')"), ['/home/u/wt'],
+    'a POSIX path carrying no escapes must pass through byte-for-byte');
+
+  // NEVER-WORSE: only the doubled backslash collapses. Interpreting the rest of the escape table
+  // would turn `C:\new` into `C:` + a newline and invent a path nobody wrote.
+  assert.deepEqual(inlineStrings(String.raw`x('C:\new')`), [String.raw`C:\new`],
+    'a single backslash is left verbatim — the source is already malformed, so do not guess');
+});
+
 test('GUARD: an inline remove naming its own target is still denied', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
   const q = (s) => `'${s}'`;
   const v = await assessCommand(
-    inlineCase(`require(${q('fs')}).${RM_}Sync(${q(fx.wt('uniqueUncommitted'))},{recursive:true})`), fx.root);
+    inlineCase(`require(${q('fs')}).${RM_}Sync(${jsStr(fx.wt('uniqueUncommitted'))},{recursive:true})`), fx.root);
   assert.notEqual(v.decision, 'allow', 'the remove role must keep its exact targeting proxy');
+});
+
+/* ------------- "removable" and "holds irreplaceable content" are different questions ---- */
+//
+// analyze.mjs sets safe:false for the main working tree unconditionally, and correctly: git
+// refuses `git worktree remove` there and .git lives inside it, so it is never removable. But the
+// guard's content verbs read that same flag to answer a DIFFERENT question — "would this command
+// destroy content" — and in a single-clone repository, the layout almost every repo has, that
+// made holt DENY `git reset --hard`, `git clean -fdx`, `git checkout -- .` and
+// `git restore --worktree .` FOREVER. On a byte-clean tree. With no escape hatch: .holtrc.json
+// cannot make holt less safe and `holt discard` cannot help because the refusal names no file.
+//
+// The message contradicted itself in consecutive clauses — "would destroy work that exists
+// nowhere else", then "its files are reproducible from base". That is an hour-one uninstall, and
+// it is the single most expensive kind of bug this project can ship: a safety tool that refuses
+// ordinary work teaches its user to switch it off, after which it protects nothing.
+//
+// All three directions are pinned here. A change that cures the over-refusal by allowing a real
+// destruction fails the second test; one that keeps the repo-root rule but re-breaks the clean
+// case fails the first.
+
+test('PRIMARY: content verbs are allowed on a byte-clean main working tree', async (t) => {
+  const fx = await newRepo('primary-clean');
+  t.after(() => fx.cleanup());
+  const st = await fx.git(['status', '--porcelain']);
+  assert.equal(String(st).trim(), '', 'premise: the fixture must be byte-clean');
+
+  for (const cmd of ['git reset --hard', 'git clean -fdx', 'git checkout -- .', 'git restore --worktree .']) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow',
+      `${cmd} on a clean main working tree destroys nothing and must not be refused (got ${v.decision})`);
+  }
+});
+
+test('PRIMARY: NEVER-WORSE — the same verbs are caught once the tree holds unique work', async (t) => {
+  const fx = await newRepo('primary-dirty');
+  t.after(() => fx.cleanup());
+  await fx.write('only-here.js', 'export function ONLY_COPY_HERE() { return 1; }\n');
+
+  for (const cmd of ['git reset --hard', 'git clean -fdx']) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.notEqual(v.decision, 'allow',
+      `${cmd} must still be caught when the main tree holds the only copy of something`);
+  }
+});
+
+test('PRIMARY: NEVER-WORSE — rm -rf of the repository root is still refused', async (t) => {
+  const fx = await newRepo('primary-rmrf');
+  t.after(() => fx.cleanup());
+  // Removability and content are separate questions, and this is the removability one: .git lives
+  // inside the main working tree, so its loss takes every commit, branch, reflog and rescue ref
+  // with it — irrespective of whether the tree is clean.
+  const v = await assessCommand(`rm -rf ${fx.root}`, fx.root);
+  assert.notEqual(v.decision, 'allow',
+    'deleting the main working tree destroys .git and must be refused even on a clean tree');
 });

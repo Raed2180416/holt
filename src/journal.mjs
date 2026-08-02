@@ -17,9 +17,29 @@ import os from 'node:os';
 import path from 'node:path';
 import { git } from './git.mjs';
 
+/**
+ * Where the audit trail lives, or `null` when git cannot say.
+ *
+ * AN EMPTY ANSWER IS NOT A PATH PREFIX. When `rev-parse --git-common-dir` failed or returned
+ * nothing — outside a repository, a broken symlink, a git too old for the flag — `path.join('',
+ * 'holt', 'journal.jsonl')` produced the RELATIVE path `holt/journal.jsonl`, and holt appended its
+ * audit journal into whatever directory the process happened to be standing in.
+ *
+ * FOUND IN THIS REPOSITORY: an untracked `holt/journal.jsonl` appeared at the root of holt's own
+ * working tree, holding a real `blocked` event, written by an agent that had run holt somewhere
+ * git could not resolve. It shows up in `git status`, invites being committed, and is the same
+ * defect this project keeps finding — a failed read treated as a usable value rather than as the
+ * absence of one.
+ *
+ * So: resolve, verify the result is ABSOLUTE, and otherwise return null. A caller that cannot
+ * locate the journal must say so, not invent a location.
+ */
 async function journalPath(cwd) {
-  const common = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd });
-  return path.join(common.stdout.trim(), 'holt', 'journal.jsonl');
+  const common = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd })
+    .catch(() => null);
+  const dir = common?.stdout?.trim();
+  if (!dir || !path.isAbsolute(dir)) return null;
+  return path.join(dir, 'holt', 'journal.jsonl');
 }
 
 /**
@@ -115,6 +135,15 @@ export function actorOf({ env = process.env } = {}) {
 export async function appendEvent(cwd, event, { env = process.env } = {}) {
   try {
     const p = await journalPath(cwd);
+    // No resolvable journal means no journal. Writing to a relative fallback would put an audit
+    // trail in the user's working tree — which is how `holt/journal.jsonl` ended up untracked at
+    // the root of this very repository.
+    if (!p) {
+      process.stderr.write(
+        `holt journal: no git common dir here, so '${event?.action ?? '?'}' was not recorded `
+        + '— the action itself was NOT affected\n');
+      return { ok: false, error: 'no git common dir' };
+    }
     await fs.mkdir(path.dirname(p), { recursive: true });
     const line = { at: new Date().toISOString(), actor: actorOf({ env }), ...event };
     await fs.appendFile(p, `${JSON.stringify(line)}\n`, 'utf8');
@@ -128,9 +157,11 @@ export async function appendEvent(cwd, event, { env = process.env } = {}) {
 
 /** Read the whole journal, oldest first. A corrupt line is surfaced, not swallowed. */
 export async function readJournal(cwd) {
+  const p = await journalPath(cwd);
+  if (!p) return [];   // nowhere to keep a journal means there are no events, not an error
   let raw;
   try {
-    raw = await fs.readFile(await journalPath(cwd), 'utf8');
+    raw = await fs.readFile(p, 'utf8');
   } catch (e) {
     if (e.code === 'ENOENT') return [];
     throw e;
