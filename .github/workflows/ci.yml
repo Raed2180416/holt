@@ -127,6 +127,22 @@ jobs:
           cargo install --locked jj-cli --root "$HOME/.local" || echo "jj unavailable; its suite will skip and say so"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      - name: install opencode (one of the 29 integration targets holt wires)
+        # THE PUBLISHED TEST COUNT MUST NOT DEPEND ON WHAT THE GRADER HAPPENS TO HAVE INSTALLED.
+        # test/e2e/opencode-plugin.test.mjs ends in `t.skip('opencode not installed')` when the
+        # binary is absent, so this job measured 697 passing while README claimed 698 and
+        # BENCHMARKS explained a 698/699 split — three numbers for one suite, and the
+        # published-numbers gate failed the build over the difference rather than the difference
+        # being fixed.
+        #
+        # The deeper reason to install it: opencode is a SHIPPED integration target, and the only
+        # test that drives the real binary has therefore never run in CI once. An adapter proven
+        # solely on the maintainer's machine is exactly the class this workflow's other jobs exist
+        # to close.
+        run: |
+          npm i -g opencode-ai
+          opencode --version
+
       - run: npm ci
 
       - name: doctor

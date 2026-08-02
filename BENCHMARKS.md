@@ -181,16 +181,24 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 698 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| tests | 726 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
 | deliberate-defect mutations | 42/42 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
 
-One test is deliberately excluded from that figure. `npm test` defines 699 tests; the opencode
-plugin test cannot execute without opencode installed, and a skipped test prints `ok` while never
-running — so counting it would inflate the claim. CI compares the published number against tests
-that actually PASSED, never against the total defined, and prints every skip. A developer with
-opencode installed sees 699.
+CI compares the published number against tests that actually PASSED, never against the total
+defined, and prints every skip — because a skipped test prints `ok` while never running, and
+counting it would inflate the claim.
+
+That rule used to cost a number rather than fix one. `test/e2e/opencode-plugin.test.mjs` drives
+the real `opencode` binary and skipped when it was absent, so CI measured 697 while README claimed
+698 and this table explained a 698-versus-699 split: three numbers for one suite, and the gate
+failing the build over the difference instead of the difference being removed. The deeper cost was
+worse — opencode is one of the 29 integration targets holt wires, and the only test that drives it
+for real had therefore never executed in CI once.
+
+CI now installs opencode, so nothing skips and there is one number: **726 defined, 726 passing.**
+A developer without opencode installed sees 725 passing and 1 skipped, and `npm test` says so.
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
 broken, not merely observed to be green. **Does not mean:** 42 hand-picked mutations amount to full
