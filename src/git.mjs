@@ -697,8 +697,35 @@ export async function readWorktreeFile(root, relPath) {
   }
 }
 
+/**
+ * Two processes writing the SAME git object at the same time is a race Windows loses.
+ *
+ * git writes a loose object to a temporary file and renames it into place. On POSIX that rename
+ * is atomic and idempotent — two processes computing the same content compute the same object id,
+ * and whoever loses the race simply overwrites identical bytes. On Windows the rename fails if the
+ * destination is open, and git surfaces it as
+ *
+ *     error: unable to write file …/.git/objects/aa/c493…: Permission denied
+ *
+ * MEASURED on a Windows CI runner: two concurrent `holt rescue` calls against one worktree, which
+ * is the ordinary shape when two agents finish at once or a hook and a human overlap. One of them
+ * died with a hard GitFailed instead of converging on the object the other had just written.
+ *
+ * The operation is CONTENT-ADDRESSED and therefore idempotent: retrying either finds the object
+ * already present or writes the identical bytes. So this retries, briefly, and only for the
+ * specific transient shape — never for a real failure, which would otherwise be retried into a
+ * confusing timeout instead of reported.
+ */
+const TRANSIENT_OBJECT_WRITE = /unable to write (?:file|sha1 filename|loose object).*(?:Permission denied|EPERM|EACCES|being used by another process)/i;
+
 export async function gitOk(argv, opts) {
-  const r = await git(argv, opts);
+  let r = await git(argv, opts);
+  for (let attempt = 1; attempt <= 4 && r.code !== 0 && TRANSIENT_OBJECT_WRITE.test(r.stderr ?? ''); attempt++) {
+    // 20ms, 40ms, 80ms, 160ms — bounded, and short next to the operation it protects.
+    await new Promise((res) => { setTimeout(res, 20 * (2 ** (attempt - 1))); });
+    // eslint-disable-next-line no-await-in-loop -- a retry is sequential by definition
+    r = await git(argv, opts);
+  }
   if (r.code !== 0) {
     throw new GitFailed(`git ${argv.join(' ')} exited ${r.code}: ${r.stderr.trim()}`, {
       code: r.code,

@@ -282,8 +282,8 @@ const MUTATIONS = [
     id: 'policy-silent-pass',
     defect: 'an unparseable policy file is ignored instead of refusing — the team believes rules ran',
     file: 'src/team/policy.mjs',
-    find: "      throw Object.assign(new Error(`${rel} is not valid JSON (${e.message}) — refusing to run with a policy nobody can read`), { code: 'POLICY_PARSE' });",
-    replace: '      continue;',
+    find: "        throw Object.assign(",
+    replace: "        if (true) { doc = { version: 1, rules: [] }; } else throw Object.assign(",
     tests: ['test/unit/policy.test.mjs'],
   },
   {

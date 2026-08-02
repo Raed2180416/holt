@@ -242,3 +242,52 @@ test('discoverGitWorktrees: a newline-named worktree DIRECTORY is reported at it
   // names a directory that does not exist, and every later operation aims at nothing.
   await assert.doesNotReject(fs.stat(found.path), 'the reported worktree path must exist on disk');
 });
+
+/**
+ * A TRANSIENT OBJECT-WRITE RACE IS RETRIED; A REAL FAILURE IS NOT.
+ *
+ * git writes a loose object to a temp file and renames it into place. That rename is atomic and
+ * idempotent on POSIX — two processes computing the same content compute the same object id — but
+ * on Windows it fails when the destination is open, surfacing as
+ *
+ *     error: unable to write file …/.git/objects/aa/c493…: Permission denied
+ *
+ * Measured on a Windows CI runner: two concurrent `holt rescue` calls against one worktree — the
+ * ordinary shape when two agents finish at once — and one died with a hard failure instead of
+ * converging on the object the other had just written.
+ *
+ * The retry is narrow on purpose. Retrying a REAL failure turns a clear error into a confusing
+ * delay, so the pattern is pinned here directly rather than only through a race that cannot be
+ * reproduced on demand.
+ */
+test('GIT: the transient object-write race is recognised, and nothing else is', async () => {
+  const { default: fsp } = await import('node:fs/promises');
+  const src = await fsp.readFile(new URL('../../src/git.mjs', import.meta.url), 'utf8');
+  const m = /const TRANSIENT_OBJECT_WRITE = (\/.*\/[a-z]*);/.exec(src);
+  assert.ok(m, 'the pattern must be a named constant so it can be graded');
+  // eslint-disable-next-line no-eval -- reading the module's own literal, not user input
+  const re = eval(m[1]);
+
+  const transient = [
+    "error: unable to write file /r/.git/objects/aa/c49374: Permission denied",
+    "error: unable to write sha1 filename .git/objects/ab/cdef: Permission denied",
+    'error: unable to write loose object file: EPERM',
+    'error: unable to write file .git/objects/1a/2b: The process cannot access the file because it is being used by another process',
+  ];
+  for (const s of transient) {
+    assert.ok(re.test(s), `must be recognised as transient: ${s}`);
+  }
+
+  // ANTI-VACUITY: a pattern that matched everything would satisfy the loop above and would retry
+  // genuine failures into a timeout.
+  const real = [
+    'fatal: not a git repository',
+    'error: pathspec ‘x’ did not match any file(s) known to git',
+    'fatal: unable to write new index file',
+    'error: unable to write file .git/objects/aa/bb: No space left on device',
+    'fatal: The main working tree cannot be locked or unlocked',
+  ];
+  for (const s of real) {
+    assert.ok(!re.test(s), `must NOT be retried — it is a real failure: ${s}`);
+  }
+});
