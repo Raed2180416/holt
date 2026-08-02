@@ -299,3 +299,92 @@ test('ENTERPRISE BENCH: importing the harness must not RUN it', () => {
   assert.equal(typeof bench.verifyCorrectness, 'function', 'the harness exports its grader');
   assert.equal(typeof bench.percentile, 'function');
 });
+
+/* ==================================================================================
+ * eval/bench.mjs — the harness behind §1's "1000/1000 correct"
+ * ================================================================================== */
+
+/**
+ * THE SAME FAIL-OPEN DEFECT, IN THE HARNESS THAT PRODUCES THE HEADLINE NUMBER.
+ *
+ * eval/enterprise-bench.mjs was fixed for this and the fix could not propagate: bench.mjs graded
+ * inline in main(), exported nothing, and no test file referenced it. Two defects stacked:
+ *
+ *   1. The `hold` category was fail-open. `const s = report.safe.find(...); if (s?.safe) error()`
+ *      records an error only when the answer is TRUE, and a worktree holt never reported on
+ *      yields `undefined` — falsy — which is silence. Erasing all 9 committed-ahead worktrees
+ *      from every array in holt's report still printed "hold 9/9 held ✓", exit 0. At N=1000 that
+ *      is 300 of the 1000 verdicts ungraded.
+ *
+ *   2. The summary line was `${expect.hold.size}/${expect.hold.size}` — planted divided by
+ *      itself, structurally incapable of printing a disagreement. holt actively calling all 9
+ *      committed-ahead worktrees SAFE TO DELETE — the loudest possible product failure — still
+ *      printed "hold 9/9 held" beside its own error list.
+ *
+ * BENCHMARKS.md § 1 and site/index.html's "1000 — copies checked, all correct" rest on this.
+ * The number appears to be true; it was simply never verified.
+ */
+const scaleBench = await import('../../eval/bench.mjs');
+
+const EXPECT = () => ({
+  atRisk: new Set(['wt-risk-1']),
+  hold: new Set(['wt-hold-1']),
+  disposable: new Set(['wt-disp-1']),
+});
+
+test('BENCH §1: a worktree holt never reported on is UNGRADED, never "held"', () => {
+  // The exact simulation that beat the shipped grader: holt says nothing at all about the
+  // committed-ahead worktree.
+  const g = scaleBench.gradeVerdicts({
+    safe: [{ id: 'wt-risk-1', safe: false }, { id: 'wt-disp-1', safe: true }],
+    unique: [{ id: 'wt-risk-1', uncommittedOnlyCount: 3 }],
+  }, EXPECT());
+
+  assert.equal(g.holdGraded, 0, 'nothing was graded in the hold category');
+  assert.equal(g.holdRight, 0, 'and so nothing can be right in it');
+  assert.ok(g.errors.some((e) => /wt-hold-1.*ungraded/i.test(e)),
+    `absence must be an error in its own right: ${JSON.stringify(g.errors)}`);
+  assert.equal(g.gradedTotal, 2, 'two of three planted worktrees were graded');
+  assert.equal(g.plantedTotal, 3, 'and the planted total stays visible beside it');
+});
+
+test('BENCH §1: the printed counter must be able to disagree', () => {
+  // holt returns the WRONG verdict: everything called safe to delete, including committed work.
+  const g = scaleBench.gradeVerdicts({
+    safe: [
+      { id: 'wt-risk-1', safe: true },
+      { id: 'wt-hold-1', safe: true },
+      { id: 'wt-disp-1', safe: true },
+    ],
+    unique: [{ id: 'wt-risk-1', uncommittedOnlyCount: 3 }],
+  }, EXPECT());
+
+  assert.equal(g.holdGraded, 1, 'it was graded');
+  assert.equal(g.holdRight, 0, 'and it was WRONG — the numerator must be able to be zero');
+  assert.equal(g.atRiskRight, 0, 'at-risk called safe is wrong too');
+  assert.equal(g.disposableRight, 1, 'the genuinely disposable one is still right');
+  assert.ok(g.errors.some((e) => /wt-hold-1.*called SAFE/.test(e)), JSON.stringify(g.errors));
+});
+
+test('BENCH §1: ANTI-VACUITY — a fully correct report grades clean, with real denominators', () => {
+  // Without this, everything above is satisfied by a grader that errors unconditionally.
+  const g = scaleBench.gradeVerdicts({
+    safe: [
+      { id: 'wt-risk-1', safe: false, reasons: ['uncommitted only'] },
+      { id: 'wt-hold-1', safe: false, reasons: ['committed ahead'] },
+      { id: 'wt-disp-1', safe: true },
+    ],
+    unique: [{ id: 'wt-risk-1', uncommittedOnlyCount: 3 }],
+  }, EXPECT());
+
+  assert.deepEqual(g.errors, [], `a correct report must grade clean: ${JSON.stringify(g.errors)}`);
+  assert.equal(g.gradedTotal, 3);
+  assert.equal(g.allRight, 3);
+  assert.equal(g.atRiskRight, 1);
+  assert.equal(g.holdRight, 1);
+  assert.equal(g.disposableRight, 1);
+});
+
+test('BENCH §1: importing the harness must not RUN a 1000-worktree benchmark', () => {
+  assert.equal(typeof scaleBench.gradeVerdicts, 'function', 'the harness exports its grader');
+});

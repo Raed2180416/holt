@@ -25,6 +25,26 @@ that got faster by skipping work fails the run outright, which would void the sp
 
 Reproduce: `node eval/bench.mjs 1000` (first argument is N).
 
+**These verdicts were re-graded after the harness was found unable to disagree.** Until this was
+fixed, `eval/bench.mjs` had two stacked defects, and they are the same shape as the one holt exists
+to catch — a measurement that cannot tell *nothing was wrong* from *nothing was measured*:
+
+- **The `hold` category was fail-open.** `const s = report.safe.find(...); if (s?.safe) error()`
+  records an error only when the answer is TRUE, and a worktree holt never reported on yields
+  `undefined` — falsy — which is silence. Erasing all the committed-ahead worktrees from every
+  array in holt's report still printed `hold 9/9 held ✓` at exit 0. At N=1000 that was **300 of
+  the 1000 verdicts never graded**.
+- **The summary line was `planted / planted`** — literally `${expect.hold.size}/${expect.hold.size}`,
+  structurally incapable of printing a disagreement. holt actively calling every committed-ahead
+  worktree SAFE TO DELETE — the loudest possible product failure — still printed `hold 9/9 held`
+  beside its own error list.
+
+The grader now treats NOT FOUND as an error in its own right, before any verdict is inspected, and
+every numerator above has a denominator counting what was actually graded. `holt` itself was not
+wrong: re-run against the corrected grader, all 1000 verdicts are genuinely correct. The number was
+true and unverified, which is not the same as verified, and this page is not allowed to print the
+difference. `test/unit/eval-validity.test.mjs` now grades the grader.
+
 ### The same measurement on a REAL repository, which contradicts the line above
 
 This section used to end "Time grows linearly in N, not worse." That was measured only on the
@@ -181,7 +201,7 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 741 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| tests | 745 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
 | deliberate-defect mutations | 42/42 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
@@ -197,8 +217,8 @@ failing the build over the difference instead of the difference being removed. T
 worse — opencode is one of the 29 integration targets holt wires, and the only test that drives it
 for real had therefore never executed in CI once.
 
-CI now installs opencode, so nothing skips and there is one number: **741 defined, 741 passing.**
-A developer without opencode installed sees 740 passing and 1 skipped, and `npm test` says so.
+CI now installs opencode, so nothing skips and there is one number: **745 defined, 745 passing.**
+A developer without opencode installed sees 744 passing and 1 skipped, and `npm test` says so.
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
 broken, not merely observed to be green. **Does not mean:** 42 hand-picked mutations amount to full
