@@ -478,48 +478,44 @@ test('FIRST RUN: `holt brief` never fabricates a clean bill when the scan could 
   // skipped", and the CLI printed "every sibling workstream is clean right now" at exit 0 while
   // `holt status` in the same repo said "scanned 0/2 · 2 skipped". Fail-open on missing evidence,
   // in the one channel agents read. The claim is now made only after re-deriving the scan.
-  const fx = await newRepo('brief-truth');
-  t.after(() => fx.cleanup());
-  const sib = path.join(fx.root, '..', 'brief-truth-sib2');
-  await fx.git(['worktree', 'add', '-q', '-b', 'sib2', sib, 'main']);
-  await fs.writeFile(path.join(sib, 'unique.txt'), 'only here\n');
-
-  // Healthy shape first (anti-vacuity): with a real dirty sibling the brief has plenty to say.
-  const healthy = await holt(['brief', '--cwd', fx.root], fx.root);
-  assert.match(healthy.stdout, /holt/, `sanity: ${healthy.stdout}`);
-  assert.doesNotMatch(healthy.stdout, /clean right now/,
-    'a repo with a dirty sibling must never read as clean');
-
-  // Break the sibling. THE FAULT MUST BE REAL ON THIS PLATFORM: the original shape here was
-  // `chmod(sib/.git, 0o000)`, and Node's chmod on Windows only toggles the read-only bit — NTFS
-  // has no POSIX mode — so on every Windows run the pointer stayed readable, the scan answered
-  // normally, and this test asserted the product's response to a fault that was never injected.
-  // It failed for the right reason (the brief was correct; the fixture was not), which is the
-  // worst kind of red: it reads as a product defect on the one platform holt is least proven on.
+  // THE FAULT MUST BE REAL ON THIS PLATFORM: the original shape here was `chmod(sib/.git, 0o000)`,
+  // and Node's chmod on Windows only toggles the read-only bit — NTFS has no POSIX mode — so on
+  // every Windows run the pointer stayed readable, the scan answered normally, and this test
+  // asserted the product's response to a fault that was never injected. It failed for the right
+  // reason (the brief was correct; the fixture was not), which is the worst kind of red: it reads
+  // as a product defect on the one platform holt is least proven on.
   //
-  // So the fault is a broken gitdir POINTER, which is real on every filesystem, and it is only
-  // asserted against after `holt status` confirms the workstream really did become unscannable.
+  // So the fault is a broken gitdir POINTER, real on every filesystem, and it is only asserted
+  // against after `holt status` confirms the workstream really did become unscannable.
   const faults = [
-    ['the .git pointer names a gitdir that does not exist',
-      () => fs.writeFile(path.join(sib, '.git'), 'gitdir: /nonexistent/holt-broken-gitdir\n')],
-    ['the .git pointer is not parseable at all',
-      () => fs.writeFile(path.join(sib, '.git'), ' not a gitdir pointer at all\n')],
+    ['the .git pointer names a gitdir that does not exist', 'gitdir: /nonexistent/holt-broken-gitdir\n'],
+    ['the .git pointer is not parseable at all', ' not a gitdir pointer at all\n'],
   ];
-  if (process.platform !== 'win32') {
-    // Kept as an EXTRA shape where it is expressible, because an unreadable pointer and a
-    // pointer-to-nowhere reach the scan through different errno paths.
-    faults.push(['the .git pointer is unreadable', () => fs.chmod(path.join(sib, '.git'), 0o000)]);
-  }
-  const pointer = await fs.readFile(path.join(sib, '.git'));
-  t.after(async () => {
-    await fs.chmod(path.join(sib, '.git'), 0o644).catch(() => {});
-    await fs.writeFile(path.join(sib, '.git'), pointer).catch(() => {});
-  });
+  // A POSIX-only EXTRA shape: an unreadable pointer and a pointer-to-nowhere reach the scan
+  // through different errno paths, so both are worth grading where both are expressible.
+  if (process.platform !== 'win32') faults.push(['the .git pointer is unreadable', null]);
 
-  for (const [what, inject] of faults) {
-    await fs.chmod(path.join(sib, '.git'), 0o644).catch(() => {});
-    await fs.writeFile(path.join(sib, '.git'), pointer);
-    await inject();
+  // ONE FIXTURE PER FAULT, rather than rewriting `.git` in place between iterations. On Windows
+  // the second rewrite failed with EPERM — a file git and holt had just had open is not reliably
+  // reopenable for writing there — so the loop died in the fixture again rather than in the code
+  // under test. A fault injected into a fresh repository also grades each shape independently,
+  // which is what the assertions claim to be doing.
+  for (const [i, [what, pointerText]] of faults.entries()) {
+    const fx = await newRepo('brief-truth');
+    t.after(() => fx.cleanup());
+    const sib = path.join(fx.root, '..', `brief-truth-sib-${i}`);
+    await fx.git(['worktree', 'add', '-q', '-b', 'sib2', sib, 'main']);
+    await fs.writeFile(path.join(sib, 'unique.txt'), 'only here\n');
+
+    // Healthy shape first (anti-vacuity): with a real dirty sibling the brief has plenty to say.
+    const healthy = await holt(['brief', '--cwd', fx.root], fx.root);
+    assert.match(healthy.stdout, /holt/, `sanity: ${healthy.stdout}`);
+    assert.doesNotMatch(healthy.stdout, /clean right now/,
+      'a repo with a dirty sibling must never read as clean');
+
+    if (pointerText === null) await fs.chmod(path.join(sib, '.git'), 0o000);
+    else await fs.writeFile(path.join(sib, '.git'), pointerText);
+    t.after(() => fs.chmod(path.join(sib, '.git'), 0o644).catch(() => {}));
 
     // ANTI-VACUITY: prove the fault landed before grading the response to it.
     const st = await holt(['status', '--json', '--cwd', fx.root], fx.root);
