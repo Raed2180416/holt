@@ -793,3 +793,48 @@ test('DISCARD: the human path prints the recovery route, not a pointer to nothin
   assert.match(show, /an hour of hand edits/,
     `the printed ref must really hold the discarded content, got: ${JSON.stringify(show)}`);
 });
+
+/**
+ * A GUARD THAT IS PRESENT AND INERT IS WORSE THAN AN ABSENT ONE, because its presence is what
+ * stops anyone looking.
+ *
+ * MEASURED: the identical `rm -rf <worktree holding the only copy>` came back `deny` for Claude
+ * Code's payload shape and `{"permission":"allow"}` for Cursor's. Cursor's `beforeShellExecution`
+ * carries the command at the TOP LEVEL; holt only looked inside `tool_input`, found nothing, and
+ * took the `!command` early-allow path.
+ *
+ * So every Cursor user had a deny hook installed, wired correctly, emitting a correctly-shaped
+ * response — that permitted everything, while HOSTS.md listed Cursor as a deterministic blocker.
+ */
+test('HOOK PAYLOADS: every host shape reaches the same verdict', async (t) => {
+  const fx = await newRepo('hook-shapes');
+  t.after(() => fx.cleanup());
+  await fx.worktree('victim');
+  await fx.write('only.js', 'export function SHAPES_SOLE() {}\n', fx.wt('victim'));
+  const target = fx.wt('victim');
+
+  const shapes = {
+    'claude-code': (cmd) => ({ tool_name: 'Bash', tool_input: { command: cmd }, cwd: fx.root }),
+    cursor: (cmd) => ({ command: cmd, cwd: fx.root }),
+    generic: (cmd) => ({ toolInput: { command: cmd }, cwd: fx.root }),
+  };
+
+  const drive = (host, payload) => new Promise((resolve) => {
+    const child = execFile(process.execPath,
+      [BIN, 'hook', 'pre-tool-use', '--host', host, '--cwd', fx.root],
+      { cwd: fx.root, timeout: 120_000, env: { ...process.env, NO_COLOR: '1' } },
+      (err, stdout) => resolve(String(stdout ?? '')));
+    child.stdin.end(JSON.stringify(payload));
+  });
+
+  for (const [host, mk] of Object.entries(shapes)) {
+    const denied = await drive(host, mk(`rm -rf ${target}`));
+    assert.match(denied, /"(permissionDecision|permission|decision)"\s*:\s*"deny"/,
+      `${host}: destroying the only copy must be refused in this host's own shape, got: ${denied}`);
+
+    // NEVER-WORSE: a benign command must still be allowed, or the fix is "refuse everything".
+    const allowed = await drive(host, mk('git status'));
+    assert.match(allowed, /"(permissionDecision|permission|decision)"\s*:\s*"allow"/,
+      `${host}: a benign command must still be allowed, got: ${allowed}`);
+  }
+});

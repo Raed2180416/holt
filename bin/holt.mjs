@@ -621,7 +621,22 @@ async function cmdHook(opts) {
 
   if (event === 'pre-tool-use') {
     const toolName = payload.tool_name ?? payload.toolName;
-    const command = opts.command ?? payload.tool_input?.command ?? payload.toolInput?.command;
+    // EVERY HOST'S PAYLOAD SHAPE, because reading only one of them makes the hook inert on the
+    // others while still reporting a decision.
+    //
+    // MEASURED: the identical `rm -rf <worktree holding the only copy>` came back `deny` for
+    // Claude Code's shape and `{"permission":"allow"}` for Cursor's. Cursor's
+    // `beforeShellExecution` carries the command at the TOP LEVEL; holt only looked inside
+    // `tool_input`, found nothing, and took the `!command` early-allow path. So every Cursor user
+    // had a deny hook installed, wired correctly, emitting a correctly-shaped response — that
+    // permitted everything. A guard that is present and inert is worse than an absent one,
+    // because its presence is what stops anyone looking.
+    const command = opts.command
+      ?? payload.tool_input?.command       // Claude Code
+      ?? payload.toolInput?.command        // camelCase variants
+      ?? payload.command                   // Cursor beforeShellExecution, and the generic shape
+      ?? payload.input?.command
+      ?? payload.arguments?.command;
 
     // Only shell-ish tools can destroy a worktree. Anything else is allowed without a scan,
     // which keeps the hook off the critical path for the overwhelming majority of tool calls.
