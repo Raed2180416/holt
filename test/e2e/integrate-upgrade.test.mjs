@@ -864,3 +864,65 @@ test('WORKTREES: integrate wires every linked worktree, not just the primary', a
       `the worktree's own PreToolUse hook must exist: ${JSON.stringify(settings)}`);
   }
 });
+
+/**
+ * A USER MODIFICATION IS NOT A STALE ENTRY, AND holt MUST NOT NARROW SOMEBODY'S GUARD.
+ *
+ * MEASURED: a user who deliberately WIDENED holt's own hook —
+ *
+ *     { matcher: "Bash|Write|Edit",
+ *       hooks: [{ command: "holt hook pre-tool-use --host claude-code", timeout: 600 }] }
+ *
+ * — had it silently rewritten to holt's canonical `matcher: "Bash"`, `timeout: 120`, and was told
+ * "reconciled 1 stale hook(s) from a prior version". It was not stale: the COMMAND was already
+ * exactly what holt writes today. Only the matcher and timeout were theirs — and both were WIDER
+ * than holt's defaults, so holt narrowed a user's guard and described it as an upgrade.
+ *
+ * The thing that goes stale is the COMMAND (an old bin path, retired flags). matcher, timeout and
+ * any wrapping are the user's configuration of a hook holt merely supplies.
+ */
+test('OWNERSHIP: a user-widened holt hook is preserved, not reset to canonical', async (t) => {
+  const dir = await tmp('widened');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), JSON.stringify({
+    hooks: {
+      PreToolUse: [{
+        matcher: 'Bash|Write|Edit',
+        hooks: [{ type: 'command', command: 'holt hook pre-tool-use --host claude-code', timeout: 600 }],
+      }],
+    },
+  }, null, 2));
+
+  const r = await installClaudeCode(dir, { bin: 'holt' });
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  const pre = after.hooks.PreToolUse;
+
+  assert.equal(pre.length, 1, `no duplicate must be appended beside it: ${JSON.stringify(pre)}`);
+  assert.equal(pre[0].matcher, 'Bash|Write|Edit', "the user's WIDER matcher must survive");
+  assert.equal(pre[0].hooks[0].timeout, 600, "the user's timeout must survive");
+  assert.doesNotMatch(r.action, /stale/i,
+    `and holt must not describe leaving it alone as having fixed something: ${r.action}`);
+});
+
+test('OWNERSHIP: NEVER-WORSE — a genuinely stale COMMAND is still reconciled', async (t) => {
+  // The other direction, and the reason reconciliation exists: a command pointing at a bin that
+  // no longer exists must be brought up to date, or the hook silently stops firing.
+  const dir = await tmp('widened-stale');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
+  await fs.writeFile(path.join(dir, '.claude', 'settings.json'), JSON.stringify({
+    hooks: {
+      PreToolUse: [{
+        matcher: 'Bash',
+        hooks: [{ type: 'command', command: 'node /old/path/holt.mjs hook pre-tool-use --host claude-code', timeout: 120 }],
+      }],
+    },
+  }, null, 2));
+
+  await installClaudeCode(dir, { bin: 'holt' });
+  const after = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
+  const cmds = after.hooks.PreToolUse.flatMap((e) => e.hooks.map((h) => h.command));
+  assert.deepEqual(cmds, ['holt hook pre-tool-use --host claude-code'],
+    `a stale command must be replaced, exactly once: ${JSON.stringify(cmds)}`);
+});

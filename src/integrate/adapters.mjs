@@ -1031,14 +1031,37 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
     // COMMAND-LEVEL GRANULARITY: for each existing entry, remove only holt's commands and
     // keep the user's. An entry that had ONLY holt's commands is removed entirely; an entry
     // that had holt's + user's commands keeps the user's.
+    // A USER MODIFICATION IS NOT A STALE ENTRY.
+    //
+    // MEASURED: a user who deliberately WIDENED holt's own hook —
+    //   { matcher: "Bash|Write|Edit", hooks: [{ command: "holt hook pre-tool-use --host claude-code",
+    //     timeout: 600 }] }
+    // — had it silently rewritten to holt's canonical `matcher: "Bash"`, `timeout: 120`, and was
+    // told "reconciled 1 stale hook(s) from a prior version". It was not stale; the COMMAND was
+    // already exactly what holt writes today. Only the matcher and timeout were theirs, and both
+    // were WIDER than holt's defaults — so holt narrowed a user's guard and described it as an
+    // upgrade.
+    //
+    // The thing that goes stale is the COMMAND (an old bin path, retired flags). matcher, timeout
+    // and any wrapper are the user's configuration of a hook holt merely supplies. So an entry
+    // whose holt command already matches the canonical one is left EXACTLY as it is.
+    const canonicalCmds = new Set(entries.flatMap((e) => commandsOf(e)));
     const preserved = [];
     let foundHolt = false;
+    let keptUserShaped = 0;
     for (const entry of existing) {
       const cmds = commandsOf(entry);
       const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
       const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
       if (holtCmds.length > 0) {
         foundHolt = true;
+        // Already running the current command: this entry is DONE. Keep the user's matcher,
+        // timeout and any wrapping untouched, and do not append a duplicate below.
+        if (userCmds.length === 0 && holtCmds.every((c) => canonicalCmds.has(c))) {
+          preserved.push(entry);
+          keptUserShaped++;
+          continue;
+        }
         if (userCmds.length > 0) {
           preserved.push({ ...entry, hooks: entry.hooks.filter((h) => !isHoltHookCommand(h?.command, sub)) });
         }
@@ -1046,18 +1069,26 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
         preserved.push(entry);
       }
     }
+    // Only append the canonical entries this event still lacks.
+    const stillNeeded = keptUserShaped > 0 ? [] : entries;
 
     if (!foundHolt) {
       installed++;
     } else {
       const currentHolt = existing.filter((e) => commandsOf(e).some((c) => isHoltHookCommand(c, sub)));
-      if (JSON.stringify(currentHolt) !== JSON.stringify(entries)) {
+      // A PRESERVED USER SHAPE IS "UNCHANGED", NOT "RECONCILED". The entry differs from holt's
+      // canonical one — that is the whole point, the user widened it — so a plain inequality test
+      // reported "reconciled 1 stale hook(s) from a prior version" about a hook that was neither
+      // stale nor touched. holt must not describe leaving something alone as having fixed it.
+      if (keptUserShaped > 0) {
+        unchanged++;
+      } else if (JSON.stringify(currentHolt) !== JSON.stringify(entries)) {
         reconciled++;
       } else {
         unchanged++;
       }
     }
-    cfg.hooks[event] = [...preserved, ...(nonArrayRemnant ? [nonArrayRemnant] : []), ...entries];
+    cfg.hooks[event] = [...preserved, ...(nonArrayRemnant ? [nonArrayRemnant] : []), ...stillNeeded];
   }
 
   await fs.mkdir(path.dirname(file), { recursive: true });
@@ -1083,7 +1114,20 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
 
       if (Array.isArray(eventArr)) {
         // Element-level: remove holt's entries, append new ones
+        // Same rule as the in-memory path above: an entry already running the CANONICAL command
+        // is the user's configuration of a current hook, not a stale one. Leave matcher, timeout
+        // and any wrapping exactly as they are, and do not append a duplicate beside it.
+        const canonical = new Set(entries.flatMap((e) => commandsOf(e)));
+        const alreadyCurrent = (entry) => {
+          const cmds = commandsOf(entry);
+          const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
+          return holtCmds.length > 0
+            && cmds.every((c) => isHoltHookCommand(c, sub))
+            && holtCmds.every((c) => canonical.has(c));
+        };
+        const keepsUserShape = eventArr.some(alreadyCurrent);
         const isMine = (entry) => {
+          if (alreadyCurrent(entry)) return false;   // theirs to keep, not ours to replace
           const cmds = commandsOf(entry);
           const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
           const userCmds = cmds.filter((c) => !isHoltHookCommand(c, sub));
@@ -1091,7 +1135,7 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
           // If it has holt's + user's, we need to strip holt's commands from it.
           return holtCmds.length > 0 && userCmds.length === 0;
         };
-        const reconciled_text = jsoncReconcileArray(result, ['hooks', event], isMine, entries, { tabSize: 2, insertSpaces: true });
+        const reconciled_text = jsoncReconcileArray(result, ['hooks', event], isMine, keepsUserShape ? [] : entries, { tabSize: 2, insertSpaces: true });
         if (reconciled_text != null) result = reconciled_text;
 
         // Handle user-widened entries: entries that have BOTH holt's and user's commands
