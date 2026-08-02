@@ -104,17 +104,42 @@ test('RELEASE BODY: the body checked into this repository passes its own gate', 
   }
 });
 
-test('RELEASE BODY: the shipped install command is the one the README and CI use', async () => {
-  // The three surfaces drifting apart is the whole defect. Agreement is asserted, not assumed.
+test('RELEASE BODY: the body and the README advertise the SAME ASSET, each selecting it the way its own surface must', async () => {
+  // The three surfaces drifting apart is the whole defect. Agreement is asserted, not assumed —
+  // but agreement is not the same as being IDENTICAL, and requiring identical URLs here was
+  // itself holding one of the two surfaces wrong:
+  //
+  //   · A RELEASE BODY is the page for ONE release. A reader who lands on the v0.3.0 page must
+  //     get v0.3.0, so its URL pins the tag. checkReleaseBody() enforces exactly that, above.
+  //   · The README is the page for the PROJECT. A tag pinned there makes the headline install
+  //     command hand every future reader an older build until somebody remembers to edit a
+  //     markdown file — and 404 outright while that tag is unpublished, which is precisely what
+  //     it was doing. It uses GitHub's documented stable form: /releases/latest/download/<asset>.
+  //
+  // So the two URLs must differ in their SELECTOR and agree on everything else. What still may
+  // never drift — the thing this test was written to catch — is the repository and the asset
+  // FILE: two surfaces naming different files is how a reader installs something nobody verified.
   const readme = await fs.readFile(path.join(ROOT, 'README.md'), 'utf8');
   const body = await fs.readFile(path.join(BODIES_DIR, `${TAG}.md`), 'utf8');
-  const commandIn = (text) => {
+  const commandIn = (text, what) => {
     const m = text.match(/npm install -g (https:\/\/\S+\.tgz)/);
-    assert.ok(m, 'no tarball install command found — pattern drift, not agreement');
-    return m[1];
+    assert.ok(m, `${what}: no tarball install command found — pattern drift, not agreement`);
+    const { pathname } = new URL(m[1]);
+    const segments = pathname.split('/').filter(Boolean);
+    return { url: m[1], pathname, slug: segments.slice(0, 2).join('/'), asset: segments.at(-1) };
   };
-  assert.equal(commandIn(body), commandIn(readme),
-    'the release body and the README advertise different install commands');
+  const inReadme = commandIn(readme, 'README.md');
+  const inBody = commandIn(body, `${TAG}.md`);
+
+  assert.equal(inReadme.slug, inBody.slug,
+    'the release body and the README install from different repositories');
+  assert.equal(inReadme.asset, inBody.asset,
+    `the release body installs '${inBody.asset}' and the README installs '${inReadme.asset}' — `
+    + 'one of them is a file the other never verified');
+  assert.equal(inReadme.pathname, `/${SLUG}/releases/latest/download/${inReadme.asset}`,
+    `the README must use the stable-latest form, not ${inReadme.url}`);
+  assert.equal(inBody.pathname, `/${SLUG}/releases/download/${TAG}/${inBody.asset}`,
+    `the ${TAG} body must install ${TAG}'s own asset, not ${inBody.url}`);
 });
 
 test('RELEASE BODY: the GitHub Action installs the version this tree publishes', async () => {

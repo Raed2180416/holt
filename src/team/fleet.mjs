@@ -22,6 +22,7 @@ import { scan } from '../scan.mjs';
 import { analyze } from '../analyze.mjs';
 import { branchAudit } from '../branches.mjs';
 import { checkEntitlement } from '../license.mjs';
+import { samePathAsync } from '../paths.mjs';
 
 export class EntitlementError extends Error {
   constructor(entitlement) {
@@ -94,7 +95,17 @@ export async function findRepos(roots, { maxDepth = 3 } = {}) {
   // Rank: the main working tree first, then the shortest path, then lexicographic. Every term is
   // a property of the candidate itself, so the winner is the same whatever order the walk found
   // them in — a fleet total that changed with filesystem ordering would be unauditable.
-  const rank = (p, id) => [id && path.dirname(id) === p ? 0 : 1, p.length, p];
+  //
+  // "IS THIS THE MAIN TREE" IS A PATH COMPARISON ACROSS TWO SOURCES, and it used to be spelled
+  // `path.dirname(id) === p`. `id` is git's absolute --git-common-dir; `p` is the walker's
+  // path.resolve of a directory it read. On macOS git says /private/var/... where the walker holds
+  // /var/...; on Windows one side can be an 8.3 short name and the filesystem folds case. The
+  // comparison was therefore FALSE for every candidate on two of three platforms, silently
+  // demoting the main working tree to the shortest-path tiebreak — so `holt fleet` could report a
+  // linked agent worktree as the repository's row, with a different branch and a different set of
+  // unlanded work than the developer sees locally. Found by `npm run lint:paths`.
+  const mainTree = new Map();   // candidate path -> is it the repository's main working tree
+  const rank = (p) => [mainTree.get(p) ? 0 : 1, p.length, p];
   const better = (a, b) => {
     for (let i = 0; i < a.length; i++) { if (a[i] !== b[i]) return a[i] < b[i]; }
     return false;
@@ -102,9 +113,10 @@ export async function findRepos(roots, { maxDepth = 3 } = {}) {
 
   for (const p of candidates) {
     const id = await repoIdentity(p);
+    mainTree.set(p, id ? await samePathAsync(path.dirname(id), p) : false);
     const key = id ?? `unidentified:${p}`;
     const prev = byRepo.get(key);
-    if (!prev || better(rank(p, id), rank(prev, id))) byRepo.set(key, p);
+    if (!prev || better(rank(p), rank(prev))) byRepo.set(key, p);
   }
 
   return [...byRepo.values()].sort();

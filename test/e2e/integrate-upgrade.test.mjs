@@ -33,6 +33,7 @@ import {
   legacyMcpTargets, retireLegacyMcp, mcpTargets, installMcp, installGitHooks,
 } from '../../src/integrate/adapters.mjs';
 import { receiptPath } from '../../src/integrate/receipt.mjs';
+import { samePathSync } from '../../src/paths.mjs';
 
 /**
  * Real git, at module scope. '/dev/null' NOT os.devNull — git-for-windows is MSYS and translates
@@ -163,7 +164,16 @@ test('UPGRADE: a real prior-release stale MCP file (.cline/mcp.json, shipped in 
   // PRECONDITION: current holt no longer considers this a real target at all — if it did, this
   // test would not be exercising retirement, only ordinary reinstall.
   const current = mcpTargets(dir, os.homedir(), { scope: 'project' }).map((t2) => t2.file);
-  assert.ok(!current.includes(path.join(dir, '.cline', 'mcp.json')),
+  // A NEGATIVE PRECONDITION IS ONLY WORTH ANYTHING IF IT COULD HAVE FAILED. `current.includes(...)`
+  // is raw string equality over native paths, and two paths spelled by different code disagree on
+  // Windows (case, 8.3 short names) and macOS (/var vs /private/var) — so `!includes` would be
+  // trivially true there and this precondition would assert nothing on the two platforms holt is
+  // least proven on. samePathSync folds case, and the non-empty check pins that there was a list
+  // to search at all. Found by `npm run lint:paths`.
+  const legacyCline = path.join(dir, '.cline', 'mcp.json');
+  assert.ok(current.length > 0,
+    'PRECONDITION: mcpTargets must return project targets for the negative below to mean anything');
+  assert.ok(!current.some((f) => samePathSync(f, legacyCline)),
     'PRECONDITION: .cline/mcp.json must not be a current mcpTargets entry');
 
   const results = await retireLegacyMcp(dir, { scope: 'project' });
@@ -781,7 +791,11 @@ test('JSONC: a file holt CANNOT parse is left byte-for-byte alone, and says so',
 
   assert.equal(await fs.readFile(file, 'utf8'), broken,
     'an unparseable config must not be touched at all');
-  const row = results.find((r) => r.path === file);
+  // samePathSync, not `===`: `file` is this test's path.join and `r.path` is whatever installMcp
+  // reported, so the two are spelled by different code. They agree today; the day one side starts
+  // canonicalising, a raw `===` turns this into "the file was never reported on" — a failure that
+  // blames the product for the harness's spelling. Found by `npm run lint:paths`.
+  const row = results.find((r) => samePathSync(r.path, file));
   assert.ok(row, `the file must still be reported on: ${JSON.stringify(results)}`);
   assert.match(row.action, /could not parse|left alone/i,
     `and the report must say why rather than claiming success: ${row.action}`);

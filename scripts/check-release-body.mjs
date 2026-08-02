@@ -26,7 +26,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const BODIES_DIR = path.join(ROOT, '.github', 'releases');
@@ -158,6 +158,12 @@ async function main() {
   process.exit(failed === 0 ? 0 : 1);
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// pathToFileURL, not `path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)`, and for
+// exactly the reason written down in scripts/generate-hosts.mjs: those two strings are produced by
+// different machinery, so on Windows a drive-letter case difference or an 8.3 short name makes the
+// comparison false and `main()` never runs. The failure mode is the worst one a GATE can have —
+// the step exits 0 having checked nothing at all. Every other entry point in scripts/ already uses
+// this idiom; this one was the straggler, found by `npm run lint:paths`.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err) => { console.error(`check-release-body: ${err.message}`); process.exit(1); });
 }
