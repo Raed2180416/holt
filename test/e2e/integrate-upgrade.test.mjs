@@ -824,20 +824,43 @@ test('WORKTREES: integrate wires every linked worktree, not just the primary', a
   const r = await holtBin(['integrate', '--cwd', repo], repo);
   assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
 
-  // GRADE FROM THE FILESYSTEM. Every tree an agent could run in must carry the project config.
-  for (const wt of [repo, path.join(dir, 'agent-a'), path.join(dir, 'agent-b')]) {
-    for (const f of ['.claude/settings.json', '.mcp.json', 'AGENTS.md']) {
-      await assert.doesNotReject(fs.stat(path.join(wt, f)),
-        `${path.basename(wt)} must have ${f} — a host reads its config where it runs`);
+  // PARITY, NOT A FIXED FILE LIST. Which hosts integrate writes for depends on what is installed
+  // on the machine — CI runners have no ~/.claude, so asserting `.claude/settings.json` exists
+  // made this test pass locally and fail on all three CI platforms, which is the
+  // environment-dependent-green class this repository keeps finding. The property that actually
+  // holds everywhere: WHATEVER the primary got, every linked worktree got too.
+  const CANDIDATES = [
+    '.claude/settings.json', '.mcp.json', 'AGENTS.md', '.cursor/hooks.json',
+    '.cursor/mcp.json', '.opencode/plugins/holt.js', '.vscode/mcp.json', 'crush.json',
+  ];
+  const present = async (root) => {
+    const out = [];
+    for (const f of CANDIDATES) {
+      // eslint-disable-next-line no-await-in-loop
+      if (await fs.stat(path.join(root, f)).then(() => true).catch(() => false)) out.push(f);
     }
+    return out;
+  };
+
+  const inPrimary = await present(repo);
+  assert.ok(inPrimary.length >= 2,
+    `ANTI-VACUITY: integrate must have written something to the primary, got ${JSON.stringify(inPrimary)}`);
+
+  for (const wt of [path.join(dir, 'agent-a'), path.join(dir, 'agent-b')]) {
+    const inWt = await present(wt);
+    assert.deepEqual(inWt.sort(), inPrimary.sort(),
+      `${path.basename(wt)} must carry exactly what the primary carries — a host reads its config `
+      + `where it runs. primary=${JSON.stringify(inPrimary)} worktree=${JSON.stringify(inWt)}`);
   }
   // Hooks are shared, so exactly one file, in the common git directory.
   await assert.doesNotReject(fs.stat(path.join(repo, '.git', 'hooks', 'pre-commit')),
     'the shared pre-commit hook must be installed');
 
-  // ANTI-VACUITY: the hooks written into a worktree must be REAL — the guard has to answer from
-  // there, not merely have a file present.
-  await fs.writeFile(path.join(dir, 'agent-a', 'only.js'), 'export function WIRED_SOLE() {}\n');
-  const settings = JSON.parse(await fs.readFile(path.join(dir, 'agent-a', '.claude', 'settings.json'), 'utf8'));
-  assert.ok(settings.hooks?.PreToolUse?.length, `the worktree's own PreToolUse hook must exist: ${JSON.stringify(settings)}`);
+  // And where a hook file was written, its CONTENT must be real — a file that exists but carries
+  // no hook entry would satisfy the parity check above while guarding nothing.
+  if (inPrimary.includes('.claude/settings.json')) {
+    const settings = JSON.parse(await fs.readFile(path.join(dir, 'agent-a', '.claude', 'settings.json'), 'utf8'));
+    assert.ok(settings.hooks?.PreToolUse?.length,
+      `the worktree's own PreToolUse hook must exist: ${JSON.stringify(settings)}`);
+  }
 });

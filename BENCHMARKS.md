@@ -25,6 +25,11 @@ that got faster by skipping work fails the run outright, which would void the sp
 
 Reproduce: `node eval/bench.mjs 1000` (first argument is N).
 
+**Machine load moves these figures by ~1.5×, and the correctness column does not move at all.**
+Re-run during this session on the same machine while agents were running: 1.05 s / 3.45 s / 12.5 s
+(10.5 / 11.5 / 12.5 ms per worktree), with 100/100, 300/300 and 1000/1000 correct each time. Treat
+the wall clock as an order of magnitude and the verdicts as the measurement.
+
 **These verdicts were re-graded after the harness was found unable to disagree.** Until this was
 fixed, `eval/bench.mjs` had two stacked defects, and they are the same shape as the one holt exists
 to catch — a measurement that cannot tell *nothing was wrong* from *nothing was measured*:
