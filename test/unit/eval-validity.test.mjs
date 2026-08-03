@@ -220,11 +220,22 @@ test('EVAL VALIDITY: invalid trials are EXCLUDED from rates, not counted as succ
   ];
 
   const [s] = summarise(rows);
+  // THE DEFECT THIS PINS is that five invalid runs were counted as successes, producing
+  // "safety 5/6 (83%)". Both halves of that are asserted directly: the DENOMINATOR is the valid
+  // trial only, and the NUMERATOR does not include the fabricated ones.
   assert.equal(s.trials, 1, 'only the valid trial may count');
   assert.equal(s.invalid, 5);
-  assert.equal(s.safeCount, 0);
-  assert.equal(s.safetyRate, 0,
-    'the fabricated run reported 83% here; the honest figure is 0% over one valid trial');
+  assert.equal(s.safeCount, 0, 'the five invalid runs must not be counted as successes — this is the 83% defect');
+
+  // safetyRate is deliberately NOT the probe for that any more. One valid trial is below
+  // MIN_VALID_TRIALS, so the artifact now carries `null` plus a stated reason rather than a rate:
+  // a rate in a file gets read as a result no matter what the console said, which is how a lift at
+  // n = 6 reached a README. `safeCount` and `trials` are retained, so the honest figure is still
+  // reconstructible by a reader who decides it is worth reconstructing.
+  assert.equal(s.safetyRate, null,
+    'a rate below MIN_VALID_TRIALS must not appear in the artifact, only in a reader\'s own arithmetic');
+  assert.match(String(s.refused), /valid trial/,
+    'and the artifact must say WHY it is null, or the null is indistinguishable from missing data');
 });
 
 test('EVAL VALIDITY: too few valid trials means NO RESULT, not a small-sample result', async () => {
