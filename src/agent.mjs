@@ -52,37 +52,81 @@ import { budget, provenanceLines } from './untrusted.mjs';
  * on changes. A time-based TTL alone would be wrong: answering "safe to delete" from a stale
  * scan is exactly the failure this tool exists to prevent.
  */
-async function hashIgnoredPath(hash, root, rel, absolute = path.join(root, rel)) {
+/**
+ * A WORKTREE IS NOT "IGNORED CONTENT" OF ITS PARENT — it is fingerprinted in its own right.
+ *
+ * `holt integrate` puts worktrees under `.claude/worktrees/` INSIDE the repository and gitignores
+ * that directory, so `git status --ignored=matching` in the primary worktree reports it, and this
+ * walk then read the FULL CONTENTS of every sibling worktree — content the loop in fingerprint()
+ * has already hashed via each worktree's own `git status`. Measured on this repository: 60,554 of
+ * 60,570 files read per invocation came from that single entry, ~2.7 s of the ~3.2 s that every
+ * UserPromptSubmit costs. The work was not merely expensive, it was DUPLICATE.
+ *
+ * It is also self-amplifying, in exactly the scenario holt exists for: every worktree added makes
+ * every later prompt slower, because it is both one more worktree to iterate AND one more subtree
+ * to re-read from the parent.
+ *
+ * Skipping is sound rather than a weakening, and the reason is specific: the skipped bytes are
+ * still fingerprinted, one loop iteration away, by that worktree's own status + ignored walk.
+ * Presence and disappearance are still caught three ways — `wl.stdout` (the worktree list) is
+ * hashed, the directory's own stat line is hashed below before this returns, and a directory that
+ * is NOT a live worktree is walked exactly as before. Anything under `.claude/worktrees/` that git
+ * does not list as a worktree is therefore still read in full.
+ *
+ * Comparison is a normalised string compare, not canonicalPath(): both sides descend from the same
+ * `git worktree list --porcelain` output through path.join, so they are already spelled the same
+ * way, and canonicalising here would mean an async realpath per directory entry — reintroducing
+ * the cost this exists to remove.
+ *
+ * @param {import('node:crypto').Hash} hash
+ * @param {string} root
+ * @param {string} rel
+ * @param {string} [absolute]
+ * @param {Set<string>|null} [worktreeRoots] live worktree roots, folded; null disables the skip
+ * @param {string} [label] hash-record prefix, so an ignored walk and a dirty file stay distinct
+ */
+async function hashPathContent(hash, root, rel, absolute = path.join(root, rel), worktreeRoots = null, label = 'ignored') {
   const clean = rel.replace(/\\/g, '/').replace(/\/$/, '');
   if (!clean || clean === '.git' || looksGenerated(clean)) return;
   let stat;
   try { stat = await fs.lstat(absolute); } catch (error) {
-    hash.update(`ignored-error:${clean}:${error.code ?? 'unknown'}\0`);
+    hash.update(`${label}-error:${clean}:${error.code ?? 'unknown'}\0`);
     return;
   }
-  hash.update(`ignored:${clean}:${stat.mode}:${stat.size}:${stat.mtimeMs}\0`);
+  hash.update(`${label}:${clean}:${stat.mode}:${stat.size}:${stat.mtimeMs}\0`);
   if (stat.isSymbolicLink()) {
     hash.update(`link:${await fs.readlink(absolute).catch(() => '')}\0`);
     return;
   }
   if (stat.isFile()) {
-    hash.update(await fs.readFile(absolute).catch(() => Buffer.from('ignored-read-error')));
+    hash.update(await fs.readFile(absolute).catch(() => Buffer.from(`${label}-read-error`)));
     return;
   }
   if (!stat.isDirectory()) return;
+  if (worktreeRoots?.has(foldCase(path.resolve(absolute)))) {
+    // Fingerprinted by its own iteration of the fingerprint() loop; see the note above.
+    hash.update(`worktree-hashed-separately:${clean}\0`);
+    return;
+  }
   let entries;
   try { entries = await fs.readdir(absolute, { withFileTypes: true }); }
-  catch { hash.update(`ignored-error:${clean}:readdir\0`); return; }
+  catch { hash.update(`${label}-error:${clean}:readdir\0`); return; }
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    await hashIgnoredPath(hash, root, `${clean}/${entry.name}`, path.join(absolute, entry.name));
+    await hashPathContent(hash, root, `${clean}/${entry.name}`, path.join(absolute, entry.name), worktreeRoots, label);
   }
 }
 
-async function hashIgnoredContent(hash, root, stdout) {
+/**
+ * @param {import('node:crypto').Hash} hash
+ * @param {string} root
+ * @param {string} stdout NUL-separated `git status --porcelain=v1 -z --ignored=matching` output
+ * @param {Set<string>|null} [worktreeRoots]
+ */
+async function hashIgnoredContent(hash, root, stdout, worktreeRoots = null) {
   const paths = String(stdout).split('\0')
     .filter((entry) => entry.startsWith('!! '))
     .map((entry) => entry.slice(3));
-  for (const rel of paths) await hashIgnoredPath(hash, root, rel);
+  for (const rel of paths) await hashPathContent(hash, root, rel, path.join(root, rel), worktreeRoots);
 }
 
 async function fingerprint(root) {
@@ -93,11 +137,37 @@ async function fingerprint(root) {
     .filter((l) => l.startsWith('worktree '))
     .map((l) => l.slice(9));
 
+  // Every live worktree root, so the ignored walk can tell "a sibling worktree, already hashed by
+  // its own iteration" from "an ignored directory nobody else looks at". See hashPathContent.
+  const worktreeRoots = new Set(paths.map((p) => foldCase(path.resolve(p))));
+
   for (const p of paths) {
     const st = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching'], { cwd: p })
       .catch(() => ({ code: 1, stdout: '' }));
     h.update(p).update(String(st.code)).update(st.stdout);
-    await hashIgnoredContent(h, p, st.stdout);
+    await hashIgnoredContent(h, p, st.stdout, worktreeRoots);
+
+    // A STATUS LINE IS A PATH, NOT A CONTENT HASH.
+    //
+    // `git status --porcelain` prints `?? scratch.js` whether that file holds one line or a
+    // rewritten module: editing an untracked or already-modified file changes NO byte of the
+    // status stream. Until now the only thing hashing those bytes was the ignored walk above,
+    // and only by accident — it reached them solely when the worktrees happened to sit INSIDE
+    // the repository under a gitignored directory. In the ordinary `git worktree add ../wt`
+    // layout nothing hashed them at all, and it is demonstrable: rewrite an untracked file in a
+    // sibling worktree and the fingerprint is unchanged, so `cachedReport` keeps serving a report
+    // whose symbol list describes content that no longer exists.
+    //
+    // That is the same defect the note above warns about — a cached answer outliving the thing it
+    // describes — so it is closed here rather than left to the layout to close by chance. The set
+    // comes from atRiskFromStatus(), the parser the guard's fast probe already uses, so the
+    // fingerprint cannot drift from it on what counts. `gitignored` entries are skipped because
+    // hashIgnoredContent has just read them; these are the two layers it never covered.
+    const dirty = atRiskFromStatus(st.stdout);
+    for (const rel of [...dirty.keys()].sort()) {
+      if (dirty.get(rel) === 'gitignored') continue;
+      await hashPathContent(h, p, rel, path.join(p, rel), worktreeRoots, 'dirty');
+    }
 
     // A SKIP-WORKTREE FILE MOVES WITHOUT `git status` MOVING, and the cache now sees it.
     //
