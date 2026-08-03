@@ -184,10 +184,13 @@ CONFIG (optional — see README.md#configuration)
                       This is deliberately not something holt asks an AGENT to write: it is your
                       decision, in a file you review.
 
-  HOLT_HOOK_FAIL_OPEN=1   BREAK GLASS (environment variable, not config). If a bug in holt makes
-                      the guard stop commands it should not, this lets everything through while
-                      you report it. Every command it permits is announced and journalled. The
-                      guard is OFF for as long as it is set.
+  HOLT_HOOK_FAIL_OPEN=1   BREAK GLASS for a CRASH, not for a refusal. If holt's analyser throws,
+                      this lets the command through instead of blocking you behind a broken tool,
+                      and says so. It does NOT overrule a verdict: a command holt has decided to
+                      refuse is still refused with this set — measured, exit 2 either way. To get
+                      past a refusal holt should not have made, add a bounded guardAllow entry
+                      (see above); that path is reviewed and journalled, which is why it is the one
+                      that exists.
 
 QUICK START
   holt setup                     # first run: install backends, wire agents, show what's at risk
@@ -854,7 +857,15 @@ function isPreToolUseInvocation(argv = process.argv) {
  * Hook entry point.
  *
  * Exit codes are part of the contract for hosts that branch on them rather than parsing JSON:
- *   0 = allow · 1 = deny · 2 = ask/could-not-verify
+ *   0 = allow · 2 = deny, ask, or could-not-verify
+ *
+ * DENY AND ASK SHARE 2, DELIBERATELY, AND 1 IS NEVER EMITTED. This comment used to say
+ * "1 = deny", which no code path can produce — `const code = verdict.decision === 'allow' ? 0 : 2`
+ * is the only place a hook exit code is chosen. A host written against the old comment would wait
+ * for a 1 that never arrives and read every DENIAL as the softer "ask". The collapse is intended:
+ * a host that cannot express "ask" must stop, not proceed, when holt could not verify what a
+ * command does — so the safe verdict and the unverified verdict deliberately look identical from
+ * the outside. Hosts needing the distinction parse the JSON, which carries it exactly.
  */
 async function cmdHook(opts) {
   const event = opts._[1] ?? 'pre-tool-use';

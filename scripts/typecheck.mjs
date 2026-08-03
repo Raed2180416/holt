@@ -120,6 +120,31 @@ if (spawnError || cutShort || globalErrors.length || (code !== 0 && count === 0)
   process.exit(1);
 }
 
+// A FILE THAT DOES NOT PARSE IS NOT A FILE WITH FEW DIAGNOSTICS. TS1xxx is tsc's SYNTAX range: a
+// stray backtick or a missing brace stops the parse, everything after it in that file is never
+// analysed, and the total COLLAPSES. The ratchet then reads the collapse as progress and writes the
+// smaller number to the ceiling — permanently hiding every diagnostic the broken file was masking.
+//
+// Reproduced, not hypothesised: an edit put a backtick inside a template literal in bin/holt.mjs,
+// tsc reported TS1005, the count went 206 -> 3, and this script printed "down from 206 — ceiling
+// lowered" and exited 0. That is the THIRD instance of the class named at the top of this file
+// (a ratchet that cannot tell "clean" from "did not run"), after the spawn failure and the blind
+// checker — so it is closed the same way they were: fatal on its own, never ratcheted.
+// NOT "the TS1xxx range" — that range also holds TYPE diagnostics that parse fine. This codebase
+// carries four TS1064s ("the return type of an async function must be Promise<T>") as ordinary
+// debt, and failing on those would be an over-refusal: the run IS valid, the file DID parse.
+// These are the codes where tsc's parser gives up and stops reading the file.
+const PARSE_STOPPERS = /error TS(1002|1003|1005|1109|1110|1127|1128|1131|1160|1161|1435):/;
+const unparsed = lines.filter((l) => PARSE_STOPPERS.test(l));
+if (unparsed.length) {
+  console.error(`typecheck: FAILED — ${unparsed.length} syntax error(s). A file that does not parse is not analysed,`);
+  console.error('           so this run\'s count is meaningless and the ceiling has NOT been moved.');
+  console.error('');
+  for (const l of unparsed.slice(0, 10)) console.error(`  ${l}`);
+  if (unparsed.length > 10) console.error(`  … and ${unparsed.length - 10} more`);
+  process.exit(1);
+}
+
 // THE CHECKER MUST BE ABLE TO SEE ITS OWN IMPORTS. TS2591 is "Cannot find name '<module>'" —
 // the module did not resolve, so everything imported from it is typed `never` and every
 // diagnostic downstream is that one failure echoing. A count measured through a blind checker is

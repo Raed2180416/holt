@@ -61,14 +61,37 @@ async function measureTests() {
   return { ok: true, count: Number(pass[1]), defined: Number(total[1]) };
 }
 
-/** The mutation score the harness prints. A survivor is a hole, and a hole is not a headline. */
+/**
+ * The mutation score the harness prints. A survivor is a hole, and a hole is not a headline.
+ *
+ * READ THE HARNESS'S OWN SUMMARY LINE, DO NOT COUNT WORDS. This function used to count occurrences
+ * of /\bkilled\b/, and the harness's final line is itself "78/78 mutations killed (100%)" — which
+ * contains the word. So it reported 80 for a set of 79 and WROTE THAT NUMBER TO ALL THREE PUBLIC
+ * SURFACES: this checker committed, in its first real run, precisely the defect it exists to
+ * prevent. The summary line is authoritative; the per-mutation lines are cross-checked against it
+ * so a run that dies half way cannot be published as a complete one.
+ */
 async function measureMutations() {
   const r = await run(process.execPath, ['test/mutation.mjs']);
   const text = `${r.stdout}\n${r.stderr}`;
-  const killed = (text.match(/\bkilled\b/g) ?? []).length;
-  const survived = (text.match(/\bSURVIVED\b/gi) ?? []).length;
-  if (killed + survived === 0) return { ok: false, why: 'the mutation harness reported no results' };
-  return { ok: true, killed, survived, total: killed + survived, score: `${killed}/${killed + survived}` };
+  const summary = /(\d+)\/(\d+) mutations killed/.exec(text);
+  if (!summary) {
+    return { ok: false, why: 'the mutation harness printed no "N/M mutations killed" summary — it '
+      + 'crashed, was killed, or its output format changed. No score may be published from this.' };
+  }
+  const killed = Number(summary[1]);
+  const total = Number(summary[2]);
+  const survived = total - killed;
+
+  // A run that ended early still prints a summary for what it did reach. Count the per-mutation
+  // verdict lines and require them to account for the whole set.
+  const declared = /deliberate defects/.exec(text) ? Number(/— (\d+) deliberate defects/.exec(text)?.[1] ?? total) : total;
+  const verdicts = (text.match(/^\s+\S+\s+(killed|SURVIVED)\b/gm) ?? []).length;
+  if (verdicts !== declared || total !== declared) {
+    return { ok: false, why: `the harness declared ${declared} defects, printed ${verdicts} verdict `
+      + `line(s) and summarised ${total} — an incomplete run must not be published` };
+  }
+  return { ok: true, killed, survived, total, score: `${killed}/${total}` };
 }
 
 const problems = [];
@@ -98,26 +121,32 @@ if (!TESTS_ONLY) {
 const { TEST_COUNT_PATTERNS, MUTATION_PATTERNS, claims } = await import(
   path.join(ROOT, 'test/lib/published-number-patterns.mjs'));
 
-for (const rel of SURFACES) {
-  const text = await fs.readFile(path.join(ROOT, rel), 'utf8').catch(() => null);
-  if (text === null) { problems.push(`${rel}: unreadable`); continue; }
-
-  if (measured.testCount) {
-    const found = [...new Set(claims(text, TEST_COUNT_PATTERNS, 1))];
-    if (!found.length) problems.push(`${rel}: publishes no test count this checker can see — pattern drift`);
-    else if (found.some((c) => c !== measured.testCount)) {
-      problems.push(`${rel}: publishes test count ${JSON.stringify(found)}, measured ${measured.testCount}`);
+/** Every place a surface disagrees with what was just measured. */
+async function compareSurfaces() {
+  const out = [];
+  for (const rel of SURFACES) {
+    const text = await fs.readFile(path.join(ROOT, rel), 'utf8').catch(() => null);
+    if (text === null) { out.push(`${rel}: unreadable`); continue; }
+    if (measured.testCount) {
+      const found = [...new Set(claims(text, TEST_COUNT_PATTERNS, 1))];
+      if (!found.length) out.push(`${rel}: publishes no test count this checker can see — pattern drift`);
+      else if (found.some((c) => c !== measured.testCount)) {
+        out.push(`${rel}: publishes test count ${JSON.stringify(found)}, measured ${measured.testCount}`);
+      }
+    }
+    if (measured.mutationScore) {
+      // '10/12' is the permanent falsification record — a WORSE past score, deliberately kept.
+      const found = [...new Set(claims(text, MUTATION_PATTERNS, 2))].filter((c) => c !== '10/12');
+      if (!found.length) out.push(`${rel}: publishes no mutation score this checker can see — pattern drift`);
+      else if (found.some((c) => c !== measured.mutationScore)) {
+        out.push(`${rel}: publishes mutation score ${JSON.stringify(found)}, measured ${measured.mutationScore}`);
+      }
     }
   }
-  if (measured.mutationScore) {
-    // '10/12' is the permanent falsification record — a WORSE past score, deliberately kept.
-    const found = [...new Set(claims(text, MUTATION_PATTERNS, 2))].filter((c) => c !== '10/12');
-    if (!found.length) problems.push(`${rel}: publishes no mutation score this checker can see — pattern drift`);
-    else if (found.some((c) => c !== measured.mutationScore)) {
-      problems.push(`${rel}: publishes mutation score ${JSON.stringify(found)}, measured ${measured.mutationScore}`);
-    }
-  }
+  return out;
 }
+
+problems.push(...await compareSurfaces());
 
 if (WRITE && !problems.some((p) => p.startsWith('MUTATION SCORE') || p.startsWith('TEST COUNT'))) {
   for (const rel of SURFACES) {
@@ -138,7 +167,24 @@ if (WRITE && !problems.some((p) => p.startsWith('MUTATION SCORE') || p.startsWit
     }
     if (text !== before) { await fs.writeFile(file, text, 'utf8'); console.log(`updated ${rel}`); }
   }
-  console.log('\nsurfaces rewritten to the measured values; re-run without --write to confirm.');
+
+  // RE-READ AND RE-COMPARE. A REWRITE THAT ONLY PARTLY LANDS IS WORSE THAN NONE.
+  //
+  // This is not belt-and-braces, it is a defect this script already committed: the first real
+  // --write replaced the plain-text claims and MISSED the URL-encoded badge
+  // (`mutation%20score-54%2F54%20killed`), leaving README publishing 54/54 and 79/79 at once — and
+  // then printed "surfaces rewritten" and exited 0. A half-written surface is a surface that
+  // contradicts itself, which is strictly worse than the stale-but-consistent state it replaced.
+  // So success is now something the script PROVES by re-reading, never something it assumes from
+  // having called writeFile.
+  const residual = await compareSurfaces();
+  if (residual.length) {
+    console.error(`\nPARTIAL WRITE — ${residual.length} claim(s) did NOT update and must be fixed by hand:`);
+    for (const r of residual) console.error(`  - ${r}`);
+    console.error('\nThe surfaces are now INCONSISTENT. Fix these before publishing anything.');
+    process.exit(1);
+  }
+  console.log('\nsurfaces rewritten AND re-verified against the measurement.');
   process.exit(0);
 }
 

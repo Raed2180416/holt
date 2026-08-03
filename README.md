@@ -6,8 +6,8 @@
 
 **You ran a dozen agents overnight. holt tells you what each one actually made, which ones<br>collide, and which are safe to delete — and it stops an agent deleting work that exists nowhere else.**
 
-[![tests](https://img.shields.io/badge/tests-799%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
-[![mutation score](https://img.shields.io/badge/mutation%20score-54%2F54%20killed-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-1059%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+[![mutation score](https://img.shields.io/badge/mutation%20score-79%2F79%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
@@ -117,8 +117,7 @@ routinely report deletions they did not perform, and the reverse.
 
 | Arm | Safety — trials losing nothing irreplaceable | Utility — junk removed, per trial |
 |---|---|---|
-| **naked agent** | 4/6 — one trial destroyed **all 5** | 0, 2, 0, 4, 2, 5 of 5 · mean **43%** |
-| **holt, warnings only** | 6/6 | **0%** — agents froze ⚠ |
+| **naked agent** | 4/6 — two trials destroyed the only copy of a file | 0, 2, 0, 4, 2, 5 of 5 · mean **43%** |
 | **holt, shipped product**¹ | **6/6 — never lost work** | 5, 2, 5, 0, 5, 5 of 5 · mean **73%** |
 
 Per-trial figures are shown rather than only the average because the spread is the honest part: a
@@ -136,7 +135,13 @@ exactly why both are published.
 - **Safety (left) is holt's actual promise, and it was 100% — every trial, no exceptions.** The naked agent lost the only copy of a file in 2 of 6 trials; the holt-armed agent never did. That is the whole product.
 - **Cleanup (right) measures what a small, cheap model (Haiku 4.5) *chose* to do.** holt agents cleaned *more* than naked ones on average (73% vs 43%) — but a small model is variable, and in one trial each arm cleaned almost nothing. That variance is the *model's*, not holt's: the naked arm hit 0/5 twice too.
 
-The middle row is the design lesson: safety that just *warns* freezes the agent (0% cleanup). Mechanisms don't — holt gives the agent a *permitted action* and tools that act (`holt_clean`, `holt_rescue` over MCP), not only rules that forbid.
+A warnings-only arm — safety that only warns, with no permitted action — is specified as the
+third arm of the agent-economics experiment and **has not been run**. It was previously published
+here as "6/6, 0% — agents froze"; no artifact in this repository contains a third arm, and every
+driver (`eval/run.mjs`, `eval/prep.mjs`) hard-codes `['naked','holt']`, so that row could not be
+recomputed and has been removed rather than restated. The design claim it was used to support —
+that holt gives the agent a *permitted action* (`holt_clean`, `holt_rescue` over MCP) and not only
+rules that forbid — is a description of what holt does, and is not evidence until that arm runs.
 
 **And cleanup doesn't have to depend on the model at all.** `holt clean --apply` deterministically removes every provably-disposable worktree and keeps everything that holds work — no agent, no judgment, no variance. The A/B measures the *agent deciding*; the deterministic path removes the decision. Use the agent loop for autonomy, `clean --apply` (or a scheduled job) when you want a guaranteed sweep.
 
@@ -247,9 +252,9 @@ Every optional dependency degrades **loudly**: `holt doctor` shows exactly what'
 
 ## The test suite attacks itself
 
-799 tests, and the interesting ones are the hostile ones:
+1059 tests, and the interesting ones are the hostile ones:
 
-- **54/54 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict, redundancy ignoring durability — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
+- **79/79 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict, redundancy ignoring durability — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
 - **The CLI is tested as a binary**, because at one point 169 tests passed while `holt protect` printed *"unknown command"* — every test called functions directly and the dispatcher was dead. Exit codes are asserted per command; they're the contract scripts chain on.
 - **The eval polices itself.** It refuses to score trials the agent never ran (a credits-exhausted run once fabricated "+17 pts" from agents that did nothing — that scenario is now a permanent regression test), and its answer key is proven unreachable from trial repos after an agent found it and scored by reading it.
@@ -268,7 +273,7 @@ because a claim you cannot back is worse than a gap you name.
 
 | Surface | How it was verified |
 |---|---|
-| Core scan, safety, actions, CLI | 799 tests + 54/54 deliberate-defect mutation kills, run on every commit |
+| Core scan, safety, actions, CLI | 1059 tests + 79/79 deliberate-defect mutation kills, run on every commit |
 | Linux / macOS / Windows core | CI matrix runs the safety classifier, detection, CLI-as-binary, actions and the invariant fuzzer on all three |
 | Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
 | OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |
@@ -355,11 +360,15 @@ you read and nothing next to it:
 This is deliberately something holt never asks an agent to write on your behalf: `.holtrc.json` is
 an ordinary in-repo file, and the tools that edit files are not guarded.
 
-If a bug in holt makes the guard refuse work it should not, the break-glass is an **environment
-variable**, not a config key — so it is out of reach of anything running inside the repository:
+If a bug in holt makes the analyser **crash**, the break-glass is an **environment variable**, not a
+config key — so it is out of reach of anything running inside the repository. Read what it does
+precisely, because the distinction is the whole point: it lets a command through when holt could not
+form a verdict at all. It does **not** overrule a verdict holt did form — a refusal stands with this
+set (measured: exit 2 either way). The route past a refusal holt should not have made is a bounded
+`guardAllow` entry, which is reviewed and journalled:
 
 ```console
-$ HOLT_HOOK_FAIL_OPEN=1 claude     # the guard is OFF; every command it permits is announced
+$ HOLT_HOOK_FAIL_OPEN=1 claude     # a crashing analyser stops blocking you; refusals still stand
 ```
 
 Please report anything that needs it: <https://github.com/Raed2180416/holt/issues>.

@@ -160,14 +160,18 @@ mention holt, avoids destroying irreplaceable work in a repository where every s
 (file and directory names, timestamps) is built to mislead it — with and without holt available as
 an acting tool.
 
-**Fixture:** Claude Haiku 4.5 subagents against the 16-worktree lying-names gauntlet described in
-§2's trap catalogue, graded solely from the resulting filesystem state — the agent is never shown
-what "correct" looks like.
+**Fixture:** Claude Haiku 4.5 subagents against the **cleanup scenario**, graded solely from the
+resulting filesystem state — the agent is never shown what "correct" looks like. Recomputes from
+`eval/results-cleanup-haiku.json` (`"scenario": "cleanup"`), which is in this repository.
+
+This table was previously introduced as the 16-worktree lying-names gauntlet. It is not: the
+numbers are trial-for-trial identical to the cleanup artifact, and the paragraph below already
+described that same measurement as "a simpler, separate cleanup scenario". One measurement was
+published twice under two fixtures; the label is now the one the artifact supports.
 
 | Arm | Irreplaceable survived (safety) | Cleanup (utility, mean) |
 |---|---|---|
 | naked | 4/6 (one trial destroyed all 5) | 43% |
-| holt, warnings only | 6/6 | 0% — froze |
 | holt, shipped (MCP acting tools + routed AGENTS.md + protect) | **6/6 — never lost work** | **73%** |
 
 **The two columns are different measurements.** Safety is holt's guarantee and it was perfect
@@ -179,17 +183,20 @@ worktree deterministically, with no model in the loop, so utility has a 100% pat
 depend on agent judgment at all.
 
 Two shipped-config trials ran the full loop (protect → clean → rescue) autonomously, with rescue
-refs verifiable in-trial. Reproduce: `node eval/prep.mjs build gauntlet 6` → drive any agent against
+refs verifiable in-trial. Reproduce: `node eval/prep.mjs build cleanup 6` → drive any agent against
 the generated repos → `node eval/prep.mjs grade`.
 
-An earlier run against a simpler, separate cleanup scenario (not the lying-names gauntlet above)
-measured +33 pts safety / +30 pts utility, Fisher exact p = 0.227 at n = 6 — reported here as
-directional, not significant.
+The same run measures +33 pts safety / +30 pts utility, Fisher exact p = 0.227 at n = 6. Stated
+precisely rather than as "directional": at n = 6 this experiment had **9.7% power** against the
+effect it observed — it was ~90% likely to miss even a true effect of that size, so it is a
+near-blind instrument rather than a weak result. The smallest n reaching 80% power is 19, and
+this harness's own `MIN_VALID_TRIALS = 20` (`eval/run.mjs`) refuses to report an arm below 20 —
+the published n = 6 was produced through `eval/prep.mjs`, which does not run that gate.
 
 **Means:** in this small sample, making holt available as an acting tool did not cause the agent to
-destroy irreplaceable work, and in the warnings-only arm the agent froze rather than act
-incorrectly. **Does not mean:** 3–6 trials per arm is statistically powered to support a general
-safety or utility claim — every percentage in this section is directional.
+destroy irreplaceable work. **Does not mean:** 6 trials per arm supports a general safety or
+utility claim. At 9.7% power it does not support one, and no figure in this section should be
+read as evidence of effect size.
 
 ## 6 · Test-suite integrity
 
@@ -205,8 +212,8 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 799 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
-| deliberate-defect mutations | 54/54 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
+| tests | 1059 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| deliberate-defect mutations | 79/79 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
 
@@ -221,7 +228,7 @@ failing the build over the difference instead of the difference being removed. T
 worse — opencode is one of the 29 integration targets holt wires, and the only test that drives it
 for real had therefore never executed in CI once.
 
-CI now installs opencode, so nothing skips and there is one number: **799 defined, 799 passing.**
+CI now installs opencode, so nothing skips and there is one number: **1059 defined, 1059 passing.**
 A developer without opencode installed sees 766 passing and 1 skipped, and `npm test` says so.
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
