@@ -6150,7 +6150,19 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
 
   const text = `[holt — parallel workstream state]\n${lines.join('\n')}\n`
     + (provenance.length ? `${provenance.join('\n')}\n` : '')
-    + '(Before deleting ANY worktree run: holt gate <id> — exit 0 disposable, 1 holds unique work, 2 unknown.)';
+    // NAME A ROUTE THE READER CAN ACTUALLY TAKE.
+    //
+    // This line is injected into EVERY session and told the agent to run `holt gate <id>` — and
+    // `gate` is not on the MCP surface at all: the substring appears nowhere in the tools/list
+    // payload. An agent reaching holt only over MCP was instructed, before every deletion, to use
+    // a name it cannot call, and the functional equivalent it CAN call was never mentioned. The
+    // most-read line in the product pointed at a door that is not there for a large share of its
+    // readers.
+    //
+    // Both routes are named because the brief cannot know which one the reader has.
+    + '(Before deleting ANY worktree, check it first: run `holt gate <id>` — exit 0 disposable, '
+    + '1 holds unique work, 2 unknown — or call the holt_check_workstream tool if you have holt '
+    + 'over MCP.)';
 
   if (!opts.onlyIfChanged || !root) return text;
 

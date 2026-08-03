@@ -193,7 +193,7 @@ const TOOLS = [
     name: 'holt_collisions',
     title: 'Workstreams that will fight',
     description:
-      'Pairs contesting the same content. "proven" means git merge-tree reports a real conflict; "predicted" means at least one side is uncommitted so merge-tree cannot see it — confidence is highest when both sides added the same symbol.',
+      'Pairs contesting the same content. Call BEFORE landing or merging, to sequence work that would conflict. "proven" = git merge-tree reports a real conflict; "predicted" = one side is uncommitted so merge-tree cannot see it, strongest when both added the same symbol.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max pairs (default 10, at most 100).' } },
@@ -215,7 +215,7 @@ const TOOLS = [
     name: 'holt_duplicates',
     title: 'Workstreams that built the same thing',
     description:
-      'Pairs that produced overlapping work. Cross-dispatch overlap is waste; same-family overlap is expected fan-out. Set deep:true to additionally run token-level clone detection (jscpd), which catches the same logic written under different names.',
+      'Pairs that produced overlapping work. Call BEFORE assigning work or landing a batch: two agents that built the same thing need one review, not two. Cross-dispatch overlap is waste; same-family is expected fan-out, not free. deep:true adds jscpd clones.',
     inputSchema: {
       type: 'object',
       properties: {
