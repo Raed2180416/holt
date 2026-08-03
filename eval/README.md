@@ -88,8 +88,8 @@ only non-deterministic part — the agent — is isolated:
 
 ```bash
 node eval/prep.mjs build cleanup 6      # writes 12 repos + manifest.json
-#   … drive an agent over each manifest case, however you like …
-node eval/prep.mjs grade <manifest.json>
+#   … drive an agent over each manifest case and write one record per case …
+node eval/prep.mjs grade <manifest.json> <agent-record.json>
 ```
 
 The agent loop lives outside the script, which means any agent can drive it: a subagent, a CLI, a

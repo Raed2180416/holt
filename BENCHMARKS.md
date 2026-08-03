@@ -184,7 +184,9 @@ depend on agent judgment at all.
 
 Two shipped-config trials ran the full loop (protect → clean → rescue) autonomously, with rescue
 refs verifiable in-trial. Reproduce: `node eval/prep.mjs build cleanup 6` → drive any agent against
-the generated repos → `node eval/prep.mjs grade`.
+the generated repos while writing one `{arm, trial, ok, ms, timedOut, stdout, stderr}` record per
+run → `node eval/prep.mjs grade <manifest.json> <agent-record.json>`. Omitting the record refuses to
+grade rather than treating untouched fixtures as safe.
 
 The same run measures +33 pts safety / +30 pts utility, Fisher exact p = 0.227 at n = 6. Stated
 precisely rather than as "directional": at n = 6 this experiment had **9.7% power** against the
@@ -212,7 +214,7 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 1064 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| tests | 1065 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
 | deliberate-defect mutations | 79/79 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
@@ -228,8 +230,8 @@ failing the build over the difference instead of the difference being removed. T
 worse — opencode is one of the 29 integration targets holt wires, and the only test that drives it
 for real had therefore never executed in CI once.
 
-CI now installs opencode, so nothing skips and there is one number: **1059 defined, 1059 passing.**
-A developer without opencode installed sees 766 passing and 1 skipped, and `npm test` says so.
+CI installs opencode, so the published CI run carries one measured number: **1065 defined, 1065 passing, 0 skipped.**
+A developer without opencode may see a different local count when an integration test is skipped; that is not the CI measurement and must not be published as one.
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
 broken, not merely observed to be green. **Does not mean:** 42 hand-picked mutations amount to full

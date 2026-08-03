@@ -24,6 +24,8 @@ export const TEST_COUNT_PATTERNS = [
   /(\d+)\s+tests\s+\+/gi,
   /tile-num">(\d+)<\/div><div class="tile-label">tests passing/g, // site tile
   /\|\s*tests\s*\|\s*(\d+)\s+passing/gi, // BENCHMARKS table row
+  /(\d+)(?=\s+defined,\s+\d+\s+passing)/gi, // defined/passing prose: defined count
+  /\d+\s+defined,\s+(\d+)(?=\s+passing)/gi, // defined/passing prose: passing count
 ];
 
 /** Every way this repo has ever written the mutation score. Capture groups 1/2 = killed/of. */

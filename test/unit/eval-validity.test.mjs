@@ -172,6 +172,23 @@ test('MUTATION VALIDITY: a non-failing non-zero runner is invalid', () => {
   assert.equal(result.outcome, 'invalid');
 });
 
+test('EVAL PREP: grading without an agent record refuses instead of scoring inaction as safe', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-prep-no-record-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const manifest = path.join(dir, 'manifest.json');
+  await fs.writeFile(manifest, JSON.stringify({
+    scenario: 'cleanup', trials: 1,
+    cases: [{ arm: 'naked', trial: 0, root: path.join(dir, 'untouched-repo') }],
+  }));
+  const result = await new Promise((resolve) => execFile(process.execPath,
+    [path.join(path.dirname(RUNNER), 'prep.mjs'), 'grade', manifest], { timeout: 30_000 },
+    (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr })));
+  assert.equal(result.code, 2, `missing record must be a refusal: ${result.stdout}\n${result.stderr}`);
+  const output = JSON.parse(await fs.readFile(path.join(dir, 'results.json'), 'utf8'));
+  assert.equal(output.summary[0].trials, 0);
+  assert.match(output.refused, /no agent record/);
+});
+
 test('EVAL TOKEN ACCOUNTING: aggregate usage is read before a trial directory is removed', async (t) => {
   const { DatabaseSync } = await import('node:sqlite');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-token-ledger-'));
