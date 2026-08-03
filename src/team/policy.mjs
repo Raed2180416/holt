@@ -29,6 +29,56 @@
  *  - Every violation names the rule id, the subject, and the evidence, so a red build is
  *    actionable without re-running anything locally.
  *  - THE SUBJECT OF A GATE NEVER SUPPLIES ITS OWN RULES. See loadGatePolicy below.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * ADJUDICATED 2026-08-01 — WHY THIS IS HAND-ROLLED AND NOT OPA/REGO OR CEDAR
+ *
+ * The right instinct is to take an existing policy engine rather than grow a bespoke one, and it
+ * was evaluated properly. Measured live against the npm registry on 2026-08-01 (re-derive with
+ * `npm view <pkg> dist.unpackedSize dependencies time.modified`; these numbers rot, the
+ * reasoning does not):
+ *
+ *   @open-policy-agent/opa-wasm  1.10.0, last published 2024-11-08, 950 KB, 2 runtime deps.
+ *     DISQUALIFYING: it only EVALUATES pre-compiled WASM. Its own README says to produce that
+ *     with `opa build -t wasm example.rego` — the Go binary. A policy file is written by the
+ *     USER, so adopting Rego would require every holt user to install the OPA toolchain merely
+ *     to author one. That is not a local-first CLI.
+ *
+ *   @cedar-policy/cedar-wasm     4.12.0, last published 2026-07-28, 0 runtime deps, Apache-2.0.
+ *     Genuinely strong: actively developed, no dependencies, parses and evaluates policy text
+ *     in-process with no external compiler, and formally verified. It is 12,745 KB unpacked
+ *     against holt's entire shipped surface of 487 KB (bin + src + README) — 26x the whole
+ *     product to express four rules.
+ *
+ * THE DECIDING ARGUMENT IS NOT SIZE, IT IS FIT, AND IT IS THIS: not one of the defects this
+ * module has ever had was an EXPRESSIVENESS defect. The gate read its rules from the candidate;
+ * a rule matched globs against symbol identities and could never fire; an empty path list
+ * validated and passed; unknown keys were silently ignored. Every one of those would have existed
+ * identically under Rego or Cedar, because they are defects of PROVENANCE (who wrote the rules)
+ * and REACHABILITY (can this rule fire at all) — questions no policy language answers for you.
+ * Adopting either engine would have fixed exactly zero of them while adding a language users must
+ * learn and a dependency the free tier cannot carry.
+ *
+ * There is also a semantic mismatch worth naming: Cedar answers "may this principal take this
+ * action on this resource", one decision per request. holt's rules are aggregate assertions over
+ * a scan result ("no branch may hold unlanded work"). Encoding those means synthesising one
+ * authorization request per rule per subject and reassembling the answers here — which is this
+ * file, with a 12 MB dependency underneath it.
+ *
+ * WHAT WOULD HAVE TO BE TRUE TO CHANGE THE ANSWER — adopt Cedar (not Rego, for the compiler
+ * reason above), as an OPTIONAL dependency so the free tier stays dependency-free, when ANY of:
+ *   1. Users need rules these four types cannot express: conditionals, arithmetic, cross-rule
+ *      logic, per-branch-pattern overrides, or their own predicates. One request is an anecdote;
+ *      the trigger is the third distinct one that cannot be expressed by adding a rule type.
+ *   2. The rule-type count passes ~10, where a hand-rolled validator stops being reviewable in
+ *      one sitting and an off-the-shelf grammar starts being cheaper than the one here.
+ *   3. A buyer requires a formally verified engine, or wants to reuse an existing Cedar/Rego
+ *      corpus they already maintain. This is a real procurement ask and it outranks every
+ *      argument above on its own.
+ *   4. Policy needs to be authored or analysed OUTSIDE holt — a central service, a policy
+ *      linter, "which repositories would this rule change break" — where a standard language
+ *      and its tooling are the product rather than an implementation detail.
+ * ---------------------------------------------------------------------------------------------
  */
 
 import fs from 'node:fs/promises';
@@ -89,61 +139,127 @@ function pathsCarriedBy(u, layers) {
   return [...out].sort();
 }
 
+/* ============================================================== VALIDATION ==== */
+
+/** Keys every rule may carry, plus the keys each TYPE adds. Anything else is a refusal. */
+const COMMON_RULE_KEYS = new Set(['id', 'type', 'severity', 'enabled', 'description']);
+const TYPE_RULE_KEYS = {
+  'no-unlanded': new Set(['exempt']),
+  'max-branch-age': new Set(['exempt', 'days']),
+  'protected-paths': new Set(['paths']),
+  'require-classified': new Set([]),
+};
+const TOP_LEVEL_KEYS = new Set(['version', 'rules', 'description']);
+
+/** A glob that matches every possible subject. A rule exempting one of these exempts everything. */
+const UNIVERSAL_GLOBS = new Set(['*', '**', '**/*', '*/**']);
+
+const refuse = (code, message) => { throw Object.assign(new Error(message), { code }); };
+
 /**
- * Validation, in ONE place. Both readers — the working tree and the base ref — must apply
- * identical rules. Uses jsonc-parser (not regex) so a string containing `//` is not truncated.
+ * Every glob in `list` must be a non-empty string. A non-string here used to reach
+ * `globToRegExp`, where `glob.length` on `null` threw a TypeError from the middle of evaluation.
  */
-function validatePolicy(raw, rel) {
-    let doc;
-    {
-      // A COMMENT STRIPPER THAT CANNOT SEE STRINGS DELETES POLICY.
-      //
-      // This tolerated `//` and `/* */` with two regexes, and a regex does not know it is inside a
-      // string literal. A byte-for-byte VALID policy containing a path glob like
-      //
-      //     "paths": ["secrets/**", "docs/a // b.md"]
-      //
-      // was truncated mid-string at the ` //`, and `holt ci` — the merge gate an organisation
-      // relies on — then refused to run at all with POLICY_PARSE. Where the truncation happened
-      // to leave valid JSON it was worse than a refusal: a rule silently disappeared and the gate
-      // passed what it was installed to block.
-      //
-      // jsonc-parser is already a dependency and understands both comments and string context.
-      const errors = [];
-      doc = jsoncParse(raw, errors, { allowTrailingComma: true, disallowComments: false });
-      if (errors.length || doc === undefined) {
-        throw Object.assign(
-          new Error(`${rel} is not valid JSON/JSONC (${errors.length} parse error(s)) — refusing to run with a policy nobody can read`),
-          { code: 'POLICY_PARSE' },
-        );
-      }
+function checkGlobs(list, { label, ruleId, field }) {
+  list.forEach((g, i) => {
+    if (typeof g !== 'string' || !g.trim()) {
+      refuse('POLICY_RULE', `${label}: rule '${ruleId}' ${field}[${i}] must be a non-empty string glob, got ${JSON.stringify(g)}`);
     }
-    if (doc?.version !== 1) {
-      throw Object.assign(new Error(`${rel}: unsupported policy version ${JSON.stringify(doc?.version)} — upgrade holt rather than run an unenforced policy`), { code: 'POLICY_VERSION' });
-    }
-    if (!Array.isArray(doc.rules) || doc.rules.length === 0) {
-      throw Object.assign(new Error(`${rel}: no rules defined — an empty policy would pass everything silently`), { code: 'POLICY_EMPTY' });
-    }
-    const seen = new Set();
-    for (const r of doc.rules) {
-      if (!r?.id || typeof r.id !== 'string') throw Object.assign(new Error(`${rel}: every rule needs a string id`), { code: 'POLICY_RULE' });
-      if (seen.has(r.id)) throw Object.assign(new Error(`${rel}: duplicate rule id '${r.id}'`), { code: 'POLICY_RULE' });
-      seen.add(r.id);
-      if (!RULE_TYPES.has(r.type)) {
-        throw Object.assign(new Error(`${rel}: rule '${r.id}' has unknown type '${r.type}'. Known: ${[...RULE_TYPES].join(', ')}`), { code: 'POLICY_RULE' });
-      }
-      if (r.severity && !SEVERITIES.has(r.severity)) {
-        throw Object.assign(new Error(`${rel}: rule '${r.id}' has unknown severity '${r.severity}'`), { code: 'POLICY_RULE' });
-      }
-      if (r.type === 'max-branch-age' && !(Number(r.days) > 0)) {
-        throw Object.assign(new Error(`${rel}: rule '${r.id}' needs a positive 'days'`), { code: 'POLICY_RULE' });
-      }
-      if (r.type === 'protected-paths' && !Array.isArray(r.paths)) {
-        throw Object.assign(new Error(`${rel}: rule '${r.id}' needs a 'paths' array`), { code: 'POLICY_RULE' });
-      }
-    }
-    return doc;
+  });
 }
+
+/**
+ * Validate one policy document. `label` names the source in every refusal.
+ *
+ * Uses jsonc-parser (not regex) so a string containing `//` is not truncated mid-literal.
+ *
+ * THE STANDARD: a policy must be incapable of reading as strict to its author while running as
+ * inert in the binary. Three additions over the original validator, each reproduced first:
+ *
+ *   UNKNOWN KEYS REFUSE. `{"sevrity":"warn"}` and a top-level `"defaultSeverity"` were silently
+ *   ignored. Silent tolerance of a typo means the file a security reviewer reads and the rules
+ *   the binary runs are two different documents, and nothing anywhere says so.
+ *
+ *   VACUOUS RULES REFUSE. `{"type":"protected-paths","paths":[]}` validated, matched nothing and
+ *   passed every build; `{"exempt":["**"]}` exempts every subject there can be. Both are rules
+ *   that CANNOT FIRE — a green build from a rule that never ran.
+ *
+ *   NON-STRING GLOBS REFUSE, at load time, instead of crashing the evaluator mid-run.
+ */
+export function parsePolicy(raw, label) {
+  let doc;
+  {
+    // jsonc-parser understands both comments and string context, so a path glob like
+    // "docs/a // b.md" is not truncated at the //.
+    const errors = [];
+    doc = jsoncParse(String(raw), errors, { allowTrailingComma: true, disallowComments: false });
+    if (errors.length || doc === undefined) {
+      refuse('POLICY_PARSE', `${label} is not valid JSON/JSONC (${errors.length} parse error(s)) — refusing to run with a policy nobody can read`);
+    }
+  }
+  if (doc?.version !== 1) {
+    refuse('POLICY_VERSION', `${label}: unsupported policy version ${JSON.stringify(doc?.version)} — upgrade holt rather than run an unenforced policy`);
+  }
+  for (const k of Object.keys(doc)) {
+    if (!TOP_LEVEL_KEYS.has(k)) {
+      refuse('POLICY_SCHEMA', `${label}: unknown top-level key '${k}'. Known: ${[...TOP_LEVEL_KEYS].join(', ')}. holt refuses rather than ignore it — a key holt does not act on is a rule you believe you have and do not.`);
+    }
+  }
+  if (!Array.isArray(doc.rules) || doc.rules.length === 0) {
+    refuse('POLICY_EMPTY', `${label}: no rules defined — an empty policy would pass everything silently`);
+  }
+
+  const seen = new Set();
+  for (const r of doc.rules) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) {
+      refuse('POLICY_RULE', `${label}: every entry of 'rules' must be an object, got ${JSON.stringify(r)}`);
+    }
+    if (!r.id || typeof r.id !== 'string') refuse('POLICY_RULE', `${label}: every rule needs a string id`);
+    if (seen.has(r.id)) refuse('POLICY_RULE', `${label}: duplicate rule id '${r.id}'`);
+    seen.add(r.id);
+    if (!RULE_TYPES.has(r.type)) {
+      refuse('POLICY_RULE', `${label}: rule '${r.id}' has unknown type '${r.type}'. Known: ${[...RULE_TYPES].join(', ')}`);
+    }
+
+    const allowed = new Set([...COMMON_RULE_KEYS, ...TYPE_RULE_KEYS[r.type]]);
+    for (const k of Object.keys(r)) {
+      if (!allowed.has(k)) {
+        refuse('POLICY_SCHEMA', `${label}: rule '${r.id}' has unknown key '${k}'. A rule of type '${r.type}' accepts: ${[...allowed].sort().join(', ')}`);
+      }
+    }
+    if (r.severity !== undefined && !SEVERITIES.has(r.severity)) {
+      refuse('POLICY_RULE', `${label}: rule '${r.id}' has unknown severity '${r.severity}'`);
+    }
+    if (r.enabled !== undefined && typeof r.enabled !== 'boolean') {
+      refuse('POLICY_RULE', `${label}: rule '${r.id}' has a non-boolean 'enabled' (${JSON.stringify(r.enabled)})`);
+    }
+    if (r.exempt !== undefined && !Array.isArray(r.exempt)) {
+      refuse('POLICY_RULE', `${label}: rule '${r.id}' has a non-array 'exempt'`);
+    }
+    if (Array.isArray(r.exempt)) checkGlobs(r.exempt, { label, ruleId: r.id, field: 'exempt' });
+
+    if (r.type === 'max-branch-age' && !(Number(r.days) > 0)) {
+      refuse('POLICY_RULE', `${label}: rule '${r.id}' needs a positive 'days'`);
+    }
+    if (r.type === 'protected-paths') {
+      if (!Array.isArray(r.paths)) refuse('POLICY_RULE', `${label}: rule '${r.id}' needs a 'paths' array`);
+      checkGlobs(r.paths, { label, ruleId: r.id, field: 'paths' });
+    }
+
+    // ---- can this rule fire at all? -------------------------------------------------
+    if (r.enabled === false) continue; // switched off in words; honoured and reported later
+    if (r.type === 'protected-paths' && r.paths.length === 0) {
+      refuse('POLICY_VACUOUS', `${label}: rule '${r.id}' protects an EMPTY list of paths, so it can never fire — a rule that cannot fail is a green build nobody earned. Give it paths, or set "enabled": false to turn it off deliberately.`);
+    }
+    if (Array.isArray(r.exempt) && r.exempt.some((g) => UNIVERSAL_GLOBS.has(g.trim()))) {
+      refuse('POLICY_VACUOUS', `${label}: rule '${r.id}' exempts every possible subject (${r.exempt.join(', ')}), so it can never fire. Narrow the exemption, or set "enabled": false to turn it off deliberately.`);
+    }
+  }
+  return doc;
+}
+
+/** Internal alias for callers that still use the old name. */
+function validatePolicy(raw, rel) { return parsePolicy(raw, rel); }
 
 /**
  * THE RULES MUST NOT COME FROM THE THING BEING JUDGED.
@@ -163,56 +279,18 @@ export async function loadPolicyFrom(readAt) {
     let raw;
     try { raw = await readAt(rel); } catch { continue; }
     if (raw == null) continue;
-    const policy = validatePolicy(raw, rel);
+    const policy = parsePolicy(raw, rel);
     return { found: true, path: rel, policy, source: 'base-ref', trusted: true };
   }
   return { found: false };
 }
 
-/** Load and validate from the WORKING TREE. Returns {found:false} when absent — absence is not an error. */
+/** Load and validate from the WORKING TREE. Returns {found:false} when absent. */
 export async function loadPolicy(root) {
   for (const rel of POLICY_PATHS) {
     let raw;
     try { raw = await fs.readFile(path.join(root, rel), 'utf8'); } catch { continue; }
-    const policy = validatePolicy(raw, rel);
-    return { found: true, path: rel, policy, source: 'worktree', trusted: false };
-  }
-  return { found: false };
-}
-
-/** Validate one policy document. Exported for testing. */
-export function parsePolicy(raw, label) {
-  return validatePolicy(raw, label);
-}
-
-/**
- * Load and validate the policy AS IT EXISTS IN `ref` — never from the working tree.
- *
- * Fails CLOSED in the one case that matters: when the ref DECLARES a policy path but the blob
- * cannot be read (a partial clone, a pruned object). "I cannot read the rules" must never
- * collapse into "there are no rules"; that is the same absent-evidence-reads-as-pass defect the
- * whole module exists to prevent. The two states are separated by asking the TREE whether the
- * path exists, which needs no blob, before asking for the content.
- */
-export async function loadPolicyFromRef(root, ref) {
-  for (const rel of POLICY_PATHS) {
-    const ls = await git(['ls-tree', '--name-only', ref, '--', rel], { cwd: root }).catch((e) => ({ code: -1, stderr: e.message }));
-    if (ls.code !== 0) {
-      throw Object.assign(
-        new Error(`cannot inspect '${ref}' for ${rel} (${String(ls.stderr).trim() || `exit ${ls.code}`}) — refusing to judge a change against a base holt cannot read`),
-        { code: 'POLICY_BASE_UNREADABLE' },
-      );
-    }
-    if (!ls.stdout.trim()) continue; // the base genuinely does not carry this path
-
-    const show = await git(['show', `${ref}:${rel}`], { cwd: root }).catch((e) => ({ code: -1, stderr: e.message }));
-    if (show.code !== 0) {
-      throw Object.assign(
-        new Error(`${ref}:${rel} exists in the base tree but its content is unreadable (${String(show.stderr).trim() || `exit ${show.code}`}) — refusing to pass a build against a policy that could not be loaded`),
-        { code: 'POLICY_BASE_UNREADABLE' },
-      );
-    }
-    return { found: true, path: rel, policy: parsePolicy(show.stdout, `${ref}:${rel}`), source: 'base', ref, trusted: true };
+    return { found: true, path: rel, policy: parsePolicy(raw, rel), source: 'worktree', trusted: false, raw };
   }
   return { found: false };
 }
@@ -244,22 +322,6 @@ export async function loadPolicyFromRef(root, ref) {
  * @param {string|null} baseRef  the ref/oid the audit compared against — the same base, so the
  *   policy and the evidence it judges can never come from two different worlds.
  */
-export async function loadGatePolicy(root, { baseRef = null } = {}) {
-  if (baseRef) {
-    const fromBase = await loadPolicyFromRef(root, baseRef);
-    if (fromBase.found) return fromBase;
-  }
-  const fromTree = await loadPolicy(root);
-  if (!fromTree.found) return { found: false };
-  return {
-    ...fromTree,
-    trusted: false,
-    note: baseRef
-      ? `no policy exists in the base (${baseRef}); using the working-tree copy, which cannot suppress any other check`
-      : 'no base ref available; using the working-tree copy, which cannot suppress any other check',
-  };
-}
-
 /**
  * Compose the final `holt ci` verdict from the policy result and the inline-flag result.
  *
@@ -273,13 +335,266 @@ export async function loadGatePolicy(root, { baseRef = null } = {}) {
  * A TRUSTED policy keeps the original behaviour exactly — it is the reviewed statement of what
  * this repository wants enforced, so it supersedes the flags as it always did.
  */
-export function gateVerdict({ policyResult, flagFailures = [], trusted = false } = {}) {
-  const carried = trusted ? [] : [...flagFailures];
+/**
+ * Load and validate the policy AS IT EXISTS IN `ref` — never from the working tree.
+ *
+ * FAILS CLOSED on the case that matters: the ref carries the path but the blob cannot be read
+ * (partial clone, pruned object, shallow fetch). "I cannot read the rules" must never collapse
+ * into "there are no rules" — that is the absent-evidence-reads-as-pass defect this whole module
+ * exists to prevent. The two states are told apart by asking the TREE whether the path exists,
+ * which needs no blob, before asking for content.
+ */
+export async function loadPolicyFromRef(root, ref) {
+  for (const rel of POLICY_PATHS) {
+    const ls = await git(['ls-tree', '--name-only', ref, '--', rel], { cwd: root })
+      .catch((e) => ({ code: -1, stdout: '', stderr: e.message }));
+    if (ls.code !== 0) {
+      refuse('POLICY_BASE_UNREADABLE',
+        `cannot inspect '${ref}' for ${rel} (${String(ls.stderr).trim() || `exit ${ls.code}`}) — refusing to judge a change against a base holt cannot read`);
+    }
+    if (!ls.stdout.trim()) continue; // the base genuinely does not carry this path
+
+    const show = await git(['show', `${ref}:${rel}`], { cwd: root })
+      .catch((e) => ({ code: -1, stdout: '', stderr: e.message }));
+    if (show.code !== 0) {
+      refuse('POLICY_BASE_UNREADABLE',
+        `${ref}:${rel} exists in the base tree but its content is unreadable (${String(show.stderr).trim() || `exit ${show.code}`}) — refusing to pass a build against a policy that could not be loaded`);
+    }
+    return {
+      found: true, path: rel, policy: parsePolicy(show.stdout, `${ref}:${rel}`),
+      source: 'base', ref, trusted: true, raw: show.stdout,
+    };
+  }
+  return { found: false };
+}
+
+/* =============================================================== AUTHORITY ==== */
+
+/** Environment variables by which a CI provider declares "this run judges a proposed change". */
+const CI_BASE_VARS = ['GITHUB_BASE_REF', 'CHANGE_TARGET', 'CI_MERGE_REQUEST_TARGET_BRANCH_NAME',
+  'BITBUCKET_PR_DESTINATION_BRANCH', 'SYSTEM_PULLREQUEST_TARGETBRANCH'];
+
+const declaredBase = (env) => {
+  for (const k of CI_BASE_VARS) {
+    const v = env?.[k]?.trim();
+    if (v) return { var: k, ref: v };
+  }
+  return null;
+};
+
+/**
+ * IS THIS BASE AN INDEPENDENT AUTHORITY — may the rules it carries judge this commit?
+ *
+ * Reading policy from the base ref instead of the working tree is the right fix for "a pull
+ * request edits the gate that judges it", and it is worth exactly nothing if the base and the
+ * candidate are THE SAME COMMIT. `resolveBase` ends in a `primary-head-fallback`, reached by any
+ * repository with no `origin/HEAD` and no branch named main/master/trunk/develop/default — a
+ * fork, a mirror, a `release`-only repo, a bare CI checkout. Measured on a real repository: on
+ * such a branch `base.oid === HEAD`, so "load the rules from the base" loads the candidate's own
+ * committed policy, and the fix defeats itself in silence.
+ *
+ * THE RULE, and it is about REFS, not about commits: A BASE IS AN AUTHORITY ONLY IF THE
+ * CANDIDATE CANNOT WRITE TO IT.
+ *
+ * Refs, not commits, because `base.oid === HEAD` on its own is innocent and common — a branch cut
+ * ten seconds ago and edited only in the working tree sits exactly there, and the base commit it
+ * points at was still written by somebody else. What actually removes authority is the candidate
+ * being able to MOVE the ref the rules come from: holt fell back to HEAD (there is no base ref at
+ * all), or the base ref IS the branch that is checked out, so its next commit rewrites the rules
+ * that judge it. Treating equal OIDs as the test instead flagged every freshly-cut branch and
+ * would have taught users to ignore the warning — the way a smoke alarm in a kitchen gets
+ * unplugged.
+ *
+ * The consequence is deliberately asymmetric, because the two situations are not the same:
+ *
+ *   - Running holt locally on your own tip is not an attack, it is Tuesday. Refusing there would
+ *     make the tool unusable, so it DEGRADES: the policy still runs and can still fail the build,
+ *     but it is marked untrusted and may not suppress anything.
+ *
+ *   - In CI, where the environment DECLARES the branch this work is proposed against, the right
+ *     base was knowable and holt used something else. That is a misconfiguration producing a
+ *     meaningless verdict, so it REFUSES and names the flag that fixes it. A gate whose own
+ *     preconditions failed must not render a verdict at all.
+ *
+ * @param {string|null} headRef  the checked-out branch's short name, or null when detached.
+ */
+export function baseAuthority({ base = null, headOid = null, headRef = null, env = process.env } = {}) {
+  const declared = declaredBase(env);
+  const ci = !!declared;
+  const shortRef = (r) => String(r ?? '').replace(/^refs\/heads\//, '').replace(/^origin\//, '');
+
+  if (!base?.oid) {
+    return {
+      independent: false, ci, kind: 'no-base',
+      reason: 'holt could not resolve any base ref, so there is nothing to take the rules FROM',
+      fix: 'Pass --base <ref> (in GitHub Actions: --base "origin/$GITHUB_BASE_REF").',
+    };
+  }
+
+  // Checked FIRST because it is the most specific and the most actionable: the environment named
+  // the target branch, so if holt judged against something else the verdict is about the wrong
+  // comparison entirely, whatever colour it comes out.
+  if (declared && shortRef(declared.ref) !== shortRef(base.ref)) {
+    return {
+      independent: false, ci, kind: 'base-mismatch',
+      reason: `${declared.var} declares this change is proposed against '${declared.ref}', but holt judged it against '${base.ref}' — the rules and the evidence would come from a branch nobody is merging into`,
+      fix: `Pass --base "origin/${shortRef(declared.ref)}".`,
+    };
+  }
+  if (base.how === 'primary-head-fallback') {
+    return {
+      independent: false, ci, kind: 'head-fallback',
+      reason: `holt found no base branch and fell back to HEAD (base.how=${base.how}), so the "base" IS the candidate commit — any policy read from it is the candidate's own`,
+      fix: 'Pass --base <ref> (in GitHub Actions: --base "origin/$GITHUB_BASE_REF"), or create/track the default branch.',
+    };
+  }
+  if (headRef && shortRef(headRef) === shortRef(base.ref)) {
+    return {
+      independent: false, ci, kind: 'self-base',
+      reason: `the base ref (${base.ref}) is the branch that is checked out, so this branch supplies the rules that judge it — its next commit rewrites its own gate`,
+      fix: 'Pass --base <ref> naming the branch this work will be merged INTO.',
+    };
+  }
+  return {
+    independent: true, ci, kind: 'independent',
+    // Reported, never acted on: equal OIDs are the innocent freshly-cut-branch case, and a
+    // reviewer looking at a verdict should be able to see that without re-deriving it.
+    sameCommitAsHead: !!headOid && base.oid === headOid,
+    base: { ref: base.ref, oid: base.oid, how: base.how },
+  };
+}
+
+/** The checked-out branch's short name, or null when HEAD is detached. A pure read. */
+export async function currentBranch(root) {
+  const r = await git(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: root }).catch(() => null);
+  if (!r || r.code !== 0) return null;
+  const name = r.stdout.trim();
+  return !name || name === 'HEAD' ? null : name;
+}
+
+/**
+ * THE GATE LOADER — the policy `holt ci` is entitled to enforce, and where it came from.
+ *
+ * RULES COME FROM THE BASE, which is the same rule GitHub applies to CODEOWNERS: the copy on the
+ * ref the work merges INTO is the copy reviewers already approved. A pull request may PROPOSE new
+ * rules; it may not enact them upon itself.
+ *
+ * The working tree is a FALLBACK for exactly one honest case — a repository adopting policy for
+ * the first time, or a developer running holt before committing one — and it cannot become a
+ * bypass in either direction:
+ *
+ *   - it is never consulted when the base HAS a policy, so a head-side edit or deletion is
+ *     invisible to the gate; and
+ *   - what it returns is `trusted: false`, and `gateVerdict` forbids an untrusted policy from
+ *     SUPPRESSING any check that would otherwise have run. Otherwise "delete the policy" is
+ *     merely swapped for "add a permissive policy", and the gate falls through the other door.
+ *
+ * `headDiffers` is reported whenever the working tree's copy is not the enforced one, so a
+ * reviewer is told, in the build output, that this change proposes altering the gate.
+ */
+export async function loadGatePolicy(root, { base = null, headOid = null, headRef, env = process.env } = {}) {
+  const ref = headRef === undefined ? await currentBranch(root) : headRef;
+  const authority = baseAuthority({ base, headOid, headRef: ref, env });
+
+  if (!authority.independent) {
+    // In CI the correct base was knowable. Refuse rather than render a meaningless verdict.
+    if (authority.ci) {
+      refuse('POLICY_NO_AUTHORITY',
+        `holt ci cannot establish an independent base for this change: ${authority.reason}. ${authority.fix} Refusing to judge a change by rules that may have come from itself.`);
+    }
+    const fromTree = await loadPolicy(root);
+    if (!fromTree.found) return { found: false, authority };
+    return {
+      ...fromTree, trusted: false, authority, headDiffers: false,
+      note: `${authority.reason} — the working-tree policy is being used, is NOT trusted, and cannot suppress any other check`,
+    };
+  }
+
+  const fromBase = await loadPolicyFromRef(root, base.oid);
+  if (fromBase.found) {
+    // Did the candidate propose a change to the gate? Read the working tree WITHOUT validating
+    // it: a candidate's malformed proposal must not be able to fail a build for the base's rules.
+    let headDiffers = false;
+    for (const rel of POLICY_PATHS) {
+      let raw = null;
+      try { raw = await fs.readFile(path.join(root, rel), 'utf8'); } catch { /* absent */ }
+      if (rel === fromBase.path) headDiffers = raw !== fromBase.raw;
+      else if (raw !== null) headDiffers = true;
+    }
+    return { ...fromBase, authority, headDiffers };
+  }
+
+  const fromTree = await loadPolicy(root);
+  if (!fromTree.found) return { found: false, authority };
+  return {
+    ...fromTree, trusted: false, authority, headDiffers: true,
+    note: `no policy exists in the base (${base.ref}); using the working-tree copy, which is NOT trusted and cannot suppress any other check`,
+  };
+}
+
+/**
+ * Compose the final `holt ci` verdict from the policy result and the inline-flag result.
+ *
+ * Stated once and enforced here rather than remembered at the call site: A POLICY holt DOES NOT
+ * TRUST MAY ADD FAILURES AND MAY NEVER REMOVE THEM. Policy mode short-circuits the inline flags,
+ * so without this a candidate that adds a permissive `.holt/policy.json` switches off the
+ * `--fail-on-unlanded` the repository owner asked for — the same bypass through the other door.
+ *
+ * A TRUSTED policy keeps the original behaviour exactly: it is the reviewed statement of what
+ * this repository wants enforced, so it supersedes the flags as it always did.
+ */
+export function gateVerdict({ policyResult = null, flagFailures = [], trusted = false } = {}) {
+  const carried = trusted === true ? [] : [...flagFailures];
   return {
     ok: !!policyResult?.ok && carried.length === 0,
     carriedFlagFailures: carried,
     errors: (policyResult?.errors ?? 0) + carried.length,
     warnings: policyResult?.warnings ?? 0,
+  };
+}
+
+/** Where the rules came from — reported on EVERY `holt ci` outcome, including the refusals. */
+export function policySourceOf(loaded) {
+  return {
+    from: loaded?.source ?? null,
+    ref: loaded?.ref ?? null,
+    trusted: loaded?.trusted ?? null,
+    authority: loaded?.authority?.kind ?? null,
+    headProposesChange: loaded?.headDiffers ?? null,
+    note: loaded?.note ?? null,
+  };
+}
+
+/**
+ * The complete `holt ci` policy-mode outcome — verdict, provenance and the payload the CLI
+ * prints. It lives HERE, not in bin/, for a reason discovered by mutation: with the composition
+ * inline in the CLI, flipping `trusted: loaded.trusted` to `trusted: true` — the exact bypass
+ * this module exists to prevent — killed no test, because the CLI's policy branch is unreachable
+ * without a paid license and the suite has none. A behaviour that cannot be reached by a test is
+ * not covered by one, however many tests surround it. Moving the composition into a pure function
+ * shrinks the untestable surface to a single call expression, and pins everything else.
+ *
+ * `trusted` is derived here rather than passed in, so no call site can supply the wrong one.
+ */
+export function ciPolicyOutcome({ loaded, policyResult, flagFailures = [], entitlement = null } = {}) {
+  const verdict = gateVerdict({ policyResult, flagFailures, trusted: loaded?.trusted === true });
+  return {
+    verdict,
+    payload: {
+      ok: verdict.ok,
+      mode: 'policy',
+      policy: loaded?.path ?? null,
+      policySource: policySourceOf(loaded),
+      entitlement: entitlement ? { tier: entitlement.tier, org: entitlement.org ?? null } : null,
+      rulesEvaluated: policyResult?.rulesEvaluated ?? [],
+      disabledRules: policyResult?.disabledRules ?? [],
+      errors: verdict.errors,
+      warnings: verdict.warnings,
+      violations: policyResult?.violations ?? [],
+      exempted: policyResult?.exempted ?? [],
+      carriedFlagFailures: verdict.carriedFlagFailures,
+      note: 'requires full refs (actions/checkout with fetch-depth: 0)',
+    },
   };
 }
 
@@ -294,7 +609,15 @@ export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {
   const unlanded = (audit?.unlanded ?? []).filter((b) => !ignore.includes(b.name));
   const unknown = audit?.unknown ?? [];
 
-  for (const rule of policy.rules) {
+  // A rule turned off in words is honoured — and then NAMED in the verdict. Validation refuses
+  // every OTHER way a rule can fail to fire (an empty path list, an exemption that swallows
+  // everything), so this is the single route to a dormant rule and it leaves a mark in the
+  // output. The failure being designed against is not a disabled rule; it is a rule everybody
+  // believes is running.
+  const enabled = policy.rules.filter((r) => r.enabled !== false);
+  const disabledRules = policy.rules.filter((r) => r.enabled === false).map((r) => r.id);
+
+  for (const rule of enabled) {
     const sev = rule.severity ?? 'error';
 
     if (rule.type === 'no-unlanded') {
@@ -364,6 +687,7 @@ export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {
     errors: errors.length,
     warnings: violations.length - errors.length,
     exempted,
-    rulesEvaluated: policy.rules.map((r) => r.id),
+    rulesEvaluated: enabled.map((r) => r.id),
+    disabledRules,
   };
 }
