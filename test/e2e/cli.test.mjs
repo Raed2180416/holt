@@ -952,3 +952,40 @@ test('DOCTOR: a worktree created after integrate is reported as unwired, not sil
   const fixed = JSON.parse((await holt(['doctor', '--json', '--cwd', fx.root], fx.root)).stdout);
   assert.deepEqual(fixed.unwiredWorktrees, [], 'the prescribed fix must actually work');
 });
+
+test('CLI: a numeric flag is parsed and never silently coerced', async (t) => {
+  // src/mcp/server.mjs:466-472 states holt's own contract for numeric input: "REJECT wrong type …
+  // CLAMP+SAY a number outside its declared range … nothing is silent." The MCP layer obeyed it and
+  // the CLI did not: every one of these flags was `Number(x) || <default>`, which accepts garbage
+  // and proceeds as though a real value had been supplied — and, because 0 is falsy, silently
+  // replaced a value the user chose on purpose.
+  const fx = await newRepo('numeric-flags');
+  t.after(() => fx.cleanup());
+
+  // WRONG TYPE IS REFUSED, and the message names the flag and shows what was given.
+  for (const flag of ['--columns', '--rows', '--max-depth', '--max-age-days', '--concurrency']) {
+    const r = await holt(['status', flag, 'abc'], fx.root);
+    assert.notEqual(r.code, 0, `${flag} abc must not succeed`);
+    assert.match(`${r.stdout}${r.stderr}`, new RegExp(`${flag}[^\n]*must be a number`),
+      `${flag} must be refused by name, not silently defaulted: ${r.stderr.slice(0, 200)}`);
+  }
+
+  // A FALSY-BUT-VALID VALUE IS NOT DISCARDED. `--max-depth 0` used to become 3 because `0 || 3`
+  // is 3 — the single sharpest case, since nothing was wrong with the input.
+  const zero = await holt(['status', '--max-depth', '0'], fx.root);
+  assert.match(`${zero.stdout}${zero.stderr}`, /--max-depth 0 is below the minimum/,
+    'a value below the minimum must be clamped OUT LOUD, never silently replaced');
+
+  // OUT OF RANGE IS CLAMPED AND SAID — not refused, because `--columns 99999` has an obvious
+  // intended meaning and refusing it would be over-refusal.
+  const wide = await holt(['status', '--columns', '99999'], fx.root);
+  assert.equal(wide.code, 0, 'an out-of-range but meaningful value must still run');
+  assert.match(`${wide.stdout}${wide.stderr}`, /--columns 99999 is above the maximum/,
+    'the clamp must be announced; a silent clamp is the same defect wearing a different hat');
+
+  // NEVER-WORSE: an ordinary value still works and says nothing.
+  const ok = await holt(['status', '--columns', '100'], fx.root);
+  assert.equal(ok.code, 0);
+  assert.doesNotMatch(`${ok.stdout}${ok.stderr}`, /above the maximum|below the minimum|must be a number/,
+    'a valid value must not produce a warning');
+});

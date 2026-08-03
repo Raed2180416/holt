@@ -203,6 +203,38 @@ QUICK START
 Full documentation: https://raed2180416.github.io/holt/
 `;
 
+/**
+ * A NUMERIC FLAG IS PARSED, NOT COERCED. `Number(x) || fallback` did three wrong things at once.
+ *
+ * src/mcp/server.mjs:466-472 writes holt's own contract for exactly this: "REJECT wrong type …
+ * CLAMP+SAY a number outside its declared range … nothing is silent." The MCP layer obeys it; the
+ * CLI did not, and the gap was invisible because both were "working".
+ *
+ *   `--max-depth abc`  -> NaN, then `|| 3`  -> silently ran at depth 3 as if 3 had been typed.
+ *   `--columns abc`    -> silently 120.
+ *   `--max-depth 0`    -> 0 is FALSY, so a value the user chose on purpose was silently replaced.
+ *
+ * Accepting garbage and proceeding as though a real value had been supplied is the meta-root in
+ * miniature: acting on a number nobody derived. Out-of-range is clamped rather than refused —
+ * `--columns 99999` has an obvious intended meaning and refusing it would be over-refusal — but
+ * the clamp is ANNOUNCED, because a silent clamp is the same defect wearing a different hat.
+ */
+function numericFlag(name, raw, { min, max, integer = true }) {
+  if (raw === undefined) throw new Error(`${name} needs a value`);
+  const n = Number(raw);
+  if (!Number.isFinite(n)) throw new Error(`${name} must be a number, got ${JSON.stringify(raw)}`);
+  if (integer && !Number.isInteger(n)) throw new Error(`${name} must be a whole number, got ${JSON.stringify(raw)}`);
+  if (n < min) {
+    process.stderr.write(`holt: ${name} ${n} is below the minimum ${min} — using ${min}.\n`);
+    return min;
+  }
+  if (n > max) {
+    process.stderr.write(`holt: ${name} ${n} is above the maximum ${max} — using ${max}.\n`);
+    return max;
+  }
+  return n;
+}
+
 function parseArgs(argv) {
   const opts = {
     _: [], json: false, base: null, cwd: process.cwd(), symbols: true,
@@ -247,13 +279,13 @@ function parseArgs(argv) {
       }
       case '--install': opts.install = true; break;
       case '--yes': case '-y': opts.yes = true; break;
-      case '--max-depth': opts.maxDepth = Number(argv[++i]) || 3; break;
+      case '--max-depth': opts.maxDepth = numericFlag('--max-depth', argv[++i], { min: 1, max: 64 }); break;
       case '--fail-on-unlanded': opts.failOnUnlanded = true; break;
-      case '--max-age-days': opts.maxAgeDays = Number(argv[++i]) || null; break;
+      case '--max-age-days': opts.maxAgeDays = numericFlag('--max-age-days', argv[++i], { min: 0, max: 36500 }); break;
       case '--ignore': (opts.ignore ??= []).push(argv[++i]); break;
       case '--snapshot': opts.snapshot = true; break;
-      case '--columns': opts.columns = Number(argv[++i]) || 120; break;
-      case '--rows': opts.rowsOpt = Number(argv[++i]) || 34; break;
+      case '--columns': opts.columns = numericFlag('--columns', argv[++i], { min: 20, max: 1000 }); break;
+      case '--rows': opts.rowsOpt = numericFlag('--rows', argv[++i], { min: 5, max: 500 }); break;
       case '-h': case '--help': opts.help = true; break;
       case '-v': case '-V': case '--version': opts.version = true; break;
       case '--base': opts.base = argv[++i]; break;
@@ -270,7 +302,7 @@ function parseArgs(argv) {
       case '--command': opts.command = argv[++i]; break;
       case '--bin': opts.bin = argv[++i]; break;
       case '--remove': opts.remove = true; break;
-      case '--concurrency': opts.concurrency = Number(argv[++i]) || 8; break;
+      case '--concurrency': opts.concurrency = numericFlag('--concurrency', argv[++i], { min: 1, max: 64 }); break;
       case '--verbose': opts.verbose = true; break;
       case '--debug': opts.debug = true; break;
       case '--quiet': opts.quiet = true; break;
