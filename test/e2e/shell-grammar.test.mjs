@@ -159,3 +159,73 @@ test('GRAMMAR NEVER-WORSE: the same constructs carrying ordinary work stay out o
       `ORDINARY WORK MUST NOT BE REFUSED: ${cmd} -> ${v.decision} (${v.reason})`);
   }
 });
+
+/**
+ * `find` SELECTS THE WORKTREE ITSELF — the mergify incident in its `find` spelling.
+ *
+ * The `-name` / `-path` filters exist so `find . -name '*.pyc' -delete` is not read as "deletes
+ * everything under ." — the loudest false positive available. To stay honest for a RECURSIVE
+ * remover, the filter is asked of every enclosing directory's name too, because `-exec rm -rf {} +`
+ * matched on a directory takes everything beneath it.
+ *
+ * That ancestor walk ran over the dirty path, which is expressed RELATIVE TO THE WORKTREE ROOT — so
+ * it could never reach the worktree's own directory name, which is the single component anyone
+ * sweeping sibling worktrees actually matches on. Measured, against a worktree holding the only
+ * copy of a symbol:
+ *
+ *     find <worktree> -name 'src'  -exec rm -rf {} +   ->  deny    (inside: always worked)
+ *     find <parent> -name 'wt-precious' -exec rm -rf {} +  ->  ALLOW
+ *     find <parent> -name 'wt-*'   -exec rm -rf {} +   ->  ALLOW
+ *     find <parent> -path '*wt-p*' -exec rm -rf {} +   ->  ALLOW
+ *
+ * Found by an agent exercising the whole command surface, not by attacking this rule — which is why
+ * it survived the repair that fixed the inside-the-worktree half and wrote a comment claiming the
+ * class was closed.
+ *
+ * `-delete` IS DELIBERATELY NOT DENIED HERE. find's `-delete` implies `-depth` and removes
+ * directories with rmdir, which fails on a non-empty one — verified with real find: `find . -name
+ * 'wt-*' -delete` reports "Directory not empty" and the content survives. Refusing it would be an
+ * over-refusal on a command that cannot do the damage, and the whole point of the filter is to be
+ * exactly as tight as the truth allows.
+ */
+test('GRAMMAR: a find expression that selects the WORKTREE is not allowed to sweep it', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  const wt = rel(fx.root, fx.wt('uniqueUncommitted'));
+  const parent = wt.replace(/\/[^/]+$/, '');
+  const name = wt.slice(parent.length + 1);
+  const del = `${'r'}m -rf`;
+
+  // ANTI-VACUITY: the plain containment case must already deny, or this fixture proves nothing.
+  const control = await assessCommand(`${del} ${parent}`, fx.root);
+  assert.notEqual(control.decision, 'allow',
+    `PREMISE BROKEN — the parent directory must be protected: ${del} ${parent} -> ${control.decision}`);
+
+  for (const [why, cmd] of [
+    ['-name is the worktree directory itself', `find ${parent} -name '${name}' -exec ${del} {} +`],
+    ['-name is a glob over the worktrees', `find ${parent} -name '${name.slice(0, 3)}*' -exec ${del} {} +`],
+    ['-path selects the worktree', `find ${parent} -path '*${name.slice(0, 4)}*' -exec ${del} {} +`],
+    ['-maxdepth does not exempt it', `find ${parent} -maxdepth 1 -name '${name}' -exec ${del} {} +`],
+    ['the filter still works INSIDE a worktree', `find ${wt} -name 'src' -exec ${del} {} +`],
+  ]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.notEqual(v.decision, 'allow',
+      `a find sweep that selects a worktree holding the only copy must not be allowed (${why}): ${cmd}`);
+  }
+
+  // NEVER-WORSE: filters that select nothing holt protects stay silent. `find . -name '*.pyc'
+  // -delete` being refused is the failure this whole filter exists to prevent.
+  for (const cmd of [
+    `find ${parent} -name 'node_modules' -exec ${del} {} +`,
+    `find ${parent} -name '*.log' -delete`,
+    `find ${parent} -name '*.pyc' -delete`,
+    `find . -name '*.tmp' -exec ${del} {} +`,
+    // -delete cannot remove a non-empty directory, so it is not a sweep and must not be treated as one.
+    `find ${parent} -name '${name.slice(0, 3)}*' -delete`,
+  ]) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'allow',
+      `ordinary find cleanup must stay allowed: ${cmd} -> ${v.decision} (${v.reason})`);
+  }
+});

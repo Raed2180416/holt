@@ -4406,6 +4406,16 @@ function destroys(item, dirty) {
       const parts = d0.split('/');
       names.push(parts[parts.length - 1]);
       if (item.recursive) for (let i = parts.length - 1; i > 0; i--) names.push(parts[i - 1]);
+      // …AND THE COMPONENTS ABOVE THE WORKTREE ROOT, up to the find root. `d0` is relative to the
+      // worktree, so the walk above can never reach the worktree's own directory name — the single
+      // component a sweep over sibling worktrees matches on. See `outerNames` where it is built.
+      //
+      // Gated on `recursive` for exactly the reason the inner walk is: a match on a DIRECTORY only
+      // destroys what is beneath it when the action removes recursively. `find <parent> -name 'wt-*'
+      // -delete` is not that — find's `-delete` implies `-depth` and uses rmdir, which fails on a
+      // non-empty directory — so it is not treated as one, and the filter stays as tight as it can
+      // honestly be rather than refusing a command that cannot do the damage.
+      if (item.recursive && item.outerNames?.length) names.push(...item.outerNames);
       if (!names.some((n) => matchesPath(item.nameMatcher, n))) return false;
     }
     // find's `-path` is tested against the path AS FIND PRINTS IT — `<root>/<rest>`. The root as
@@ -4413,8 +4423,25 @@ function destroys(item, dirty) {
     // is one find could have selected, and a superset is the direction that cannot lose work.
     if (item.pathMatcherFilter) {
       const asFind = `${item.rel ? `${item.rel}/` : ''}${d0}`;
-      if (!matchesPath(item.pathMatcherFilter, d0) && !matchesPath(item.pathMatcherFilter, asFind)
-        && !matchesPath(item.pathMatcherFilter, `./${d0}`)) return false;
+      const cands = [d0, asFind, `./${d0}`];
+      // `-path` HAS THE SAME BOUNDARY PROBLEM AS `-name`, and it is the spelling that survived the
+      // `-name` repair: `find <parent> -path '*wt-p*' -exec rm -rf {} +` selects the WORKTREE
+      // DIRECTORY, and none of the three readings above contain it, because `d0` is relative to
+      // that directory. See `outerNames`.
+      const outer = item.outerNames ?? [];
+      if (outer.length) {
+        const full = `${outer.join('/')}/${d0}`;
+        cands.push(full, `./${full}`);
+        // A recursive remover that matches an ANCESTOR takes everything beneath it, so every
+        // enclosing directory between the find root and the worktree is a candidate as well.
+        if (item.recursive) {
+          for (let i = outer.length; i > 0; i--) {
+            const p = outer.slice(0, i).join('/');
+            cands.push(p, `./${p}`);
+          }
+        }
+      }
+      if (!cands.some((c) => matchesPath(item.pathMatcherFilter, c))) return false;
     }
   }
 
@@ -4562,6 +4589,26 @@ async function assessFileTargets(targets, cwd, ctx) {
           // `-maxdepth 0` names the ROOT and nothing under it, so a root reached from ABOVE is
           // reached by the root path itself, not by anything inside it.
           rootOnly: false,
+          // THE PATH COMPONENTS BETWEEN THE FIND ROOT AND THIS WORKTREE — including the worktree's
+          // OWN DIRECTORY NAME, which is the one a cleanup sweep actually matches on.
+          //
+          // The `-name` filter is applied to a dirty path expressed RELATIVE TO THE WORKTREE ROOT,
+          // so those components are not in it and were never tested. The ancestor walk that makes
+          // `-name` honest therefore stopped exactly at the boundary that matters, and the mergify
+          // incident in its `find` spelling came back ALLOW:
+          //
+          //   find <parent> -name 'wt-precious' -exec rm -rf {} +   -> ALLOW  (exact worktree name)
+          //   find <parent> -name 'wt-*'        -exec rm -rf {} +   -> ALLOW
+          //   find <worktree> -name 'src'       -exec rm -rf {} +   -> deny   (inside: always worked)
+          //
+          // Recorded here rather than derived in the filter because this is the only place that
+          // knows BOTH the find root and the worktree root; downstream sees a relative path and a
+          // `rel` of '**' and cannot reconstruct them.
+          // relativeWithinAsync canonicalises both sides and returns forward-slash space, which is
+          // what the name matcher works in — and it is the one form the path guard recognises, so a
+          // faithful hand-rolled `path.relative` here would be exactly the invisible second copy
+          // that helper exists to prevent.
+          outerNames: (await relativeWithinAsync(abs, reached)).split('/').filter((s) => s && s !== '..'),
         });
       }
       continue;
