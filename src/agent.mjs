@@ -35,6 +35,7 @@ import {
 } from './paths.mjs';
 import { discover, repoAbsenceError, parseWorktreePorcelain } from './discover.mjs';
 import { scan, atRiskFiles, atRiskFromStatus, generatedEvidence, looksGenerated, indexFlagDelta } from './scan.mjs';
+import { readReceipt, ownershipOf } from './integrate/receipt.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
 import { scratchDir } from './symbols.mjs';
 import { git } from './git.mjs';
@@ -2398,6 +2399,27 @@ function newProbeCtx(cwd) {
           for (const p of flags.atRisk) {
             if (!looksGenerated(p, activeDirs) && !map.has(p)) map.set(p, 'uncommitted');
           }
+
+          // …AND HOLT'S OWN UNTOUCHED OUTPUT COMES BACK OUT, exactly as it does in the scan.
+          //
+          // This probe deliberately re-derives the at-risk set from raw porcelain so the guard can
+          // answer without paying for a scan, and its own doc comment says the two must not drift.
+          // They drifted here: the scan learned to subtract the config files holt itself wrote into
+          // every worktree, and the probe did not, so `holt gate` said DISPOSABLE while `rm -rf
+          // <worktree>` was refused for 20 files — each one annotated, accurately and absurdly,
+          // "[seen by the guard, not by the last scan]".
+          //
+          // Only MINE_UNTOUCHED is removed. A file holt wrote that the user has since edited stays,
+          // and an unreadable receipt removes nothing, so the probe can only ever shrink toward the
+          // truth — never below what the scan protects, which is the direction that would re-open
+          // a hole.
+          try {
+            const receipt = await readReceipt(root);
+            if (receipt) {
+              const owned = await ownershipOf(root, [...map.keys()], receipt);
+              for (const [p, kind] of owned) if (kind === 'MINE_UNTOUCHED') map.delete(p);
+            }
+          } catch { /* could not look -> subtract nothing -> protect everything */ }
           for (const p of flags.unknown) {
             if (!looksGenerated(p, activeDirs) && !map.has(p)) map.set(p, 'unknown');
           }

@@ -65,7 +65,10 @@ export async function fileHash(abs) {
 
 /**
  * Read the receipt.
- * @returns {Promise<{version: number, created: Record<string, string|null>, dirs: string[]}|null>}
+ * A `created` entry is a LIST of accepted hashes; receipts written before that change carry a bare
+ * string, and both forms are read everywhere (see recordCreated and ownershipOf).
+ *
+ * @returns {Promise<{version: number, created: Record<string, string|string[]|null>, dirs: string[]}|null>}
  *   `null` means holt could not read it — which callers MUST treat as "own nothing", not "own all".
  */
 export async function readReceipt(repoRoot) {
@@ -120,7 +123,23 @@ export async function recordCreated(repoRoot, { files = [], dirs = [] } = {}) {
   for (const rel of files) {
     // The hash is taken AFTER writing, so it is the content holt is responsible for. If the user
     // edits the file later, the hash stops matching and holt no longer claims it.
-    created[rel] = await fileHash(path.join(repoRoot, rel));
+    //
+    // A LIST, NOT ONE HASH, and the reason is holt's own subject matter. `integrate` runs per
+    // worktree against a receipt shared through the git common dir, last-writer-wins, so a single
+    // slot means worktree 2's write erases worktree 1's hash — and worktree 1's byte-identical
+    // copy then reads as edited-by-the-user. Safe in the delete direction, wrong in the risk
+    // direction, and it would have made the P0-1 fix stop working at exactly two worktrees.
+    // Capped and deduped so a hundred re-runs cannot grow the receipt without bound. Reading is
+    // backward-compatible by construction (see ownershipOf's Array.isArray), so a receipt written
+    // by an older holt keeps working untouched.
+    const prior = Array.isArray(existing.created?.[rel])
+      ? existing.created[rel]
+      : (existing.created?.[rel] ? [existing.created[rel]] : []);
+    const now = await fileHash(path.join(repoRoot, rel));
+    // flatMap, not filter: a boolean-returning filter does not narrow the element type, so the
+    // result would still read as possibly-null and the receipt's own contract would not typecheck.
+    const hashes = [...prior, now].flatMap((h) => (typeof h === 'string' && h ? [h] : []));
+    created[rel] = [...new Set(hashes)].slice(-8);
   }
   const dirSet = new Set([...existing.dirs, ...dirs]);
 
@@ -151,7 +170,59 @@ export async function holtOwnsFile(repoRoot, relPath, receipt) {
   if (!recorded) return false;                       // no hash recorded -> cannot prove it is ours
   const now = await fileHash(path.join(repoRoot, relPath));
   if (now === null) return false;                    // gone or unreadable -> nothing to delete
-  return now === recorded;
+  // A receipt entry is a LIST of accepted hashes (see recordCreated); older receipts hold a bare
+  // string. Both are read here, so an in-place upgrade never makes holt forget what it owns —
+  // which would strand its own files as undeletable on exactly the uninstall that needed them gone.
+  return (Array.isArray(recorded) ? recorded : [recorded]).includes(now);
+}
+
+/**
+ * Three-state ownership for a set of paths — the same question `holtOwnsFile` answers, asked in
+ * the direction this file was never asked about.
+ *
+ * `holtOwnsFile` answers "may I DELETE this?", so every uncertainty collapses to false. The risk
+ * layer needs "is this the USER'S work?", where the same uncertainty must collapse the other way.
+ * Reusing the delete-shaped predicate there would read "could not look" as "not holt's" as "the
+ * user's irreplaceable work" — and one `null` would silently protect the whole tree.
+ *
+ *   MINE_UNTOUCHED  recorded, bytes unchanged -> holt's own output. Contributes ZERO to
+ *                   irreplaceability: `holt integrate` recreates it byte-for-byte, and the receipt
+ *                   lives in <git-common-dir>/holt/ so it outlives `git clean -fdx` and the
+ *                   worktree itself.
+ *   MINE_EDITED     recorded, bytes differ -> THE USER'S FILE NOW. Full protection. This is the
+ *                   cell that makes the scheme honest: holt writing a file once does not give it a
+ *                   permanent claim on whatever the user later puts there.
+ *   NOT_MINE        no entry, or an entry with no hash. A NAME is never evidence, in either
+ *                   direction — files holt only APPENDED to are not in `created` and land here.
+ *   UNKNOWN         receipt unreadable -> PROTECT.
+ *
+ * `null` MEANS PROTECT IN BOTH CONSUMERS, and it is written as one invariant precisely because the
+ * two readings are opposite: for uninstall an unreadable receipt means "delete nothing", and here
+ * it must mean "protect everything" rather than "holt owns nothing".
+ *
+ * @param {string} wtPath  the worktree the paths live in — NOT necessarily the repo root
+ * @param {string[]} rels
+ * @param {{created?: Record<string, string|string[]|null>}|null} receipt
+ *   already-read receipt, or null for "could not look"
+ * @returns {Promise<Map<string, 'MINE_UNTOUCHED'|'MINE_EDITED'|'NOT_MINE'|'UNKNOWN'>>}
+ */
+export async function ownershipOf(wtPath, rels, receipt) {
+  if (!receipt) return new Map(rels.map((f) => [f, 'UNKNOWN']));
+  const out = new Map();
+  for (const f of rels) {
+    const rec = receipt.created?.[f];
+    if (!rec) { out.set(f, 'NOT_MINE'); continue; }
+    const now = await fileHash(path.join(wtPath, f));
+    if (now === null) { out.set(f, 'NOT_MINE'); continue; }
+    // A SET of accepted hashes, not one. `integrate` runs per worktree against a receipt shared
+    // through the git common dir, and `recordCreated` is last-writer-wins — so with a single hash
+    // every OTHER worktree's byte-identical copy silently demotes to MINE_EDITED. Safe, but it
+    // makes MINE_UNTOUCHED unreachable and this whole fix stops working the moment there are two
+    // worktrees, which is holt's entire subject matter.
+    const accepted = Array.isArray(rec) ? rec : [rec];
+    out.set(f, accepted.includes(now) ? 'MINE_UNTOUCHED' : 'MINE_EDITED');
+  }
+  return out;
 }
 
 /** Did holt create this directory? Empty-directory cleanup is only safe for directories holt made. */

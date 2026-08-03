@@ -31,9 +31,10 @@
 
 import path from 'node:path';
 import fs from 'node:fs/promises';
-import { git, catFileBatch, splitNul, pmap, resolveRef, GitRefused } from './git.mjs';
+import { git, gitPathBatched, catFileBatch, splitNul, pmap, resolveRef, GitRefused } from './git.mjs';
 import { resolveBackend, symbolsOnDisk, symbolsAtBase, diffSymbols, symbolKey } from './symbols.mjs';
 import { pathContentKey } from './content-identity.mjs';
+import { readReceipt, ownershipOf } from './integrate/receipt.mjs';
 
 const BASE_CANDIDATES = ['main', 'master', 'trunk', 'develop', 'default'];
 
@@ -257,9 +258,12 @@ async function lineEndingOnlyVsBase(root, baseOid, committed, files, { timeout }
   if (files.length === 0) return false;
   const tree = committed.mergedTree;
 
+  // Batched for the SAME reason indexFlagDelta is — a workstream that touched tens of thousands
+  // of files builds an argv past the kernel's ARG_MAX and `execve` answers E2BIG. `diff` over a
+  // pathspec list is per-path, so the union over any partition of `files` is the same answer.
   const [raw, num] = await Promise.all([
-    git(['diff', '--raw', '--no-renames', '-z', baseOid, tree, '--', ...files], { cwd: root, timeout }),
-    git(['diff', '--numstat', '-z', baseOid, tree, '--', ...files], { cwd: root, timeout }),
+    gitPathBatched(['diff', '--raw', '--no-renames', '-z', baseOid, tree, '--'], files, { cwd: root, timeout }),
+    gitPathBatched(['diff', '--numstat', '-z', baseOid, tree, '--'], files, { cwd: root, timeout }),
   ]);
   if (raw.code !== 0 || num.code !== 0) return false;
   const statuses = parseRawDiff(raw.stdout);
@@ -288,14 +292,304 @@ async function lineEndingOnlyVsBase(root, baseOid, committed, files, { timeout }
   return true;
 }
 
-/** UNCOMMITTED delta: the layer no git relationship command can see. */
+/* ------------------------------------------- the index's per-path reporting filter ---- */
+
+/**
+ * THE COMPENSATING MEASUREMENT FOR `git status`'s PER-PATH REPORTING FILTER.
+ *
+ * THE FAULT THIS EXISTS TO CLOSE. Every "does this worktree hold content that exists nowhere
+ * else" answer in holt was derived from `git status` alone, and an absent entry was read as the
+ * positive fact "this path is unmodified". But `git status` is not a measurement of the working
+ * tree. It is a measurement of the working tree AS FILTERED BY THE INDEX'S PER-PATH REPORTING
+ * BITS, and holt never read the filter — so a path git was TOLD NOT TO REPORT was byte-for-byte
+ * indistinguishable from a path that had nothing to report.
+ *
+ * MEASURED, on a fixture whose `config/local.json` held live credentials that exist in no commit:
+ *
+ *     git update-index --skip-worktree config/local.json
+ *     git status --porcelain -uall            -> (empty)
+ *     holt gate wt-a                          -> exit 0  "✓ disposable — no uncommitted changes"
+ *     holt rescue wt-a --json                 -> {"nothingToRescue": true}
+ *     holt clean --json                       -> wouldRemove: [wt-a]
+ *     hook: rm config/local.json              -> exit 0  ALLOW
+ *     git update-index --no-skip-worktree …   (same bytes, same command)
+ *     hook: rm config/local.json              -> exit 2  BLOCK
+ *
+ * Four surfaces, one missing measurement. `--skip-worktree <config>` is the canonical advice for
+ * keeping local credentials out of git, so the file this blinds holt to is precisely the file
+ * whose only copy is on disk.
+ *
+ * THE INSTRUMENT. `git ls-files -v` is the one command that prints the filter: a per-entry tag,
+ * lowercased when the entry is marked assume-unchanged. `-s` adds the index blob oid in the same
+ * pass, so one call yields both the flag and the content to compare against.
+ *
+ * THE TAG VOCABULARY IS A DENYLIST, NOT AN ALLOWLIST, for the reason CACHE_INERT_OPTS gives:
+ * a tag git adds later that suppresses status output must default to "resolve it", not to
+ * "assume status already covered it". STATUS_VISIBLE_TAGS lists the tags git still reports
+ * through `status` (H normal, M unmerged, R unstaged removal, C unstaged change, U resolve-undo,
+ * K checkout conflict, ? untracked). Everything else, and every lowercase tag, is resolved here.
+ *
+ * "UNKNOWN MUST NOT SILENTLY BECOME EITHER ANSWER" — AND A CLEAN TREE IS A REAL ANSWER. This
+ * does not report a flagged entry as at-risk; it RESOLVES it to one of three real outcomes:
+ *
+ *   not on disk        -> dropped. Nothing at that path can be destroyed. THIS IS THE
+ *                         NEVER-ANNOYING KEYSTONE: `git sparse-checkout` implements itself with
+ *                         the skip-worktree bit, so every excluded path in every sparse checkout
+ *                         carries an `S`. Measured — in a `sparse-checkout set src` worktree,
+ *                         `git ls-files -v` prints `S config/local.json` exactly as the
+ *                         credentials case does. A rule keyed on the flag alone would report
+ *                         every sparse worktree as unknown. The flag is not the evidence; the
+ *                         file being there is.
+ *   on disk, identical -> dropped. The developer flagged it and never changed it. Clean.
+ *   on disk, different -> `atRisk`. The modification is in no commit, no index entry and no
+ *                         stash. This is the loss holt exists to prevent.
+ *   unmeasurable       -> `unknown`. Never folded into either of the above.
+ *
+ * CONTENT IS COMPARED WITH `git hash-object`, NOT AN IN-PROCESS SHA1, because the working-tree
+ * bytes and the index blob are allowed to differ legitimately. Measured on a `*.txt text
+ * eol=crlf` fixture: the file on disk is CRLF, the index blob is LF, `git status` says clean,
+ * `git hash-object f.txt` returns the index oid e5c5c55… and `git hash-object --no-filters`
+ * (what a hand-rolled sha1 computes) returns cf9b2a8… — so a hand-rolled hash would have called
+ * an untouched file destroyed work and denied `rm` on it. hash-object applies exactly the clean
+ * filter and eol conversion git itself would, which is the only comparison that cannot produce
+ * that false positive.
+ *
+ * COST, AND IT IS MEASURED WHERE THE COST ACTUALLY IS. One extra `ls-files -v` per worktree.
+ * On holt's own 20,189-file repository, where nothing is flagged: `status --porcelain -z -uall
+ * --ignored=matching` (which every one of these call sites ALREADY runs) 29 ms, `ls-files -v -z`
+ * 12 ms, and neither the second `ls-files` nor `hash-object` runs at all.
+ *
+ * THAT MEASUREMENT WAS ONCE THE WHOLE STORY AND IT WAS THE WRONG STORY, because holt's own
+ * repository is the case where the expensive half never executes. The case that decides whether
+ * this is annoying is a repository where MANY entries are flagged and NONE is on disk — which is
+ * every sparse checkout, since `git sparse-checkout` implements itself with the skip-worktree
+ * bit. Measured on an ordinary monorepo cone checkout with 40,000 excluded paths (65-char
+ * average path):
+ *
+ *     git ls-files -v -z                                    15.8 ms
+ *     directory-pruned existence over all 40,000 paths      11.1 ms   (ONE stat)
+ *     naive lstat per path                                 518.5 ms
+ *     git ls-files -s -z -- <all 40,000>                    spawn E2BIG   (argv 2.6 MB)
+ *
+ * So the ORDER of those steps is the cost. See the block comment in the body.
+ *
+ * @param {string} wtPath
+ * @param {{timeout?: number}} [opts]
+ * @returns {Promise<{atRisk:string[], unknown:string[], stamp:string, how:string, error?:string}>}
+ */
+export async function indexFlagDelta(wtPath, { timeout } = {}) {
+  // `-v` ALONE, NOT `-v -s`. The oid is only needed for entries that turn out to be flagged, and
+  // asking for it up front made every record ~50 bytes longer on a listing that has one record
+  // per tracked file. See the two-call structure below.
+  // THIS FUNCTION NEVER THROWS. Its callers are the guard's critical path and the scan's
+  // Promise.all; a rejection there would propagate as an exception rather than as the
+  // fail-closed `how` this contract is built on — and an exception in the guard is a FAIL-OPEN
+  // exit 1 under the PreToolUse protocol. `git()` rejects, not resolves, when the binary cannot
+  // be spawned at all (missing git, unreadable cwd), which a `code !== 0` check alone misses.
+  const r = await git(['ls-files', '-v', '-z'], { cwd: wtPath, timeout })
+    .catch((error) => ({ code: -1, stdout: '', stderr: error?.message ?? String(error) }));
+  if (r.code !== 0) {
+    return {
+      atRisk: [], unknown: [], stamp: 'index-flags-failed',
+      how: 'index-flags-failed', error: r.stderr?.trim() || `ls-files exited ${r.code}`,
+    };
+  }
+
+  // THE SCAN ALLOCATES NOTHING FOR THE 99.99% OF RECORDS THAT ARE `H`, AND THAT IS THE WHOLE
+  // POINT. This listing has one NUL-terminated `<tag> <path>` record per tracked file — 20,189 of
+  // them in holt's own repository. The obvious `stdout.split('\0')` then slicing each record
+  // costs ~100k string allocations per call and was MEASURED at +177 ms on `rm -rf node_modules`
+  // (27.9 ms -> 205.3 ms), which is the annoyance axis, not a micro-optimisation: a guard that
+  // stalls a fifth of a second on the most ordinary destructive-looking command in software is a
+  // guard people switch off. Walking record boundaries with indexOf and testing ONE character
+  // code brought it back to 30.9 ms. Only a non-`H` record is ever materialised.
+  const s = r.stdout;
+  const H = 72; // 'H'
+  const flaggedTags = [];
+  const flaggedPaths = [];
+  for (let start = 0; start < s.length;) {
+    let end = s.indexOf('\0', start);
+    if (end < 0) end = s.length;
+    if (end > start && s.charCodeAt(start) !== H) {
+      const rec = s.slice(start, end);
+      const sp = rec.indexOf(' ');
+      const tag = sp === 1 ? rec[0] : '';
+      const p = sp === 1 ? rec.slice(2) : '';
+      // Lowercase = assume-unchanged (git-ls-files: "use lowercase letters for files that are
+      // marked as assume unchanged"). Any tag outside the status-visible set is resolved too.
+      if (tag && p && (tag !== tag.toUpperCase() || !STATUS_VISIBLE_TAGS.has(tag))) {
+        flaggedTags.push(tag);
+        flaggedPaths.push(p);
+      }
+    }
+    start = end + 1;
+  }
+
+  if (!flaggedPaths.length) return { atRisk: [], unknown: [], stamp: '', how: 'ls-files-v' };
+
+  /* ------------------------------------------------------------------------------------
+   * EXISTENCE IS ASKED FIRST, AND IT IS ASKED OF THE FILESYSTEM.
+   *
+   * The three-outcome contract above already says it: "not on disk -> dropped … THIS IS THE
+   * NEVER-ANNOYING KEYSTONE". What was wrong was the ORDER. The instrument used to run over
+   * every flagged path and the disk test filtered its results afterwards, so a sparse checkout
+   * — where `git sparse-checkout` sets skip-worktree on every excluded path, and NONE of those
+   * paths is on disk — paid the whole instrument to answer about nothing at all. Both edges of
+   * that were measured on an ordinary monorepo sparse checkout:
+   *
+   *   40,000 excluded paths, 65-char average   argv 2,600,000 B > ARG_MAX 2,097,152
+   *       -> `spawn E2BIG` -> how:'index-flags-failed' -> the worktree is UNCLASSIFIABLE, so
+   *          `rm -rf dist` answered exit 2 forever (allow -> ask, on every call, unrecoverably)
+   *   12,000 excluded paths, under the ceiling
+   *       -> the instrument SUCCEEDS and costs 890 ms per guarded Bash call (71 ms unpatched),
+   *          against this file's own 200 ms annoyance bar, for a measurement over zero files.
+   *
+   * Asking the disk first makes both disappear, and it is the cheap question, not the dear one:
+   * a sparse cone excludes whole DIRECTORIES, so one absent directory answers for every path
+   * beneath it. MEASURED on that same 40,000-path checkout: 1 stat, 11 ms — against 518 ms for
+   * a naive lstat per path and 2.6 MB of argv for the git call that no longer happens.
+   *
+   * THE PRUNE ONLY EVER DROPS A PATH THE FILESYSTEM POSITIVELY DENIES. ENOENT/ENOTDIR on an
+   * ancestor is the one and only reason to skip; any other errno (EACCES on a parent, EIO)
+   * falls through to the per-file lstat, which routes it to `unknown`. Unproven is not absent.
+   * ---------------------------------------------------------------------------------- */
+  /** @type {Map<string, boolean>} relative directory -> "the filesystem says it is there" */
+  const dirSeen = new Map();
+  const dirExists = async (rel) => {
+    if (rel === '' || rel === '.') return true;
+    const cached = dirSeen.get(rel);
+    if (cached !== undefined) return cached;
+    const slash = rel.lastIndexOf('/');
+    // Shortest prefix first: an absent `apps` answers for all 40,000 paths under it with no
+    // further syscall, and a present one is asked about exactly once.
+    if (!(await dirExists(slash < 0 ? '' : rel.slice(0, slash)))) { dirSeen.set(rel, false); return false; }
+    let there = true;
+    // `stat`, not `lstat`: a symlinked directory in the path is still a directory to open(2),
+    // and calling it absent would drop a real file. A dangling symlink throws ENOENT and is
+    // absent, which is correct.
+    try { there = (await fs.stat(path.join(wtPath, rel))).isDirectory(); }
+    catch (error) { there = !(error?.code === 'ENOENT' || error?.code === 'ENOTDIR'); }
+    dirSeen.set(rel, there);
+    return there;
+  };
+
+  /** @type {{path:string, tag:string, st:import('node:fs').Stats|null}[]} */
+  const onDisk = [];
+  for (let i = 0; i < flaggedPaths.length; i++) {
+    const p = flaggedPaths[i];
+    const slash = p.lastIndexOf('/');
+    if (slash > 0 && !(await dirExists(p.slice(0, slash)))) continue;
+    try { onDisk.push({ path: p, tag: flaggedTags[i], st: await fs.lstat(path.join(wtPath, p)) }); }
+    catch (error) {
+      // ENOENT is the sparse-checkout case and every other "git was told not to write it out":
+      // there is nothing at that path, so nothing at that path can be lost.
+      if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') continue;
+      onDisk.push({ path: p, tag: flaggedTags[i], st: null });   // unstattable: never dropped
+    }
+  }
+  if (!onDisk.length) return { atRisk: [], unknown: [], stamp: '', how: 'ls-files-v' };
+
+  // Second call, reached only for flagged paths that are ACTUALLY THERE: the index oid for
+  // those and no others. `gitPathBatched` keeps the argument list under the OS ceiling however
+  // many there are — see the E2BIG note in git.mjs. The answer is per-path, so the union over
+  // any partition of the path list is the same answer.
+  const staged = await gitPathBatched(['ls-files', '-s', '-z', '--'], onDisk.map((e) => e.path),
+    { cwd: wtPath, timeout });
+  if (staged.code !== 0) {
+    const paths = onDisk.map((e) => e.path);
+    return {
+      atRisk: [], unknown: paths, stamp: `oid-unreadable:${paths.join('\0')}`,
+      how: 'index-flags-failed', error: staged.stderr?.trim() || `ls-files -s exited ${staged.code}`,
+    };
+  }
+  const oidByPath = new Map();
+  for (const rec of staged.stdout.split('\0')) {
+    if (!rec) continue;
+    const tab = rec.indexOf('\t');
+    if (tab < 0) continue;
+    const head = rec.slice(0, tab).split(' ');
+    if (head.length < 3) continue;
+    oidByPath.set(rec.slice(tab + 1), head[1]);
+  }
+
+  // Only the suppressed entries that are on disk reach the stamp — a repository with none of
+  // them pays for neither. No index entry for a path `ls-files -v` just listed means the two
+  // calls disagree; that is an unreadable state, not a clean one.
+  const present = [];
+  const unknown = [];
+  const stampParts = [];
+  for (const e of onDisk) {
+    const oid = oidByPath.get(e.path) ?? null;
+    if (e.st === null) {
+      unknown.push(e.path);
+      stampParts.push(`${e.path}\0${e.tag}\0${oid}\0unstattable`);
+      continue;
+    }
+    stampParts.push(`${e.path}\0${e.tag}\0${oid}\0${e.st.size}\0${e.st.mtimeMs}`);
+    // Not a regular file (a directory or a symlink where the index records a blob), or an entry
+    // whose oid the second call did not return: holt has nothing to compare and says so.
+    if (!e.st.isFile() || !oid) { unknown.push(e.path); continue; }
+    present.push({ path: e.path, tag: e.tag, oid });
+  }
+
+  const stamp = stampParts.join('\n');
+  if (!present.length) return { atRisk: [], unknown, stamp, how: 'ls-files-v' };
+
+  // One batched hash-object for every suppressed file that is actually on disk, split across as
+  // many spawns as the argument-list ceiling requires. `--` and the absolute paths keep a path
+  // that begins with `-` from being read as an option.
+  const hashed = await gitPathBatched(['hash-object', '--'],
+    present.map((e) => path.join(wtPath, e.path)), { cwd: wtPath, timeout });
+  if (hashed.code !== 0) {
+    // The instrument failed. Absence of evidence is not evidence of absence: every file it was
+    // asked about is unknown, not clean.
+    return {
+      atRisk: [], unknown: [...unknown, ...present.map((e) => e.path)], stamp,
+      how: 'index-flags-hash-failed', error: hashed.stderr?.trim() || `hash-object exited ${hashed.code}`,
+    };
+  }
+  const oids = hashed.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  if (oids.length !== present.length) {
+    return {
+      atRisk: [], unknown: [...unknown, ...present.map((e) => e.path)], stamp,
+      how: 'index-flags-hash-failed',
+      error: `hash-object returned ${oids.length} oid(s) for ${present.length} path(s)`,
+    };
+  }
+
+  const atRisk = [];
+  for (let i = 0; i < present.length; i++) {
+    if (oids[i] !== present[i].oid) atRisk.push(present[i].path);
+  }
+  return { atRisk, unknown, stamp, how: 'ls-files-v' };
+}
+
+/**
+ * Tags `git ls-files -v` prints for entries `git status` still reports on. See indexFlagDelta().
+ * H tracked/normal · M unmerged · R unstaged removal · C unstaged change · U resolve-undo ·
+ * K checkout conflict · ? untracked.
+ */
+const STATUS_VISIBLE_TAGS = new Set(['H', 'M', 'R', 'C', 'U', 'K', '?']);
+
+/**
+ * UNCOMMITTED delta: the layer no git relationship command can see.
+ *
+ * @param {string} wtPath
+ * @param {{timeout?: number}} opts
+ * @returns {Promise<{files:string[], untracked:string[], unmeasured:string[], how:string,
+ *   error?:string}>} `unmeasured` is present on EVERY branch, including the failure ones: a
+ *   caller that has to decide "was this layer measured" must never have to test for the field's
+ *   existence as well as its contents.
+ */
 async function uncommittedDelta(wtPath, { timeout }) {
-  const status = await git(
-    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
-    { cwd: wtPath, timeout },
-  );
+  const [status, flags] = await Promise.all([
+    git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: wtPath, timeout }),
+    // The filter git applied to the answer above, measured rather than assumed. See
+    // indexFlagDelta(): without it a `--skip-worktree` credentials file is reported as clean.
+    indexFlagDelta(wtPath, { timeout }),
+  ]);
   if (status.code !== 0) {
-    return { files: [], untracked: [], how: 'status-failed', error: status.stderr.trim() };
+    return { files: [], untracked: [], unmeasured: [], how: 'status-failed', error: status.stderr.trim() };
   }
 
   const files = [];
@@ -312,7 +606,22 @@ async function uncommittedDelta(wtPath, { timeout }) {
     else files.push(p);
   }
 
-  return { files, untracked, how: 'status+diff-HEAD' };
+  // A BROKEN FILTER-READER IS NOT A CLEAN FILTER. If `ls-files` could not run, holt does not
+  // know what status was allowed to tell it, and the scan must refuse to classify rather than
+  // publish an answer it cannot stand behind — the same rule committedDelta already follows.
+  if (flags.how !== 'ls-files-v') {
+    return {
+      files, untracked, unmeasured: flags.unknown,
+      how: 'index-flags-failed', error: flags.error ?? flags.how,
+    };
+  }
+
+  return {
+    files: [...new Set([...files, ...flags.atRisk])],
+    untracked,
+    unmeasured: flags.unknown,
+    how: 'status+diff-HEAD',
+  };
 }
 
 /**
@@ -730,11 +1039,15 @@ async function scanFiles(ws, ctx) {
     // answer (Law: prove the instrument can detect presence before trusting its silence).
     const committedFailed = ['merge-tree-failed', 'merge-tree-no-tree', 'three-dot-failed']
       .includes(committed.how);
-    const statusFailed = uncommitted.how === 'status-failed';
+    // `index-flags-failed` joins `status-failed` here rather than getting its own branch: both
+    // mean "the working-tree layer was not measured", and the only safe reading of an unmeasured
+    // layer is UNKNOWN. See indexFlagDelta() — `git status` answers through a per-path filter,
+    // so a status run whose filter could not be read is an unread instrument, not a clean one.
+    const statusFailed = uncommitted.how === 'status-failed' || uncommitted.how === 'index-flags-failed';
     if (committedFailed || statusFailed) {
       result.reason = committedFailed
         ? `committed-delta instrument failed (${committed.how}: ${committed.error ?? 'unknown'}) — refusing to classify`
-        : `status instrument failed (${uncommitted.error ?? 'unknown'}) — refusing to classify`;
+        : `${uncommitted.how === 'index-flags-failed' ? 'index-flag' : 'status'} instrument failed (${uncommitted.error ?? 'unknown'}) — refusing to classify`;
       return result; // ok stays false -> UNKNOWN -> never safe, never cleaned
     }
 
@@ -743,8 +1056,9 @@ async function scanFiles(ws, ctx) {
     // this, untracked `dist/handmade.js` in a repo with no build system was dropped from the
     // at-risk set by its name alone — the same reasoning that destroyed logs/ content twice.
     const cFiles = committed.files.filter((f) => !looksGenerated(f, activeDirs));
-    const uFiles = uncommitted.files.filter((f) => !looksGenerated(f, activeDirs));
-    const uUntracked = (uncommitted.untracked ?? []).filter((f) => !looksGenerated(f, activeDirs));
+    // `let`: holt's own untouched output is subtracted from both below. See the note there.
+    let uFiles = uncommitted.files.filter((f) => !looksGenerated(f, activeDirs));
+    let uUntracked = (uncommitted.untracked ?? []).filter((f) => !looksGenerated(f, activeDirs));
 
     // THE SYMBOL-EXTRACTION SET IS UNCONDITIONAL, NOT MANIFEST-GATED.
     //
@@ -757,6 +1071,49 @@ async function scanFiles(ws, ctx) {
     // explicit arg extracts its symbols despite `--exclude`). So `touched` is filtered with the
     // unconditional GENERATED list (no activeDirs), keeping the symbol layer clean while the
     // at-risk layers stay manifest-gated.
+    // FILES HOLT ITSELF WROTE ARE NOT THE USER'S IRREPLACEABLE WORK.
+    //
+    // `holt setup` writes its adapter configs — .claude/settings.json, .mcp.json, AGENTS.md,
+    // .cursor/hooks.json and about sixteen more — into EVERY worktree, so agents get holt wiring
+    // wherever they start. Those files are untracked, and untracked was read as
+    // work-existing-nowhere-else, so holt made every worktree permanently undeletable using
+    // evidence it had manufactured about itself. Measured on a fresh repo:
+    //
+    //   before `holt setup`: gate = exit 0, disposable, 1 file
+    //   after  `holt setup`: gate = exit 1, "20 uncommitted file(s), 38 symbol(s) found nowhere
+    //                        else" — and those 38 symbols are holt's own config keys
+    //                        (mcpServers, PreToolUse, HOLT_CMD, module.exports)
+    //   git worktree remove / --force / rm -rf: ALL THREE BLOCKED. holt clean --apply: removes 0.
+    //
+    // The refusal was provably false by md5: repo/AGENTS.md and scratch/AGENTS.md were
+    // byte-identical. holt was reporting "found nowhere else" about content it had duplicated
+    // itself, which is this project's signature defect committed against its own user. And it is
+    // self-amplifying — the more worktrees, the more undeletable ones.
+    //
+    // PROVENANCE IS RECORDED, NOT INFERRED. src/integrate/receipt.mjs already stores a hash for
+    // every file holt writes, precisely so ownership is a fact rather than a guess about names.
+    // It had zero consumers outside the uninstall path. Only MINE_UNTOUCHED is subtracted: a file
+    // holt wrote and the USER HAS SINCE EDITED is the user's file now and keeps full protection,
+    // and an unreadable receipt yields UNKNOWN, which protects everything (see ownershipOf).
+    //
+    // Subtracted HERE because `uFiles`/`uUntracked` feed both vetoes — `touchedFiles` below, which
+    // becomes the symbol surface, and `result.uncommitted`, which becomes the file counts. Fixing
+    // one and not the other is what leaves `holt gate` still refusing after a "fix".
+    let holtOwned = new Set();
+    try {
+      const receipt = await readReceipt(ws.path);
+      const candidates = [...new Set([...uFiles, ...uUntracked])];
+      if (candidates.length) {
+        const owned = await ownershipOf(ws.path, candidates, receipt);
+        holtOwned = new Set([...owned].filter(([, v]) => v === 'MINE_UNTOUCHED').map(([f]) => f));
+      }
+    } catch {
+      holtOwned = new Set();          // could not look -> subtract nothing -> protect everything
+    }
+    const notHoltOwned = (f) => !holtOwned.has(f);
+    uFiles = uFiles.filter(notHoltOwned);
+    uUntracked = uUntracked.filter(notHoltOwned);
+
     const touchedFiles = [...new Set([
       ...committed.files.filter((f) => !looksGenerated(f)),
       ...uFiles.filter((f) => !looksGenerated(f)),
@@ -793,6 +1150,11 @@ async function scanFiles(ws, ctx) {
     result.uncommitted = {
       files: uFiles, untracked: uUntracked, count: uFiles.length + uUntracked.length,
       how: uncommitted.how,
+      // Paths the index flagged as not-status-reported that holt could not resolve to a real
+      // answer (unreadable, or not a regular file). NOT folded into `files`: an unknown is not
+      // an at-risk file, and it is not a clean one either. contentAtRisk() turns it into `blind`,
+      // which is what stops safeToDelete() calling the workstream disposable.
+      unmeasured: uncommitted.unmeasured ?? [],
     };
     // THE FULL LIST, NOT A SAMPLE. This used to be `.slice(0, 50)` while `count` stayed the true
     // length — a list whose length disagreed with its own count. That is fine for a display
