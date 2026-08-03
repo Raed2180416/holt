@@ -228,14 +228,62 @@ test('GATE ASK: cd - and popd are unresolved, never guessed', async (t) => {
   }
 });
 
-test('GATE: `worktree prune` is evaluated against EVERY workstream, not one', async (t) => {
+/**
+ * `worktree prune` IS A MANY-TARGET VERB — BUT ITS TARGETS ARE THE PRUNABLE RECORDS.
+ *
+ * THIS TEST USED TO RATIFY THE DEFECT. It asserted `deny` with several targets against
+ * `standardFixture()`, in which every worktree is present on disk and NOTHING is prunable — so
+ * the command it demanded a refusal for is one that git itself does nothing at all for. Measured,
+ * with real git, in a repo with zero prunable records: `git worktree prune -v` changed no
+ * worktree record and no byte on disk, and holt answered
+ *
+ *     deny — "git worktree prune would destroy work that exists nowhere else.
+ *             • live: 1 uncommitted file(s); 1 symbol(s) found nowhere else"
+ *
+ * naming a live worktree that `git worktree prune` cannot touch under any flags. A guard that
+ * makes a false statement about a command that does nothing is one people switch off, and a
+ * green test asserting that behaviour is why it survived. See
+ * test/e2e/no-op-invocations.test.mjs for the whole class.
+ *
+ * The INTENT is kept exactly — prune is not a one-target verb — and asserted against a fixture
+ * where it genuinely reaches several worktrees, together with the negative half the original
+ * lacked: the live worktrees must NOT be named.
+ */
+test('GATE: `worktree prune` is evaluated against every PRUNABLE workstream, not one', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
+
+  // Make two records prunable by removing their directories — which is the only thing that
+  // makes `git worktree prune` do anything.
+  for (const w of ['uniqueUncommitted', 'uniqueCommitted']) {
+    await fs.rm(fx.wt(w), { recursive: true, force: true });
+  }
+  const list = await fx.git(['worktree', 'list', '--porcelain']);
+  assert.equal((list.match(/^prunable/gm) ?? []).length, 2,
+    'PREMISE FAILED: the fixture must hold exactly two prunable records');
 
   const verdict = await assessCommand('git worktree prune', fx.root);
   assert.equal(verdict.decision, 'deny');
   assert.ok(verdict.targets.length > 1,
-    `prune affects all worktrees; expected several targets, got ${verdict.targets.join(', ')}`);
+    `prune reaches every prunable record; expected several targets, got ${verdict.targets.join(', ')}`);
+  for (const live of ['collideA', 'collideB', 'alpha-1', 'beta-1']) {
+    assert.ok(!verdict.targets.includes(live),
+      `${live} is on disk and prune cannot touch it, so naming it is a false statement`);
+  }
+});
+
+test('GATE ALLOW: `worktree prune` with nothing prunable is a no-op, and is not refused', async (t) => {
+  // The twin this file's own header demands: "each deny test has an allow twin". Its absence is
+  // what let the defect above sit green.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const list = await fx.git(['worktree', 'list', '--porcelain']);
+  assert.equal(/^prunable/m.test(list), false, 'PREMISE FAILED: something is prunable');
+
+  const verdict = await assessCommand('git worktree prune', fx.root);
+  assert.equal(verdict.decision, 'allow',
+    `git worktree prune removes records for directories that are already gone; with none gone it `
+    + `does nothing, so a refusal here is a false statement: ${verdict.reason ?? ''}`);
 });
 
 /* ------------------------------------------------------------- the brief ---- */
@@ -2422,6 +2470,62 @@ test('LOOP: NEVER-WORSE — a loop whose body is harmless stays allowed', async 
   }
 });
 
+// EXPANSION MUST NOT UNBALANCE THE COMMAND IT REWRITES.
+//
+// The substitution was `"?\$\{?VAR\}?"?` — an optional quote on each side, matched INDEPENDENTLY.
+// With the variable last inside a quoted string, the trailing `"?` consumed the string's CLOSING
+// quote, so `echo "n: $t"` expanded to `echo "n: a b` — one quote, unterminated. holt then refused
+// the command with "could not parse … it ends inside an unterminated quote", reporting a defect in
+// its own rewrite as a defect in the user's input.
+//
+// Measured on an ordinary feature-detection loop, the kind of line that appears in every setup
+// script ever written:
+//
+//     for t in bwrap docker; do command -v $t >/dev/null 2>&1 \
+//       && echo "  available: $t" || echo "  missing: $t"; done      ->  ASK (unparseable)
+//
+// That is the over-refusal half of the signature defect, and it is the half that gets a guard
+// switched off — which costs all of the protection rather than some of it.
+test('LOOP: expansion never leaves an odd number of quotes behind', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  // The rewrite itself must stay balanced, wherever the variable sits in the string.
+  for (const cmd of [
+    'for t in a b; do echo "$t"; done',          // the whole quoted string
+    'for t in a b; do echo "n: $t"; done',       // at the END — the shape that broke
+    'for t in a b; do echo "x ($t)"; done',      // mid-string
+    'for t in a b; do echo "a $t b"; done',
+    'for t in a b; do echo "${t}"; done',        // braced spelling of the same thing
+    'for t in a b; do echo "n: ${t}"; done',
+  ]) {
+    for (const body of expandForLoops(cmd)) {
+      const quotes = body.split('"').length - 1;
+      assert.equal(quotes % 2, 0,
+        `expansion left an unterminated quote — holt would refuse its own rewrite: ${cmd} -> ${body}`);
+    }
+  }
+
+  // And end to end: the real command, through the real decision path.
+  const benign = 'for t in bwrap docker; do command -v $t >/dev/null 2>&1 '
+    + '&& echo "  available: $t" || echo "  missing: $t"; done';
+  const v = await assessCommand(benign, fx.root);
+  assert.equal(v.decision, 'allow',
+    `an ordinary feature-detection loop must not be refused (got ${v.decision}: ${v.reason})`);
+
+  // ANTI-VACUITY: dropping BOTH quotes of a "$VAR" pair is deliberate — the list may be a glob and
+  // the containment rule matches it against the worktrees, so quoting must not hide a destroyer.
+  // If this fix had been implemented by leaving quotes alone entirely, these would stop denying.
+  for (const cmd of [
+    'for d in ../wt/*; do rm -rf "$d"; done',
+    'for d in ../wt/*; do rm -rf "${d}"; done',
+  ]) {
+    const bad = await assessCommand(cmd, fx.root);
+    assert.notEqual(bad.decision, 'allow',
+      `quoting must not hide a destroyer behind a loop variable: ${cmd}`);
+  }
+});
+
 test('WORKTREE-GLOB: git worktree remove over a glob or ancestor reaches every match', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
@@ -2442,4 +2546,47 @@ test('EXPAND: expandForLoops binds the variable and never invents a body', () =>
   assert.deepEqual(expandForLoops('for d in ../wt-*; do rm -rf "$d"; done'), ['rm -rf ../wt-*']);
   assert.deepEqual(expandForLoops('for i in 1 2 3; do echo $i; done'), ['echo 1 2 3']);
   assert.deepEqual(expandForLoops('rm -rf x'), [], 'a command with no for-loop expands to nothing');
+});
+
+/**
+ * A TARGET THAT CONTAINS THE WORKTREES DESTROYS THEM — the mergify incident, in the spelling it
+ * took. This is pinned here because the mutation harness proved nothing pinned it: deliberately
+ * dropping the ancestor rule (`for (const reached of rootsReachedFromAbove(...))` -> `of []`) left
+ * every test in the suite GREEN. 77 of 78 mutations were killed and this was the survivor.
+ *
+ * It survived for a reason worth recording. `rm -rf <parent>` still denies with the rule dropped,
+ * because the WORKTREE layer recognises the path and answers first — so the obvious assertion tests
+ * the wrong layer and passes either way. The rule is load-bearing only where the worktree layer has
+ * no verb of its own, which is any FILE verb aimed at the directory holding the worktrees:
+ *
+ *     mv <parent-of-the-worktrees> /tmp/elsewhere
+ *
+ * — one rename, every worktree under it leaves the repository, and only the file layer's
+ * ancestor resolution can see it.
+ */
+test('CONTAINMENT: a file verb aimed at the directory that HOLDS the worktrees is refused', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  // The directory the linked worktrees live in — an ancestor, not a worktree itself.
+  const parent = path.dirname(fx.wt('uniqueUncommitted'));
+  const away = path.join(os.tmpdir(), `holt-containment-${process.pid}`);
+
+  const v = await agent.assessCommand(`mv ${parent} ${away}`, fx.root);
+  assert.notEqual(v.decision, 'allow',
+    'moving the directory that CONTAINS the worktrees takes every one of them with it: '
+    + `mv ${parent} ${away} -> ${v.decision} (${v.reason})`);
+
+  // The file layer must be the one answering, and it must have resolved the contained worktrees
+  // rather than shrugging at a path that is not itself a worktree. Without this the assertion above
+  // passes on the worktree layer alone and the ancestor rule stays untested — which is exactly how
+  // it went untested until a mutation found it.
+  const targets = agent.resolveFileTargets(`mv ${parent} ${away}`);
+  assert.ok(targets.length > 0,
+    'the file layer must resolve an ancestor target to the worktrees underneath it');
+
+  // NEVER-WORSE: an ancestor that contains no worktree at all is ordinary file work.
+  const junk = await agent.assessCommand(`mv ${away}-src ${away}-dst`, fx.root);
+  assert.equal(junk.decision, 'allow',
+    `moving a directory that holds no worktree must stay allowed -> ${junk.decision}`);
 });
