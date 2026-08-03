@@ -169,7 +169,7 @@ And the v0.2 stack that turns the analysis into motion:
 | order | which workstreams land in parallel, and the sequence for the entangled rest | `holt order` — exact lanes, heuristic peel, every watched merge named |
 | partition | how N agents should split the repo *before* they collide | `holt partition --agents 3` — disjoint buckets, each observed hotspot gets one owner |
 | branches | the other graveyard: branches nobody dares delete | `holt branches [--apply]` — content-landed squash merges detected; `--apply` uses `-d`, never `-D` |
-| journal | who deleted what, months later, with the evidence | `holt journal` — append-only audit of every protect / unprotect / rescue / clean / branch-delete, each stamped with who |
+| journal | **who** deleted what, months later, with the evidence — and proof nobody edited the record | `holt journal` — hash-chained (RFC 6962) audit of every protect / **unprotect** / rescue / clean / branch-delete / blocked, with actor attribution; `--verify` names the exact entry that broke; `--export ocsf\|ecs\|cef` for your SIEM |
 | forensics | **which agent destroyed what, and when** — the question asked after an incident | `holt forensics <workstream>` — created / wrote / attempted / **BLOCKED** / survived, each line bound to the agent session that produced it |
 
 Plus the two layers nobody else has:
@@ -445,8 +445,11 @@ headcount:
 | Forensics for one repository — who destroyed what, and when | ✓ | ✓ | ✓ |
 | Audit journal + export (JSON/CSV) | ✓ | ✓ | ✓ |
 | Policy as code (`.holt/policy.json`) | | ✓ | ✓ |
+| Tamper-evident audit trail: hash chain, `--verify`, one-shot export in every format | ✓ | ✓ | ✓ |
 | Fleet view across every repository | | ✓ | ✓ |
 | Cross-repo correlation of one agent session (`forensics --fleet`) | | ✓ | ✓ |
+| Fleet audit: verify + aggregate every repository's chain at once | | ✓ | ✓ |
+| Continuous cursor-tracked SIEM sink (`journal --sink`) | | ✓ | ✓ |
 | SSO / SAML / SCIM, self-hosted & air-gapped licensing, SLA | | | ✓ |
 | *Coming:* webhook sink | — | — | — |
 
@@ -469,8 +472,12 @@ far more collision risk than a 50-dev team on 5 quiet ones — per-seat would ch
 Unlimited developers, no seat minimum, annual prepay discounted.
 
 **Your data never leaves your machine — on *any* tier, including paid.** Fleet view scans *your*
-repositories on *your* machine; audit export writes a file *you* control (or POSTs to a webhook
-*you* configure). There is no hosted holt dashboard your code is sent to, no telemetry, and no
+repositories on *your* machine; the audit sink writes newline-delimited OCSF/ECS/CEF to a file
+*you* control, which your existing log shipper (Filebeat, Vector, Fluent Bit, Splunk UF) tails —
+holt itself makes no outbound connection, on any tier. That is not a limitation working around
+the no-network promise; it is how every serious log pipeline already handles retry, backpressure
+and TLS, and rebuilding it would be the mistake.
+There is no hosted holt dashboard your code is sent to, no telemetry, and no
 license check-in — a Team key is an Ed25519-signed token you activate once
 (`holt license activate <key>`) or set as `HOLT_LICENSE` in CI, verified entirely offline. If a
 subscription lapses, paid features keep working for a 14-day grace period rather than breaking

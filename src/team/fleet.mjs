@@ -24,6 +24,7 @@ import { branchAudit } from '../branches.mjs';
 import { git } from '../git.mjs';
 import { checkEntitlement } from '../license.mjs';
 import { samePathAsync } from '../paths.mjs';
+import { verifyJournal, readJournalRaw } from '../journal.mjs';
 
 export class EntitlementError extends Error {
   constructor(entitlement) {
@@ -179,5 +180,119 @@ export async function fleetScan(roots, { concurrency = 4, maxDepth = 3, env = pr
     note: failures.length
       ? `${failures.length} repository(ies) FAILED to scan and are excluded from every total above — they are not clean, they are unknown`
       : 'every discovered repository scanned successfully',
+  };
+}
+
+/* ========================================================== FLEET AUDIT ==== */
+
+/**
+ * Every repository's audit trail, verified and aggregated.
+ *
+ * THE QUESTION A COMPLIANCE REVIEWER ACTUALLY ASKS is not "show me this repo's log" — the
+ * developer already has that for free and can print it. It is "across all 40 repositories this
+ * team owns, has anyone removed protection from irreplaceable work, and can you prove none of
+ * those logs has been edited". Answering that needs every chain verified at once and, crucially,
+ * needs the repos with NO journal and with BROKEN journals surfaced as their own buckets.
+ *
+ * A repository whose chain does not verify is never folded into the totals. Silent partial
+ * coverage in an audit report is the failure that makes the whole artefact worthless: a clean
+ * summary computed over the repos that happened to work is a false statement of compliance.
+ */
+export async function fleetAudit(roots, {
+  concurrency = 4, maxDepth = 3, env = process.env, since = null, publicKeyB64 = null,
+} = {}) {
+  // `publicKeyB64` is an ARGUMENT ONLY, never an env var — an env override would let anyone
+  // point holt at a key they mint licences with. Same rule as src/license.mjs.
+  const ent = checkEntitlement('fleet', { env, publicKeyB64 });
+  if (!ent.entitled) throw new EntitlementError(ent);
+
+  const sinceMs = since ? Date.parse(since) : null;
+  if (since && !Number.isFinite(sinceMs)) throw new Error(`--since: '${since}' is not a date holt can parse`);
+
+  const repos = await findRepos(roots, { maxDepth });
+  const rows = [];
+  const failures = [];
+
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, 16)) }, async () => {
+    while (cursor < repos.length) {
+      const root = repos[cursor++];
+      try {
+        const v = await verifyJournal(root);
+        const { entries } = await readJournalRaw(root);
+        const list = entries.filter((e) => e && e.corrupt === undefined
+          && (sinceMs === null || Date.parse(e.at ?? '') >= sinceMs));
+
+        const byAction = {};
+        const actors = new Map();
+        let unattributed = 0;
+        for (const e of list) {
+          const act = e.action ?? 'unknown';
+          byAction[act] = (byAction[act] ?? 0) + 1;
+          const a = e.actor;
+          if (!a || a.user === 'unknown') unattributed += 1;
+          if (a) {
+            const who = `${a.user}@${a.host}${a.agent && a.agent !== 'unknown' ? ` via ${a.agent}` : ''}`;
+            actors.set(who, (actors.get(who) ?? 0) + 1);
+          }
+        }
+        rows.push({
+          repo: root,
+          name: path.basename(root),
+          verified: v.ok,
+          code: v.code,
+          reason: v.reason,
+          broken: v.broken ?? null,
+          entries: list.length,
+          legacy: v.legacy ?? 0,
+          root: v.root,
+          byAction,
+          unprotects: byAction.unprotect ?? 0, // the number this report exists to surface
+          blocked: byAction.blocked ?? 0,
+          unattributed,
+          actors: [...actors.entries()].sort((a, b) => b[1] - a[1]).map(([who, n]) => ({ who, events: n })),
+        });
+      } catch (e) {
+        failures.push({ repo: root, error: e.message });
+      }
+    }
+  });
+  await Promise.all(workers);
+
+  rows.sort((a, b) => Number(a.verified) - Number(b.verified)
+    || b.unprotects - a.unprotects || a.name.localeCompare(b.name));
+
+  const verified = rows.filter((r) => r.verified);
+  const unverified = rows.filter((r) => !r.verified);
+  const total = (k) => verified.reduce((n, r) => n + (r[k] ?? 0), 0);
+
+  const fleetActors = new Map();
+  for (const r of verified) {
+    for (const a of r.actors) fleetActors.set(a.who, (fleetActors.get(a.who) ?? 0) + a.events);
+  }
+
+  return {
+    scannedAt: new Date().toISOString(),
+    roots: roots.map((r) => path.resolve(r)),
+    since: since ?? null,
+    repositories: rows.length,
+    verifiedRepositories: verified.length,
+    // NEVER folded into the totals below.
+    unverifiedRepositories: unverified.map((r) => ({
+      repo: r.repo, name: r.name, code: r.code, reason: r.reason, broken: r.broken,
+    })),
+    totals: {
+      events: total('entries'),
+      unprotects: total('unprotects'),
+      blocked: total('blocked'),
+      legacyUnchained: total('legacy'),
+      unattributed: total('unattributed'),
+    },
+    actors: [...fleetActors.entries()].sort((a, b) => b[1] - a[1]).map(([who, n]) => ({ who, events: n })),
+    repos: rows,
+    failures,
+    note: (unverified.length || failures.length)
+      ? `${unverified.length} repository(ies) FAILED verification and ${failures.length} could not be read — none is counted in the totals above. They are not clean, they are unaccounted for.`
+      : `every discovered repository's audit chain verifies (${verified.length}/${rows.length})`,
   };
 }

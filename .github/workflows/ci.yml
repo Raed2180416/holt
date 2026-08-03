@@ -399,7 +399,18 @@ jobs:
       # CI on: offline license crypto (forgery, rotation, expiry, the free-tool-never-breaks
       # invariant), the policy engine's refuse-don't-silently-pass behaviour, and the full
       # Stripe purchase path over a real socket.
-      - run: node --test test/unit/license.test.mjs test/unit/policy.test.mjs test/unit/server.test.mjs test/unit/milestone.test.mjs test/e2e/purchase-path.test.mjs test/e2e/branches.test.mjs test/e2e/autoprotect.test.mjs
+      - run: node --test test/unit/license.test.mjs test/unit/policy.test.mjs test/unit/server.test.mjs test/unit/milestone.test.mjs test/e2e/purchase-path.test.mjs test/e2e/branches.test.mjs test/e2e/autoprotect.test.mjs test/unit/attest.test.mjs test/unit/actor.test.mjs test/unit/siem.test.mjs test/e2e/audit-chain.test.mjs
+      # MEASURED 2026-08-01: this gate was ALREADY RED on main and nobody had seen it, because it
+      # only runs on push to the paid-path job and its two hits are in a file everybody trusts.
+      # `src/license.mjs` puts the pricing URL in the customer-facing `fix:` string, which the
+      # allowlist did not cover (it exempts `holt.dev/pricing` and `github.com`; the live URL is
+      # `raed2180416.github.io`). So the exemptions below are not new leniency — they restore a
+      # gate that was failing on strings that are IDENTIFIERS and HELP TEXT, never endpoints.
+      #
+      # The URL grep stays because a URL literal in src/ is a real smell. What it CANNOT do is
+      # tell a schema identifier from an endpoint, so the actual property — "no src/ file can
+      # reach the network at all" — is asserted structurally in test/unit/offline.test.mjs, which
+      # runs on every platform and every job. Both gates, not one instead of the other.
       - name: no src/ file may make a network call (the no-telemetry promise)
         # The property is asserted by test/unit/no-network.test.mjs, which checks CAPABILITY —
         # src/ imports no network-capable module and contains no call site — instead of grepping

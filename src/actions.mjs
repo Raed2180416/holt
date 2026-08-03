@@ -244,7 +244,9 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
  * trail whose only gap is the risky action is not a partial audit trail, it is a misleading one:
  * a reviewer reading it sees protections applied and never released, so the record positively
  * asserts a safer state than the repository is in. Same shape as the others (action, id, path,
- * reason, actor), so one reader parses all of them.
+ * reason, actor), so one reader parses all of them. `--force`, which releases a lock holt did
+ * NOT place, is recorded distinctly, because overriding another tool's or another human's
+ * protection is a different act from releasing your own.
  */
 export async function unprotect(cwd, { id = null, force = false, dryRun = false, reason: overrideReason = null, ...opts } = {}) {
   const { report } = await assess(cwd, opts);
@@ -289,8 +291,12 @@ export async function unprotect(cwd, { id = null, force = false, dryRun = false,
       // record as the justification for it.
       await journal(cwd, {
         action: 'unprotect', id: ws.id, path: ws.path,
+        branch: ws.branch ?? null, head: ws.head ?? null,
         reason: st.reason, forced: !!force, foreignLock: foreign,
         overrideReason: (foreign && overrideReason) ? String(overrideReason).trim() : null,
+        evidence: foreign
+          ? 'released a lock holt did NOT place (--force) — a protection set by another tool or person was overridden'
+          : 'released a lock holt placed to protect work found nowhere else',
       }, journalFailures);
     }
   }

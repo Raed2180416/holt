@@ -38,6 +38,9 @@ export function summarizeJournal(events, { now = null } = {}) {
   // Protections RELEASED, reported beside protections applied. A safety tally that shows only
   // the guards it put up, never the ones taken down, overstates the standing protection — the
   // same one-sided record the journal itself had while `unprotect` went unwritten.
+  // Surfaced, never netted off. Releasing protection is the one action that makes irreplaceable
+  // work destroyable again; a summary that showed only the protections and hid the releases
+  // would overstate the safety posture, which is the failure mode this whole file guards against.
   const released = count('unprotect');
 
   // "Prevented losses" = the events that stood between work and deletion: a refused destructive
