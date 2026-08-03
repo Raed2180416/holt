@@ -24,7 +24,7 @@ import {
 } from '../src/render.mjs';
 import { renderHtml } from '../src/graph-html.mjs';
 import { renderClusters } from '../src/ascii-graph.mjs';
-import { assessCommand, buildBrief, cachedReport, resolveCommand } from '../src/agent.mjs';
+import { assessCommand, buildBrief, cachedReport, resolveCommand, resolveFileTargets } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import {
   integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext, mcpTargets,
@@ -842,6 +842,53 @@ let hookVerdictEmitted = false;
  * @param {any} opts
  * @param {{command?: string, cwd?: string}} [ctx] the command this verdict is about, when known
  */
+/**
+ * FILES WHOSE REMOVAL CHANGES WHETHER HOLT RUNS AT ALL.
+ *
+ * holt DENIES `git worktree unlock <wt>` and ALLOWS `rm -f .git/worktrees/<wt>/locked`, which has
+ * the identical effect. It allows `rm -f ~/.claude/settings.json`, which de-registers the PreToolUse
+ * hook so the guard stops running in every later session. Both measured, with controls.
+ *
+ * That is root-cause taxonomy #2 — deciding on the SPELLING of an action rather than its EFFECT.
+ *
+ * The answer is NOT to refuse these. Over-refusal disqualifies exactly as under-protection does,
+ * and reconfiguring or removing holt is legitimate work a user must be able to do without fighting
+ * the tool being removed. What was missing is that it happened SILENTLY: the single event an audit
+ * trail most exists for is the guard being switched off, and nothing recorded it.
+ *
+ * So this RECORDS and does not block.
+ *
+ * Detection uses the guard's OWN resolver, never a match on the command text. Text matching is the
+ * same defect one level up: `rm -f ./AGENTS.md`, `rm -f "$PWD/AGENTS.md"` and `rm -f AGENTS.md` are
+ * one action spelled three ways, and a regex would catch a different subset than the guard sees.
+ *
+ * @param {string} command
+ * @param {string} cwd
+ * @returns {string[]} absolute paths of holt's own wiring this command reaches
+ */
+function holtWiringTouched(command, cwd) {
+  let targets;
+  try { targets = resolveFileTargets(command); } catch { return []; }
+  const hits = [];
+  for (const t of targets ?? []) {
+    const raw = t?.resolvedRaw ?? t?.raw;
+    if (!raw) continue;
+    const abs = path.resolve(cwd, String(raw));
+    const base = path.basename(abs);
+    const parts = abs.split(path.sep);
+    if (base === 'settings.json' && parts.includes('.claude')) hits.push(abs);
+    else if (base === '.mcp.json' || base === 'AGENTS.md' || base === 'CLAUDE.md') hits.push(abs);
+    else if (base === '.holtrc.json') hits.push(abs);
+    else if (base === 'locked' && parts.includes('worktrees')) hits.push(abs);
+  }
+  return [...new Set(hits)];
+}
+
+/**
+ * @param {any} verdict
+ * @param {any} opts
+ * @param {{command?: string, cwd?: string}} [ctx] the command this verdict is about, when known
+ */
 function emitHookVerdict(verdict, opts, { command, cwd } = {}) {
   // Re-entry means the emitter itself failed. There is no verdict to report and no way to report
   // one: stop the command. Fail-closed is the only honest end for a guard that cannot speak.
@@ -981,6 +1028,24 @@ async function cmdHook(opts) {
         action: 'allowlisted', source: 'guardAllow', command: String(command).slice(0, 200),
         pattern: verdict.allowlistPattern ?? null,
       }).catch(() => {});
+    }
+
+    // SWITCHING THE GUARD OFF IS THE ONE EVENT AN AUDIT TRAIL MOST EXISTS FOR, and it was the one
+    // event nothing recorded. Only on a verdict that lets the command PROCEED: a refusal did not
+    // happen, and the refusal path already journals its own prevented loss. Best-effort and
+    // last — like every other write here, logging must never delay or alter the hook.
+    if (verdict.decision === 'allow') {
+      const wiring = holtWiringTouched(command, cwd);
+      if (wiring.length) {
+        await appendEvent(cwd, {
+          action: 'holt-wiring-touched',
+          command: String(command).slice(0, 200),
+          paths: wiring.slice(0, 8),
+          note: 'a command holt ALLOWED reaches holt\'s own installation. Allowed on purpose — '
+            + 'reconfiguring or removing holt is legitimate and must not require fighting it — '
+            + 'and recorded because after this the guard may no longer be running.',
+        }).catch(() => {});
+      }
     }
     // Record a prevented loss, so `holt journal --summary` can show the champion a real number:
     // "N destructive commands refused." Best-effort — logging must never delay or alter the hook.

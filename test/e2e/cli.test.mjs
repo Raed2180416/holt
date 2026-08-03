@@ -989,3 +989,45 @@ test('CLI: a numeric flag is parsed and never silently coerced', async (t) => {
   assert.doesNotMatch(`${ok.stdout}${ok.stderr}`, /above the maximum|below the minimum|must be a number/,
     'a valid value must not produce a warning');
 });
+
+test('GUARD: switching holt off is allowed, and recorded', async (t) => {
+  // holt DENIES `git worktree unlock <wt>` and ALLOWS `rm -f .git/worktrees/<wt>/locked`, which has
+  // the identical effect; it allows removing ~/.claude/settings.json, which de-registers the
+  // PreToolUse hook so the guard stops running in every later session. Root-cause taxonomy #2 —
+  // deciding on the SPELLING of an action rather than its EFFECT.
+  //
+  // The fix is NOT refusal. Reconfiguring or removing holt is legitimate work, and a tool you have
+  // to fight to uninstall is a worse tool — over-refusal disqualifies exactly as under-protection
+  // does. What was missing is that it happened silently. Both halves are asserted here: the command
+  // still runs, AND the event is on the record, because after it the guard may not be.
+  const fx = await newRepo('wiring-journal');
+  t.after(() => fx.cleanup());
+
+  const payload = (cmd) => JSON.stringify({
+    session_id: 'x', transcript_path: '/dev/null', cwd: fx.root,
+    hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: cmd },
+  });
+
+  for (const cmd of ['rm -f .mcp.json', 'rm -f AGENTS.md']) {
+    const r = await hook(['hook', 'pre-tool-use', '--host', 'claude-code'], fx.root, payload(cmd));
+    assert.equal(r.code, 0, `${cmd} must still be ALLOWED — holt must not be undeletable: ${r.stderr}`);
+  }
+
+  // NEGATIVE CONTROLS. A recorder that fires on ordinary commands is noise, and noise in an audit
+  // trail is indistinguishable from no audit trail.
+  for (const cmd of ['echo hello', 'rm -rf node_modules']) {
+    const r = await hook(['hook', 'pre-tool-use', '--host', 'claude-code'], fx.root, payload(cmd));
+    assert.equal(r.code, 0, `${cmd} must be allowed: ${r.stderr}`);
+  }
+
+  const { readJournal } = await import('../../src/journal.mjs');
+  const events = await readJournal(fx.root);
+  const wiring = events.filter((e) => e.action === 'holt-wiring-touched');
+
+  assert.equal(wiring.length, 2,
+    `exactly the two wiring commands must be recorded, not the ordinary ones: ${JSON.stringify(events.map((e) => e.action))}`);
+  assert.ok(wiring.every((e) => (e.paths ?? []).length > 0),
+    'each entry must name the path it reached, or the record cannot be acted on');
+  assert.ok(wiring.some((e) => String(e.command).includes('.mcp.json')), 'the .mcp.json removal must be named');
+  assert.ok(wiring.some((e) => String(e.command).includes('AGENTS.md')), 'the AGENTS.md removal must be named');
+});
