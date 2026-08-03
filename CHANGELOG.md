@@ -188,6 +188,25 @@ grouped here by what a user would notice, not by commit.
 - The site was rewritten: light mode, plainer language, an honest checkout CTA, a readable A/B
   table that no longer scrolls sideways on a phone, and duplicate nav removed.
 
+## Unreleased
+
+**`holt ci` could go green on no evidence. Two ways, both fixed.** Both are behaviour changes
+that can turn a previously-green build red — which is the point: in each case the green was the
+bug.
+
+- **A pull request could neutralise the policy that gates it.** The policy was read from the
+  WORKING TREE, which in a PR is the candidate's own copy: a branch whose only change was
+  `rm .holt/policy.json` turned a failing gate into a passing one. `.holt/policy.json` is now
+  read from the BASE ref, the way GitHub reads CODEOWNERS — a change may propose rules, it may
+  not enact them upon itself. The working tree remains the fallback when the base carries no
+  policy (adopting one for the first time still works), but such a policy is marked untrusted
+  and may only ADD failures: it can never switch off `--fail-on-unlanded`. A base that declares
+  a policy whose content cannot be read is a refusal, never "no policy".
+- **A shallow checkout made the gate pass on zero evidence.** `actions/checkout` defaults to
+  `fetch-depth: 1`; with no history there is nothing to compare, so holt found no unlanded work
+  and reported a pass — most reassuring exactly where it knew least. `holt ci` now detects a
+  shallow or grafted repository and REFUSES with exit 2 and a message naming `fetch-depth: 0`.
+
 ## 0.2.0
 
 **Landing and enforcement.** The analysis layer became something you can act on.

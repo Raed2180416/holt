@@ -39,9 +39,9 @@ import { readJournal, appendEvent } from '../src/journal.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
 import { resolveActor, setAmbientActor, actorLabel } from '../src/actor.mjs';
 import { forensics, renderForensics } from '../src/forensics.mjs';
-import { git, listTrackedFiles } from '../src/git.mjs';
+import { git, listTrackedFiles, historyCompleteness } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
-import { loadPolicy, loadPolicyFrom, evaluatePolicy } from '../src/team/policy.mjs';
+import { loadPolicy, loadPolicyFrom, loadGatePolicy, evaluatePolicy, gateVerdict } from '../src/team/policy.mjs';
 import { fleetScan } from '../src/team/fleet.mjs';
 import { loadConfig, ConfigError } from '../src/config.mjs';
 import { stashState, describeStash } from '../src/stash.mjs';
@@ -361,6 +361,30 @@ async function buildReport(opts) {
   const report = await analyze(scanned, opts);
   stderr('holt: analysis complete.\n');
   return { report, scanned };
+}
+
+/**
+ * The inline-flag half of `holt ci` — the free gate a single repo runs on itself.
+ *
+ * Extracted so it can be evaluated INDEPENDENTLY of the policy branch. A policy the base ref
+ * does not carry must not be able to switch these off (see loadGatePolicy): the checks a user
+ * asked for on the command line are the one thing a file inside the candidate cannot revoke.
+ */
+function inlineFlagFailures(audit, ignore, opts) {
+  const unlanded = audit.unlanded.filter((b) => !ignore.has(b.name));
+  const overAge = opts.maxAgeDays
+    ? unlanded.filter((b) => b.ageDays != null && b.ageDays > opts.maxAgeDays) : [];
+  const failures = [];
+  if (opts.failOnUnlanded && unlanded.length) {
+    failures.push(`${unlanded.length} branch(es) hold unlanded work: ${unlanded.map((b) => `${b.name} (${b.fileCount} file(s)${b.ageDays != null ? `, ${b.ageDays}d old` : ''})`).join(', ')}`);
+  }
+  if (opts.maxAgeDays && overAge.length && !opts.failOnUnlanded) {
+    failures.push(`${overAge.length} unlanded branch(es) older than ${opts.maxAgeDays}d: ${overAge.map((b) => b.name).join(', ')}`);
+  }
+  if ((opts.failOnUnlanded || opts.maxAgeDays) && audit.unknown.length) {
+    failures.push(`${audit.unknown.length} branch(es) could not be classified (instrument failure) — refusing to pass policy on missing evidence`);
+  }
+  return failures;
 }
 
 /**
@@ -1756,6 +1780,26 @@ async function main() {
   if (cmd === 'ci') {
     // The team gate. Report-only by default; policy is explicit flags, and an instrument
     // failure (unknown bucket) is NEVER a green result when policy is on.
+    const ciRoot = (await discover(opts.cwd, opts)).root;
+
+    // PRECONDITION, checked before any mode branch so no future mode can be added around it:
+    // holt can only say "nothing was abandoned" if it can SEE the history. A shallow or grafted
+    // checkout — actions/checkout's default fetch-depth of 1 — produces an empty audit for the
+    // same reason a blindfold produces an empty room. Absent evidence REFUSES; it never passes.
+    // Skipped when there is no repository at all: that is a different failure, and branchAudit
+    // below already names it precisely.
+    const hist = ciRoot ? await historyCompleteness(ciRoot) : { complete: true, kind: 'complete' };
+    if (!hist.complete) {
+      const payload = {
+        ok: false, code: `incomplete-history:${hist.kind}`, history: hist,
+        reason: `holt ci refuses to render a verdict here — ${hist.reason}`,
+        fix: hist.fix,
+      };
+      if (opts.json) { emitJson(payload); process.exit(2); }
+      process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${hist.fix}\n`));
+      process.exit(2);
+    }
+
     const audit = await branchAudit(opts.cwd, opts);
     if (!audit.ok) { process.stderr.write(paint('red', `holt ci: ${audit.reason}\n`)); process.exit(2); }
     const ignore = new Set([...(opts.ignore ?? []), process.env.GITHUB_HEAD_REF].filter(Boolean));
@@ -1764,66 +1808,67 @@ async function main() {
     // enforced is a hard failure in BOTH directions: unreadable policy exits 2, and an
     // unlicensed policy exits 3 — never a silent pass, which would tell a team they are
     // covered when nothing ran.
+    //
+    // The policy is read from the BASE the audit compared against, never from the working tree:
+    // a pull request may propose rules, it may not enact them upon itself. See loadGatePolicy.
     let loaded;
     try {
-      // THE POLICY COMES FROM THE BASE REF, NOT THE BRANCH BEING JUDGED.
-      //
-      // Both arms of the old expression resolved to the local filesystem — which, in the only
-      // place this gate runs, is a checkout of the PULL REQUEST. The branch under review supplied
-      // the rules that judged it, so a contributor could loosen a threshold or delete the file
-      // and the gate reported a clean pass. On a fork PR that is an unauthenticated stranger
-      // choosing their own policy, on the feature that requires a paid tier to run at all.
-      //
-      // `git show <base>:<path>` reads the committed object on the protected branch and never
-      // touches the working tree. Changing the policy therefore requires a review on the base
-      // branch, which is the control the feature claims to provide.
-      //
-      // Falling back to the working tree when there is no base is correct and not a hole: with no
-      // base ref there is no PR, holt is running ON the branch, and that tree IS the authority.
-      const baseRef = audit?.base?.oid ?? audit?.base?.ref ?? null;
-      loaded = baseRef
-        ? await loadPolicyFrom(async (rel) => {
-          const r = await git(['show', `${baseRef}:${rel}`], { cwd: opts.cwd });
-          return r.code === 0 ? r.stdout : null;
-        })
-        : await loadPolicy(opts.cwd);
-      loaded.authority = baseRef ? `base ref ${String(baseRef).slice(0, 12)}` : 'working tree (no base ref)';
+      loaded = await loadGatePolicy(ciRoot ?? opts.cwd, { baseRef: audit.base?.oid ?? null });
     } catch (e) {
       if (opts.json) { emitJson({ ok: false, code: e.code, reason: e.message }); process.exit(2); }
       process.stderr.write(paint('red', `holt ci: ${e.message}\n`));
       process.exit(2);
     }
+    // Flag failures are computed BEFORE the policy branch because an UNTRUSTED policy — one the
+    // base does not carry — must never suppress them. Otherwise a PR that merely adds a
+    // permissive .holt/policy.json neutralises `--fail-on-unlanded`, which is the same defect
+    // as editing the policy, through a different door.
+    const flagFailures = inlineFlagFailures(audit, ignore, opts);
     if (loaded.found) {
       const ent = checkEntitlement('policy-file');
       if (!ent.entitled) {
-        const payload = { ok: false, code: 'unlicensed-policy', policy: loaded.path, entitlement: ent,
-          reason: `${loaded.path} declares a policy but ${ent.reason}. Refusing to pass a build against a policy that did not run.` };
+        // WHICH policy was found is part of the refusal: a reader has to be able to tell that the
+        // rules came from the base and not from the change being judged.
+        const from = loaded.trusted ? `${loaded.ref}:${loaded.path}` : `${loaded.path} (working tree)`;
+        const payload = { ok: false, code: 'unlicensed-policy', policy: loaded.path,
+          policySource: loaded.source, policyTrusted: !!loaded.trusted, policyRef: loaded.ref ?? null,
+          entitlement: ent,
+          reason: `${from} declares a policy but ${ent.reason}. Refusing to pass a build against a policy that did not run.` };
         if (opts.json) { emitJson(payload); process.exit(3); }
         process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
         process.exit(3);
       }
       const { report } = await buildReport(opts).catch(() => ({ report: null }));
       const res = evaluatePolicy(loaded.policy, { audit, report, ignore: [...ignore] });
+      // An untrusted policy (base has none — see loadGatePolicy) may ADD failures and never
+      // remove them, so whatever the inline flags would have failed on still fails.
+      const verdict = gateVerdict({ policyResult: res, flagFailures, trusted: loaded.trusted });
+      const carried = verdict.carriedFlagFailures;
+      const ok = verdict.ok;
       const payload = {
-        ok: res.ok, mode: 'policy', policy: loaded.path, entitlement: { tier: ent.tier, org: ent.org ?? null },
+        ok, mode: 'policy', policy: loaded.path,
+        policySource: loaded.source, policyTrusted: !!loaded.trusted,
+        policyRef: loaded.ref ?? null, policyNote: loaded.note ?? null,
+        entitlement: { tier: ent.tier, org: ent.org ?? null },
         rulesEvaluated: res.rulesEvaluated, errors: res.errors, warnings: res.warnings,
         violations: res.violations, exempted: res.exempted,
+        flagFailures: carried,
         note: 'requires full refs (actions/checkout with fetch-depth: 0)',
       };
-      if (opts.json) { emitJson(payload); process.exit(res.ok ? 0 : 1); }
-      out(paint('bold', `holt ci — policy ${loaded.path}`) + paint('grey', `  ${res.rulesEvaluated.length} rule(s) · ${ent.tier} license`));
+      if (opts.json) { emitJson(payload); process.exit(ok ? 0 : 1); }
+      const origin = loaded.trusted ? `from base ${loaded.ref}` : 'from the WORKING TREE (base declares none)';
+      out(paint('bold', `holt ci — policy ${loaded.path}`) + paint('grey', `  ${res.rulesEvaluated.length} rule(s) · ${ent.tier} license · ${origin}`));
       for (const v of res.violations) {
         const c = v.severity === 'error' ? 'red' : 'yellow';
         out(`  ${paint(c, v.severity.toUpperCase())} ${paint('bold', v.rule)}  ${v.message}`);
         for (const e of v.evidence ?? []) out(paint('grey', `      ${e}`));
       }
-      if (res.ok) out(paint('green', `\n  PASS — ${res.warnings} warning(s), 0 errors\n`));
-      else out(paint('red', `\n  FAIL — ${res.errors} error(s), ${res.warnings} warning(s)\n`));
-      process.exit(res.ok ? 0 : 1);
+      for (const f of carried) out(`  ${paint('red', 'ERROR')} ${paint('bold', 'ci-flags')}  ${f}`);
+      if (ok) out(paint('green', `\n  PASS — ${res.warnings} warning(s), 0 errors\n`));
+      else out(paint('red', `\n  FAIL — ${verdict.errors} error(s), ${verdict.warnings} warning(s)\n`));
+      process.exit(ok ? 0 : 1);
     }
     const unlanded = audit.unlanded.filter((b) => !ignore.has(b.name));
-    const overAge = opts.maxAgeDays
-      ? unlanded.filter((b) => b.ageDays != null && b.ageDays > opts.maxAgeDays) : [];
     // A SHALLOW CLONE CANNOT ANSWER THIS QUESTION, AND SAYING `ok: true` ANYWAY IS THE WORST
     // FAILURE THIS COMMAND HAS.
     //
@@ -1843,27 +1888,18 @@ async function main() {
     const shallowR = await git(['rev-parse', '--is-shallow-repository'], { cwd: opts.cwd });
     const isShallow = shallowR.code === 0 && shallowR.stdout.trim() === 'true';
 
-    const failures = [];
+    const failures = [...flagFailures];
     if (isShallow && (opts.failOnUnlanded || opts.maxAgeDays)) {
-      failures.push(
+      failures.unshift(
         'SHALLOW CLONE — holt cannot see the history this policy is about, so it is refusing to '
         + 'pass rather than reporting a green it did not verify. Fetch full refs: '
         + 'actions/checkout with `fetch-depth: 0`.',
       );
     }
-    if (opts.failOnUnlanded && unlanded.length) {
-      failures.push(`${unlanded.length} branch(es) hold unlanded work: ${unlanded.map((b) => `${b.name} (${b.fileCount} file(s)${b.ageDays != null ? `, ${b.ageDays}d old` : ''})`).join(', ')}`);
-    }
-    if (opts.maxAgeDays && overAge.length && !opts.failOnUnlanded) {
-      failures.push(`${overAge.length} unlanded branch(es) older than ${opts.maxAgeDays}d: ${overAge.map((b) => b.name).join(', ')}`);
-    }
-    if ((opts.failOnUnlanded || opts.maxAgeDays) && audit.unknown.length) {
-      failures.push(`${audit.unknown.length} branch(es) could not be classified (instrument failure) — refusing to pass policy on missing evidence`);
-    }
     const result = {
-      ok: failures.length === 0,
+      ok: flagFailures.length === 0,
       policy: { failOnUnlanded: !!opts.failOnUnlanded, maxAgeDays: opts.maxAgeDays ?? null, ignored: [...ignore] },
-      failures,
+      failures: flagFailures,
       unlanded: unlanded.map((b) => ({ name: b.name, files: b.fileCount, ageDays: b.ageDays })),
       contentLanded: audit.contentLanded.map((b) => b.name),
       unknown: audit.unknown.map((b) => b.name),
