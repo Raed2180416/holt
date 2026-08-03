@@ -798,7 +798,10 @@ function backslashEscapes(next, word, hasWord) {
  */
 const STDIN_SCRIPTS = new Set(['-', '/dev/stdin', '/dev/fd/0', '/proc/self/fd/0']);
 /** Words that open a compound command; the verb is whatever follows them. */
-const SHELL_KEYWORDS = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '!', '{', '}']);
+// `builtin` and `coproc` introduce a command exactly as `do` and `then` do — `builtin cd ../wt &&
+// rm -rf src/only-here.js` moved the working directory unseen, and `coproc rm -rf <file>` ran the
+// destroyer in a background subshell. Both were ALLOWED because the first word matched no verb.
+const SHELL_KEYWORDS = new Set(['do', 'then', 'else', 'elif', 'if', 'while', 'until', '!', '{', '}', 'builtin', 'coproc']);
 /**
  * Shell options that CONSUME the next word. Without them `bash -euo pipefail <<'E'` reads
  * `pipefail` as the script operand, concludes the shell is running a file, and calls the body a
@@ -2514,7 +2517,27 @@ function verbSpec(word) {
 }
 
 /** Transparent prefixes: they change how a command runs, never what it destroys. */
-const WRAPPERS = new Set(['sudo', 'command', 'nohup', 'time', 'env', 'exec', 'nice', 'ionice', 'doas']);
+const WRAPPERS = new Set([
+  'sudo', 'command', 'nohup', 'time', 'env', 'exec', 'nice', 'ionice', 'doas',
+  // A WRAPPER LIST IS AN ENUMERATION, AND AN ENUMERATION IS NEVER FINISHED. These were derived by
+  // agents attacking the carrier class rather than supplied from this file, and every one of them
+  // runs its operand as an ordinary command in the caller's own working directory:
+  //
+  //     setsid rm -rf <wt>/src/only-here.js      ->  ALLOW     (plain `rm` there: deny)
+  //     stdbuf -o0 rm -rf <wt>/src/only-here.js  ->  ALLOW
+  //     strace -f rm -rf <wt>/src/only-here.js   ->  ALLOW
+  //
+  // The worktree layer's path-containment net already caught these when the target was a whole
+  // worktree; it was the FILE layer that missed them, so the hole landed on one uncommitted file.
+  //
+  // Being wrong about a name here is safe in one direction only, which is why guessing is not
+  // allowed: a name that is NOT a wrapper resolves the verb to something no table matches, and the
+  // command behaves exactly as it does today. Stepping PAST a real verb is the dangerous direction,
+  // so nothing whose operand grammar is unclear goes in this set — those go in WRAPPER_OPERANDS
+  // with an explicit count, or nowhere at all.
+  'setsid', 'stdbuf', 'unbuffer', 'strace', 'ltrace', 'valgrind',
+  'unshare', 'nsenter', 'setpriv', 'runuser', 'catchsegv', 'watch',
+]);
 
 /**
  * Wrappers that take OPERANDS OF THEIR OWN before the command starts.
@@ -2540,6 +2563,8 @@ const WRAPPER_OPERANDS = new Map([
   ['taskset', 1],   // taskset [OPTS] MASK COMMAND
   ['chrt', 1],      // chrt [OPTS] PRIORITY COMMAND
   ['setarch', 1],   // setarch [OPTS] ARCH COMMAND
+  ['chroot', 1],    // chroot [OPTS] NEWROOT COMMAND
+  ['perf', 1],      // perf SUBCOMMAND [OPTS] COMMAND  — `stat`/`record`/`trace` is an operand
 ]);
 
 /** Options of the above that take a SEPARATE value (`timeout -k 5 30 cmd`), so it is not the verb. */
@@ -2562,12 +2587,34 @@ const WRAPPER_OPT_VALUE = new Set(['-k', '--kill-after', '-s', '--signal', '-c',
 const WRAPPER_OPTS = new Map([
   ['sudo', { value: new Set(['-u', '--user', '-g', '--group', '-p', '--prompt', '-C', '--close-from', '-h', '--host', '-r', '--role', '-t', '--type', '-U', '--other-user']), halt: new Set(['-l', '--list', '-e', '--edit', '-V', '--version']) }],
   ['doas', { value: new Set(['-u', '-C']), halt: new Set(['-L']) }],
-  ['env', { value: new Set(['-u', '--unset', '-C', '--chdir', '-S', '--split-string']), halt: new Set() }],
+  // `-S` / `--split-string` IS NOT A VALUE, IT IS THE COMMAND. Listing it here — which I did in the
+  // same pass that added this table — made skipWrappers consume `rm -rf <wt>` as the flag's operand
+  // and land past everything, so `env -S 'rm -rf <wt>'` was ALLOWED while plain `env rm -rf <wt>`
+  // was denied. A wrapper option that CARRIES the command belongs in the inline-program readers
+  // (see shellInlineProgram), never in a skip list: skipping is for things that are not the command.
+  ['env', { value: new Set(['-u', '--unset', '-C', '--chdir']), halt: new Set() }],
   ['nice', { value: new Set(['-n', '--adjustment']), halt: new Set() }],
   ['ionice', { value: new Set(['-c', '--class', '-n', '--classdata', '-p', '--pid']), halt: new Set() }],
   ['time', { value: new Set(['-o', '--output', '-f', '--format']), halt: new Set() }],
   ['exec', { value: new Set(['-a']), halt: new Set() }],
   ['command', { value: new Set(), halt: new Set(['-v', '-V', '--version']) }],
+  // The derived wrappers. Their own options are skipped so the verb after them is reached —
+  // `strace -f rm …` landed on `-f` and matched nothing. None of these has a "print it, do not run
+  // it" mode, so unlike `command -v` there is no halt entry to get wrong. Attached values
+  // (`stdbuf -o0`, `--reuid=1000`) are one token and need no entry.
+  ['strace', { value: new Set(['-o', '-e', '-p', '-s', '-E', '-u', '-a', '-b', '-P']), halt: new Set() }],
+  ['ltrace', { value: new Set(['-o', '-e', '-p', '-s', '-l', '-u']), halt: new Set() }],
+  ['stdbuf', { value: new Set(['-i', '-o', '-e', '--input', '--output', '--error']), halt: new Set() }],
+  ['setsid', { value: new Set(), halt: new Set() }],
+  ['unbuffer', { value: new Set(['-p']), halt: new Set() }],
+  ['valgrind', { value: new Set(['--log-file']), halt: new Set() }],
+  ['unshare', { value: new Set(['--map-user', '--map-group', '--setuid', '--setgid']), halt: new Set() }],
+  ['nsenter', { value: new Set(['-t', '--target', '-S', '--setuid', '-G', '--setgid', '-w', '--wd']), halt: new Set() }],
+  ['setpriv', { value: new Set(['--reuid', '--regid', '--groups', '--securebits', '--pdeathsig']), halt: new Set() }],
+  ['runuser', { value: new Set(['-u', '--user', '-g', '--group', '-s', '--shell']), halt: new Set(['-c', '--command']) }],
+  ['watch', { value: new Set(['-n', '--interval']), halt: new Set() }],
+  ['perf', { value: new Set(['-e', '-o', '-p', '-C']), halt: new Set() }],
+  ['chroot', { value: new Set(['--userspec', '--groups']), halt: new Set() }],
 ]);
 
 /**
@@ -2800,6 +2847,47 @@ export function lexSegments(command, depth = 0, offset = 0) {
       let j = i + 1;
       while (j < command.length && command[j] !== '"') {
         if (command[j] === '\\') { add(command[j + 1] ?? '', true); j += 2; continue; }
+
+        // A COMMAND SUBSTITUTION IS STILL A COMMAND INSIDE DOUBLE QUOTES. The branch below this
+        // block already lexes `$(…)` and `` `…` `` as commands in their own right — but only when
+        // they are UNQUOTED, because this loop consumed the quoted ones character by character and
+        // did nothing with them but set `bufLive`. The shell does not care about the quotes: it
+        // runs the substitution either way, and only the RESULT is quoted.
+        //
+        //     echo $(rm -rf <wt>/src/only-here.js)     ->  deny    (the unquoted branch saw it)
+        //     echo "$(rm -rf <wt>/src/only-here.js)"   ->  ALLOW   ← one pair of quotes
+        //     echo "`rm -rf <wt>/src/only-here.js`"    ->  ALLOW
+        //     git commit -m "$(rm -rf <wt>/src/only-here.js)"  ->  ALLOW
+        //
+        // Quoting a substitution is the NORMAL way to write one — unquoted is the mistake shellcheck
+        // warns about — so the guarded spelling was the unusual one and the everyday one was blind.
+        //
+        // The text stays in the enclosing word exactly as before, so the outer verb still reads as
+        // `echo` and no false "the command name comes from a substitution" appears; the inner
+        // program is appended as nested segments, which the cwd walk already ignores because a
+        // substitution runs in a subshell.
+        if ((command[j] === '$' && command[j + 1] === '(') || command[j] === '`') {
+          const bt = command[j] === '`';
+          const open = bt ? 1 : 2;
+          let k = j + open;
+          let dep = 1;
+          for (; k < command.length; k++) {
+            if (command[k] === '\\') { k++; continue; }
+            if (bt) { if (command[k] === '`') { dep = 0; break; } continue; }
+            if (command[k] === '(') dep++;
+            else if (command[k] === ')') { dep--; if (dep === 0) break; }
+          }
+          const inner = command.slice(j + open, k);
+          if (depth < 4 && inner.trim()) {
+            for (const seg of lexSegments(inner, depth + 1, offset + j + open)) nested.push({ ...seg, nested: true });
+          }
+          add(command.slice(j, Math.min(k + 1, command.length)), false);
+          has = true;
+          bufLive = true;   // its value is produced at runtime, exactly as in the unquoted branch
+          j = Math.min(k, command.length - 1) + 1;
+          continue;
+        }
+
         // Double quotes still expand `$NAME`, `${NAME}`, `$(…)` and backticks — the shell resolves
         // them at runtime, so a target that carries one is not a target holt can see.
         if (command[j] === '`' || (command[j] === '$' && /[A-Za-z_{(]/.test(command[j + 1] ?? ''))) bufLive = true;
@@ -3711,7 +3799,24 @@ export function resolveFileTargets(command) {
       continue;
     }
 
-    const spec = verbSpec(w[0]);
+    // THE VERB IS THE PROGRAM, NOT THE PATH IT WAS SPELLED WITH. This read the raw word while its
+    // own sibling — resolveDestructiveUtility, one screen up — already reads
+    // `path.basename(w[0]).replace(/\.exe$/i, '')`. Two readers of "what is the verb", and only one
+    // of them knew that a program can be named by its path:
+    //
+    //     rm -rf <wt>/src/only-here.js         ->  deny
+    //     /bin/rm -rf <wt>/src/only-here.js    ->  ALLOW    same syscall, same file, gone
+    //     /usr/bin/git -C <wt> reset --hard    ->  ALLOW
+    //     ./node_modules/.bin/rimraf <wt>/…    ->  ALLOW
+    //
+    // The FILE layer was the one that missed it; the worktree layer's path-containment net still
+    // caught `/bin/rm -rf <wt>` (the whole worktree). So the hole landed exactly on "one
+    // uncommitted file", which is the case the product exists for. Twelve confirmed misses, and the
+    // cheapest possible bypass of a guard that reads command text: type the absolute path.
+    //
+    // `.exe` is stripped for the same reason it is stripped in the sibling — on Windows the verb is
+    // spelled `rm.exe`, and a table keyed on `rm` would never match it.
+    const spec = verbSpec(path.basename(w[0]).replace(/\.exe$/i, ''));
     if (!spec) continue;
     const rest = w.slice(1);
     const restP = wp.slice(1);
