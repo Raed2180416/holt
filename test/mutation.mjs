@@ -434,7 +434,7 @@ export const MUTATIONS = [
     id: 'journal-anonymous',
     defect: 'journal entries lose their actor, so an audit trail records what and when but never who',
     file: 'src/journal.mjs',
-    find: '    const line = { at: new Date().toISOString(), actor: actorOf({ env }), ...clipEventDeep(event) };',
+    find: '    const line = { at: new Date().toISOString(), ...clipEventDeep(event), actor: actor ?? currentActor() };',
     replace: '    const line = { at: new Date().toISOString(), ...clipEventDeep(event) };',
     tests: ['test/e2e/team.test.mjs'],
   },

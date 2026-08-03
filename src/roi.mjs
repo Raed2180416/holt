@@ -26,6 +26,11 @@ export function summarizeJournal(events, { now = null } = {}) {
   const count = (a) => list.filter((e) => e.action === a).length;
 
   const blocked = count('blocked');                 // destructive commands the hook refused
+  // Attempts holt could NOT verify, so the host decided. Reported because a reviewer needs it,
+  // and deliberately NOT counted as a prevented loss: holt did not prevent anything there — it
+  // said so and stepped aside. Folding these into the headline would be exactly the inflated
+  // safety number this file exists to refuse.
+  const unverified = count('unverified');
   const protectedWt = count('protect');             // worktrees locked because they held unique work
   const rescued = count('rescue');                  // unique work captured to a verifiable ref
   const cleaned = count('clean-remove') + count('removed'); // disposable worktrees reclaimed
@@ -49,6 +54,7 @@ export function summarizeJournal(events, { now = null } = {}) {
     preventedLosses,
     breakdown: {
       destructiveCommandsBlocked: blocked,
+      attemptsHoltCouldNotVerify: unverified,
       workstreamsProtected: protectedWt,
       workstreamsRescued: rescued,
       worktreesReclaimed: cleaned,
@@ -61,6 +67,9 @@ export function summarizeJournal(events, { now = null } = {}) {
         ? `holt is protecting ${protectedWt} workstream(s) that hold work found nowhere else`
         : 'no prevented losses recorded yet — the record starts the first time something is protected, rescued, or refused'),
     note: 'Every figure here is a count of events that actually fired, taken from the journal. '
+      + 'estimatedHoursSaved is a conservative planning figure (2h per prevented loss, 15m per '
+      + 'reclaim), not a measurement. preventedLosses counts events that actually fired, and '
+      + 'EXCLUDES attemptsHoltCouldNotVerify — holt did not prevent those, it declined to judge them. '
       + 'Audit them with `holt journal --export json`.',
   };
 }

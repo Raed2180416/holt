@@ -21,6 +21,7 @@ import { discover, repoAbsenceError } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze } from '../analyze.mjs';
 import { branchAudit } from '../branches.mjs';
+import { git } from '../git.mjs';
 import { checkEntitlement } from '../license.mjs';
 import { samePathAsync } from '../paths.mjs';
 

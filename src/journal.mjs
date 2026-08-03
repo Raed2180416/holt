@@ -10,6 +10,12 @@
  * The journal is best-effort BY DESIGN: failing to record must never abort the action itself
  * (the action's own verification already ran and the state change is real either way), but the
  * failure must be LOUD on stderr — a silent audit gap is worse than a crash.
+ *
+ * EVERY LINE CARRIES ITS ACTOR (see src/actor.mjs). "who deleted that worktree" was in the
+ * header comment of this file as a thing the journal answered, and it did not: an event was
+ * `{at, action, id, path}` with no agent, no session, nothing. Identity is stamped here, in ONE
+ * place, so no future call site can forget it — and it is stamped as `unknown` when unknown,
+ * which is a recorded answer rather than a missing field.
  */
 
 import fs from 'node:fs/promises';
@@ -17,6 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { git } from './git.mjs';
 import { mark } from './untrusted.mjs';
+import { currentActor, UNKNOWN } from './actor.mjs';
 
 /**
  * Where the audit trail lives, or `null` when git cannot say.
@@ -42,42 +49,6 @@ async function journalPath(cwd) {
   if (!dir || !path.isAbsolute(dir)) return null;
   return path.join(dir, 'holt', 'journal.jsonl');
 }
-
-/**
- * WHO — the third of the three facts an audit trail owes a reviewer, next to WHAT and WHEN.
- *
- * The journal recorded what happened and when, and never who. In a repository where a human and
- * several agents all act, "a protection was released at 03:12" is not an audit record, it is a
- * timestamp. So every event carries an actor, stamped centrally HERE rather than at each call
- * site: an attribution that depends on every new action remembering to add it is an attribution
- * with a hole in it — the same defect as journalling four actions out of five.
- *
- * NOTHING IS INVENTED. Each field is a measurement or the literal string 'unknown'. A fabricated
- * identity in an audit log is worse than an admitted gap, because a reviewer cannot tell the two
- * apart.
- *
- * The agent identity is read from environment variable NAMES, never by scanning environment
- * VALUES for something that looks like a session id. That distinction is deliberate: an audit
- * file must not become the place secrets land. A name qualifies when it ENDS in `_SESSION_ID` or
- * `_AGENT_ID` — the convention every agent host that publishes an identity already follows — so
- * a host holt has never heard of is attributed with no code change, and the agent NAME is
- * derived from the variable's own prefix rather than from a list holt has to maintain.
- * `HOLT_ACTOR` overrides everything, because a CI system knows its own identity better than any
- * heuristic can.
- */
-const AGENT_ID_VAR = /^([A-Z0-9]+(?:_[A-Z0-9]+)*?)_(?:SESSION_ID|AGENT_ID)$/;
-const MAX_FIELD = 200;
-
-/**
- * Namespaces the OPERATING SYSTEM and desktop own. They follow the very same naming convention
- * and are NOT actors: `XDG_SESSION_ID` is systemd-logind's login session, `DBUS_SESSION_*` the
- * message bus. Recording "agent: xdg" would be precisely the invented identity this whole block
- * exists to refuse. Note what the list contains — OS-owned namespaces, never agent names. A new
- * agent host needs no entry here, which is the property that stops it rotting.
- */
-const OS_SESSION_NAMESPACES = new Set([
-  'XDG', 'DBUS', 'DESKTOP', 'GNOME', 'KDE', 'SSH', 'TERM', 'WINDOW', 'LOGIN', 'SYSTEMD', 'X11',
-]);
 
 /**
  * Neutralise every terminal/JSONL control character in one place.
@@ -110,6 +81,8 @@ const OS_SESSION_NAMESPACES = new Set([
  * It also neutralises bidi and zero-width characters, which the old regex did not touch at all.
  */
 const stripControls = (v) => mark(v, { max: Number.MAX_SAFE_INTEGER });
+
+const MAX_FIELD = 200;
 
 /** One line, bounded. Control characters would break the JSONL record they are written into. */
 const clip = (v) => {
@@ -147,6 +120,41 @@ function clipEventDeep(value, depth = 0) {
   }
   return value;   // numbers, booleans, null preserved so forced:true / overrideReason:null survive
 }
+
+/**
+ * WHO — the third of the three facts an audit trail owes a reviewer, next to WHAT and WHEN.
+ *
+ * The journal recorded what happened and when, and never who. In a repository where a human and
+ * several agents all act, "a protection was released at 03:12" is not an audit record, it is a
+ * timestamp. So every event carries an actor, stamped centrally HERE rather than at each call
+ * site: an attribution that depends on every new action remembering to add it is an attribution
+ * with a hole in it — the same defect as journalling four actions out of five.
+ *
+ * NOTHING IS INVENTED. Each field is a measurement or the literal string 'unknown'. A fabricated
+ * identity in an audit log is worse than an admitted gap, because a reviewer cannot tell the two
+ * apart.
+ *
+ * The agent identity is read from environment variable NAMES, never by scanning environment
+ * VALUES for something that looks like a session id. That distinction is deliberate: an audit
+ * file must not become the place secrets land. A name qualifies when it ENDS in `_SESSION_ID` or
+ * `_AGENT_ID` — the convention every agent host that publishes an identity already follows — so
+ * a host holt has never heard of is attributed with no code change, and the agent NAME is
+ * derived from the variable's own prefix rather than from a list holt has to maintain.
+ * `HOLT_ACTOR` overrides everything, because a CI system knows its own identity better than any
+ * heuristic can.
+ */
+const AGENT_ID_VAR = /^([A-Z0-9]+(?:_[A-Z0-9]+)*?)_(?:SESSION_ID|AGENT_ID)$/;
+
+/**
+ * Namespaces the OPERATING SYSTEM and desktop own. They follow the very same naming convention
+ * and are NOT actors: `XDG_SESSION_ID` is systemd-logind's login session, `DBUS_SESSION_*` the
+ * message bus. Recording "agent: xdg" would be precisely the invented identity this whole block
+ * exists to refuse. Note what the list contains — OS-owned namespaces, never agent names. A new
+ * agent host needs no entry here, which is the property that stops it rotting.
+ */
+const OS_SESSION_NAMESPACES = new Set([
+  'XDG', 'DBUS', 'DESKTOP', 'GNOME', 'KDE', 'SSH', 'TERM', 'WINDOW', 'LOGIN', 'SYSTEMD', 'X11',
+]);
 
 /** The automation identity the environment declares, or null when it declares none. */
 function agentFrom(env) {
@@ -195,8 +203,26 @@ export function actorOf({ env = process.env } = {}) {
   };
 }
 
-/** Append one event. Returns {ok} and never throws. */
-export async function appendEvent(cwd, event, { env = process.env } = {}) {
+/**
+ * The actor shape a reader can always rely on. A journal written before identity existed has no
+ * `actor` key at all; normalising on READ rather than rewriting history means an old line is
+ * reported as genuinely unattributed instead of being back-filled with today's agent — which
+ * would be fabricating attribution for an action holt did not observe.
+ */
+export const UNATTRIBUTED = Object.freeze({
+  agent: UNKNOWN, agentVersion: null, session: null, invocation: null,
+  via: UNKNOWN, confidence: 'unknown', evidence: [],
+});
+
+/**
+ * Append one event. Returns {ok} and never throws.
+ *
+ * @param {string} cwd
+ * @param {object} event
+ * @param {object} [opts]
+ * @param {object} [opts.actor] explicit actor; defaults to the process's resolved actor
+ */
+export async function appendEvent(cwd, event, { actor = null } = {}) {
   try {
     const p = await journalPath(cwd);
     // No resolvable journal means no journal. Writing to a relative fallback would put an audit
@@ -212,7 +238,10 @@ export async function appendEvent(cwd, event, { env = process.env } = {}) {
     // The event's own strings carry attacker-controlled names (worktree id, branch, path); neutralise
     // control characters in all of them centrally, exactly as the actor is neutralised, so nothing an
     // action forgets to sanitise can forge a line in the rendered audit trail. See clipEventDeep.
-    const line = { at: new Date().toISOString(), actor: actorOf({ env }), ...clipEventDeep(event) };
+    // The actor is written LAST so an event that (wrongly) carried its own `actor` key cannot
+    // overwrite the resolved one — attribution is not something a caller gets to spoof by
+    // shape collision.
+    const line = { at: new Date().toISOString(), ...clipEventDeep(event), actor: actor ?? currentActor() };
     await fs.appendFile(p, `${JSON.stringify(line)}\n`, 'utf8');
     return { ok: true };
   } catch (e) {
@@ -234,6 +263,12 @@ export async function readJournal(cwd) {
     throw e;
   }
   return raw.split('\n').filter(Boolean).map((line) => {
-    try { return JSON.parse(line); } catch { return { corrupt: line }; }
+    let e;
+    try { e = JSON.parse(line); } catch { return { corrupt: line }; }
+    if (!e || typeof e !== 'object') return { corrupt: line };
+    // Every reader gets the same shape, and an event predating identity is reported as
+    // unattributed rather than as a missing key some caller will forget to handle.
+    if (!e.actor || typeof e.actor !== 'object') e.actor = { ...UNATTRIBUTED };
+    return e;
   });
 }

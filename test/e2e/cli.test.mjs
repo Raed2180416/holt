@@ -69,7 +69,7 @@ test('CLI: every command is REACHABLE and exits 0', async (t) => {
   const readOnly = [
     ['status'], ['risk'], ['collisions'], ['duplicates'], ['plan'],
     ['impact'], ['graph'], ['doctor'], ['brief'], ['rescued'],
-    ['context', 'holds'],
+    ['context', 'holds'], ['journal'], ['forensics'], ['forensics', 'holds'],
   ];
   for (const args of readOnly) {
     const r = await holt([...args, '--cwd', fx.root, '--json'], fx.root);
