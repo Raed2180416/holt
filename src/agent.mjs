@@ -2297,7 +2297,25 @@ export function resolveCommand(command) {
   const boundLoopVars = boundLoopVariables(command);
   const unresolved = matches.filter((m) => m.unresolved && ![...boundLoopVars].some((name) => m.unresolved.includes(`$${name}`)))
     .map((m) => m.unresolved);
-  if (hasAmbiguousDirectoryChange(command)) unresolved.push('ambiguous shell working-directory change');
+  // AN UNKNOWABLE `cd` ONLY MATTERS IF SOMETHING ACTS ON THE FILESYSTEM FROM THERE.
+  //
+  // This used to flag the command whenever any `cd` target could not be resolved statically, and
+  // assessCommand asks on ANY unresolved entry — so `cd $(pwd)` and `cd "$(dirname "$0")"`, which
+  // destroy nothing and are two of the most common lines in shell, were refused. In a
+  // non-interactive agent session `ask` degrades to a hard block with no escape, and over-refusal
+  // is a shipping defect exactly as under-protection is.
+  //
+  // The reason the flag exists is `cd $(unknowable) && rm -rf .` — a destroyer judged against the
+  // wrong tree. That danger requires a destroyer, or a file operand, to be present at all: with
+  // neither, the shell lands somewhere holt cannot name and nothing happens there. So the flag is
+  // now raised when the command carries something whose effect depends on that directory, and a
+  // bare `cd` is no longer refused for being unpredictable about a place nothing is done in.
+  //
+  // A fix that only spelled out `$(git rev-parse --show-toplevel)` would leave `$(pwd)`,
+  // `$(dirname "$0")` and every other spelling refused — the instance, not the class.
+  if (hasAmbiguousDirectoryChange(command) && (matches.length > 0 || filePaths.length > 0)) {
+    unresolved.push('ambiguous shell working-directory change');
+  }
   for (const target of filePaths) {
     if (target.unresolved && ![...boundLoopVars].some((name) => target.unresolved.includes(`$${name}`))) {
       unresolved.push(target.unresolved);
@@ -5404,15 +5422,23 @@ async function assessWorktreeCommand(command, cwd, ctx) {
   const callerCwd = cwd;
   const commandCwd = commandWorkingDirectory(command, callerCwd);
   if (commandCwd === null) {
-    return {
-      decision: 'ask',
-      kind: structure.matches[0]?.kind ?? 'unresolved directory change',
-      targets: [],
-      files: [],
-      reason: 'holt could not resolve the command working directory before execution. Confirm manually before proceeding.',
-    };
-  }
-  cwd = commandCwd;
+    // THE SECOND DOOR TO THE SAME REFUSAL, and the reason `cd $(pwd)` was still refused after the
+    // unresolved-list fix above. An unknowable working directory is only dangerous when something
+    // in the command ACTS from it: `cd $(unknowable) && git reset --hard` must be judged against a
+    // tree holt cannot name, so it asks. A bare `cd` does nothing in the place it lands.
+    if (structure.matches.length) {
+      return {
+        decision: 'ask',
+        kind: structure.matches[0]?.kind ?? 'unresolved directory change',
+        targets: [],
+        files: [],
+        reason: 'holt could not resolve the command working directory before execution. Confirm manually before proceeding.',
+      };
+    }
+    // Keep the CALLER's tree rather than falling through with null — the remaining layers still
+    // run, they simply run against the directory the agent was actually in.
+    cwd = callerCwd;
+  } else cwd = commandCwd;
   if (structure.unresolved.length) {
     return {
       decision: 'ask',

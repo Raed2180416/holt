@@ -2270,6 +2270,47 @@ test('SUBSTITUTION: arithmetic expansion is data, while nested commands remain g
   }
 });
 
+test('SUBSTITUTION: an unknowable `cd` is refused for what runs AFTER it, not for existing', async (t) => {
+  // THE CLASS, not the one spelling. Recognising `$(git rev-parse --show-toplevel)` by name left
+  // every other way of writing the same harmless line refused — and `cd "$(dirname "$0")"` is one
+  // of the most common lines in shell. In a non-interactive agent session `ask` is a hard block
+  // with no escape, so this was a daily-driver defect, not a cosmetic one.
+  //
+  // The danger the rule exists for is `cd $(unknowable) && rm -rf .`: a destroyer judged against a
+  // tree holt cannot name. That needs a destroyer to be PRESENT. A bare `cd` does nothing wherever
+  // it lands, so it is allowed — and the moment anything destructive rides along it is refused
+  // again. Both halves are asserted here, because fixing one by breaking the other is not a fix.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const protectedPath = fx.wt('uniqueUncommitted');
+
+  for (const command of [
+    'cd $(pwd)',
+    'cd "$(pwd)"',
+    'cd $(dirname "$0")',
+    'cd "$(dirname "$0")"',
+    'cd $(git rev-parse --show-toplevel)',
+    'cd $(pwd) && ls -la',
+    'cd $(dirname "$0") && npm test',
+  ]) {
+    const verdict = await assessCommand(command, fx.root);
+    assert.equal(verdict.decision, 'allow',
+      `a cd to an unresolvable directory destroys nothing and must be allowed: ${command}`);
+  }
+
+  for (const command of [
+    `cd $(pwd) && rm -rf ${protectedPath}`,
+    `cd "$(dirname "$0")" && rm -rf ${protectedPath}`,
+    'cd $(pwd) && git reset --hard',
+    'cd $(pwd) && git clean -fd',
+    `cd $(rm -rf ${protectedPath}) && echo done`,
+  ]) {
+    const verdict = await assessCommand(command, fx.root);
+    assert.ok(verdict && verdict.decision !== 'allow',
+      `an unresolvable cd carrying a destroyer must still be refused: ${command}`);
+  }
+});
+
 /* -------------------------- a substitution in an ARGUMENT is not a substituted VERB ---- */
 
 /**

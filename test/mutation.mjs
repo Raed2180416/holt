@@ -745,8 +745,8 @@ export const MUTATIONS = [
     id: 'cd-ambiguity-allowed',
     defect: 'cd - and popd are guessed instead of asking when the prior directory is not statically known',
     file: 'src/agent.mjs',
-    find: "  if (hasAmbiguousDirectoryChange(command)) unresolved.push('ambiguous shell working-directory change');",
-    replace: "  if (false) unresolved.push('ambiguous shell working-directory change');",
+    find: "  if (hasAmbiguousDirectoryChange(command) && (matches.length > 0 || filePaths.length > 0)) {",
+    replace: "  if (false) { // mutated: an unknowable cd is guessed instead of asked about",
     tests: ['test/e2e/integration.test.mjs'],
   },
   {
