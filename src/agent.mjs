@@ -1250,6 +1250,54 @@ function inlineShellPrograms(command) {
     //
     // `trap - EXIT` RESETS a handler and `trap '' EXIT` IGNORES the signal; neither runs anything,
     // so neither is a program. Options (`-l`, `-p`) are skipped to find the action operand.
+    // AN OPTION'S VALUE CAN BE A PROGRAM, AND AN ENVIRONMENT VARIABLE'S VALUE CAN BE A PROGRAM.
+    //
+    // Everything above looks for a SHELL named in argv. These carriers name no shell at all — the
+    // program is a string handed to a tool that will run it, and the tool is one nobody would call
+    // dangerous. Measured, every one allowed:
+    //
+    //     git -c core.pager='rm -rf <wt>' log       GIT_EDITOR='rm -rf <wt>' git commit --amend
+    //     git rebase -x 'rm -rf <wt>' HEAD~3        PAGER='rm -rf <wt>' git log
+    //     su -c 'rm -rf <wt>'                       tar -xf a.tar --to-command='rm -rf <wt>'
+    //     npx -c 'rm -rf <wt>'                      nodemon --exec 'rm -rf <wt>'
+    //     powershell -Command "Remove-Item -Recurse -Force <wt>"
+    //
+    // This is the class the shell-parser question turns on. A grammar parses `git -c core.pager=…
+    // log` perfectly and correctly answers "the command is `git`" — the destroyer is a STRING IN AN
+    // ARGUMENT, and no parser can know that this particular string will be executed. Only a table
+    // of which tools run which of their own arguments can, which is why an AST swap closes ~10% of
+    // these misses and this does not get easier by parsing harder.
+    //
+    // The value is handed to the same recursion every other inline program uses, so a destroyer in
+    // there is assessed exactly as if it had been typed on the line.
+    const carrier = PROGRAM_OPTS.get(path.basename(w[0] ?? ''));
+    if (carrier) {
+      for (let j = 1; j < w.length; j++) {
+        const eq = w[j].indexOf('=');
+        // `--exec=CMD` and git's `-c key=CMD` both carry the program attached to the option.
+        if (eq > 0) {
+          const key = w[j].slice(0, eq);
+          const val = w[j].slice(eq + 1);
+          if (carrier.has(key) || (w[j - 1] === '-c' && GIT_PROGRAM_CONFIG.test(key))) {
+            if (val && val.length < command.length) out.push(val);
+          }
+          continue;
+        }
+        if (carrier.has(w[j]) && w[j + 1] != null) {
+          if (w[j + 1].length < command.length) out.push(w[j + 1]);
+          j++;
+        }
+      }
+    }
+    // `NAME=program cmd …` — the assignment is a prefix of THIS command, so the program runs now.
+    for (const word of seg.words) {
+      const eq = word.indexOf('=');
+      if (eq <= 0) break;                       // assignments only ever precede the verb
+      const name = word.slice(0, eq);
+      const val = word.slice(eq + 1);
+      if (PROGRAM_ENV.has(name) && val.trim() && val.length < command.length) out.push(val);
+    }
+
     if (w[0] === 'trap') {
       const at = w.findIndex((word, j) => j > 0 && !word.startsWith('-'));
       const action = at > 0 ? w[at] : null;
@@ -2460,6 +2508,30 @@ const FILE_VERBS = {
   // `tee f` truncates f; `tee -a f` does not.
   tee: { role: 'truncate', valueOpts: new Set(), skipIf: ['-a', '--append'] },
   dd: { role: 'dd', valueOpts: new Set() },
+
+  // `sed -i` AND `perl -pi` ARE DELIBERATELY NOT HERE, AND THIS IS THE INTERESTING ENTRY.
+  //
+  // An adversarially-derived corpus classified them as destroyers, and mechanically that is
+  // arguable: `sed -i 's/.*//' f` does empty a file, and a bad regex over the only copy of
+  // something loses it. Adding them cost TWO FALSE POSITIVES immediately, both on this repository's
+  // own README while it had uncommitted edits:
+  //
+  //     sed -i "s/foo/bar/g" README.md            ->  refused
+  //     sed -i 's/it'\''s/its/' README.md         ->  refused
+  //
+  // An in-place substitution is an EDIT, not a destruction. The file still has content afterwards;
+  // the operation transforms it the way an editor writing the buffer does, and holt does not block
+  // `vim README.md` either. What this layer refuses is content REMOVED — deleted, emptied, moved
+  // out — and `sed -i` is on the other side of that line no matter how bad the regex is.
+  //
+  // Refusing every in-place refactor is precisely the friction that gets a guard switched off, and
+  // a guard that is switched off protects nothing. So the miss is accepted, knowingly, and named
+  // here so the next person does not "fix" it: the two corpora genuinely disagree, and the
+  // false-positive one wins, because over-refusal is the failure that cannot be recovered from.
+  //
+  // `gzip` IS here, and the difference is exactly the line above: `gzip f` REPLACES f with f.gz and
+  // the original path is gone. `-k`/`-c`/`-d`/`-l`/`-t` all keep it.
+  gzip: { role: 'delete', valueOpts: new Set(['-S', '--suffix']), skipIf: ['-k', '--keep', '-c', '--stdout', '--to-stdout', '-d', '--decompress', '-l', '--list', '-t', '--test'] },
 };
 
 /**
@@ -2515,6 +2587,52 @@ function verbSpec(word) {
   const w = word.toLowerCase();
   return Object.hasOwn(WIN_FILE_VERBS, w) ? WIN_FILE_VERBS[w] : null;
 }
+
+/**
+ * Options whose VALUE is a shell program the tool will run. See the use site in
+ * inlineShellPrograms for why no parser can supply this and a table has to.
+ *
+ * Enumeration again, and the same asymmetry makes it safe to be incomplete: a name missing here
+ * behaves exactly as today, while a name wrongly present sends a string that is NOT a program into
+ * an assessment that will find no destructive verb in it and allow it. Nothing here can refuse a
+ * command that does not contain a destroyer.
+ */
+const PROGRAM_OPTS = new Map([
+  ['su', new Set(['-c', '--command'])],
+  ['script', new Set(['-c', '--command'])],
+  ['npx', new Set(['-c', '--call'])],
+  ['npm', new Set(['-c', '--call'])],
+  ['pnpm', new Set(['-c'])],
+  ['yarn', new Set(['-c'])],
+  ['nodemon', new Set(['--exec', '-x'])],
+  ['git', new Set(['-x', '--exec', '--tree-filter', '--index-filter', '--msg-filter', '--commit-filter', '--parent-filter', '--tag-name-filter'])],
+  ['tar', new Set(['--to-command'])],
+  ['rsync', new Set(['-e', '--rsh'])],
+  ['mapfile', new Set(['-C'])],
+  ['readarray', new Set(['-C'])],
+  ['powershell', new Set(['-Command', '-c', '-EncodedCommand'])],
+  ['pwsh', new Set(['-Command', '-c'])],
+  ['vim', new Set(['-c', '--cmd'])],
+  ['vi', new Set(['-c'])],
+  ['ex', new Set(['-c'])],
+  ['nvim', new Set(['-c', '--cmd'])],
+  ['systemd-run', new Set(['-p'])],
+  ['ssh', new Set([])],
+  ['find', new Set(['-execdir'])],
+]);
+
+/** `git -c <key>=<program>`: the config keys whose value git executes. */
+const GIT_PROGRAM_CONFIG = /(^|\.)(pager|editor|sshCommand|askpass|helper|textconv|command|hooksPath|external)$/i;
+
+/**
+ * Environment variables whose value is a program. `GIT_EDITOR='rm -rf <wt>' git commit --amend`
+ * names no shell and no destructive verb in command position — git runs the string for you.
+ */
+const PROGRAM_ENV = new Set([
+  'GIT_EDITOR', 'GIT_SEQUENCE_EDITOR', 'GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_PAGER', 'GIT_ASKPASS',
+  'GIT_EXTERNAL_DIFF', 'GIT_PROXY_COMMAND',
+  'PAGER', 'EDITOR', 'VISUAL', 'PROMPT_COMMAND', 'BASH_ENV', 'ENV', 'SHELL',
+]);
 
 /** Transparent prefixes: they change how a command runs, never what it destroys. */
 const WRAPPERS = new Set([
