@@ -2363,9 +2363,39 @@ function newProbeCtx(cwd) {
  * rm rule costs nothing on the overwhelmingly common case of deleting build output.
  */
 async function targetIsWorktree(target, cwd, ctx) {
-  const abs = await canonicalPath(path.resolve(cwd || process.cwd(), target));
+  const base = cwd || process.cwd();
   const roots = await ctx.worktreeRoots();
   if (roots === null) return true; // cannot tell -> fall through to the full check, never skip silently
+
+  // A GLOB IS NOT A PATH, AND RESOLVING IT AS ONE MADE THIS PRE-CHECK STAND ASIDE FOR EVERY GLOB.
+  //
+  // `path.resolve` turns `<wt>/dup-*` into the literal string `<wt>/dup-*`, which no worktree root
+  // is ever equal to or under — so this returned false and the whole WORKTREE LAYER declined to
+  // look at any globbed target at all. That was invisible for years because the FILE layer catches
+  // the same command whenever the content is genuinely unique; it only surfaces where the file
+  // layer has nothing to say and the worktree layer is the only one that could answer:
+  //
+  //     rm -rf <wt>/dup-a <wt>/dup-b   ->  deny   joint effect — both copies of a duplicated pair
+  //     rm -rf <wt>/dup-*              ->  ALLOW  the same two worktrees, the shorter spelling
+  //
+  // Each of dup-a and dup-b is individually disposable BECAUSE THE OTHER HOLDS THE CONTENT, so the
+  // file layer allows both and only the joint-effect check can refuse. It never ran, because the
+  // layer that computes the target set had already returned null.
+  //
+  // Matching happens in PATTERN space against the roots list this function already has in hand —
+  // `rootsReachedFromAbove` is the same helper the file layer uses for `../wt-*`. So the hot path
+  // is untouched: `rm -rf dist/*` matches no root, falls through to the literal test below, and
+  // stands aside without paying for a scan, exactly as before.
+  if (isGlobPattern(target)) {
+    const prefix = globFreePrefix(target);
+    const globPrefixAbs = await canonicalPath(path.resolve(base, unescapeGlob(prefix)));
+    const suffix = target
+      .slice((prefix === '.' && !target.startsWith('.')) ? 0 : prefix.length)
+      .replace(/^\/+/, '');
+    if (rootsReachedFromAbove(roots, globPrefixAbs, suffix).length) return true;
+  }
+
+  const abs = await canonicalPath(path.resolve(base, target));
   for (const wt of roots) {
     // Dangerous iff the target IS a worktree root, or CONTAINS one (deleting a parent directory
     // takes the worktrees under it with it). Deleting something INSIDE a worktree — the common
@@ -4955,7 +4985,22 @@ async function assessWorktreeCommand(command, cwd, ctx) {
   // reasoning. A guard that is slow on ordinary work gets uninstalled, and an uninstalled guard
   // protects nothing, so this costs exactly as much as it did before on everything that cannot be
   // affected.
-  if (reached.length && structure.resolvedPaths?.length > 1) {
+  // A GLOB IS ONE PATH THAT NAMES MANY, so counting paths is the wrong question for it. The length
+  // test asks "did the user write more than one target", and a glob writes exactly one:
+  //
+  //     rm -rf <dir>/dup-a <dir>/dup-b   ->  deny    two paths, union runs
+  //     rm -rf <dir>/dup-*               ->  ALLOW   one path, union skipped   <- this
+  //
+  // Both destroy both copies of a duplicated pair, and the glob is the shorter thing to type. It is
+  // also the exact spelling of the mergify incident, so this is not a corner: `rm -rf ../wt-*` is
+  // how a cleanup sweep gets written when the worktrees share a prefix.
+  //
+  // targetWorkstreams already expands a pattern against every known workstream — the machinery was
+  // there and the gate never let it run. `reached.length` still guards the hot path on its own: a
+  // glob that resolved to NO workstream (`rm -rf build/*`) costs exactly what it did before,
+  // because nothing can be lost jointly when nothing was reached in the first place.
+  const globTarget = structure.resolvedPaths?.some((p) => p?.path && isGlobPattern(p.path));
+  if (reached.length && (structure.resolvedPaths?.length > 1 || globTarget)) {
     try {
       const { report: r } = await cachedReport(cwd, { includePrimary: true });
       const known = new Set(reached.map((s) => s?.id).filter(Boolean));
