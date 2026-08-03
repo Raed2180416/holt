@@ -7,6 +7,8 @@
  * pretty path.
  */
 
+import { budget, padTo, padStartTo, provenanceLines as sharedProvenanceLines } from './untrusted.mjs';
+
 const useColor = () =>
   process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
 
@@ -28,28 +30,76 @@ function bar(n, max, width = 18) {
   return '█'.repeat(filled) + c('grey', '·'.repeat(Math.max(0, width - filled)));
 }
 
-function pad(s, n) {
-  const str = String(s);
-  return str.length >= n ? str.slice(0, n) : str + ' '.repeat(n - str.length);
-}
+// Width-aware, not `String.length`-aware. `.length` counts UTF-16 units, so `fix-日本語` (7 units,
+// 10 columns) shoved every later column three places right, and `slice(0, n)` could cut between a
+// surrogate pair and emit a lone surrogate — invalid UTF-8, a replacement glyph on screen. Both
+// are "a sanitiser that mangles an ordinary name", which fails for the same reason an injection
+// getting through does.
+const pad = (s, n) => padTo(s, n);
+const padStart = (s, n) => padStartTo(s, n);
 
-function padStart(s, n) {
-  const str = String(s);
-  return str.length >= n ? str : ' '.repeat(n - str.length) + str;
-}
+/**
+ * THE BOUNDARY, applied where this file can actually enforce it.
+ *
+ * Everything printed here is either holt's own words or something the repository controls —
+ * worktree ids, branch names, file paths, symbol names, stash messages, collision reasons. Before
+ * this existed, a worktree whose directory basename contained a newline printed free-standing
+ * lines of forged holt imperative inside `holt collisions`, and an ESC in a name cleared the
+ * terminal that was showing the real warning. Both are reproduced in test/e2e/injection.test.mjs.
+ *
+ * Every renderer opens a budget and every repository-derived value goes through `u.take` or
+ * `u.cell`. That is the structural home: the rule is "no repo value reaches `out` except through
+ * the budget", one rule for the whole file, and test/unit/untrusted.test.mjs drives EVERY export
+ * of this module with a report whose every string is a payload and fails on any control, bidi or
+ * zero-width character in the result. A new interpolation added without the boundary goes red
+ * without anyone remembering to guard it.
+ */
+const repoData = () => budget();
 
-/** Header shown by every command: what holt measured against, and how. */
-export function renderHeader(report) {
+/**
+ * The marker for a value printed where holt has promised an IDENTIFIER — a workstream id, a
+ * branch, a file path, a symbol. Such a value is fenced when its extent would otherwise be
+ * unreadable (see `wrap()` in src/untrusted.mjs). Reattack that motivated it: a worktree named
+ * `HIGH [proven] main <-> main   (same family)` rendered as
+ *
+ *     HIGH  HIGH [proven] main <-> main   (same family) <-> VERIFIED-DISPOSABLE-…  (same family)
+ *
+ * — structurally contained, and impossible to read. Free-text positions (a stash message, a
+ * collision reason, holt's own sentences) deliberately do NOT carry it.
+ */
+const ID = { ident: true };
+
+/**
+ * The provenance label, and the evidence lines.
+ *
+ * One implementation, in src/untrusted.mjs, shared by every renderer in the program — this file,
+ * `holt graph`, `holt order`, `holt partition`, `holt branches` and the TUI. See the comment
+ * there for why each line may state only what its own counter proves.
+ */
+const provenanceLines = (u) => sharedProvenanceLines(u, c);
+
+/**
+ * Header shown by every command: what holt measured against, and how.
+ *
+ * `base.ref` is a BRANCH NAME and `root` is a filesystem path — both repository-controlled, both
+ * printed on the first two lines of every command, which is the most quoted output holt has.
+ * @param {any} report
+ * @param {ReturnType<typeof budget>} [u]
+ */
+export function renderHeader(report, u = repoData()) {
   const lines = [];
   lines.push(
-    `${c('bold', 'holt')} ${c('grey', '·')} ${report.root}`,
+    `${c('bold', 'holt')} ${c('grey', '·')} ${u.take(report.root)}`,
   );
+  const ref = u.take(report.base.ref, ID);
   const baseNote = report.base.how === 'primary-head-fallback'
-    ? c('yellow', `${report.base.ref} (fallback — no conventional base branch found)`)
-    : `${report.base.ref} ${c('grey', `(${report.base.how})`)}`;
-  lines.push(`  base      ${baseNote} ${c('grey', report.base.oid.slice(0, 8))}`);
+    ? c('yellow', `${ref} (fallback — no conventional base branch found)`)
+    // `how` is holt's own enum today. It is marked anyway: the cost is nothing, and "this field
+    // happens to be ours right now" is the assumption every one of these leaks was built on.
+    : `${ref} ${c('grey', `(${u.take(report.base.how)})`)}`;
+  lines.push(`  base      ${baseNote} ${c('grey', String(report.base.oid).slice(0, 8))}`);
   lines.push(
-    `  symbols   ${report.backend.degraded ? c('yellow', report.backend.label) : report.backend.label}`,
+    `  symbols   ${report.backend.degraded ? c('yellow', u.take(report.backend.label)) : u.take(report.backend.label)}`,
   );
   if (report.strictReadOnly) {
     lines.push(`  mode      ${c('yellow', 'strict-read-only — committed deltas are APPROXIMATE (over-report)')}`);
@@ -83,13 +133,14 @@ export function renderHeader(report) {
  * to know the difference. A dirty (or unreadable) excluded primary is named beside every verdict
  * that could otherwise read as "holt checked everything".
  */
-function primaryCaveat(report) {
+function primaryCaveat(report, u) {
   const p = report.primaryUnscanned;
   if (!p) return [];
   if (p.dirtyFiles === 0) return [];
+  const id = u.take(p.id);
   return [p.dirtyFiles === null
-    ? c('yellow', `  (holt could not even read the primary worktree's status — '${p.id}' is NOT covered by the verdict above)`)
-    : c('yellow', `  (your primary worktree '${p.id}' holds ${p.dirtyFiles} uncommitted change(s) holt is NOT auditing — `
+    ? c('yellow', `  (holt could not even read the primary worktree's status — '${id}' is NOT covered by the verdict above)`)
+    : c('yellow', `  (your primary worktree '${id}' holds ${p.dirtyFiles} uncommitted change(s) holt is NOT auditing — `
       + 'the verdict above is about the OTHER worktrees. `holt risk --include-primary` covers it.)')];
 }
 
@@ -128,7 +179,8 @@ function noSiblingsNote(report) {
 
 /** The default view: the decision surface, not the inventory. */
 export function renderSummary(report) {
-  const out = [renderHeader(report), ''];
+  const u = repoData();
+  const out = [renderHeader(report, u), ''];
   const k = report.counts;
 
   const atRisk = report.unique.filter((u) => u.uncommittedOnlyCount > 0);
@@ -166,20 +218,20 @@ export function renderSummary(report) {
     out.push('', c('bold', 'AT RISK — delete these and the work is gone'));
     out.push('');
     const max = Math.max(...atRisk.map((u) => u.uncommittedOnlyCount));
-    for (const u of atRisk.slice(0, 12)) {
+    for (const r of atRisk.slice(0, 12)) {
       out.push(
-        `  ${pad(u.id, 34)} ${bar(u.uncommittedOnlyCount, max, 14)} ` +
-        `${padStart(u.uncommittedOnlyCount, 4)} ${c('grey', 'uncommitted-only symbol(s)')}`,
+        `  ${u.cell(r.id, 34, ID)} ${bar(r.uncommittedOnlyCount, max, 14)} ` +
+        `${padStart(r.uncommittedOnlyCount, 4)} ${c('grey', 'uncommitted-only symbol(s)')}`,
       );
-      const sample = [...u.byLayer.uncommitted, ...u.byLayer.untracked].slice(0, 3);
+      const sample = [...r.byLayer.uncommitted, ...r.byLayer.untracked].slice(0, 3);
       if (sample.length) {
-        out.push(c('grey', `     ${sample.map((s) => `${s.kind}:${s.name}`).join('  ')}`));
+        out.push(c('grey', `     ${sample.map((s) => `${u.take(s.kind)}:${u.take(s.name, ID)}`).join('  ')}`));
       }
     }
     if (atRisk.length > 12) out.push(c('grey', `  … and ${atRisk.length - 12} more`));
   }
 
-  out.push(...stashSection(report));
+  out.push(...stashSection(report, u));
 
   if (report.collisions.length) {
     out.push('', c('bold', 'COLLISIONS'));
@@ -187,8 +239,8 @@ export function renderSummary(report) {
     for (const col of report.collisions.slice(0, 8)) {
       const sev = col.severity === 'high' ? c('red', 'HIGH') : col.severity === 'medium' ? c('yellow', 'MED ') : c('grey', 'LOW ');
       const proof = col.kind === 'proven' ? c('red', '[proven]') : c('grey', '[predicted]');
-      out.push(`  ${sev} ${proof} ${col.a} ${c('grey', '<->')} ${col.b}`);
-      out.push(c('grey', `       ${col.why}`));
+      out.push(`  ${sev} ${proof} ${u.take(col.a, ID)} ${c('grey', '<->')} ${u.take(col.b, ID)}`);
+      out.push(c('grey', `       ${u.take(col.why)}`));
     }
     if (report.collisions.length > 8) out.push(c('grey', `  … and ${report.collisions.length - 8} more`));
   }
@@ -220,10 +272,11 @@ export function renderSummary(report) {
 
   if (report.skipped.length) {
     out.push('', c('yellow', `SKIPPED (${report.skipped.length}) — not counted as safe, not counted as clean`));
-    for (const s of report.skipped.slice(0, 6)) out.push(c('grey', `  ${pad(s.id, 34)} ${s.reason}`));
+    for (const s of report.skipped.slice(0, 6)) out.push(c('grey', `  ${u.cell(s.id, 34, ID)} ${u.take(s.reason)}`));
     if (report.skipped.length > 6) out.push(c('grey', `  … and ${report.skipped.length - 6} more`));
   }
 
+  out.push(...provenanceLines(u));
   out.push('');
   return out.join('\n');
 }
@@ -249,7 +302,7 @@ export function renderSummary(report) {
  * `git stash apply` + commit makes an entry harmless, and a section that keeps shouting after
  * that teaches the reader to skip it.
  */
-function stashSection(report) {
+function stashSection(report, u) {
   const stash = report.stash;
   if (!stash || (!stash.atRisk.length && stash.checked)) return [];
   const out = ['', c('bold', 'STASH — held by no worktree, and by no ref either'), ''];
@@ -257,11 +310,13 @@ function stashSection(report) {
     out.push(c('yellow', "  holt could not fully check this repository's stash — treat its entries as holding unique work"));
   }
   for (const e of stash.atRisk.slice(0, 6)) {
+    // A stash MESSAGE is free text the attacker writes: `git stash push -m` takes anything,
+    // newlines included. It is printed here verbatim and reaches an agent through `holt risk`.
     out.push(
-      `  ${pad(e.selector, 14)} ${padStart(e.uniqueCount, 4)} ` +
-      `${c('grey', 'file(s) whose content no ref holds')}  ${c('grey', e.message)}`,
+      `  ${u.cell(e.selector, 14, ID)} ${padStart(e.uniqueCount, 4)} ` +
+      `${c('grey', 'file(s) whose content no ref holds')}  ${c('grey', u.take(e.message))}`,
     );
-    const sample = e.unique.slice(0, 3).map((u) => `${u.path} (${u.layer})`);
+    const sample = e.unique.slice(0, 3).map((x) => `${u.take(x.path, ID)} (${u.take(x.layer)})`);
     if (sample.length) out.push(c('grey', `     ${sample.join('  ')}`));
   }
   if (stash.atRisk.length > 6) out.push(c('grey', `  … and ${stash.atRisk.length - 6} more`));
@@ -277,15 +332,16 @@ function stashHoldsUnique(report) {
 }
 
 export function renderRisk(report) {
-  const out = [renderHeader(report), ''];
-  out.push(c('bold', 'UNIQUE WORK  —  what only exists here'));
+  const u = repoData();
+  const out = [renderHeader(report, u), ''];
+  out.push(c('bold', 'UNIQUE WORK  —  what has no durable copy elsewhere'));
   out.push('');
   // Include FILE-level risk, not only symbol-level. A worktree whose entire content is an
   // untracked notes.md has no extractable symbols, and filtering on symbols alone printed
   // "Nothing unique anywhere" for exactly the case this tool exists to catch — while `gate`
   // was simultaneously refusing to call it safe. The report must never contradict the guard.
-  const rows = report.unique.filter((u) => u.uniqueSymbolCount > 0 || u.committedFiles > 0
-    || u.uncommittedOnlyCount > 0);
+  const rows = report.unique.filter((r) => r.uniqueSymbolCount > 0 || r.committedFiles > 0
+    || r.uncommittedOnlyCount > 0);
   if (!rows.length) {
     // "Nothing unique anywhere" is a VERDICT — it means every workstream was checked and each
     // one was reproducible from base. With zero workstreams scanned there was no checking to do,
@@ -300,32 +356,38 @@ export function renderRisk(report) {
     // precisely the path the incident takes; a stash section below it would never have run.
     const note = noSiblingsNote(report);
     if (note) {
-      out.push(note, ...primaryCaveat(report), ...stashSection(report), '');
+      out.push(note, ...primaryCaveat(report, u), ...stashSection(report, u), ...provenanceLines(u), '');
       return out.join('\n');
     }
     out.push(stashHoldsUnique(report)
       ? c('yellow', '  No WORKSTREAM holds unique work — but the stash does, and no ref holds that content.')
       : c('green', '  Nothing unique anywhere. Every workstream is reproducible from base.'));
-    out.push(...primaryCaveat(report));
-    out.push(...stashSection(report));
+    out.push(...primaryCaveat(report, u));
+    out.push(...stashSection(report, u));
+    out.push(...provenanceLines(u));
     out.push('');
     return out.join('\n');
   }
   out.push(c('grey', `  ${pad('workstream', 34)} ${padStart('uniq', 5)} ${padStart('uncomm', 7)}  verdict`));
-  for (const u of rows.slice(0, 40)) {
-    const flag = u.uncommittedOnlyCount > 0 ? c('red', '●') : u.uniqueSymbolCount > 0 ? c('yellow', '●') : c('grey', '●');
+  for (const r of rows.slice(0, 40)) {
+    const flag = r.uncommittedOnlyCount > 0 ? c('red', '●') : r.uniqueSymbolCount > 0 ? c('yellow', '●') : c('grey', '●');
     out.push(
-      `  ${flag} ${pad(u.id, 32)} ${padStart(u.uniqueSymbolCount, 5)} ${padStart(u.uncommittedOnlyCount, 7)}  ${c('grey', u.verdict)}`
-      + (u.uniqueSymbolCount === 0 && u.uncommittedFileCount > 0
-        ? c('grey', `\n      ${u.uncommittedFileCount} uncommitted file(s) with no parseable symbols — still lost if deleted`)
+      `  ${flag} ${u.cell(r.id, 32, ID)} ${padStart(r.uniqueSymbolCount, 5)} ${padStart(r.uncommittedOnlyCount, 7)}  ${c('grey', u.take(r.verdict))}`
+      + (r.uniqueSymbolCount === 0 && r.uncommittedFileCount > 0
+        ? c('grey', `\n      ${r.uncommittedFileCount} uncommitted file(s) with no parseable symbols — still lost if deleted`)
         : '')
       // THE 'uniq' COLUMN CAN BE A FLOOR, NOT A TOTAL. ctagsBatch names every file it could not
       // read (a NUL byte tripping the content classifier, a file over the size cap, a timeout) in
       // `symbolsUnmeasuredFiles` — say so here, or the number above reads as a complete count when
       // it may be an undercount that safeToDelete is already refusing to trust.
-      + (u.symbolsUnmeasuredCount > 0
-        ? c('yellow', `\n      ${u.symbolsUnmeasuredCount} file(s) holt could not read symbols from `
-          + `(e.g. ${(u.symbolsUnmeasuredFiles ?? []).slice(0, 3).join(', ')}) — 'uniq' is a floor, not a total`)
+      + (r.redundantWith?.length
+        ? c('grey', `\n      identical content is also currently held by ${r.redundantWith.slice(0, 3).map((id) => u.take(id, ID)).join(', ')}`
+          + `${r.redundantWith.length > 3 ? ` and ${r.redundantWith.length - 3} more` : ''}`
+          + `${r.redundantWithDurable?.length ? '' : '; no durable copy is proven in those holders'}`)
+        : '')
+      + (r.symbolsUnmeasuredCount > 0
+        ? c('yellow', `\n      ${r.symbolsUnmeasuredCount} file(s) holt could not read symbols from `
+          + `(e.g. ${(r.symbolsUnmeasuredFiles ?? []).slice(0, 3).map((f) => u.take(f, ID)).join(', ')}) — 'uniq' is a floor, not a total`)
         : ''),
     );
   }
@@ -334,13 +396,13 @@ export function renderRisk(report) {
   out.push('');
   const safe = report.safe.filter((s) => s.safe);
   if (!safe.length) out.push(c('grey', '  none — every workstream holds something'));
-  for (const s of safe.slice(0, 30)) out.push(`  ${c('green', '✓')} ${pad(s.id, 40)} ${c('grey', s.confidence)}`);
+  for (const s of safe.slice(0, 30)) out.push(`  ${c('green', '✓')} ${u.cell(s.id, 40, ID)} ${c('grey', u.take(s.confidence))}`);
   if (safe.length > 30) out.push(c('grey', `  … and ${safe.length - 30} more`));
 
   const unknown = report.safe.filter((s) => s.confidence === 'unknown');
   if (unknown.length) {
     out.push('', c('yellow', `UNKNOWN (${unknown.length}) — holt could not scan these, so they are NOT safe`));
-    for (const s of unknown.slice(0, 10)) out.push(c('grey', `  ? ${pad(s.id, 40)} ${s.reasons[0]}`));
+    for (const s of unknown.slice(0, 10)) out.push(c('grey', `  ? ${u.cell(s.id, 40, ID)} ${u.take(s.reasons[0])}`));
   }
   // THE CAVEAT BELONGS ON THE PATH PEOPLE ACTUALLY READ, TOO.
   //
@@ -350,78 +412,123 @@ export function renderRisk(report) {
   // with a fan-out running actually looks at. Reproduced: a repo with one sibling holding one
   // uncommitted symbol and a primary holding another printed the sibling's row and said nothing
   // whatsoever about the primary's, with no caveat anywhere in the output.
-  const caveat = primaryCaveat(report);
+  const caveat = primaryCaveat(report, u);
   if (caveat.length) out.push('', ...caveat);
+  out.push(...provenanceLines(u));
   out.push('');
   return out.join('\n');
 }
 
 /** One line per contested FILE, instead of one per pair — N pairs collapse to one finding. */
-function hotspotLines(report) {
+function hotspotLines(report, u) {
   const hs = report.hotspots ?? [];
   if (!hs.length) return [];
   const out = ['', c('bold', 'SHARED FILES  —  no symbol overlap, but the same file'), ''];
   for (const h of hs.slice(0, 12)) {
-    out.push(`  ${c('yellow', '▪')} ${h.file}  ${c('grey', `${h.count} workstreams: ${h.workstreams.slice(0, 4).join(', ')}${h.workstreams.length > 4 ? '…' : ''}`)}`);
+    out.push(`  ${c('yellow', '▪')} ${u.take(h.file, ID)}  ${c('grey', `${h.count} workstreams: ${h.workstreams.slice(0, 4).map((w) => u.take(w, ID)).join(', ')}${h.workstreams.length > 4 ? '…' : ''}`)}`);
   }
   out.push(c('grey', '  these are sequenced serially by `holt order`; use --all to list every pair'));
   return out;
 }
 
+/**
+ * THE ONE RENDERER WITH NO ROW BOUND. Every other section here stops at 8, 12, 25, 30 or 40 rows
+ * and says "… and N more"; this one printed every collision, and the repository decides how many
+ * there are. On a real repo holt reported 88, at four lines each — with names the repository also
+ * chooses. That is the flooding vector: holt's genuine warning ends up thousands of lines above
+ * whatever the agent is still holding. The BUDGET is the general fix (repo text is capped in
+ * total, and the withholding is announced), and the row bound below is the same file's own
+ * established convention applied to the section that was missing it.
+ */
+const MAX_COLLISION_ROWS = 40;
+
+export function renderHotspots(report, limit = 12) {
+  const u = repoData();
+  const rows = report.hotspots ?? [];
+  const shown = rows.slice(0, limit);
+  const out = [c('bold', `HOTSPOTS (${rows.length}) — files shared by multiple workstreams`), ''];
+  if (!rows.length) out.push(c('green', '  No low-evidence shared-file hotspots were measured.'));
+  for (const h of shown) {
+    out.push(`  ${u.take(h.file, ID)}  ${h.count} workstream(s): `
+      + h.workstreams.map((id) => u.take(id, ID)).join(', '));
+  }
+  if (rows.length > shown.length) {
+    out.push(c('grey', `  … and ${rows.length - shown.length} more — use 'holt hotspots --json --limit 100' for the bounded full list`));
+  }
+  out.push(c('grey', '  This is aggregated file overlap, not a proven merge conflict; use it before partitioning.'));
+  out.push(...provenanceLines(u));
+  out.push('');
+  return out.join('\n');
+}
+
 export function renderCollisions(report) {
-  const out = [renderHeader(report), ''];
+  const u = repoData();
+  const out = [renderHeader(report, u), ''];
   if (!report.collisions.length) {
     out.push(c('green', 'No collisions. No two workstreams contest the same content.'));
-    out.push(...hotspotLines(report));
+    out.push(...hotspotLines(report, u));
+    out.push(...provenanceLines(u));
     out.push('');
     return out.join('\n');
   }
   out.push(c('bold', `COLLISIONS (${report.collisions.length})`), '');
-  for (const col of report.collisions) {
+  for (const col of report.collisions.slice(0, MAX_COLLISION_ROWS)) {
     const sev = col.severity === 'high' ? c('red', 'HIGH') : col.severity === 'medium' ? c('yellow', 'MED ') : c('grey', 'LOW ');
     const proof = col.kind === 'proven' ? c('red', 'proven by merge-tree') : c('grey', 'predicted');
-    out.push(`${sev}  ${c('bold', col.a)} ${c('grey', '<->')} ${c('bold', col.b)}  ${col.sameFamily ? c('grey', '(same family)') : c('yellow', '(cross-dispatch)')}`);
-    out.push(`      ${proof} ${c('grey', '·')} ${col.why}`);
-    out.push(c('grey', `      files: ${col.sharedFiles.slice(0, 4).join(', ')}${col.sharedFiles.length > 4 ? ` … +${col.sharedFiles.length - 4}` : ''}`));
+    out.push(`${sev}  ${c('bold', u.take(col.a, ID))} ${c('grey', '<->')} ${c('bold', u.take(col.b, ID))}  ${col.sameFamily ? c('grey', '(same family)') : c('yellow', '(cross-dispatch)')}`);
+    out.push(`      ${proof} ${c('grey', '·')} ${u.take(col.why)}`);
+    out.push(c('grey', `      files: ${col.sharedFiles.slice(0, 4).map((f) => u.take(f, ID)).join(', ')}${col.sharedFiles.length > 4 ? ` … +${col.sharedFiles.length - 4}` : ''}`));
     if (col.sharedSymbols.length) {
-      out.push(c('grey', `      symbols: ${col.sharedSymbols.slice(0, 5).join(', ')}${col.sharedSymbols.length > 5 ? ' …' : ''}`));
+      out.push(c('grey', `      symbols: ${col.sharedSymbols.slice(0, 5).map((s) => u.take(s, ID)).join(', ')}${col.sharedSymbols.length > 5 ? ' …' : ''}`));
     }
     out.push('');
   }
+  if (report.collisions.length > MAX_COLLISION_ROWS) {
+    out.push(c('grey', `  … and ${report.collisions.length - MAX_COLLISION_ROWS} more — \`holt collisions --json\` lists every pair`), '');
+  }
+  out.push(...provenanceLines(u));
   return out.join('\n');
 }
 
+const MAX_DUPLICATE_ROWS = 25;
+
 export function renderDuplicates(report, deep) {
-  const out = [renderHeader(report), ''];
+  const u = repoData();
+  const out = [renderHeader(report, u), ''];
   out.push(c('bold', `DUPLICATE WORK — symbol identity (${report.duplicates.length} pair(s))`), '');
   if (!report.duplicates.length) out.push(c('grey', '  none'));
-  for (const d of report.duplicates.slice(0, 25)) {
+  for (const d of report.duplicates.slice(0, MAX_DUPLICATE_ROWS)) {
     const tag = d.sameFamily ? c('grey', 'expected fan-out') : c('yellow', 'CROSS-DISPATCH WASTE');
-    out.push(`  ${c('bold', d.a)} ${c('grey', '<->')} ${c('bold', d.b)}  ${tag}`);
-    out.push(c('grey', `      ${d.sharedCount} shared symbol(s), similarity ${(d.similarity * 100).toFixed(0)}%: ${d.sharedSymbols.slice(0, 4).join(', ')}`));
+    out.push(`  ${c('bold', u.take(d.a, ID))} ${c('grey', '<->')} ${c('bold', u.take(d.b, ID))}  ${tag}`);
+    out.push(c('grey', `      ${d.sharedCount} shared symbol(s), similarity ${(d.similarity * 100).toFixed(0)}%: ${d.sharedSymbols.slice(0, 4).map((s) => u.take(s, ID)).join(', ')}`));
+  }
+  if (report.duplicates.length > MAX_DUPLICATE_ROWS) {
+    out.push(c('grey', `  … and ${report.duplicates.length - MAX_DUPLICATE_ROWS} more — use 'holt duplicates --json' for every measured pair`));
   }
 
   if (deep) {
     out.push('', c('bold', 'DEEP — token clone detection'), '');
     if (!deep.ran) {
-      out.push(c('yellow', `  did not run: ${deep.reason}`));
+      out.push(c('yellow', `  did not run: ${u.take(deep.reason)}`));
     } else if (!deep.pairs.length) {
-      out.push(c('grey', `  ${deep.tool} compared ${deep.filesCompared ?? 0} added-line file(s), found no cross-workstream clones`));
+      out.push(c('grey', `  ${u.take(deep.tool)} compared ${deep.filesCompared ?? 0} added-line file(s), found no cross-workstream clones`));
     } else {
-      out.push(c('grey', `  ${deep.tool} · ${deep.clones} clone(s) across ${deep.filesCompared} added-line file(s)`), '');
+      out.push(c('grey', `  ${u.take(deep.tool)} · ${deep.clones} clone(s) across ${deep.filesCompared} added-line file(s)`), '');
       for (const p of deep.pairs.slice(0, 15)) {
         const tag = p.sameFamily ? c('grey', 'expected fan-out') : c('yellow', 'CROSS-DISPATCH WASTE');
-        out.push(`  ${c('bold', p.a)} ${c('grey', '<->')} ${c('bold', p.b)}  ${tag}`);
+        out.push(`  ${c('bold', u.take(p.a, ID))} ${c('grey', '<->')} ${c('bold', u.take(p.b, ID))}  ${tag}`);
         out.push(c('grey', `      ${p.duplicatedLines} duplicated line(s) in ${p.cloneCount} clone(s)`));
       }
     }
   }
+  out.push(...provenanceLines(u));
   out.push('');
   return out.join('\n');
 }
 
 export function renderPlan(report) {
-  const out = [renderHeader(report), ''];
+  const u = repoData();
+  const out = [renderHeader(report, u), ''];
   const p = report.plan;
   out.push(c('bold', 'LANDING PLAN'), '');
   const r = p.reviewReduction;
@@ -433,39 +540,60 @@ export function renderPlan(report) {
 
   if (p.drop.length) {
     out.push(c('green', `DROP (${p.drop.length}) — nothing to lose`));
-    for (const d of p.drop.slice(0, 20)) out.push(c('grey', `  ✓ ${d.id}`));
+    for (const d of p.drop.slice(0, 20)) out.push(c('grey', `  ✓ ${u.take(d.id, ID)}`));
     if (p.drop.length > 20) out.push(c('grey', `  … and ${p.drop.length - 20} more`));
     out.push('');
   }
   if (p.collapse.length) {
     out.push(c('magenta', `COLLAPSE (${p.collapse.length}) — duplicate of another dispatch`));
-    for (const x of p.collapse) out.push(c('grey', `  ${x.id} → ${x.into}`));
+    for (const x of p.collapse) out.push(c('grey', `  ${u.take(x.id, ID)} → ${u.take(x.into, ID)}`));
     out.push('');
   }
   out.push(c('bold', `LAND IN THIS ORDER (${p.order.length}) — least entangled first`));
   out.push('');
   for (const s of p.order.slice(0, 30)) {
     out.push(
-      `  ${padStart(s.step, 3)}. ${pad(s.id, 34)} ` +
+      `  ${padStart(s.step, 3)}. ${u.cell(s.id, 34, ID)} ` +
       c('grey', `${s.filesToReview} file(s) · ${s.uniqueSymbols} unique · entanglement ${s.entanglement}`),
     );
   }
   if (p.order.length > 30) out.push(c('grey', `  … and ${p.order.length - 30} more`));
-  out.push('', c('grey', `  ${p.note}`), '');
+  out.push('', c('grey', `  ${p.note}`));
+  out.push(...provenanceLines(u));
+  out.push('');
+  return out.join('\n');
+}
+
+export function renderCollapse(plan) {
+  const u = repoData();
+  const rows = plan.supersededBy ?? plan.collapse ?? [];
+  const out = [c('bold', `SUPERSEDED WORKSTREAMS (${rows.length})`), ''];
+  if (!rows.length) out.push(c('grey', '  none — no exact, durable duplicate has earned a recommendation'));
+  for (const row of rows.slice(0, 40)) {
+    out.push(`  ${u.take(row.id, ID)} ${c('grey', '→')} ${u.take(row.into, ID)} `
+      + c('grey', `(${row.confidence ?? 'measured'} · ${(Number(row.similarity ?? 1) * 100).toFixed(0)}% identical)`));
+    out.push(c('grey', `      ${u.take(row.why)}`));
+  }
+  if (rows.length > 40) out.push(c('grey', `  … and ${rows.length - 40} more`));
+  out.push(c('grey', '  Review the representative; this is advisory and does not delete or merge anything.'));
+  out.push(...provenanceLines(u));
+  out.push('');
   return out.join('\n');
 }
 
 export function renderImpact(imp) {
+  const u = repoData();
   const out = [];
   out.push(c('bold', 'CROSS-WORKSTREAM IMPACT') + c('grey', '  — dependency, NOT conflict'));
   out.push('');
-  out.push(c('grey', `  ${imp.tool ?? 'no reference search available'}`));
+  out.push(c('grey', `  ${imp.tool ? u.take(imp.tool) : 'no reference search available'}`));
   out.push('');
 
   if (!imp.pairs.length) {
     out.push(c('green', '  No workstream references a symbol another workstream defines.'));
     out.push('');
     for (const cav of imp.caveats) out.push(c('grey', `  · ${cav}`));
+    out.push(...provenanceLines(u));
     out.push('');
     return out.join('\n');
   }
@@ -478,23 +606,32 @@ export function renderImpact(imp) {
 
   for (const p of imp.pairs.slice(0, 20)) {
     const conf = p.confidence === 'high' ? c('yellow', 'HIGH') : p.confidence === 'medium' ? c('grey', 'MED ') : c('grey', 'LOW ');
-    out.push(`  ${conf}  ${c('bold', p.producer)} ${c('grey', 'defines →')} ${c('bold', p.consumer)} ${c('grey', 'uses')}`);
+    out.push(`  ${conf}  ${c('bold', u.take(p.producer, ID))} ${c('grey', 'defines →')} ${c('bold', u.take(p.consumer, ID))} ${c('grey', 'uses')}`);
     const shown = p.unambiguousSymbols.length ? p.unambiguousSymbols : p.symbols;
-    out.push(c('grey', `        ${shown.slice(0, 6).join(', ')}${p.symbolCount > 6 ? ` … +${p.symbolCount - 6}` : ''}`));
-    out.push(c('grey', `        defined in: ${p.definedIn.slice(0, 2).join(', ')}`));
+    out.push(c('grey', `        ${shown.slice(0, 6).map((s) => u.take(s, ID)).join(', ')}${p.symbolCount > 6 ? ` … +${p.symbolCount - 6}` : ''}`));
+    out.push(c('grey', `        defined in: ${p.definedIn.slice(0, 2).map((f) => u.take(f, ID)).join(', ')}`));
   }
   if (imp.pairs.length > 20) out.push(c('grey', `  … and ${imp.pairs.length - 20} more`));
 
   out.push('');
   out.push(c('bold', '  WHAT THIS DOES AND DOES NOT TELL YOU'));
   for (const cav of imp.caveats) out.push(c('grey', `  · ${cav}`));
+  out.push(...provenanceLines(u));
   out.push('');
   return out.join('\n');
 }
 
 export function renderContext(digest) {
+  const u = repoData();
   if (!digest.ok) {
-    return c('red', `holt: ${digest.error}`) + '\n' + c('grey', `known: ${digest.known.join(', ')}`);
+    // THE ERROR PATH IS AN INJECTION PATH TOO. `digest.error` names the workstream the user asked
+    // for and `known` lists every id in the repository, so `holt context <anything>` in a hostile
+    // clone printed the full attacker-chosen name list through a branch nothing else guards.
+    return [
+      c('red', `holt: ${u.take(digest.error)}`),
+      c('grey', `known: ${digest.known.map((k) => u.take(k, ID)).join(', ')}`),
+      ...provenanceLines(u),
+    ].join('\n');
   }
   const out = [];
   // Translate the family rule into a human-readable hint. "creation-burst" means workstreams
@@ -504,25 +641,125 @@ export function renderContext(digest) {
     : digest.familyRule === 'user-override' ? 'grouped by .holtrc.json'
     : digest.familyRule === 'name-fallback' ? 'grouped by name stem'
     : digest.familyRule;
-  out.push(c('bold', `CONTEXT for ${digest.workstream}`) + c('grey', `  (sibling group: ${ruleHint})`));
+  out.push(c('bold', `CONTEXT for ${u.take(digest.workstream, ID)}`) + c('grey', `  (sibling group: ${u.take(ruleHint)})`));
   out.push('');
-  if (digest.siblings.length) out.push(c('grey', `  siblings: ${digest.siblings.join(', ')}`), '');
-  for (const a of digest.advice) out.push(`  ${c('yellow', '!')} ${a}`);
+  if (digest.siblings.length) out.push(c('grey', `  siblings: ${digest.siblings.map((s) => u.take(s, ID)).join(', ')}`), '');
+  // `advice` is holt's sentence with repository names interpolated INTO it upstream, in
+  // src/analyze.mjs — so by the time it arrives here it is one string and the boundary can only
+  // treat the whole line as repository data. That is correct but coarse; the residual note in the
+  // patch asks buildAdvice() to mark the names at the point it interpolates them, which is the
+  // only place the two can still be told apart.
+  for (const a of digest.advice) out.push(`  ${c('yellow', '!')} ${u.take(a, { max: 600 })}`);
   out.push('');
   if (digest.duplicatedSymbols.length) {
     out.push(c('bold', '  ALREADY BUILT NEXT DOOR'));
     for (const d of digest.duplicatedSymbols) {
-      out.push(`    ${pad(d.workstream, 30)} ${d.count} ${c('grey', d.symbols.slice(0, 4).join(', '))}`);
+      out.push(`    ${u.cell(d.workstream, 30, ID)} ${d.count} ${c('grey', d.symbols.slice(0, 4).map((s) => u.take(s, ID)).join(', '))}`);
     }
     out.push('');
   }
   if (digest.contestedFiles.length) {
     out.push(c('bold', '  CONTESTED FILES'));
     for (const f of digest.contestedFiles) {
-      out.push(`    ${pad(f.workstream, 30)} ${f.fileCount} ${f.hasUncommitted ? c('yellow', '(uncommitted)') : ''}`);
-      out.push(c('grey', `      ${f.files.slice(0, 3).join(', ')}`));
+      out.push(`    ${u.cell(f.workstream, 30, ID)} ${f.fileCount} ${f.hasUncommitted ? c('yellow', '(uncommitted)') : ''}`);
+      out.push(c('grey', `      ${f.files.slice(0, 3).map((x) => u.take(x, ID)).join(', ')}`));
     }
     out.push('');
   }
+  out.push(...provenanceLines(u));
+  return out.join('\n');
+}
+
+/* ------------------------------------------------------------ moved here to be under the gate -- */
+
+/**
+ * `holt order`, `holt partition` and `holt branches` used to be rendered INLINE in bin/holt.mjs's
+ * dispatcher, and that placement was the whole bug: bin/holt.mjs exports nothing, so the gate in
+ * test/unit/untrusted.test.mjs — which enumerates every export of this file and drives it with a
+ * report whose every string is a payload — could not see them. Measured on one hostile repository
+ * with a newline in a worktree basename: `holt collisions` fenced the name correctly while
+ * `holt order` and `holt partition` each printed a free-standing forged `[holt] …` line.
+ *
+ * They are functions here, not statements there, for exactly one reason: so the gate enumerates
+ * them. The rule the gate enforces is "no repository value reaches a line except through the
+ * budget", and the only way to keep that rule honest is for every renderer to be reachable from
+ * one place that can be enumerated.
+ */
+export function renderOrder(plan) {
+  const u = repoData();
+  const out = [c('bold', 'holt order') + c('grey', '  (heuristic — conflictsWithLater names the merges to watch)')];
+  if (plan.parallel.length) {
+    out.push(`\n  PARALLEL-SAFE  ${c('grey', 'no observed interaction — land in any order, concurrently')}`);
+    for (const id of plan.parallel) out.push(`    ${c('green', u.take(id, ID))}`);
+  }
+  for (const lane of plan.lanes) {
+    out.push(`\n  LANE (${lane.members.length} entangled)`);
+    lane.order.forEach((step, i) => {
+      const later = step.conflictsWithLater
+        .map((x) => `${u.take(x.id, ID)} (${x.why.map((w) => u.take(w)).join('; ')})`).join(', ');
+      out.push(`    ${i + 1}. ${u.take(step.id, ID)}${later ? c('yellow', `  → watch: ${later}`) : c('green', '  → clears the lane')}`);
+    });
+  }
+  out.push(...provenanceLines(u));
+  out.push('');
+  return out.join('\n');
+}
+
+export function renderPartition(plan) {
+  const u = repoData();
+  const out = [c('bold', `holt partition — ${plan.agents} agents`)
+    + c('grey', `  (${plan.granularity ?? 'top-level-directory'} · advisory: a collision-free starting map, not a work plan)`)];
+  for (const b of plan.buckets) {
+    out.push(`\n  AGENT ${b.agent}  ${c('grey', `${b.weight} tracked file(s)`)}`);
+    // A directory name is repository-controlled in exactly the way a worktree basename is.
+    out.push(`    ${b.dirs.map((d) => u.take(d, ID)).join('  ')}`);
+  }
+  if (plan.avoid.length) {
+    out.push(`\n  ${c('yellow', 'ALREADY CONTESTED')}  ${c('grey', 'one owner each — currently touched by multiple live workstreams')}`);
+    for (const a of plan.avoid.slice(0, 15)) {
+      const held = a.currentlyHeldBy.map((h) => u.take(h, ID)).join(', ');
+      out.push(`    ${u.take(a.file, ID)}  ${c('grey', `held by ${held}`)}  → agent ${a.assignTo ?? '?'}`);
+    }
+  }
+  out.push(...provenanceLines(u));
+  out.push('');
+  return out.join('\n');
+}
+
+export function renderBranches(audit) {
+  const u = repoData();
+  const base = audit.base.ref ? u.take(audit.base.ref, ID) : String(audit.base.oid).slice(0, 12);
+  const checkedOut = audit.checkedOut ?? audit.excludedCheckedOut ?? [];
+  const checked = checkedOut.length
+    ? checkedOut.map((x) => u.take(x, ID)).join(', ') : 'none';
+  const out = [c('bold', 'holt branches')
+    + c('grey', `  vs ${base} · ${audit.audited} audited · checked-out report-only: ${checked}`)];
+  const section = (label, items, colour) => {
+    if (!items.length) return;
+    out.push(`\n  ${c(colour, label)}`);
+    for (const b of items) {
+      out.push(`    ${u.take(b.name, ID)}  ${c('grey', u.take(b.reason))}`);
+      // `command` is holt's own sentence with a branch name interpolated upstream; the boundary
+      // can only treat the assembled string as repository data, and it does.
+      if (b.command) out.push(`      ${c('grey', '$')} ${u.take(b.command)}`);
+      if (b.files) {
+        out.push(`      ${c('grey', b.files.slice(0, 5).map((f) => u.take(f, ID)).join(', ')
+          + (b.fileCount > 5 ? ` … +${b.fileCount - 5}` : ''))}`);
+      }
+    }
+  };
+  section(`LANDED — safe to delete (${audit.landed.length})`, audit.landed, 'green');
+  section(`CONTENT-LANDED — evidence says landed, git ancestry says no (${audit.contentLanded.length})`, audit.contentLanded, 'yellow');
+  section(`UNLANDED — holds work (${audit.unlanded.length})`, audit.unlanded, 'red');
+  section(`UNKNOWN — instrument failed, refusing to classify (${audit.unknown.length})`, audit.unknown, 'red');
+  if (audit.applied.length) {
+    out.push('\n  APPLIED');
+    for (const a of audit.applied) {
+      out.push(`    ${u.take(a.name, ID)}  ${a.ok ? c('green', 'deleted (-d)') : c('red', `refused: ${u.take(a.error)}`)}`);
+    }
+  }
+  out.push(`\n  ${c('grey', audit.note)}`);
+  out.push(...provenanceLines(u));
+  out.push('');
   return out.join('\n');
 }

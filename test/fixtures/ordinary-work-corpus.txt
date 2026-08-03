@@ -1,0 +1,454 @@
+# holt — THE ORDINARY-WORK CORPUS.
+#
+# Every line is a command that MUST be allowed silently. A false positive here is as serious as
+# a missed destroyer: a guard that interrupts work it could have read gets switched off, which
+# costs ALL of the protection rather than some of it. Nine interruptions and one save is the
+# profile of a guard people uninstall.
+#
+# THESE ARE NOT INVENTED. Provenance is marked per section:
+#   repo             — holt's own package.json scripts, .github/workflows run: steps, and docs
+#   readonly         — the dry-run / usage spellings of the verbs holt guards (the [G5] class)
+#   journal          — commands the LIVE hook refused during real sessions on the author's
+#                      machine, read out of .git/holt/journal.jsonl and adjudicated safe
+#   toolchain        — documented invocations of node, python, rust, go, docker, make, kubectl,
+#                      terraform and day-to-day git
+#   history-shapes   — shapes mined from a real developer's fish/bash/zsh history, with private
+#                      paths genericised so they reproduce on any machine
+#
+# Lines starting with # are comments. Blank lines are ignored.
+# Pinned by test/e2e/no-op-invocations.test.mjs, which fails if ANY line is not allowed.
+
+# --- repo (45) ---
+node --test "test/**/*.test.mjs"
+node --test "test/unit/*.test.mjs"
+node --test "test/e2e/*.test.mjs"
+node bin/holt.mjs doctor
+node test/mutation.mjs
+npm test && npm run test:mutation && npm run typecheck && npm run hosts:check
+node scripts/typecheck.mjs
+node scripts/generate-hosts.mjs
+node scripts/generate-hosts.mjs --check
+node scripts/lint-native-paths.mjs
+npm run test
+npm run test:unit
+npm run test:e2e
+npm run selfcheck
+npm run test:mutation
+npm run test:all
+npm run typecheck
+npm run hosts:generate
+npm run hosts:check
+npm run lint:paths
+node bin/holt.mjs doctor --json
+node bin/holt.mjs status
+node bin/holt.mjs status --json
+node scripts/check-ci-hardening.mjs --self-test
+node scripts/run-guard-corpus.mjs
+node scripts/check-release-body.mjs --all
+node scripts/smoke-installed.mjs --bin holt
+node --test test/unit/no-network.test.mjs
+node --test "test/unit/safety.test.mjs"
+bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"
+holt doctor --json
+gh run list
+gh release view v0.2.0 --json body -q .body
+git clone --depth 50 --quiet https://example.invalid/r.git r
+git log -1 --format=%B
+git status --porcelain README.md
+git merge-tree --write-tree main feature
+git rev-list --count HEAD
+git worktree add -q --detach wt1
+git init -q -b main .
+git config user.email ci@holt.invalid
+git fsck --unreachable --no-reflogs
+git diff base...head
+go env GOPATH
+cargo check
+
+# --- readonly (61) ---
+git worktree prune --dry-run
+git worktree prune -n
+git worktree prune -n -v
+git worktree prune --dry-run --verbose
+git worktree prune -nv
+git worktree prune --verbose --dry-run
+git worktree prune --dry-run --expire 3.months.ago
+git -C /home/raed/.holt-work/guard-classes/over-refusal/fx/main worktree prune --dry-run
+git worktree prune -h
+git worktree prune --help
+git worktree remove -h
+git worktree remove --help
+git worktree unlock -h
+git worktree --help
+git help worktree
+man git-worktree
+git worktree list
+git worktree list --porcelain
+git worktree list -v
+git clean -n
+git clean -nd
+git clean -ndx
+git clean --dry-run
+git clean --dry-run -d
+git clean -fdn
+git clean -h
+git clean --help
+git help clean
+git reset -h
+git reset --help
+git help reset
+git stash list
+git stash show
+git stash show -p
+git stash show --stat stash@{0}
+git stash -h
+git stash --help
+git stash push -h
+git stash drop -h
+git stash pop -h
+git stash apply --help
+git checkout -h
+git checkout --help
+git restore -h
+git restore --help
+rm --help
+rm --version
+man rm
+bash --version
+bash --help
+sh --version
+fish --version
+zsh --version
+pwsh --version
+node --version
+python3 --version
+Remove-Item -Recurse -Force ../vc-wt -WhatIf
+Remove-Item ../vc-wt -Recurse -WhatIf
+robocopy src ../vc-wt /MIR /L
+git config --get-regexp worktree
+git status --porcelain
+
+# --- journal (5) ---
+git worktree prune -h 2>&1 | head -8; echo "---"; git --version
+echo "=== what git says prune would actually do ==="; git worktree prune --verbose --dry-run; echo "(empty == prunes nothing)"
+printf 'shell=%s\n' "$SHELL"; fish --version; command -v python; python3 -V; command -v timeout
+git worktree list --porcelain | grep -a worktree
+git -C /home/raed/.holt-work/fx worktree list
+
+# --- toolchain (129) ---
+cargo build --release
+cargo test --all-features
+cargo clippy -- -D warnings
+cargo fmt --check
+cargo tree --duplicates
+go build ./...
+go test ./... -race
+go vet ./...
+gofmt -l .
+go mod tidy
+python3 -m pytest -q
+python3 -m venv .venv
+python3 -m pip list
+pytest tests/ -k "not slow" --maxfail=1
+ruff check .
+black --check .
+mypy src
+poetry run pytest
+uv run python -c "import sys; print(sys.version)"
+docker build -t app:dev .
+docker compose up -d
+docker compose logs -f api
+docker ps -a --format "{{.Names}}"
+docker image ls
+docker exec -it api sh -c "ls /app"
+make
+make -j8 all
+make test
+make -n install
+cmake -B build -S .
+cmake --build build --target all
+ninja -C build
+npm ci
+npm install --no-save
+npm run build --workspaces
+npm audit --omit=dev
+pnpm install --frozen-lockfile
+pnpm -r build
+yarn install --immutable
+npx tsc --noEmit
+npx eslint . --max-warnings=0
+npx prettier --check .
+npx vitest run
+npx jest --ci
+npx playwright test --reporter=line
+kubectl get pods -n prod
+kubectl describe deploy api
+kubectl logs -f deploy/api
+terraform plan -out=tf.plan
+terraform validate
+terraform fmt -check -recursive
+aws s3 ls s3://bucket/prefix/
+gh pr list --state open
+gh workflow view ci.yml
+git status -sb
+git diff
+git diff --cached
+git diff HEAD~1
+git add -A
+git add -p src/
+git commit -m "fix: guard"
+git commit --amend --no-edit
+git log --oneline -20
+git log --graph --all --decorate
+git show HEAD
+git branch -a
+git switch -c feature/x
+git switch main
+git checkout -b feature/y
+git checkout main
+git checkout feature/x
+git fetch --all --prune
+git pull --rebase
+git rebase -i HEAD~3
+git rebase --continue
+git cherry-pick abc1234
+git bisect start
+git bisect good HEAD~10
+git merge --no-ff feature/x
+git tag -l "v*"
+git remote -v
+git blame src/agent.mjs
+git stash show -p stash@{0}
+git restore --staged src/agent.mjs
+git rm --cached secrets.env
+git rm -n old.txt
+ls -la src/
+cat package.json
+head -50 README.md
+tail -f /tmp/app.log
+wc -l src/*.mjs
+grep -rn "TODO" src/
+rg --hidden -g "!node_modules" pattern
+find . -name "*.test.mjs" -not -path "./node_modules/*"
+du -sh node_modules
+df -h .
+stat -c "%s %n" package.json
+file bin/holt.mjs
+jq -r ".version" package.json
+sort -u list.txt
+uniq -c sorted.txt
+awk '{print $1}' access.log
+sed -n '1,20p' README.md
+diff -u a.txt b.txt
+tar -tzf dist.tgz
+curl -sS -o /dev/null -w "%{http_code}" http://localhost:3000/health
+ps aux | grep node | grep -v grep
+env | sort
+date -u +%FT%TZ
+mkdir -p build/out
+touch src/new.mjs
+chmod +x scripts/run.sh
+echo "hello" > /dev/null
+time npm test
+watch -n5 "git status -sb"
+xargs -n1 echo < list.txt
+tee -a build.log < /dev/null
+ssh -o BatchMode=yes host true
+rsync -avn src/ dest/
+psql -c "select 1"
+sqlite3 db.sqlite ".tables"
+redis-cli ping
+for f in src/*.mjs; do node --check "$f"; done
+while read -r l; do echo "$l"; done < list.txt
+cd packages/api && npm test
+npm test 2>&1 | tail -20
+node -e "console.log(process.version)"
+node --check src/agent.mjs
+node -e "const {execFileSync}=require('child_process'); console.log(execFileSync('git',['--version']).toString())"
+
+# --- history-shapes, genericised (120) ---
+npx tsc -p svc/tsconfig.json --noEmit --pretty false
+git status --short
+git diff --stat
+echo "CSRF=$CSRF"
+npx tsc -p tsconfig.app.json --noEmit --pretty false
+echo "---"
+df -h /tmp
+npx tsc -b --pretty false
+python3 -m py_compile /srv/app/svc/scripts/svc-cli.py && echo "SYNTAX OK"
+npx tsc -p svc/tsconfig.json --noEmit
+ps aux | grep vite | grep -v grep
+echo ""
+echo "==="
+npx eslint tests-e2e/specs/demo-reality-full-audit.spec.ts --max-warnings=0
+echo $!
+node scripts/check-repo-hygiene.mjs | sed -n '1,220p'
+npm run build
+curl -s http://localhost:3001/health
+tail -30 /tmp/frontend.log
+npm run build && npm run build:api && npm run architecture:check
+npm run
+npm run dev
+npm run dev:live
+git status --porcelain=v1 -uall
+npm test -- --reporter=dot
+npx playwright install firefox
+git log --oneline -12
+npx eslint tests-e2e/specs/editable-data-recompute.spec.ts --max-warnings=0
+npx eslint tests-e2e/specs/demo-reality-realism-hardening.spec.ts
+npm run e2e -- tests-e2e/specs/demo-reality-realism-hardening.spec.ts --grep "P0.2"
+node --check scripts/generate-critical-demo-audit.mjs
+node scripts/generate-critical-demo-audit.mjs
+cat /tmp/svc-frontend.log | tail -10
+npx tsc -p svc/tsconfig.json --noEmit --pretty false && npx tsc -p tsconfig.app.json --noEmit --pretty false
+git diff --cached --name-status | awk '{print $1}' | sort | uniq -c
+curl -s -o /dev/null -w "%{http_code}" http://localhost:5173/demo.html
+curl -s http://127.0.0.1:5173 | head -5
+echo "hello"
+wc -l /srv/app/src/system-admin-live-app.tsx
+npm run architecture:check
+npm run lint
+ls -la /srv/app
+grep -rn "caelestia wallpaper" /etc/xdg/quickshell/caelestia/
+ls -la
+npx tsc --noEmit -p tsconfig.tests.json --pretty false
+git diff -- tests-e2e/specs/demo-reality-full-audit.spec.ts | sed -n '1,220p'
+npx tsc --noEmit --pretty false
+npx vitest run tests/proof-control-plane-rebuild-context-service.test.ts
+npx vitest --config svc/vitest.config.ts run svc/tests/proof-control-plane-rebuild-context-service.test.ts
+npx eslint tests-e2e/specs/demo-reality-realism-hardening.spec.ts src/pages/hod-pages.tsx
+python3 -m py_compile scripts/train_catboost_challenger.py
+npx playwright test --list tests-e2e/specs/demo-reality-realism-hardening.spec.ts
+npx tsc -p tsconfig.app.json --noEmit
+df -h /tmp && ss -ltnp '( sport = :4000 or sport = :5173 )' || true
+curl -s http://localhost:5173 | head -5
+git branch --show-current && git status --short
+python3 -m py_compile svc/scripts/train_sota_ensemble.py svc/scripts/generate_v2_data.py
+git branch --show-current
+python3 -m py_compile svc/scripts/generate_v2_data.py
+ls -1 /srv/app/skills | wc -l
+ls -1 /srv/app/skills | grep -E "(caveman|absolute-brainstorm|system-design|clean-code|backend-engineering)"
+npx tsc -p tests/tsconfig.json --noEmit --pretty false
+git status --short | sed -n '1,120p'
+git status --porcelain=v1 | awk '{print substr($0,1,2)}' | sort | uniq -c
+node scripts/check-repo-hygiene.mjs | sed -n '1,180p'
+git status --short .gitignore scripts/check-repo-hygiene.mjs docs/plans/2026-05-28-repo-hygiene-stabilization.md | cat
+git diff --cached --name-status | grep -E '^(A|M)\s' | cat
+git ls-files | wc -l
+python3 /tmp/write_graph2.py
+ps aux | grep vite | grep -v grep | head -5
+curl -s --max-time 5 http://localhost:5173/ | head -10
+python3 -m py_compile /srv/app/svc/scripts/train_sota_ensemble.py && echo "SYNTAX OK"
+echo "Done"
+grep -n "registryLaunchProps: ComponentProps" /srv/app/src/system-admin-faculties-workspace.tsx
+tail -20 /tmp/frontend.log
+curl -s --max-time 5 http://127.0.0.1:5173 | head -5
+ps -o pid,pcpu,state,comm -p $(pgrep -f "vite --host 127.0.0.1 --port 5173") | head -5
+tail -40 /tmp/svc-backend.log
+df -h /
+echo "Model handoff written"
+echo "Durable checkpoint written"
+grep -n "studentRegistryProofScopeActive" /srv/app/src/system-admin-live-app.tsx
+grep -n "operatorData" /srv/app/src/admin/sections/faculty-members-section.tsx
+ps aux | grep -E "run-vitest-suite|vitest" | grep -v grep
+tail -30 /tmp/svc-test.log
+ps -p 286529 -o pid,pcpu,etime,comm; tail -5 /tmp/svc-test.log
+ls /run/media/raed/SAFE_DATA/
+ls ~/srv/app/BraveSoftware/
+ls ~/srv/app/share/keyrings/
+ls ~/.local/share/keyrings
+ls -la ~/.local/share/keyrings/
+ls -la ~/.local/share/kwalletd
+find ~/.config/hypr -iname "*bind*.conf"
+ls -la ~/.config/hypr
+cat /srv/app
+ls -la /boot/efi/EFI/
+cat /proc/cpuinfo | grep -E "model name|cpu MHz|siblings|cpu cores" | head -20
+cat /etc/mkinitcpio.conf | grep -E '^(MODULES|HOOKS|BINARIES|FILES|COMPRESSION|COMPRESSION_OPTIONS)'
+echo QYLOCK_THEME_AND_LOCKSCREEN_INSTALLED
+npx skills add vercel-labs/agent-skills --global --all
+ps -eo pid,ppid,stat,etime,pcpu,pmem,wchan:24,comm,args | grep -E 'rsync|migration-logs|safedata' | grep -v grep
+tail -f /srv/app/safedata-20260514-225325/Games.console.log
+echo '---boot order---'; efibootmgr | sed -n '1,12p'; echo '---sessions---'; ls -1 /usr/share/wayland-sessions
+printf "Using backup: %s\\n" "$backup_path"
+printf "\\n== faillock active setting ==\\n"
+grep -nE "^deny\\s*=" /etc/security/faillock.conf
+printf "\\n== current tally ==\\n"
+printf "sudoers updated and validated\\n"''
+printf "== sudoers files ==\\n"
+printf "\\n== sudoers contents ==\\n"
+printf "\\n== sudoers parse ==\\n"
+printf "\\n== fan escalation ==\\n"
+printf "\\n== faillock ==\\n"
+grep -n "cmd = .*omen-control-root.*fan-profile" /usr/local/bin/omen-control
+grep -nE "^[[:space:]]*deny[[:space:]]*=" /etc/security/faillock.conf
+printf "== active polkit prompts/processes ==\\n"
+ps -eo pid,user,args | grep -E "pkexec|polkit|code-elevated|Windsurf" | grep -v grep || true
+printf "\\n== windsurf elevated helpers ==\\n"
+printf "\\n== polkit rules dirs ==\\n"
+printf "\\n== existing local polkit rules ==\\n"
+
+# --- find, xargs and the git pathspec shapes the "not an operand" repair added (48) ---
+# find with a destructive ACTION is only as broad as the filters holt can read. Every line here
+# names paths that are build output or absent, which is what these commands are for. Parity rule:
+# each of these must get the SAME verdict `rm` would get for the same paths.
+find . -name "*.pyc" -delete
+find . -type f -name "*.pyc" -delete
+find . -name "*.pyo" -delete
+find . -name "*.orig" -delete
+find . -name "*.rej" -delete
+find . -name ".DS_Store" -delete
+find . -name "*.o" -delete
+find . -name "*.class" -delete
+find build -type f -delete
+find dist -name "*.map" -delete
+find target -name "*.rlib" -delete
+find . -name "__pycache__" -type d -exec rm -rf {} +
+find . -name "*.tmp" -exec rm -f {} \;
+find coverage -type f -exec rm -f {} +
+find . -name "*.o" -print0 | xargs -0 rm -f
+find . -name "*.tmp" -print | xargs rm -f
+find . -name "*.log" -mtime +7 -delete
+find . -type f -name "*.bak" -delete
+# find with no destructive action at all is a read, and always was.
+find . -name "*.mjs"
+find . -type f -name "*.json" -maxdepth 3
+find . -name "*.mjs" -exec grep -l TODO {} +
+find . -type d -name node_modules -prune -o -name "*.mjs" -print
+find src -name "*.ts" -newer package.json
+find . -name "*.mjs" -exec wc -l {} +
+find . -name "*.sh" -exec chmod +x {} +
+find . -name "*.mjs" -exec git add {} +
+# xargs whose utility destroys nothing is untouched, whatever it reads.
+find . -name "*.mjs" | xargs grep -l TODO
+git ls-files | xargs wc -l
+ls | xargs -n1 basename
+find . -type f -name "*.json" | xargs -n1 jq -e . > /dev/null
+git ls-files -z | xargs -0 grep -c ''
+find . -name "*.mjs" -print0 | xargs -0 -n1 node --check
+# the usage and dry-run spellings the option-aware walk must keep silent
+git clean -fdx -h
+git clean -fdxh
+git clean -hfdx
+git clean -x -f -d -h
+git clean -fdx --help
+git checkout -h
+git restore -h
+git rm -h
+git switch -h
+git reset --hard -h
+git reset --mixed -h
+# `-n` is a real dry run even when `-e` eats the `-h` after it. MEASURED: git prints
+# "Would remove …" and removes nothing. The option-aware walk is what tells the two apart.
+git clean -ne -h -fd
+git clean -neh -fd
+# an index-only restore loses nothing, in both spellings
+git restore --staged src
+git restore -S src
+git restore --staged --source=HEAD .
+# branch work is not a pathspec
+git checkout -b feature/x
+git checkout -B feature/x origin/main
+git switch -c feature/x
+git switch main
+git checkout --track origin/feature

@@ -14,7 +14,7 @@ import fsp from 'node:fs/promises';
 import { standardFixture, emptyFixture, newRepo, backdateWorktreeCreation } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
-import { analyze, contextDigest } from '../../src/analyze.mjs';
+import { analyze, contextDigest, duplicates } from '../../src/analyze.mjs';
 
 async function inspectFixture(fx, opts = {}) {
   const disc = await discover(fx.root, opts);
@@ -162,6 +162,27 @@ test('P1 PRESENCE: a real registry conflict is detected AND proven by merge-tree
   assert.equal(col.kind, 'proven', 'both sides are committed, so this must be PROVEN, not predicted');
   assert.equal(col.mergeTreeConflict, true);
   assert.ok(col.sharedFiles.includes('config/registry.mjs'));
+});
+
+test('P1 HOTSPOT: merge-unknown shared files remain visible as an aggregate', async (t) => {
+  const fx = await newRepo('hotspot-first-class');
+  t.after(() => fx.cleanup());
+  const a = await fx.worktree('hot-a');
+  const b = await fx.worktree('hot-b');
+  await fx.write('config/registry.mjs', 'export const HOT_A = 1;\n', a);
+  await fx.commit('hotspot A', a);
+  await fx.write('config/registry.mjs', 'export const HOT_B = 2;\n', b);
+  await fx.commit('hotspot B', b);
+
+  const { report } = await inspectFixture(fx, { strictReadOnly: true });
+  const pair = (report.collisionsAll ?? []).find((c) => pairMatches(c, 'hot-a', 'hot-b'));
+  assert.ok(pair, 'the full evidence must contain the shared-file pair');
+  assert.equal(pair.severity, 'low', `the strict read-only pair should be low-confidence: ${JSON.stringify(pair)}`);
+  assert.equal(report.collisions.some((c) => pairMatches(c, 'hot-a', 'hot-b')), false,
+    'the low-confidence pair must stay out of the default collision triage');
+  const hotspot = report.hotspots.find((h) => h.file === 'config/registry.mjs');
+  assert.deepEqual(hotspot?.workstreams, ['hot-a', 'hot-b']);
+  assert.equal(hotspot?.count, 2);
 });
 
 test('P1: workstreams that touch disjoint files produce no collision', async (t) => {
@@ -809,6 +830,35 @@ test('P5: the plan drops disposables, collapses duplicates, and orders the rest'
     'order must be ascending by entanglement');
 });
 
+test('P5 COLLAPSE: exact fan-out copies collapse only when every copy is durable', async (t) => {
+  const fx = await newRepo('collapse-safety');
+  t.after(() => fx.cleanup());
+  const body = 'export function EXACT_FANOUT_COPY() { return 1; }\n';
+
+  for (const id of ['fanout-a', 'fanout-b']) {
+    const wt = await fx.worktree(id);
+    await fx.write('src/exact.js', body, wt);
+    await fx.commit(`${id} exact copy`, wt);
+  }
+
+  const committed = await fx.worktree('committed-copy');
+  await fx.write('src/old.js', body, committed);
+  await fx.commit('committed copy', committed);
+  await backdateWorktreeCreation(committed, 2 * 60 * 60 * 1000);
+  await fx.write('separator.md', 'separate dispatch\n');
+  await fx.commit('separate dispatch');
+  const uncommitted = await fx.worktree('uncommitted-copy');
+  await fx.write('src/new.js', body, uncommitted);
+
+  const { report } = await inspectFixture(fx);
+  const sameFamily = report.plan.collapse.filter((x) => x.id.startsWith('fanout-'));
+  assert.ok(sameFamily.length >= 1, `same-family exact copies need one representative: ${JSON.stringify(report.plan)}`);
+  assert.equal(report.plan.supersededBy.length, report.plan.collapse.length);
+  assert.equal(report.plan.collapse.some((x) => x.id === 'uncommitted-copy' || x.into === 'uncommitted-copy'), false,
+    `uncommitted work must stay in the review queue: ${JSON.stringify(report.plan.collapse)}`);
+  assert.ok(report.plan.order.some((x) => x.id === 'uncommitted-copy'), 'uncommitted work must remain ordered for review');
+});
+
 /* ------------------------------------------------------ negative control ---- */
 
 test('NEGATIVE CONTROL: a quiet repo yields no findings of any kind', async (t) => {
@@ -1274,4 +1324,69 @@ test('SECURITY: a repository cannot name a file into a ctags option', async (t) 
   assert.match(all, /REAL_SYMBOL_HERE/, 'the genuine symbol beside the hostile filename must still be found');
   // And nothing from outside the worktree leaked into the report.
   assert.ok(!/\/etc\/hostname/.test(all), `a path from the hostile file must never reach the report: ${all.slice(0, 300)}`);
+});
+
+/**
+ * P3 RECALL AT SCALE: THE NOISE FILTER USED TO EAT THE SIGNAL AT FOUR.
+ *
+ * `discriminativeSymbols` drops any symbol owned by more than `max(3, ceil(n * 0.25))` workstreams.
+ * That is CORRECT for COLLISIONS — a symbol every worktree defines (`main`, `setUp`, a generated
+ * stub, shared scaffolding) would manufacture N-squared contested pairs that mean nothing. It is
+ * exactly backwards for DUPLICATES, where "many agents independently wrote this" is the finding.
+ *
+ * MEASURED, N worktrees each committing a byte-identical `retryWithBackoff`:
+ *     2 worktrees ->  1 pair   correct
+ *     3 worktrees ->  3 pairs  correct
+ *     4 worktrees ->  0 PAIRS  silent miss (expected 6)
+ *     5 worktrees ->  0 PAIRS  silent miss (expected 10)
+ * At the floor of 3, every worktree's discriminative key set empties, `live` empties, and the
+ * comparison has nothing to compare. It reported "none" — a clean negative answer to a question it
+ * never asked.
+ *
+ * WHY IT MATTERED: the product's headline scenario is "you ran a dozen agents overnight". At twelve
+ * agents the limit is 3, so anything four or more of them wrote was invisible — and six agents each
+ * independently writing the same helper is the single most wasteful outcome a fan-out can have.
+ *
+ * Dropping the filter here costs no precision, because the name is only a PREFILTER: every pair is
+ * confirmed by comparing the DECLARED BODY, so two worktrees that merely share a common identifier
+ * with different bodies are still rejected (P3 PRECISION above pins that).
+ */
+test('P3 RECALL: a five-way fan-out of the same function is reported, not silently dropped', async (t) => {
+  const fx = await newRepo('fanout-dup');
+  t.after(() => fx.cleanup());
+
+  const BODY = 'export function retryWithBackoff(fn, n) {\n'
+    + '  let delay = 100;\n'
+    + '  for (let i = 0; i < n; i++) {\n'
+    + '    try { return fn(); } catch (e) { delay *= 2; }\n'
+    + '  }\n'
+    + '}\n';
+
+  const names = ['agent-1', 'agent-2', 'agent-3', 'agent-4', 'agent-5'];
+  for (const n of names) {
+    await fx.worktree(n);
+    await fx.write('src/retry.js', BODY, fx.wt(n));
+    await fx.commit(`${n} adds retry`, fx.wt(n));
+  }
+
+  const { scanned } = await inspectFixture(fx);
+  // PREMISE: every worktree must actually have added the symbol, or the assertion below passes for
+  // the wrong reason — a scan that saw nothing would also report no duplicates.
+  for (const n of names) {
+    const w = scanned.workstreams.find((x) => x.id === n);
+    assert.ok(w?.addedKeys?.some((k) => k.endsWith(':retryWithBackoff')),
+      `PREMISE: ${n} must add retryWithBackoff`);
+  }
+
+  const dups = await duplicates(scanned);
+  const involving = dups.filter((p) => names.includes(p.a) && names.includes(p.b));
+
+  // Five mutually-duplicated worktrees is 5-choose-2 = 10 pairs. The defect reported ZERO.
+  assert.equal(involving.length, 10,
+    `a five-way fan-out is 10 duplicate pairs, got ${involving.length} — the noise filter is eating `
+    + 'the signal again');
+  for (const p of involving) {
+    assert.ok(p.sharedSymbols.some((s) => s.endsWith(':retryWithBackoff')),
+      'every pair must name the symbol they share');
+  }
 });

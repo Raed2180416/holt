@@ -32,6 +32,12 @@ import { stashState } from './stash.mjs';
 
 const setOf = (arr) => new Set(arr);
 
+// A shared symbol with a tiny Jaccard share is an overlap candidate, not evidence of duplicate work.
+// The live 38-workstream distribution has a clean gap: 88 pairs at <= 5% and 20 pairs at >= 25%.
+// Keeping the threshold between those measured populations prevents boilerplate from becoming an
+// economic finding while retaining one-symbol exact duplicates (similarity 1.0).
+export const DUPLICATE_MIN_SIMILARITY = 0.1;
+
 function intersect(aSet, bArr) {
   const out = [];
   for (const x of bArr) if (aSet.has(x)) out.push(x);
@@ -385,6 +391,14 @@ export function uniqueWork(scanResult) {
         untracked: [...(w.uncommitted?.untracked ?? [])],
         ignored: [...(w.ignored?.files ?? [])],
       };
+      const redundantWith = new Set();
+      const redundantWithDurable = new Set();
+      for (const file of w.touched ?? []) {
+        const key = w.contentKeys?.[file];
+        if (!key) continue;
+        for (const id of ownership.others(key, w, false)) redundantWith.add(id);
+        for (const id of ownership.others(key, w, true)) redundantWithDurable.add(id);
+      }
 
       // A SYMBOL COUNT OF ZERO MUST NOT CLAIM TO BE A MEASUREMENT WHEN IT ISN'T ONE.
       //
@@ -413,16 +427,58 @@ export function uniqueWork(scanResult) {
         ignoredFileCount,
         atRiskSymbolCount: atRiskSymbols,
         committedFiles: w.committed.count,
+        // This is an observation, not permission to delete: the current bytes also appear in these
+        // workstreams. `redundantWithDurable` is the subset that can make a safeToDelete verdict
+        // true; an uncommitted-only holder is visible here but is not a recoverable backup.
+        redundantWith: redundantWith.size ? [...redundantWith].sort() : undefined,
+        redundantWithDurable: redundantWithDurable.size ? [...redundantWithDurable].sort() : undefined,
         symbolsUnmeasuredCount: symbolsUnmeasured.length,
         symbolsUnmeasuredFiles: symbolsUnmeasured.length ? symbolsUnmeasured.slice(0, 10) : undefined,
+        // THE VERDICT MUST NOT CONTRADICT THE EVIDENCE BESIDE IT.
+        //
+        // `atRisk` is max(atRiskSymbols, uncommittedFileCount + ignoredFileCount), so a worktree
+        // holding ONLY gitignored content produced `verdict: "unique-work-uncommitted"` while its
+        // own `uncommittedFileCount` was 0 and `uniqueSymbolCount` was 0. Measured, on a worktree
+        // containing nothing but `node_modules/pkg/index.js` and `.env`:
+        //     uncommittedFileCount 0 · uniqueSymbolCount 0 · ignoredFileCount 2
+        //     verdict "unique-work-uncommitted"
+        // holt gathered the right facts and then labelled them wrongly, and the CLI line read
+        // `● gi-wt  0  2  unique-work-uncommitted` — no way for a reader to know the 2 were ignored.
+        //
+        // NOT fixed by calling it disposable. Protecting a `.env` is CORRECT and valuable: a local
+        // credentials file is exactly the thing whose only copy is on disk, and it is the same class
+        // as the skip-worktree case. Protecting `node_modules/` is noise. holt cannot tell those
+        // apart from content identity alone — both genuinely exist nowhere else — so it must STATE
+        // WHAT THE CONTENT IS and let the reader judge, rather than assert "uncommitted" about
+        // files that are not uncommitted.
         verdict:
-          atRisk > 0 ? 'unique-work-uncommitted'
+          atRisk > 0
+            ? (uncommittedFileCount === 0 && atRiskSymbols === 0 && ignoredFileCount > 0
+              ? 'unique-work-gitignored-only'
+              : 'unique-work-uncommitted')
             : uniqueSymbols.length > 0 ? 'unique-work-committed'
               : w.committed.count > 0 ? 'committed-delta-no-unique-symbols'
                 : 'nothing-unique',
       };
     })
-    .sort((a, b) => b.uncommittedOnlyCount - a.uncommittedOnlyCount || b.uniqueSymbolCount - a.uniqueSymbolCount);
+    // RANKED BY WHAT WOULD ACTUALLY BE LOST, not by raw file count.
+    //
+    // The sort was `uncommittedOnlyCount` first, and that count includes gitignored files — so
+    // `holt_at_risk` on a gauntlet fixture returned, in order: bulk-vendor-sync (40 ignored files,
+    // ZERO unique symbols, `examples: []`), then mixed-bag, then DELETEME-old-experiment holding an
+    // uncommitted OAuth security fix. Forty generated `node_modules` files ranked ABOVE
+    // `validate_oauth_state`, and the tool's own output contained the tell: it had nothing to show
+    // for its top row. "Start here" is the first line of that tool's description, and it started you
+    // in the wrong place.
+    //
+    // Gitignored-only entries now sort BELOW everything with real uncommitted content or a unique
+    // symbol. They are still reported — a `.env` still matters — just not first.
+    .sort((a, b) => {
+      const ignoredOnly = (x) => (x.verdict === 'unique-work-gitignored-only' ? 1 : 0);
+      return ignoredOnly(a) - ignoredOnly(b)
+        || b.uncommittedOnlyCount - a.uncommittedOnlyCount
+        || b.uniqueSymbolCount - a.uniqueSymbolCount;
+    });
 }
 
 /* --------------------------------------- shared: what a deletion destroys ---- */
@@ -462,6 +518,18 @@ export function contentAtRisk(w) {
   const blind = [];
   if (w?.uncommitted?.how === 'status-failed') {
     blind.push(`working-tree status probe failed (${w.uncommitted.error ?? 'unknown'})`);
+  }
+  // The index's per-path reporting filter (skip-worktree / assume-unchanged) could not be read,
+  // so holt does not know what `git status` was permitted to tell it. See indexFlagDelta().
+  if (w?.uncommitted?.how === 'index-flags-failed') {
+    blind.push(`index-flag probe failed (${w.uncommitted.error ?? 'unknown'}) — cannot tell what git status was allowed to report`);
+  }
+  // Individually unresolvable paths: the flag says status did not report them, and holt could
+  // not read them to find out whether that mattered. Named, so a refusal can say which.
+  const unmeasured = (w?.uncommitted?.unmeasured ?? []).filter(Boolean);
+  if (unmeasured.length) {
+    blind.push(`${unmeasured.length} path(s) hidden from git status by an index flag could not be read`
+      + ` (e.g. ${unmeasured.slice(0, 3).join(', ')})`);
   }
   if (w?.ignored?.how === 'ignored-probe-failed') {
     blind.push(`gitignored-content probe failed (${w.ignored.error ?? 'unknown'})`);
@@ -558,7 +626,10 @@ export function safeToDelete(scanResult, unique = null) {
 
   return scanResult.workstreams.map((w) => {
     if (!w.ok) {
-      return { id: w.id, path: w.path, safe: false, confidence: 'unknown', reasons: [w.reason ?? 'not scanned'] };
+      // `prunable` is carried through because it is the ONLY thing that bounds what
+      // `git worktree prune` can reach, and the guard had no way to ask. See the `reach` field
+      // in src/agent.mjs's DESTRUCTIVE table.
+      return { id: w.id, path: w.path, safe: false, confidence: 'unknown', prunable: !!w.prunable, reasons: [w.reason ?? 'not scanned'] };
     }
 
     // THE MAIN WORKING TREE IS NEVER A DELETION CANDIDATE, whatever its contents say.
@@ -719,7 +790,7 @@ export function safeToDelete(scanResult, unique = null) {
     }
     const uncommittedCount = risk.layers.uncommitted.length + risk.layers.untracked.length;
     if (uncommittedCount > 0) reasons.push(`${uncommittedCount} uncommitted file(s)`);
-    if (u && u.uniqueSymbolCount > 0) reasons.push(`${u.uniqueSymbolCount} symbol(s) found nowhere else`);
+    if (u && u.uniqueSymbolCount > 0) reasons.push(`${u.uniqueSymbolCount} symbol(s) with no durable copy elsewhere`);
     // A LOCK HOLT PLACED IS NOT EVIDENCE — IT IS HOLT'S OWN PAST VERDICT, RESTATED.
     //
     // Counting it here made it self-justifying: `protect` locked a worktree that genuinely held
@@ -787,6 +858,9 @@ export function safeToDelete(scanResult, unique = null) {
       id: w.id,
       path: w.path,
       family: w.family,
+      // A scanned worktree is on disk, so it is not prunable — carried explicitly rather than
+      // left undefined so the guard's `reach` filter reads one field, never two shapes.
+      prunable: !!w.prunable,
       safe: reasons.length === 0,
       // Named, so nobody has to infer it: this worktree is disposable BECAUSE a living sibling
       // (or base itself, see lineEndingOnlyVsBase above) holds the identical content, not
@@ -1025,7 +1099,7 @@ export async function collisions(scanResult, opts = {}) {
   const visible = keepLow ? ranked : ranked.filter((r) => r.severity !== 'low');
   visible.all = ranked;
   visible.hidden = ranked.filter((r) => r.severity === 'low');
-  visible.hotspots = hotspotsFrom(visible.hidden);
+  visible.hotspots = hotspotsFrom(ranked.filter((r) => r.severity === 'low'));
   return visible;
 }
 
@@ -1308,7 +1382,33 @@ export function declaredBodyFromLines(lines, symLine, declLines = []) {
  */
 export async function duplicates(scanResult, { minShared = 1 } = {}) {
   const all = scanResult.workstreams.filter((w) => w.ok);
-  const { keep } = discriminativeSymbols(all);
+
+  // DUPLICATES DOES NOT USE THE COLLISION NOISE FILTER, BECAUSE FOR THIS QUESTION THE NOISE IS THE
+  // SIGNAL.
+  //
+  // `discriminativeSymbols` drops any symbol owned by more than `max(3, ceil(n * 0.25))`
+  // workstreams. That is CORRECT for collisions — a symbol every worktree defines (`main`, `setUp`,
+  // a generated stub, shared scaffolding) would manufacture N-squared contested pairs that mean
+  // nothing. It is exactly backwards here: "many agents independently wrote this" IS what
+  // `duplicates` exists to report.
+  //
+  // MEASURED, with N worktrees each committing a byte-identical `retryWithBackoff`:
+  //     2 worktrees -> 1 pair   correct        4 worktrees -> 0 pairs   SILENT MISS (expected 6)
+  //     3 worktrees -> 3 pairs  correct        5 worktrees -> 0 pairs   SILENT MISS (expected 10)
+  // The floor of 3 means a four-way fan-out vanishes entirely: every worktree's discriminative key
+  // set empties, `live` empties, and the comparison has nothing left to compare. It reports "none"
+  // — a clean negative answer to a question it never asked. At the product's own headline scale
+  // ("you ran a dozen agents overnight") anything four or more of them wrote is invisible, which is
+  // precisely the most wasteful outcome a fan-out can have.
+  //
+  // DROPPING THE FILTER COSTS NOTHING IN PRECISION, because the name is only a PREFILTER here: a
+  // pair is confirmed by comparing the DECLARED BODY (readDeclaredBody + layoutNormalisedBody
+  // below), so two agents who both happen to declare `value:code` with different bodies are already
+  // rejected. The filter was buying performance, not correctness, and it was buying it with recall
+  // on the one question this function answers.
+  const { keep } = discriminativeSymbols(all, {
+    maxShareRatio: 1, floor: Number.POSITIVE_INFINITY,
+  });
   const live = all.filter((w) => discriminativeKeys(w, keep).length);
 
   // First occurrence per (workstream, key) — overwhelmingly the common case is exactly one.
@@ -1385,10 +1485,10 @@ export async function duplicates(scanResult, { minShared = 1 } = {}) {
           new Set([...discriminativeKeys(a, keep), ...discriminativeKeys(b, keep)]).size,
       };
     })
-    .sort((x, y) => {
-      if (x.sameFamily !== y.sameFamily) return x.sameFamily ? 1 : -1;
-      return y.sharedCount - x.sharedCount;
-    });
+    .filter((p) => p.similarity >= DUPLICATE_MIN_SIMILARITY)
+    .sort((x, y) => y.sharedCount - x.sharedCount
+      || y.similarity - x.similarity
+      || Number(x.sameFamily) - Number(y.sameFamily));
 }
 
 /* ------------------------------------------------- P2: context digest ---- */
@@ -1514,7 +1614,9 @@ function buildAdvice(contested, alreadyBuilt, hasPeers = true) {
  * Executing the rebases is explicitly NOT holt's job — git-machete, stack-pr and Graphite
  * already do stacked-branch restacking well. holt produces the order; they apply it.
  */
-export function landingPlan(scanResult, { collisions: cols = [], duplicates: dups = [] } = {}) {
+export function landingPlan(scanResult, {
+  collisions: cols = [], duplicates: dups = [], collapse = true,
+} = {}) {
   const uniq = uniqueWork(scanResult);
   const safe = safeToDelete(scanResult, uniq);
   const safeIds = setOf(safe.filter((s) => s.safe).map((s) => s.id));
@@ -1528,21 +1630,78 @@ export function landingPlan(scanResult, { collisions: cols = [], duplicates: dup
     entanglement.set(c.b, (entanglement.get(c.b) ?? 0) + w);
   }
 
-  // Collapse cross-family duplicate groups to one representative: the one with more unique work.
   const uniqById = new Map(uniq.map((u) => [u.id, u]));
+  const workstreamById = new Map(live.map((w) => [w.id, w]));
   const supersededBy = new Map();
-  for (const d of dups) {
-    if (d.sameFamily) continue;
-    if (d.similarity < 0.6) continue; // only collapse when the overlap is substantial
-    const ua = uniqById.get(d.a)?.uniqueSymbolCount ?? 0;
-    const ub = uniqById.get(d.b)?.uniqueSymbolCount ?? 0;
-    const [keep, drop] = ua >= ub ? [d.a, d.b] : [d.b, d.a];
-    if (!supersededBy.has(drop)) supersededBy.set(drop, keep);
+  const collapseEvidence = new Map();
+  const parent = new Map();
+  const find = (id) => {
+    if (!parent.has(id)) parent.set(id, id);
+    const root = parent.get(id);
+    if (root === id) return id;
+    const next = find(root);
+    parent.set(id, next);
+    return next;
+  };
+  const union = (a, b) => {
+    const ar = find(a), br = find(b);
+    if (ar !== br) parent.set(ar, br);
+  };
+  const contentKeys = (w) => new Set(Object.values(w?.contentKeys ?? {}).filter(Boolean));
+  const durableDuplicate = (a, b) => {
+    const ua = uniqById.get(a.id), ub = uniqById.get(b.id);
+    if (!ua || !ub || ua.uncommittedOnlyCount > 0 || ub.uncommittedOnlyCount > 0) return false;
+    const bKeys = contentKeys(b), aKeys = contentKeys(a);
+    if (!a.touched?.length || !b.touched?.length) return false;
+    return [...contentKeys(a)].every((key) => bKeys.has(key))
+      && [...contentKeys(b)].every((key) => aKeys.has(key));
+  };
+
+  // Collapse only measured, exact, durable duplicates. Similarity below 1.0 can still be useful
+  // review evidence, but it cannot justify hiding an entire workstream: its non-shared content
+  // would disappear from the review queue. Same-family copies are included because fan-out waste
+  // is the primary review-saving case; durability and whole-work content identity are the guards.
+  if (collapse) {
+    for (const d of dups) {
+      if (d.similarity < 0.999 || !workstreamById.has(d.a) || !workstreamById.has(d.b)) continue;
+      const a = workstreamById.get(d.a), b = workstreamById.get(d.b);
+      if (!durableDuplicate(a, b)) continue;
+      union(d.a, d.b);
+      collapseEvidence.set(`${d.a}\0${d.b}`, d);
+    }
+    // Content identity is a stronger duplicate instrument than symbol identity. Safe redundant
+    // rows therefore participate in the same review cluster even when no symbol was extractable.
+    for (const s of safe) {
+      if (!s.safe || !s.redundantWith?.length) continue;
+      for (const other of s.redundantWith) {
+        if (workstreamById.has(other)) union(s.id, other);
+      }
+    }
+
+    const groups = new Map();
+    for (const id of parent.keys()) {
+      const root = find(id);
+      if (!groups.has(root)) groups.set(root, []);
+      groups.get(root).push(id);
+    }
+    for (const members of groups.values()) {
+      if (members.length < 2) continue;
+      const representative = [...members].sort((a, b) =>
+        (uniqById.get(b)?.uniqueSymbolCount ?? 0) - (uniqById.get(a)?.uniqueSymbolCount ?? 0)
+        || a.localeCompare(b))[0];
+      for (const id of members) {
+        if (id === representative) continue;
+        supersededBy.set(id, representative);
+        const evidence = [...collapseEvidence.values()].find((d) =>
+          (d.a === id && d.b === representative) || (d.a === representative && d.b === id)
+          || (d.a === id && members.includes(d.b)) || (d.b === id && members.includes(d.a)));
+        if (evidence) collapseEvidence.set(id, evidence);
+      }
+    }
   }
 
   const candidates = scanResult.workstreams
     .filter((w) => w.ok)
-    .filter((w) => !safeIds.has(w.id))
     .map((w) => {
       const u = uniqById.get(w.id);
       return {
@@ -1554,21 +1713,34 @@ export function landingPlan(scanResult, { collisions: cols = [], duplicates: dup
         entanglement: entanglement.get(w.id) ?? 0,
         supersededBy: supersededBy.get(w.id) ?? null,
         filesToReview: w.touched.length,
+        collapseEvidence: collapseEvidence.get(w.id) ?? null,
       };
     });
 
+  const supersededTargets = new Set([...supersededBy.values()]);
   const toLand = candidates
-    .filter((c) => !c.supersededBy)
+    .filter((c) => (!safeIds.has(c.id) || supersededTargets.has(c.id)) && !c.supersededBy)
     .sort((a, b) => a.entanglement - b.entanglement || b.uniqueSymbols - a.uniqueSymbols);
 
+  const dropRows = safe.filter((s) => s.safe && !s.redundantWith?.some((id) => id !== 'base'));
+  const collapseRows = candidates.filter((c) => c.supersededBy).map((c) => ({
+    id: c.id,
+    into: c.supersededBy,
+    why: 'exact duplicate content is already committed in the representative',
+    confidence: 'measured',
+    similarity: c.collapseEvidence?.similarity ?? 1,
+    sharedCount: c.collapseEvidence?.sharedCount ?? null,
+  }));
+
   return {
-    drop: safe.filter((s) => s.safe).map((s) => ({ id: s.id, why: 'nothing unique, nothing uncommitted, nothing base lacks' })),
-    collapse: candidates.filter((c) => c.supersededBy).map((c) => ({ id: c.id, into: c.supersededBy, why: 'duplicate of another dispatch' })),
+    drop: dropRows.map((s) => ({ id: s.id, why: 'nothing unique, nothing uncommitted, nothing base lacks' })),
+    collapse: collapseRows,
+    supersededBy: collapseRows,
     order: toLand.map((c, i) => ({ step: i + 1, ...c })),
     reviewReduction: {
       total: live.length,
-      dropped: safe.filter((s) => s.safe).length,
-      collapsed: candidates.filter((c) => c.supersededBy).length,
+      dropped: dropRows.length,
+      collapsed: collapseRows.length,
       toReview: toLand.length,
     },
     reviewSurface: reviewSurface(live, safeIds),
@@ -1728,7 +1900,9 @@ export async function analyze(scanResult, opts = {}) {
   // Machine consumers get the FULL evidence (co-located included): sequencing conservatively
   // costs a little parallelism, sequencing wrongly costs a failed apply.
   const colsAll = cols.all ?? cols;
-  const plan = landingPlan(scanResult, { collisions: colsAll, duplicates: dups });
+  const plan = landingPlan(scanResult, {
+    collisions: colsAll, duplicates: dups, collapse: opts.collapse !== false,
+  });
   const graph = buildGraph(scanResult, { collisions: colsAll, duplicates: dups });
 
   // Filtering is never silent. A bounded result that does not say what it bounded reads as

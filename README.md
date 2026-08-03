@@ -55,7 +55,13 @@ In one measured case, a 39-worktree repository's committed layer flagged **4** w
 
 > An unaided agent deleted **13 of 16 worktrees including all five irreplaceable ones** — *"wip-1, wip-2: only contained untracked files"* — and kept two empty decoys because they were named `IMPORTANT-do-not-delete` and `KEEP-release-candidate`. Names in both directions, content in neither.
 
-Holt prevented that loss in **every** protected trial.
+Holt prevented that loss in every protected trial of that run — and in a later 12-trial run on the
+same gauntlet it prevented it in 10, with both failures the same defect: an agent that used holt to
+*identify* what to keep and then deleted with raw `rm`, removing **both** halves of a duplicated
+pair in one command. Each half is individually disposable because the other holds the content;
+neither is disposable if both go, and a per-target check evaluates each one against a state where
+its twin still exists. Every trial that used `holt clean` — which re-verifies each worktree
+immediately before removing it — lost nothing.
 
 ---
 
@@ -316,13 +322,47 @@ Optional, and most repositories will never need it. Drop a `.holtrc.json` in the
 | `familyOverrides` | array of regex strings | `[]` | How worktree names are grouped into "the same dispatch" for sibling/duplicate reporting (`inferFamily` in `src/discover.mjs`), for a fan-out naming scheme holt's built-in patterns don't recognise. A match here is trusted directly (`familyRule: 'user-override'`), same as it always was for a caller that supplied it in code — this file is only a new way to reach that existing knob. |
 | `maintenanceFloor` | non-negative integer | `5` | Minimum disposable-worktree count before `holt`'s agent brief nags about running `holt clean --apply`. |
 | `maintenanceRatio` | number, `0`–`1` | `0.3` | Minimum disposable-fraction-of-total before the same nag fires. |
+| `guardAllow` | array of regex strings | `[]` | **The human escape hatch for the guard.** Each entry approves ONE command. See below. |
 
 No file, or a file with any subset of these keys, is fine. **An unparseable or invalid file is a
 hard error** — `holt` exits 2 with the exact reason (bad JSON, unknown key, wrong type, invalid
 regex) rather than silently falling back to defaults; a config you believe is active is never
-quietly discarded. Nothing in this file can make a "safe to delete" verdict less accurate: both
-keys tune display/nagging heuristics, never the content-identity comparison in `src/analyze.mjs`
-that actually decides what counts as unique work. See `src/config.mjs`.
+quietly discarded. Nothing in this file can make a "safe to delete" verdict less accurate: the
+first three keys tune display/nagging heuristics, never the content-identity comparison in
+`src/analyze.mjs` that actually decides what counts as unique work. See `src/config.mjs`.
+
+### Overruling the guard (`guardAllow`), and the break-glass
+
+`guardAllow` is the one key that can overrule holt's evidence, so its scope is exactly the command
+you read and nothing next to it:
+
+```json
+{ "guardAllow": ["^rm -rf (dist|build)$"] }
+```
+
+- **An entry must match one WHOLE command.** Matching is anchored for you, so `"rm -rf dist"` and
+  `"^rm -rf dist$"` mean the same thing. It will not approve `rm -rf distant-relative`.
+- **A compound command is approved only when every one of its commands is.** `rm -rf dist; rm -rf
+  ../feature` needs an entry for the second half too. Comments and string literals approve nothing:
+  `rm -rf ../feature # rm -rf dist` is the deletion, not the comment. This is the same rule Claude
+  Code applies to its own `Bash(…)` permission rules.
+- **An entry whose wildcard could span a command separator is declined**, loudly, with the rewrite —
+  `.*`, `\S`, `[^…]`. Those approve commands nobody reviewed. Bound the wildcard instead:
+  `^rm -rf dist/[\\w.-]+$`.
+- **Every use is journalled and announced** to you in the session, so an entry you did not write is
+  visible the first time it fires.
+
+This is deliberately something holt never asks an agent to write on your behalf: `.holtrc.json` is
+an ordinary in-repo file, and the tools that edit files are not guarded.
+
+If a bug in holt makes the guard refuse work it should not, the break-glass is an **environment
+variable**, not a config key — so it is out of reach of anything running inside the repository:
+
+```console
+$ HOLT_HOOK_FAIL_OPEN=1 claude     # the guard is OFF; every command it permits is announced
+```
+
+Please report anything that needs it: <https://github.com/Raed2180416/holt/issues>.
 
 ## Quick start
 

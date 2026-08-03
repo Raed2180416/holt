@@ -31,6 +31,42 @@ export const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platf
 export const foldCase = (p) => (CASE_INSENSITIVE_FS ? String(p).toLowerCase() : String(p));
 
 /**
+ * A path argument that cannot be evaluated as a path. Typed and thrown, never returned, because
+ * the alternative — handing back something path-SHAPED for input that was not a path — is the
+ * defect this whole module exists to stop: every caller downstream then compares, joins and
+ * containment-checks a value that never denoted a location, and each of those answers looks like
+ * a real answer.
+ */
+export class PathBoundaryError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'PathBoundaryError';
+    /** @type {string} */
+    this.code = 'EPATHBOUNDARY';
+  }
+}
+
+/**
+ * The one thing `path.resolve` will happily do that it must not: build a path around a NUL.
+ *
+ * A NUL byte terminates the string at the syscall boundary while JavaScript keeps counting past
+ * it, so `<repo>\0/etc/shadow` compares, folds and prefix-tests as a path under `<repo>` and then
+ * reaches the filesystem as `<repo>`. That is a containment check that says yes about one path
+ * while the kernel acts on another — a genuinely different location, agreed to by every helper
+ * below. Node's own fs layer rejects it (ERR_INVALID_ARG_VALUE); path.resolve does not, and
+ * canonicalPath's "the ancestry does not exist, hand the string back" branch swallowed the
+ * evidence. So the check is here, at the point every comparison starts.
+ */
+export function assertUsablePath(value, label = 'path') {
+  if (typeof value !== 'string') {
+    throw new PathBoundaryError(`${label} must be a string path, got ${value === null ? 'null' : typeof value}`);
+  }
+  if (value.length === 0) throw new PathBoundaryError(`${label} must not be empty`);
+  if (value.includes('\0')) throw new PathBoundaryError(`${label} contains a NUL byte, which cannot denote a location`);
+  return value;
+}
+
+/**
  * The canonical absolute location of a path, whether or not it exists yet.
  *
  * A path that does not exist STILL HAS a canonical location, and returning the raw string for it
@@ -40,6 +76,7 @@ export const foldCase = (p) => (CASE_INSENSITIVE_FS ? String(p).toLowerCase() : 
  * and the remainder re-appended.
  */
 export async function canonicalPath(p) {
+  assertUsablePath(p, 'path');
   const abs = path.resolve(p);
   try { return await fs.realpath(abs); } catch { /* does not exist yet — resolve its ancestry */ }
 

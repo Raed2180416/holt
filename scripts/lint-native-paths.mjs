@@ -79,8 +79,26 @@ const BUILTIN_CLEARERS = [
 /** The two spellings of "normalise to forward slashes" this codebase actually uses inline. */
 const INLINE_CLEARER_RE = /\.\s*replace\s*\(\s*\/\\\\\/g\s*,\s*['"]\/['"]\s*\)|\.\s*split\s*\(\s*path\s*\.\s*sep\s*\)\s*\.\s*join\s*\(\s*['"]\/['"]\s*\)/;
 
-/** `const fwd = (p) => p.replace(/\\/g, '/')` — detected, so it needs no allowlist entry. */
-const CLEARER_DEF_RE = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\(?\s*([A-Za-z_$][\w$]*)\s*\)?\s*=>\s*\2\s*\.\s*replace\s*\(\s*\/\\\\\/g\s*,\s*['"]\/['"]\s*\)/g;
+/**
+ * `const fwd = (p) => p.replace(/\\/g, '/')` — detected, so it needs no allowlist entry.
+ *
+ * The candidate shape only: a named concise arrow. Whether it actually normalises is decided by
+ * CLEARER_BODY_RE below, against the captured body.
+ *
+ * This used to require ONE parameter and the `.replace(/\\/g,'/')` spelling specifically, while
+ * INLINE_CLEARER_RE already accepted two spellings. So a helper written with the other spelling —
+ * `const rel = (from, to) => path.relative(from, to).split(path.sep).join('/')` — normalised
+ * correctly and was still reported as a native path, at every site that used it. A linter that
+ * rejects the fix it recommends teaches people to suppress it, which costs the whole rule.
+ */
+const CLEARER_DEF_RE = /(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>\s*([^;\n]+)/g;
+
+/**
+ * The body must END in the normalisation, not merely contain one. `(p) => fix(p.replace(/\\/g,'/'))`
+ * returns whatever `fix` returns, and treating it as cleared would silence real findings — the
+ * under-refusal half of a lint rule is as bad as the over-refusal half.
+ */
+const CLEARER_BODY_RE = new RegExp(`(?:${INLINE_CLEARER_RE.source})\\s*$`);
 
 /** Glob/regex machinery that reasons in forward-slash space. */
 const MATCHER_RE = /\b(?:pathMatcher|minimatch|micromatch|picomatch|globToRegExp)\s*\(|\bnew\s+RegExp\s*\(/g;
@@ -166,12 +184,26 @@ function taintedNames(code, literal, clearers) {
   const origin = new Map();
   const rootOf = (n) => origin.get(n) ?? n;
 
+  /**
+   * Names assigned from an EXPLICIT forward-slash normalisation — a recognised clearer, not merely
+   * an initialiser the analysis failed to understand. The distinction is the whole point: "cleared"
+   * is positive evidence that the value cannot carry a backslash, whereas "not native" also covers
+   * "no opinion", which is exactly when the name heuristic should still fire.
+   */
+  const cleared = new Set();
+
   const ASSIGN_RE = /(?:(?:const|let|var)\s+|^\s*|[;{(,]\s*)([A-Za-z_$][\w$]*)\s*=(?!=)/gm;
   for (const m of codeMatches(code, literal, ASSIGN_RE)) {
     const name = m[1];
     const rhsStart = m.index + m[0].length;
     const rhs = code.slice(rhsStart, statementEnd(code, literal, rhsStart));
-    if (!isNative(rhs, tainted, clearers)) { tainted.delete(name); origin.delete(name); continue; }
+    if (!isNative(rhs, tainted, clearers)) {
+      tainted.delete(name);
+      origin.delete(name);
+      if (isCleared(rhs, clearers)) cleared.add(name); else cleared.delete(name);
+      continue;
+    }
+    cleared.delete(name);
     tainted.add(name);
     // A BARE identifier passed straight into the producer — `path.dirname(dir)`. Anything more
     // complicated than that (`path.join(a, b)`, `canonicalPath(s.path)`) has no single origin, so
@@ -182,7 +214,7 @@ function taintedNames(code, literal, clearers) {
     else if (tainted.has(head) && head !== name) origin.set(name, rootOf(head));
     else origin.delete(name);
   }
-  return { tainted, rootOf };
+  return { tainted, rootOf, cleared };
 }
 
 const isCleared = (expr, clearers) =>
@@ -227,8 +259,10 @@ export function fileFindings(rel, raw, opts = {}) {
   const add = (index, rule, what, fix) => out.push({ file: rel, line: lineAt(code, index), rule, what, fix });
 
   const clearers = [...BUILTIN_CLEARERS];
-  for (const m of codeMatches(code, literal, CLEARER_DEF_RE)) clearers.push(m[1]);
-  const { tainted, rootOf } = taintedNames(code, literal, clearers);
+  for (const m of codeMatches(code, literal, CLEARER_DEF_RE)) {
+    if (CLEARER_BODY_RE.test(m[2])) clearers.push(m[1]);
+  }
+  const { tainted, rootOf, cleared } = taintedNames(code, literal, clearers);
 
   /** Every native-path expression in the file, as [start, end) spans. */
   const producers = [];
@@ -444,6 +478,14 @@ export function fileFindings(rel, raw, opts = {}) {
     for (const it of tpl.interps) {
       const expr = code.slice(it.start, it.end);
       if (SOURCE_SAFE_RE.test(expr)) continue;
+      // A value PROVEN to be in forward-slash space carries no backslash to corrupt, so the
+      // name heuristic must not override it. PATHISH_EXPR_RE fires on any identifier containing
+      // root/cwd/dir/path/file/wt, which is a deliberate catch-all for expressions the analysis
+      // could not follow — but applied to an expression it DID follow and clear, it left no way to
+      // satisfy the rule except JSON.stringify(). That is wrong twice over: it is not the only
+      // correct fix, and here it would add quotes to commands whose unquoted spelling is the thing
+      // under test, so obeying the linter would have silently reduced the coverage.
+      if (isCleared(expr, clearers) || cleared.has(expr.trim())) continue;
       if (!isNative(expr, tainted, clearers) && !PATHISH_EXPR_RE.test(expr.trim())) continue;
       add(it.start, 'native-path-in-source',
         `a path is interpolated raw into generated source: \`${expr.trim().slice(0, 40)}\``,

@@ -164,6 +164,29 @@ test('GATE DENY: destroying a worktree with uncommitted-only work is blocked, wi
   assert.match(verdict.reason, /holt gate/, 'the reason must say how to inspect');
 });
 
+test('GATE: duplicate uncommitted content is surfaced without claiming it is nowhere else', async (t) => {
+  const fx = await newRepo('duplicate-uncommitted-reason');
+  t.after(() => fx.cleanup());
+  const body = 'export function UNCOMMITTED_DUPLICATE() { return 7; }\n';
+  const a = await fx.worktree('duplicate-a');
+  const b = await fx.worktree('duplicate-b');
+  await fx.write('src/shared.js', body, a);
+  await fx.write('src/shared.js', body, b);
+
+  const { report } = await cachedReport(fx.root, { includePrimary: true });
+  for (const [id, other] of [['duplicate-a', 'duplicate-b'], ['duplicate-b', 'duplicate-a']]) {
+    const row = report.unique.find((u) => u.id === id);
+    assert.ok(row?.redundantWith?.includes(other), `content relation must be measured for ${id}: ${JSON.stringify(row)}`);
+    assert.ok(!row.redundantWithDurable?.length, `the pair must not be called durable: ${JSON.stringify(row)}`);
+  }
+
+  const verdict = await assessCommand(`rm -rf ${a}`, fx.root);
+  assert.equal(verdict.decision, 'deny');
+  assert.match(verdict.reason, /no durable copy elsewhere/);
+  assert.match(verdict.reason, /duplicate-b/);
+  assert.doesNotMatch(verdict.reason, /exists nowhere else/);
+});
+
 test('GATE ALLOW: destroying a genuinely empty worktree is permitted', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
@@ -305,6 +328,45 @@ test('BRIEF: a quiet repo produces NOTHING rather than noise', async (t) => {
 
   const text = await buildBrief(fx.root);
   assert.equal(text, null, 'no findings must mean no injected context');
+});
+
+test('BRIEF: every capped repository-derived list announces its remainder', async (t) => {
+  const fx = await newRepo('brief-overflow');
+  t.after(() => fx.cleanup());
+
+  const here = await fx.worktree('here');
+  const shared = [];
+  for (let i = 0; i < 6; i++) {
+    const names = [];
+    for (let j = 0; j < 5; j++) names.push(`BRIEF_SHARED_${i}_${j}`);
+    shared.push(names);
+  }
+  await fx.write('src/shared.js', shared.flat().map((name) => `export function ${name}() { return 1; }`).join('\n') + '\n', here);
+  await fx.commit('add shared symbols', here);
+
+  for (let i = 0; i < shared.length; i++) {
+    const wt = await fx.worktree(`dup-${i}`);
+    await fx.write(`src/dup-${i}.js`, shared[i].map((name) => `export function ${name}() { return 1; }`).join('\n') + '\n', wt);
+    await fx.commit(`duplicate group ${i}`, wt);
+  }
+
+  for (let i = 0; i < 6; i++) {
+    const wt = await fx.worktree(`risky-${i}`);
+    await fx.write(`src/risky-${i}.js`, `export function BRIEF_RISKY_${i}() { return ${i}; }\n`, wt);
+  }
+
+  for (let i = 0; i < 4; i++) {
+    await fx.write(`stash-${i}.js`, `export function BRIEF_STASH_${i}() { return ${i}; }\n`);
+    const stash = await gitIn(['stash', 'push', '-u', '-m', `brief-${i}`], fx.root);
+    assert.equal(stash.code, 0, `stash setup ${i} failed: ${stash.err}`);
+  }
+
+  const text = await buildBrief(here);
+  assert.ok(text, 'the fixture must produce a brief');
+  assert.match(text, /… and 1 more workstream/);
+  assert.match(text, /… and 1 more symbol/);
+  assert.match(text, /6 workstream.*uncommitted changes — .*… and 1 more\./);
+  assert.match(text, /4 stash entr.*NO ref holds — .*… and 1 more\./);
 });
 
 test('BRIEF: a non-repository is silent, not an exception', async () => {
@@ -652,7 +714,7 @@ test('COVERAGE: mutation verbs are blocked, not only the deletion verb', async (
   ]) {
     const v = await assessCommand(cmd, wt);
     assert.equal(v.decision, 'deny', `${cmd} destroys uncommitted work and must be denied: ${JSON.stringify(v)}`);
-    assert.match(v.reason, /exists nowhere else/i, `${cmd} must say what is at stake`);
+    assert.match(v.reason, /no durable copy elsewhere/i, `${cmd} must say what is at stake`);
   }
 });
 
@@ -2180,6 +2242,31 @@ test('NEWLINE: a worktree whose DIRECTORY NAME contains a newline is still guard
     const v = await assessCommand(cmd, fx.root);
     assert.ok(v && v.decision !== 'allow',
       `${shape}: a newline in the path must not disarm the guard: ${JSON.stringify(v)}`);
+  }
+});
+
+test('SUBSTITUTION: arithmetic expansion is data, while nested commands remain guarded', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const protectedPath = fx.wt('uniqueUncommitted');
+
+  for (const command of [
+    'echo "$(( 5 * 10 / 36 ))"',
+    'echo "t: $(( $(wc -c < README.md) * 10 / 36 ))"',
+    'cd $(git rev-parse --show-toplevel)',
+  ]) {
+    const verdict = await assessCommand(command, fx.root);
+    assert.equal(verdict.decision, 'allow',
+      `ordinary arithmetic or a known repository-root substitution must be allowed: ${command}\\n${JSON.stringify(verdict)}`);
+  }
+
+  for (const command of [
+    `echo "$(( $(rm -rf ${protectedPath}) * 10 / 36 ))"`,
+    `cd $(rm -rf ${protectedPath})`,
+  ]) {
+    const verdict = await assessCommand(command, fx.root);
+    assert.ok(verdict && verdict.decision !== 'allow',
+      `a command substitution nested in arithmetic still executes and must be guarded: ${command}\\n${JSON.stringify(verdict)}`);
   }
 });
 

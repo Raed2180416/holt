@@ -109,7 +109,7 @@ export const MUTATIONS = [
     "id": "worktree-glob-target-dropped",
     "defect": "the worktree layer resolves only ONE exact path, so `git worktree remove -f ../wt-*` (the literal mergify verb) matches no workstream and is allowed",
     "file": "src/agent.mjs",
-    "find": "      : await targetWorkstreams(report, hit.target, cwd);",
+    "find": "      : await targetWorkstreams(report, hit.pattern ?? hit.target, cwd);",
     "replace": "      : [await findWorkstream(report, hit.target, cwd)].filter(Boolean); // mutated: glob target dropped",
     "tests": [
       "test/e2e/integration.test.mjs"
@@ -139,8 +139,8 @@ export const MUTATIONS = [
     "id": "windows-path-not-unescaped",
     "defect": "inline strings are taken as raw source, so a Windows path spelled correctly in JS (`'C:\\\\p\\\\wt'`) resolves to nothing and holt ALLOWS the removal — a silent under-refusal on Windows only",
     "file": "src/agent.mjs",
-    "find": "    .map((m) => m[1].replace(/\\\\\\\\/g, '\\\\'));",
-    "replace": "    .map((m) => m[1]); // mutated: source spelling used as the path",
+    "find": "    .map((m) => m[1].replace(/\\\\\\\\/g, '\\\\'))",
+    "replace": "    .map((m) => m[1]) // mutated: source spelling used as the path",
     "tests": [
       "test/e2e/integration.test.mjs"
     ]
@@ -159,7 +159,7 @@ export const MUTATIONS = [
     "id": "inline-shellout-misses-argv-forms",
     "defect": "execFile/spawn/spawnSync drop out of the inline shell-out detector, so `node -e \"execFile('rm',['-rf','<repo>'])\"` matches no rule at all and is silently allowed",
     "file": "src/agent.mjs",
-    "find": "\\b(?:execSync|execFile|execFileSync|spawn|spawnSync)\\s*\\(/",
+    "find": "\\b(?:execSync|execFile|execFileSync|spawn|spawnSync|system|popen|qx)\\s*\\(|%x[({[]/",
     "replace": "\\bexecSync\\s*\\(/",
     "tests": [
       "test/e2e/integration.test.mjs"
@@ -239,8 +239,8 @@ export const MUTATIONS = [
     "id": "primary-tree-unwatched",
     "defect": "the hook stops scanning the primary worktree — the one tree git REFUSES to lock, so the hook is its only protection",
     "file": "src/agent.mjs",
-    "find": "    ({ report } = await cachedReport(analysisCwd, { includePrimary: true }));",
-    "replace": "    ({ report } = await cachedReport(analysisCwd));",
+    "find": "    ({ report } = await cachedReport(cwd, { includePrimary: true }));\n  } catch (err) {",
+    "replace": "    ({ report } = await cachedReport(cwd));\n  } catch (err) {",
     "tests": [
       "test/e2e/integration.test.mjs"
     ]
@@ -302,8 +302,8 @@ export const MUTATIONS = [
     id: 'fail-open-unknown',
     defect: 'an unscannable workstream is reported SAFE instead of unknown (fail-open)',
     file: 'src/analyze.mjs',
-    find: "      return { id: w.id, path: w.path, safe: false, confidence: 'unknown', reasons: [w.reason ?? 'not scanned'] };",
-    replace: "      return { id: w.id, path: w.path, safe: true, confidence: 'unknown', reasons: [w.reason ?? 'not scanned'] };",
+    find: "      return { id: w.id, path: w.path, safe: false, confidence: 'unknown', prunable: !!w.prunable, reasons: [w.reason ?? 'not scanned'] };",
+    replace: "      return { id: w.id, path: w.path, safe: true, confidence: 'unknown', prunable: !!w.prunable, reasons: [w.reason ?? 'not scanned'] };",
     tests: ['test/e2e/detection.test.mjs', 'test/e2e/break-it.test.mjs'],
   },
   {
@@ -434,8 +434,8 @@ export const MUTATIONS = [
     id: 'journal-anonymous',
     defect: 'journal entries lose their actor, so an audit trail records what and when but never who',
     file: 'src/journal.mjs',
-    find: '    const line = { at: new Date().toISOString(), actor: actorOf({ env }), ...event };',
-    replace: '    const line = { at: new Date().toISOString(), ...event };',
+    find: '    const line = { at: new Date().toISOString(), actor: actorOf({ env }), ...clipEventDeep(event) };',
+    replace: '    const line = { at: new Date().toISOString(), ...clipEventDeep(event) };',
     tests: ['test/e2e/team.test.mjs'],
   },
   {
@@ -499,8 +499,8 @@ export const MUTATIONS = [
     id: 'rescue-ref-clobber',
     defect: 'a reused worktree id silently overwrites an earlier rescue ref — destroying a capture',
     file: 'src/actions.mjs',
-    find: '      if (!oid || oid === commit) break;',
-    replace: '      break;',
+    find: "git(['update-ref', '--create-reflog', ref, commit, ''],",
+    replace: "git(['update-ref', '--create-reflog', ref, commit],",
     tests: ['test/e2e/actions.test.mjs'],
   },
   {
@@ -569,7 +569,7 @@ export const MUTATIONS = [
     id: 'shell-comment-destroyer-visible',
     defect: 'a destroyer mentioned after an unquoted shell comment is treated as executable command text',
     file: 'src/agent.mjs',
-    find: "    if (ch === '#' && (i === 0 || /[\\s;&|]/.test(s[i - 1]))) {",
+    find: "    if (ch === '#' && (i === 0 || /[\\s;&|(]/.test(s[i - 1]))) {",
     replace: '    if (false) { // mutated: shell comments are scanned as commands',
     tests: ['test/e2e/integration.test.mjs'],
   },
@@ -593,8 +593,8 @@ export const MUTATIONS = [
     id: 'compound-second-match-unseen',
     defect: 'only the first destructive match in a compound command is assessed, so an ask or allow can disarm a later deny',
     file: 'src/agent.mjs',
-    find: '  for (const hit of structure.matches) verdicts.push(await assessWorktreeMatch(command, cwd, ctx, hit));',
-    replace: '  for (const hit of structure.matches.slice(0, 1)) verdicts.push(await assessWorktreeMatch(command, cwd, ctx, hit));',
+    find: '  for (const hit of structure.matches) {',
+    replace: '  for (const hit of structure.matches.slice(0, 1)) {',
     tests: ['test/e2e/integration.test.mjs'],
   },
   {
@@ -606,12 +606,140 @@ export const MUTATIONS = [
     tests: ['test/e2e/cli.test.mjs'],
   },
   {
+    // RE-ANCHORED, because the behaviour moved. The command-wide `cwd = commandCwd` no longer
+    // decides anything for a matched verb: each match is resolved against the `cd` AND `git -C` in
+    // effect at ITS OWN position (matchWorkingDirectory), so deleting the old line stopped
+    // simulating the defect and the mutant went green while the code was still guarded. The defect
+    // is the same one — "the verb is judged in the caller's directory instead of its own" — pinned
+    // at the line that now owns it, which also covers the `git -C <subdir>` half.
     id: 'cd-worktree-layer-ignored',
-    defect: 'pathless content verbs ignore a preceding literal cd and inspect the caller directory instead',
+    defect: 'content verbs ignore the cd / git -C in effect at their own position and are judged in the caller directory instead',
     file: 'src/agent.mjs',
-    find: '  cwd = commandCwd;\n  if (structure.unresolved.length) {',
-    replace: '  if (structure.unresolved.length) {',
-    tests: ['test/e2e/integration.test.mjs'],
+    find: '    const { dir, cUnresolved } = matchWorkingDirectory(command, callerCwd, hit.index ?? 0);',
+    replace: '    const { dir, cUnresolved } = { dir: callerCwd, cUnresolved: false }; // mutated: the verb runs where the caller stands',
+    tests: ['test/e2e/integration.test.mjs', 'test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'c-flag-subdir-not-contained',
+    defect: 'a path-less verb redirected into a SUBDIRECTORY of a worktree resolves by exact path only, finds nothing, and is allowed',
+    file: 'src/agent.mjs',
+    find: '      ? [await containingWorkstream(report, cwd)].filter(Boolean)',
+    replace: '      ? [await findWorkstream(report, cwd, cwd)].filter(Boolean) // mutated: exact path, never containment',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'unterminated-quote-allowed',
+    defect: 'a command that ends inside an unterminated quote or heredoc is reported as harmless instead of unread',
+    file: 'src/agent.mjs',
+    find: '  if (parseIncomplete(command)) {',
+    replace: '  if (false) { // mutated: an unparsed tail is treated as data',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'heredoc-swallows-next-command',
+    defect: 'skipping a heredoc body does not close the segment, so the command AFTER the terminator is absorbed and its target dropped',
+    file: 'src/agent.mjs',
+    find: "      if (sk.kind === 'heredoc') flushSeg(sk.end); else flushWord();",
+    replace: '      flushWord(); // mutated: the heredoc body merges with what follows it',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'live-expansion-read-as-literal',
+    defect: 'a live $VAR is treated as a literal filename, so an unresolvable target resolves to a bogus path that matches no worktree and is allowed',
+    file: 'src/agent.mjs',
+    find: 'function looksLikeExpansion(rawTarget) {\n  if (rawTarget == null) return false;',
+    replace: 'function looksLikeExpansion(rawTarget) {\n  if (rawTarget != null) return false; // mutated: every dollar is a literal character',
+    tests: ['test/e2e/resolution.test.mjs', 'test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'unresolved-variable-not-reported',
+    defect: 'an unbounded target still carrying a shell expansion is resolved literally instead of reported, turning an ask into a silent allow',
+    file: 'src/agent.mjs',
+    find: '    if (!GLOBBY.test(value)) {',
+    replace: '    if (false) { // mutated: a residual expansion is never reported as unresolved',
+    tests: ['test/e2e/resolution.test.mjs', 'test/e2e/integration.test.mjs'],
+  },
+  {
+    id: 'subshell-parens-glued-to-words',
+    defect: 'subshell parens are read as ordinary path characters, so a `cd` inside `( … )` is invisible and its target is truncated — both silent allows',
+    file: 'src/agent.mjs',
+    find: "    if (ch === '(' || ch === ')') { flushSeg(i); continue; }",
+    replace: '    if (false) { continue; } // mutated: parens are ordinary path characters',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'git-c-only-first-applied',
+    defect: 'only the first `git -C` is applied, so a command with repeated -C is judged in a directory git never enters',
+    file: 'src/agent.mjs',
+    find: '      dir = dir === null ? v : combinePath(dir, v);',
+    replace: '      dir = dir === null ? v : dir; // mutated: later -C values are dropped',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'comment-boundary-paren-ignored',
+    defect: '`#` after `(` is not read as a comment, so an apostrophe inside it opens a quote that masks the destroyer on the next line',
+    file: 'src/agent.mjs',
+    find: "    if (ch === '#' && (i === 0 || /[\\s;&|(]/.test(s[i - 1]))) {",
+    replace: "    if (ch === '#' && (i === 0 || /[\\s;&|]/.test(s[i - 1]))) { // mutated: ( is not a word boundary",
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    // THE MUTANT THE PREVIOUS ROUND WAS MISSING. `heredoc-swallows-next-command` pins the segment
+    // BOUNDARY; reverting it never surfaced the case where the body itself is a script. So the
+    // silent allow shipped: `. /dev/stdin <<'EOF' … rm -rf ../wt-a … EOF` came back allow with an
+    // empty target list, while the identical rm typed on one line denied.
+    id: 'heredoc-executor-read-as-prose',
+    defect: 'a heredoc body is masked as a document even when its consumer EXECUTES it, so a destroyer written into a shell on stdin is invisible',
+    file: 'src/agent.mjs',
+    find: '        const consumer = heredocConsumesCode(s.slice(cmdStart, bodyStart));',
+    replace: '        const consumer = null; // mutated: every body is prose, whoever receives it',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    // ONE CLASSIFICATION, EVERY READER. The tokenizer would still read an unmasked body, so this
+    // mutant is only killable by a verb the FILE layer cannot see — `git reset --hard`,
+    // `git worktree remove`, `git clean` — which is exactly what the test asserts.
+    id: 'executed-heredoc-masked-from-verb-layer',
+    defect: 'the verb layer masks a heredoc its own scanner classified as code, so a worktree-only destroyer inside it never matches a rule',
+    file: 'src/agent.mjs',
+    find: "    .filter((r) => r[2] !== 'heredoc-code')",
+    replace: '    .filter(() => true) // mutated: an executed body is masked from the verb layer anyway',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'heredoc-consumer-ignores-pipeline',
+    defect: 'only the stage the heredoc operator is written against is read, so `cat <<EOF | bash` is judged by the cat and its body is treated as a document',
+    file: 'src/agent.mjs',
+    find: "    if (c === '|') { stage(); if (text[i + 1] === '|') i++; continue; }",
+    replace: '    if (c === \'|\') { break; } // mutated: the rest of the pipeline is not a consumer',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    // TWO READERS OF ONE RULE IS THE DEFECT ITSELF. The tokenizer honours `\` and the mask scanner
+    // did not, which cost in both directions at once: ordinary `sed 's/it'\''s/its/'` became
+    // "unparseable", and an EVEN number of escaped quotes masked a real `git -C … reset --hard`.
+    id: 'escaped-quote-opens-a-mask',
+    defect: 'the mask scanner reads a backslash-escaped quote as an opening quote, masking whatever follows it and refusing valid shell',
+    file: 'src/agent.mjs',
+    find: '      if (backslashEscapes(next, word, hasWord)) { word += next; hasWord = true; i += 2; continue; }',
+    replace: '      if (false) { word += next; hasWord = true; i += 2; continue; } // mutated: no escapes for the scanner',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'interpreter-heredoc-program-unread',
+    defect: 'an interpreter reads its program from a heredoc and holt reads only the -e/-c form, so `node <<X … rmSync(worktree) … X` is a silent allow',
+    file: 'src/agent.mjs',
+    find: '      for (const [how, code] of [...flagged, ...bodies]) {',
+    replace: '      for (const [how, code] of flagged) { // mutated: only an inline flag carries a program',
+    tests: ['test/e2e/resolution.test.mjs'],
+  },
+  {
+    id: 'read-heredoc-still-called-unseen',
+    defect: 'a shell whose program is a heredoc holt has already READ is still reported as executing input holt cannot see — absence of evidence sold as evidence of absence',
+    file: 'src/agent.mjs',
+    find: '      const literalProgram = readable.some(([a]) => a >= seg.start && a <= seg.end);',
+    replace: '      const literalProgram = false; // mutated: a body holt read is still called unseen',
+    tests: ['test/e2e/resolution.test.mjs'],
   },
   {
     id: 'cd-ambiguity-allowed',

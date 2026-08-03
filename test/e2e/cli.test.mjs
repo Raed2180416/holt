@@ -102,16 +102,49 @@ test('CLI: --json output is parseable for every command that claims it', async (
   }
 });
 
-test('CLI HOOK: malformed and BOM-prefixed payloads fail closed', async (t) => {
+test('CLI HOOK: a payload holt cannot parse fails closed', async (t) => {
   const fx = await fixture('cli-hook-parse');
   t.after(() => fx.cleanup());
 
-  for (const input of ['not json', `\uFEFF{"tool_name":"Bash","tool_input":{"command":"rm -rf ${fx.wt('holds')}"}}`]) {
-    const r = await hook(['hook', 'pre-tool-use', '--cwd', fx.root], fx.root, input);
-    assert.equal(r.code, 2, `malformed hook input must block: ${JSON.stringify(r)}`);
-    assert.match(r.stderr + r.stdout, /parse|payload|confirm|unreadable/i,
-      `the fail-closed reason must be actionable: ${r.stderr}${r.stdout}`);
-  }
+  const r = await hook(['hook', 'pre-tool-use', '--cwd', fx.root], fx.root, 'not json');
+  assert.equal(r.code, 2, `malformed hook input must block: ${JSON.stringify(r)}`);
+  assert.match(r.stderr + r.stdout, /parse|payload|confirm|unreadable/i,
+    `the fail-closed reason must be actionable: ${r.stderr}${r.stdout}`);
+});
+
+/**
+ * A BOM IS AN ENCODING PREAMBLE, NOT AN UNREADABLE PAYLOAD.
+ *
+ * `JSON.parse` throws on a leading U+FEFF, so a host whose writer emits UTF-8-with-BOM turned every
+ * single tool call in the session into "holt could not parse the hook payload" — fail-closed, and
+ * useless: the reason names nothing the reader can act on, and a guard that interrupts constantly
+ * for an unactionable reason is one that gets uninstalled. The bytes after the BOM were perfectly
+ * valid JSON the whole time.
+ *
+ * So the assertion is not "it blocks" — an ask blocks too, and that is what it used to do. It is
+ * that the BOM makes NO DIFFERENCE: the same payload with and without it reaches the same verdict,
+ * with the same evidence, which here is a deny that names the workstream at risk.
+ */
+test('CLI HOOK: a BOM-prefixed payload is stripped and answered exactly as the same payload without one', async (t) => {
+  const fx = await fixture('cli-hook-bom');
+  t.after(() => fx.cleanup());
+
+  const payload = JSON.stringify({
+    tool_name: 'Bash', tool_input: { command: `rm -rf ${fx.wt('holds')}` }, cwd: fx.root,
+  });
+  const plain = await hook(['hook', 'pre-tool-use', '--host', 'generic', '--cwd', fx.root], fx.root, payload);
+  const bom = await hook(['hook', 'pre-tool-use', '--host', 'generic', '--cwd', fx.root], fx.root, `\uFEFF${payload}`);
+
+  assert.equal(plain.code, 2, `the control must block: ${JSON.stringify(plain)}`);
+  assert.match(plain.stdout, /"decision":"deny"/, `the control must deny: ${plain.stdout}`);
+
+  assert.equal(bom.code, plain.code, `a BOM must not change the exit code: ${JSON.stringify(bom)}`);
+  assert.match(bom.stdout, /"decision":"deny"/,
+    `a BOM must not downgrade a deny to an unactionable ask: ${bom.stdout}${bom.stderr}`);
+  assert.match(bom.stdout, /CLI_VALUABLE|holds/,
+    `the BOM payload must carry the same evidence as the control: ${bom.stdout}`);
+  assert.doesNotMatch(bom.stdout + bom.stderr, /could not parse the hook payload/,
+    `a BOM is not an unparseable payload: ${bom.stdout}${bom.stderr}`);
 });
 
 /* ------------------------------------------------------------ exit codes ---- */

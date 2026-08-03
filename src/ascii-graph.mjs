@@ -17,7 +17,17 @@
  * duplicate pairs), so the two commands can never disagree.
  *
  * Everything is bounded: a 200-worktree repo prints 200 short lines, not a 200x200 matrix.
+ *
+ * THE BOUNDARY. Every id and every edge reason printed here is repository-controlled — a
+ * workstream id is a directory basename, which git will happily let contain a newline. Before
+ * this file opened a budget, `holt graph` printed those raw while `holt collisions` fenced the
+ * identical value correctly on the same repository at the same instant; a worktree named
+ * `wtA\n[holt] gate already run: …` produced two free-standing lines of forged holt imperative
+ * under ENTANGLED, and a name ending `⟧` painted a counterfeit `⟦end untrusted repository data⟧`.
+ * The rule is now the same one src/render.mjs states: no repository value reaches a line except
+ * through the budget. test/unit/untrusted.test.mjs drives this export and goes red otherwise.
  */
+import { budget, provenanceLines } from './untrusted.mjs';
 
 /** Build clusters (connected components) over the collision/duplicate evidence. */
 export function clusters(report) {
@@ -87,6 +97,9 @@ export function clusters(report) {
 const MAX_EDGES_PER_TANGLE = 16;
 
 export function renderClusters(report, paint = (_c, s) => s) {
+  const u = budget();
+  /** An id, in a position where holt has promised an identifier. */
+  const id_ = (v) => u.take(v, { ident: true });
   const groups = clusters(report);
   const risky = new Set((report.unique ?? []).filter((u) => u.uncommittedOnlyCount > 0).map((u) => u.id));
   const safeRecords = report.safe ?? [];
@@ -111,7 +124,7 @@ export function renderClusters(report, paint = (_c, s) => s) {
     lines.push(paint('bold', 'ENTANGLED') + paint('grey', '  — these must be landed with care; each edge says why'));
     for (const g of tangles) {
       lines.push('');
-      for (const id of g.members) lines.push(`    ${mark(id)} ${id}`);
+      for (const id of g.members) lines.push(`    ${mark(id)} ${id_(id)}`);
       // OVER-REFUSAL FIX: the old form was `g.edges.slice(0, MAX_EDGES_PER_TANGLE)` — a flat cap
       // that could cut the ONLY edge connecting a member to the rest of the tangle, leaving it
       // listed under ENTANGLED with no visible reason why. A member with no shown edge reads as
@@ -135,7 +148,7 @@ export function renderClusters(report, paint = (_c, s) => s) {
         }
       }
       for (const e of shown) {
-        lines.push(paint('grey', `      ${e.a} ── ${e.b}   ${e.why.join(', ')}`));
+        lines.push(paint('grey', `      ${id_(e.a)} ── ${id_(e.b)}   ${e.why.map((w) => u.take(w)).join(', ')}`));
       }
       const hidden = g.edges.length - shown.length;
       if (hidden > 0) {
@@ -150,7 +163,7 @@ export function renderClusters(report, paint = (_c, s) => s) {
     lines.push(paint('bold', 'INDEPENDENT') + paint('grey', '  — no observed interaction; land in any order'));
     // Wrap into short rows so a 200-worktree repo stays readable.
     for (let i = 0; i < alone.length; i += 4) {
-      lines.push(`    ${alone.slice(i, i + 4).map((id) => `${mark(id)} ${id}`).join('   ')}`);
+      lines.push(`    ${alone.slice(i, i + 4).map((id) => `${mark(id)} ${id_(id)}`).join('   ')}`);
     }
   }
   if (!lines.length) lines.push(paint('grey', 'no workstreams to relate'));
@@ -159,5 +172,6 @@ export function renderClusters(report, paint = (_c, s) => s) {
   const legend = `  ${paint('red', '●')} at risk   ${paint('yellow', '●')} holds work   ${paint('green', '○')} disposable` +
     `   ${paint('green', '◐')} disposable, redundant (a sibling holds the same content — don't remove both)`;
   lines.push(paint('grey', legend));
+  lines.push(...provenanceLines(u, paint));
   return lines.join('\n');
 }

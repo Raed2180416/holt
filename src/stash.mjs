@@ -38,7 +38,7 @@
  * `git log -g`, which is Tier SAFE. Every command below is Tier SAFE. Nothing here writes.
  */
 
-import { git } from './git.mjs';
+import { git, chunkByArgvBytes, ARGV_BYTE_BUDGET } from './git.mjs';
 
 /** Entries examined. A repository with more stashes than this has a bigger problem than a cap. */
 export const MAX_ENTRIES = 25;
@@ -239,13 +239,24 @@ async function reachableBlobs(cwd, paths, { timeout }) {
   const tips = await reachableTips(cwd, { timeout });
   if (!tips || !tips.length) return new Set(); // an unborn/ref-less repo reaches nothing
   if (paths.length > MAX_PATHS) return null;
-  const r = await git(['rev-list', '--objects', '--full-history', ...tips, '--', ...paths],
-    { cwd, timeout }).catch(() => null);
-  if (!r || r.code !== 0) return null;
+  // THE TIP LIST IS UNBOUNDED AND THE ARGUMENT LIST IS NOT. `paths` is capped at MAX_PATHS just
+  // above; `tips` is one oid per ref, and a repository carrying tens of thousands of refs (every
+  // PR ref in a busy monorepo) builds an argv past ARG_MAX, where `execve` answers E2BIG. Objects
+  // reachable from a SET of tips are the union of the objects reachable from each tip, so walking
+  // the tips in argv-sized groups gives exactly the same set — see the ceiling note in git.mjs.
+  const pathBytes = paths.reduce((n, p) => n + Buffer.byteLength(p, 'utf8') + 1, 0);
+  const groups = chunkByArgvBytes(tips, ARGV_BYTE_BUDGET, pathBytes + 64);
   const set = new Set();
-  for (const line of r.stdout.split('\n')) {
-    const oid = line.split(' ')[0];
-    if (oid && oid.length >= 40) set.add(oid);
+  for (const group of groups) {
+    const r = await git(['rev-list', '--objects', '--full-history', ...group, '--', ...paths],
+      { cwd, timeout }).catch(() => null);
+    // A walk that could not be completed is NOT "nothing is reachable" — see this function's
+    // contract. One failed group withdraws the whole answer rather than under-reporting it.
+    if (!r || r.code !== 0) return null;
+    for (const line of r.stdout.split('\n')) {
+      const oid = line.split(' ')[0];
+      if (oid && oid.length >= 40) set.add(oid);
+    }
   }
   return set;
 }

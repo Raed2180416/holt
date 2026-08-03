@@ -2066,3 +2066,66 @@ test('PROTECT: NEVER-WORSE — a linked worktree holding work is still locked, a
   assert.ok(a.atRisk.locked >= 1 || a.did.protected >= 1,
     `auto must be able to report a real lock: ${JSON.stringify(a.atRisk)}`);
 });
+
+/**
+ * THE ESCAPE HATCH MUST BE WALKABLE, because it is what keeps the guard installed.
+ *
+ * WHEN THIS BITES, in real work: the moment a developer decides to throw something away on purpose.
+ * They try `git worktree remove --force ../failed-experiment`, the guard refuses with
+ * "If the work is genuinely disposable, commit or discard it explicitly first", and the obvious
+ * next thing to type is `holt discard ../failed-experiment`.
+ *
+ * MEASURED before this fix: a worktree ROOT resolves to the EMPTY relative path, which reached git
+ * as `add --force -- ''` and returned "fatal: empty string is not a valid pathspec". holt reported
+ * `capture is INCOMPLETE — 1 path(s) not captured: ` with an empty name — telling the reader
+ * neither what they did wrong nor what to do instead. Fail-closed was correct throughout (nothing
+ * deleted, exit 1), so this was never a safety defect; it was a dead end at the exact moment the
+ * product most needs to get out of the way. Every failed escape is a step toward switching the
+ * guard off, and an uninstalled guard protects nothing.
+ *
+ * NOT fixed by making discard swallow a whole worktree: `discard` captures PATHS and removes them,
+ * leaving the worktree registered, while `rescue` captures a WORKTREE so it can then be removed.
+ * Conflating them would make the more dangerous operation reachable by accident.
+ */
+test('DISCARD: naming a worktree instead of a path says so, and names the command that works', async (t) => {
+  const fx = await newRepo('discard-worktree-root');
+  t.after(() => fx.cleanup());
+
+  const wt = await fx.worktree('failed-experiment');
+  await fx.write('experiment.js', 'export function abandoned() { return 1; }\n', wt);
+
+  const r = await discard(fx.root, [wt]);
+
+  assert.equal(r.ok, false, 'naming a worktree root is not a discard');
+  assert.match(r.error, /worktree, not a path inside one/,
+    `the error must say what was wrong, got: ${r.error}`);
+  assert.match(r.hint ?? '', /holt rescue/,
+    'it must name the command that actually does this');
+  assert.match(r.note ?? '', /NOTHING WAS CAPTURED OR REMOVED/,
+    'it must confirm nothing was touched');
+
+  // AND NOTHING WAS TOUCHED — the refusal is not allowed to be destructive on its way out.
+  const still = await fs.readFile(path.join(wt, 'experiment.js'), 'utf8');
+  assert.match(still, /abandoned/, 'the file must be exactly where it was');
+});
+
+test('DISCARD: NEVER-WORSE — naming an actual file still captures, verifies and removes', async (t) => {
+  const fx = await newRepo('discard-file-still-works');
+  t.after(() => fx.cleanup());
+
+  // The whole point of the fix above is that it narrows ONE input shape. If it narrowed the
+  // ordinary case too, it would have traded a bad error message for a broken escape hatch.
+  const wt = await fx.worktree('has-junk');
+  await fx.write('scratch.js', 'export function junk() { return 1; }\n', wt);
+
+  const r = await discard(wt, ['scratch.js']);
+
+  assert.equal(r.ok, true, `discarding a real file must still work: ${r.error ?? ''}`);
+  assert.equal(r.verified, true, 'the capture must be verified before anything is removed');
+  assert.deepEqual(r.discarded, ['scratch.js']);
+  assert.match(r.restore ?? '', /git checkout refs\/holt\/discard\//,
+    'it must print the plain-git command that brings the content back');
+
+  await assert.rejects(() => fs.readFile(path.join(wt, 'scratch.js'), 'utf8'),
+    'the file must actually be gone');
+});

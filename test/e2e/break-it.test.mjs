@@ -356,6 +356,13 @@ test('ATTACK: destructive commands disguised to slip past the classifier', async
   await fx.write('src/valuable.js', 'export function VALUABLE_WORK() {}\n', wt);
 
   // Each of these destroys the worktree. Any that the gate lets through is a hole.
+  //
+  // `git worktree prune` USED TO BE ON THIS LIST AND DOES NOT BELONG ON IT while the worktree is
+  // on disk: prune removes administrative records for directories that are ALREADY GONE, so with
+  // `valuable` present it cannot touch it — git-worktree(1), and measured below rather than
+  // asserted. Listing it here made the suite demand a refusal for a command that does nothing,
+  // which is how the over-refusal survived: a green test was ratifying it. Its real behaviour is
+  // pinned in the two assertions after this list, both halves.
   const disguises = [
     `git worktree remove ${wt}`,
     `git worktree remove --force ${wt}`,
@@ -363,7 +370,6 @@ test('ATTACK: destructive commands disguised to slip past the classifier', async
     `cd /tmp && git -C ${fx.root} worktree remove ${wt}`,
     `git worktree remove '${wt}'`,
     `git worktree remove "${wt}"`,
-    'git worktree prune',
   ];
 
   const holes = [];
@@ -374,6 +380,22 @@ test('ATTACK: destructive commands disguised to slip past the classifier', async
 
   assert.deepEqual(holes, [],
     `ATTACK SUCCEEDED — these destructive commands were not blocked:\n${holes.join('\n')}`);
+
+  // PREMISE, from real git: with the worktree present, prune reaches nothing.
+  const listed = await fx.git(['worktree', 'list', '--porcelain']);
+  assert.equal(/^prunable/m.test(listed), false, 'PREMISE FAILED: something is already prunable');
+  await fx.git(['worktree', 'prune', '-v']);
+  assert.ok(await fs.stat(path.join(wt, 'src', 'valuable.js')).then(() => true, () => false),
+    'PREMISE FAILED: `git worktree prune` removed a worktree that was on disk');
+  assert.equal((await assessCommand('git worktree prune', fx.root)).decision, 'allow',
+    'refusing a command that provably reaches nothing is the over-refusal this suite must not re-learn');
+
+  // …and once the directory IS gone, the record becomes prunable and the refusal comes back.
+  await fs.rm(wt, { recursive: true, force: true });
+  const after = await fx.git(['worktree', 'list', '--porcelain']);
+  assert.ok(/^prunable/m.test(after), 'PREMISE FAILED: the record did not become prunable');
+  assert.equal((await assessCommand('git worktree prune', fx.root)).decision, 'deny',
+    'a prunable record holds an index and a reflog holt cannot prove are safe');
 });
 
 test('ATTACK: the gate must not block a command that merely MENTIONS a worktree', async (t) => {

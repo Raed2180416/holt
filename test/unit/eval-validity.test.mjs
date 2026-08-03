@@ -21,26 +21,35 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const RUNNER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'eval', 'run.mjs');
 const mutation = await import('../../test/mutation.mjs');
 
-/** Pull validateRun/summarise out of the runner without executing main(). */
+/**
+ * Import the functions under test. Directly, because they are exported.
+ *
+ * This used to read eval/run.mjs as TEXT and regex-slice `validateRun`, `summarise` and
+ * MIN_VALID_TRIALS out by source position, then evaluate the fragments as a synthetic module. That
+ * existed for one reason: the runner called `main()` unconditionally at module scope, so importing
+ * it started a benchmark.
+ *
+ * The hack was not free. It broke twice in a single session — once when a comment elsewhere in the
+ * file happened to contain a marker string and `indexOf` matched the comment instead of the
+ * declaration, and once when a `const` calling `opt()` was moved into the sliced region and the
+ * fragment referenced a function that was not in it. Both failures surfaced as
+ * "Missing initializer in const declaration" and pointed nowhere near the cause. A test that is
+ * this sensitive to unrelated edits stops being a test and becomes a tax on editing.
+ *
+ * The runner now guards its entry point (`if (invokedDirectly) main()`) and exports what it tests,
+ * so the fragments are unnecessary and the failure mode is gone.
+ */
 async function loadInternals() {
-  const src = await import('node:fs/promises').then((fs) => fs.readFile(RUNNER, 'utf8'));
-
-  // The runner is a script; extract the two pure functions under test by evaluating them alone.
-  const markers = src.slice(src.indexOf('const AGENT_FAILURE_MARKERS'), src.indexOf('async function runTrial'));
-  const summariseSrc = src.slice(src.indexOf('function summarise'), src.indexOf('/** The minimum valid trials'));
-  const minSrc = src.slice(src.indexOf('const MIN_VALID_TRIALS'), src.indexOf('/** Wilson score'));
-
-  const mod = await import(
-    `data:text/javascript,${encodeURIComponent(`${markers}\n${summariseSrc}\n${minSrc}\nexport { validateRun, summarise, MIN_VALID_TRIALS };`)}`
-  );
-  return mod;
+  return import(pathToFileURL(RUNNER).href);
 }
 
 test('EVAL CONTAMINATION: the answer key must be unreachable from a trial repo', async (t) => {
@@ -161,6 +170,31 @@ test('MUTATION VALIDITY: a failing test is a killed mutation', () => {
 test('MUTATION VALIDITY: a non-failing non-zero runner is invalid', () => {
   const result = mutation.classifyMutationResult({ code: 1, stdout: '', stderr: 'runner crashed' });
   assert.equal(result.outcome, 'invalid');
+});
+
+test('EVAL TOKEN ACCOUNTING: aggregate usage is read before a trial directory is removed', async (t) => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-token-ledger-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, '.crush'));
+  const db = new DatabaseSync(path.join(root, '.crush', 'crush.db'));
+  db.exec('CREATE TABLE sessions (prompt_tokens INTEGER, completion_tokens INTEGER, cost REAL)');
+  db.exec("INSERT INTO sessions VALUES (100, 25, 0.125), (50, 10, 0.050)");
+  db.close();
+
+  const { readCrushUsage } = await loadInternals();
+  assert.deepEqual(await readCrushUsage(root), {
+    available: true, promptTokens: 150, completionTokens: 35, cost: 0.175,
+  });
+});
+
+test('EVAL TOKEN ACCOUNTING: a missing ledger is explicit, never zero usage', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-token-missing-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { readCrushUsage } = await loadInternals();
+  const usage = await readCrushUsage(root);
+  assert.equal(usage.available, false);
+  assert.match(usage.reason, /not written/);
 });
 
 test('EVAL VALIDITY: a genuine run is valid', async () => {

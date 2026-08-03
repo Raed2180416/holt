@@ -24,11 +24,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { standardFixture, newRepo } from '../fixtures.mjs';
-import { BRIEF_REFRESH_AFTER } from '../../src/agent.mjs';
+import { BRIEF_REFRESH_AFTER, evictCacheFiles } from '../../src/agent.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -43,6 +44,23 @@ function sh(cmd, args, cwd) {
 }
 
 /** The context string a host would actually splice into the agent's transcript, or null. */
+test('CACHE: eviction bounds holt cache files without touching unrelated scratch files', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-cache-evict-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  for (let i = 0; i < 5; i++) {
+    await fs.writeFile(path.join(dir, `holt-cache-${String(i).padStart(16, '0')}.json`), '{}');
+  }
+  await fs.writeFile(path.join(dir, 'holt-cache-not-a-key.json'), '{}');
+  await fs.writeFile(path.join(dir, 'keep.txt'), 'keep');
+
+  const result = await evictCacheFiles(dir, { maxFiles: 2, maxAgeMs: Number.POSITIVE_INFINITY });
+  assert.equal(result.removed, 3);
+  const remaining = await fs.readdir(dir);
+  assert.equal(remaining.filter((name) => name.startsWith('holt-cache-') && name.endsWith('.json')).length, 3,
+    'two valid cache files plus the non-key control must remain');
+  assert.ok(remaining.includes('keep.txt'), 'eviction must not touch unrelated scratch files');
+});
+
 function contextOf(stdout) {
   const s = stdout.trim();
   if (!s) return null;

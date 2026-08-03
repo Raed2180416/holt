@@ -44,26 +44,52 @@ function makeUnionFind() {
   return { find, union, has: (x) => parent.has(x) };
 }
 
-const dirOf = (f) => (f.includes('/') ? f.slice(0, f.indexOf('/')) : '<root>');
+export const MAX_PARTITION_AGENTS = 256;
+
+const unitOf = (file, depth) => {
+  const parts = String(file).split('/');
+  const dirs = parts.slice(0, -1);
+  if (!dirs.length) return depth >= 2 ? String(file) : '<root>';
+  return depth > dirs.length ? String(file) : dirs.slice(0, depth).join('/');
+};
 
 /**
- * @param {object} report - analyze() report (uses .collisions for observed hotspots)
+ * @param {object} report - analyze() report (uses full collision evidence when available)
  * @param {string[]} trackedFiles - repo-relative paths from `git ls-files`
  * @param {{agents?: number}} opts
  */
 export function partitionPlan(report, trackedFiles, { agents = 2 } = {}) {
-  const n = Math.max(2, Math.floor(agents));
+  const requested = Number(agents);
+  const n = Math.min(MAX_PARTITION_AGENTS, Math.max(2,
+    Number.isFinite(requested) ? Math.floor(requested) : 2));
+  const files = [...new Set((trackedFiles ?? []).map(String))];
+  const evidenceFiles = [...new Set((report.collisionsAll ?? report.collisions ?? [])
+    .flatMap((c) => c.sharedFiles ?? []).map(String))];
+  const allPaths = [...new Set([...files, ...evidenceFiles])];
+  const targetUnits = Math.min(n, Math.max(1, allPaths.length));
+  const maxDepth = Math.max(1, ...allPaths.map((f) => {
+    const dirs = f.split('/').slice(0, -1);
+    return dirs.length ? dirs.length + 1 : 2;
+  }));
+  let depth = 1;
+  while (depth < maxDepth && new Set(allPaths.map((f) => unitOf(f, depth))).size < targetUnits) depth++;
 
-  // Weight per top-level segment (files at the root get their own pseudo-dir "<root>").
+  // Weight per path unit. The unit deepens only when top-level directories cannot provide enough
+  // independent buckets; this preserves locality for ordinary repositories while making a
+  // single-directory monorepo useful for a larger fan-out.
   const dirWeight = new Map();
-  for (const f of trackedFiles) {
-    const seg = dirOf(f);
+  for (const f of files) {
+    const seg = unitOf(f, depth);
     dirWeight.set(seg, (dirWeight.get(seg) ?? 0) + 1);
+  }
+  for (const f of evidenceFiles) {
+    const seg = unitOf(f, depth);
+    if (!dirWeight.has(seg)) dirWeight.set(seg, 0);
   }
 
   // Observed hotspots: files two or more live workstreams both touch, from collision evidence.
   const hotspots = new Map(); // file -> Set(workstream ids)
-  for (const c of report.collisions ?? []) {
+  for (const c of report.collisionsAll ?? report.collisions ?? []) {
     for (const key of c.sharedFiles ?? []) {
       if (!hotspots.has(key)) hotspots.set(key, new Set());
       hotspots.get(key).add(c.a);
@@ -86,12 +112,12 @@ export function partitionPlan(report, trackedFiles, { agents = 2 } = {}) {
   // every file they share. Two directories anchored by a common workstream end up in the same
   // component even though no single collision names them both — which is the whole point.
   const uf = makeUnionFind();
-  for (const c of report.collisions ?? []) {
+  for (const c of report.collisionsAll ?? report.collisions ?? []) {
     const wtA = `wt:${c.a}`;
     const wtB = `wt:${c.b}`;
     uf.union(wtA, wtB);
     for (const f of c.sharedFiles ?? []) {
-      const dTok = `dir:${dirOf(f)}`;
+      const dTok = `dir:${unitOf(f, depth)}`;
       uf.union(wtA, dTok);
       uf.union(wtB, dTok);
     }
@@ -134,7 +160,7 @@ export function partitionPlan(report, trackedFiles, { agents = 2 } = {}) {
   for (const b of buckets) for (const d of b.dirs) dirOwner.set(d, b.agent);
 
   const avoid = [...hotspots.entries()].sort().map(([file, owners]) => {
-    const seg = dirOf(file);
+    const seg = unitOf(file, depth);
     return {
       file,
       currentlyHeldBy: [...owners].sort(),
@@ -145,11 +171,12 @@ export function partitionPlan(report, trackedFiles, { agents = 2 } = {}) {
 
   return {
     agents: n,
+    granularity: depth === 1 ? 'top-level-directory' : depth >= maxDepth ? 'file-or-deep-directory' : `directory-depth-${depth}`,
     buckets,
     avoid,
-    advisory: 'directory buckets are disjoint; every connected tangle of conflicting workstreams '
+    advisory: 'path units are disjoint; every connected tangle of conflicting workstreams '
       + '(transitively, not just pairwise) is glued into a single bucket, weight-balanced against '
-      + 'everything else. holt cannot know your task split — treat this as the collision-free '
-      + 'starting map, not a work plan.',
+      + 'everything else. Holt deepens units only when the requested fan-out needs it. It cannot '
+      + 'know your task split — treat this as the collision-free starting map, not a work plan.',
   };
 }

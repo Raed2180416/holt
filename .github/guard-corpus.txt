@@ -40,3 +40,11 @@ test/e2e/strict-read-only.test.mjs
 test/e2e/unprotect-force.test.mjs
 test/e2e/stash-evidence.test.mjs
 test/e2e/verify.test.mjs
+# BOTH HALVES OF THE BAR IN ONE FILE. It proves — by running the real programs — that a
+# dry-run/usage invocation destroys nothing and is allowed, that the spellings which only LOOK
+# like dry runs really do delete and are still refused, and that a 360-command corpus of ordinary
+# developer work is allowed silently. A false positive is as serious as a missed destroyer, and
+# this is where a regression in either direction shows up.
+test/e2e/no-op-invocations.test.mjs
+test/e2e/decision-integrity.test.mjs
+test/e2e/guard-classes-repair.test.mjs

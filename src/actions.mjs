@@ -166,7 +166,7 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
       : '';
     // The reason string is the entire user interface of this feature: it is what git prints to
     // whoever tries to delete this. It has to say what is at stake and how to resolve it.
-    const reason = `${LOCK_PREFIX} holds work found nowhere else`
+    const reason = `${LOCK_PREFIX} holds work with no durable copy elsewhere`
       + (sample ? ` (e.g. ${sample})` : '')
       + `. Run 'holt rescue ${s.id}' to preserve it, or 'holt risk' to inspect.`;
 
@@ -800,7 +800,7 @@ export async function auto(cwd, opts = {}) {
  * The result is an action an agent is allowed to take, which is the only kind of gate that
  * survives contact with someone in a hurry.
  */
-export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
+export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride = null, ...opts } = {}) {
   const list = (Array.isArray(paths) ? paths : [paths]).filter(Boolean);
   if (!list.length) return { ok: false, error: 'discard needs at least one path' };
 
@@ -867,7 +867,10 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
     return { ok: true, dryRun: true, worktree: ws.id, paths: rel, note: 'nothing was captured or removed' };
   }
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  // INJECTABLE ONLY SO THE COLLISION IS TESTABLE. A ref name derived from the wall clock cannot
+  // be made to collide on purpose, which is precisely why this path went untested; the same
+  // seam evictCacheFiles() already uses for `now`.
+  const stamp = stampOverride ?? new Date().toISOString().replace(/[:.]/g, '-');
   const baseRef = `refs/holt/discard/${refSafeId(ws.id)}-${stamp}`;
   // UNIQUE per invocation — see the comment on scratchIndexPath() above.
   const tmpIndex = scratchIndexPath(ws.path, 'discard');
@@ -913,8 +916,28 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
       };
     }
 
-    await gitOk(['update-ref', '--create-reflog', baseRef, commit],
-      { cwd: ws.path, allowMutation: true });
+    // A CAPTURE REF IS ALLOCATED, NEVER OVERWRITTEN — the class captureRef() already closed for
+    // `rescue`, reached here through a different door. This wrote the ref with NO old-value, so a
+    // second discard landing on the same name silently replaced the first capture's only pointer,
+    // and `discard` DELETES untracked files: nothing else holds that content, so the orphaned
+    // commit survives only until gc. `-${stamp}` makes that collision unlikely, and unlikely is
+    // exactly the argument captureRef's own comment refuses — "the write is the proof".
+    //
+    // captureRef NEVER THROWS, where gitOk did. That difference is load-bearing: the throw was what
+    // stopped the deletion below, so the explicit refusal here is not defensive decoration, it is
+    // the thing that keeps a failed allocation from costing the user their files.
+    const alloc = await captureRef(ws.path, { baseRef, commit, tree, kind: 'discard', id: ws.id });
+    if (!alloc.ok) {
+      return {
+        ok: false,
+        error: `capture ref could not be allocated (${alloc.reason}): ${alloc.gitError ?? ''}`.trim(),
+        commit,
+        note: 'NOTHING WAS DELETED. The content IS captured as the commit above, but holt could not '
+          + 'give it a name, and deleting the files would leave that capture reachable only until gc.',
+      };
+    }
+    const ref = alloc.ref;
+    const capturedCommit = alloc.commit ?? commit;
 
     // ONLY NOW IS ANYTHING TOUCHED — and what "discard" MEANS depends on what the path is.
     //
@@ -963,19 +986,19 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
     const journalFailures = [];
     await journal(cwd, {
       action: 'discard', id: ws.id, path: ws.path,
-      ref: baseRef, commit, paths: rel, count: rel.length,
+      ref, commit: capturedCommit, paths: rel, count: rel.length,
     }, journalFailures);
 
     return withJournalWarning({
       ok: true,
       worktree: ws.id,
-      ref: baseRef,
-      commit,
+      ref,
+      commit: capturedCommit,
       discarded: removed,
       reverted,
       verified: true,
-      restore: `git checkout ${baseRef} -- .`,
-      inspect: `git show ${commit} --stat`,
+      restore: `git checkout ${ref} -- .`,
+      inspect: `git show ${capturedCommit} --stat`,
       note: reverted.length
         ? 'tracked path(s) were RESTORED from HEAD rather than deleted — the edits you threw away '
           + 'are captured in the ref above and recoverable. Untracked path(s), if any, were removed.'

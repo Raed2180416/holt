@@ -16,7 +16,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { git } from '../git.mjs';
+import { repoIdentity } from '../git.mjs';
 import { discover, repoAbsenceError } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze } from '../analyze.mjs';
@@ -32,29 +32,16 @@ export class EntitlementError extends Error {
   }
 }
 
-/**
- * A directory's REPOSITORY IDENTITY — the thing that makes two directories the same repo.
+/*
+ * REPOSITORY IDENTITY LIVES IN ONE PLACE: `repoIdentity` in src/git.mjs.
  *
- * A linked worktree has a `.git` too (a file, not a directory), so "contains .git" answers
- * "is this a working tree", never "is this a distinct repository". `--git-common-dir` is git's
- * own answer to the second question: every worktree of one repository — main and linked alike —
- * reports the SAME common dir, and two unrelated repositories can never share one.
- *
- * Returns null when git cannot answer (a stray file literally named `.git`, an unreadable dir, no
- * git on PATH). Null is never treated as "same as something else": the caller falls back to the
- * path so the directory is still REPORTED and fails loudly downstream. Silently dropping a
- * directory holt could not identify would be the fail-open shape this project refuses everywhere.
+ * This module used to carry a private copy. It was correct — and the MCP repository boundary,
+ * written later, answered the same question with `repoRoot()` (a LOCATION) and shipped an
+ * over-refusal and a bypass at once. Two implementations of "are these the same repository" is
+ * how that happens; there is now one, and every caller asking the identity question calls it.
+ * Null still means UNDETERMINED here, never "same as something else": findRepos falls back to the
+ * path so a directory holt could not identify is still REPORTED and fails loudly downstream.
  */
-async function repoIdentity(dir) {
-  try {
-    const r = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: dir });
-    if (r.code !== 0) return null;
-    const out = r.stdout.trim();
-    return out ? path.resolve(out) : null;
-  } catch {
-    return null; // GitRefused/GitFailed — unidentifiable, not "already seen"
-  }
-}
 
 /**
  * Find git repositories under `roots`, bounded in depth so a home directory cannot be walked.

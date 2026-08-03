@@ -10,7 +10,7 @@
  * that git makes invisible.
  */
 
-import { git, repoRoot, pmap } from './git.mjs';
+import { git, repoRoot, repoIdentity, pmap } from './git.mjs';
 import { discoverJjWorkspaces as _discoverJj } from './jj.mjs';
 import { resolveBase } from './scan.mjs';
 import fs from 'node:fs/promises';
@@ -584,7 +584,33 @@ export async function discoverGitWorktrees(cwd) {
   // name — so a raw comparison marks NO worktree as primary. That silently disables the
   // primary-tree protection, which matters more than it looks: git REFUSES to lock the main
   // worktree, so the hook is its only defence, and it is selected by exactly this flag.
-  const canonRoot = foldCase(await canonicalPath(root));
+  // THE MAIN WORKTREE IS DEFINED BY THE REPOSITORY, NOT BY WHERE YOU ARE STANDING.
+  //
+  // `root` comes from repoRoot(cwd), which answers "where am I" — and in a BARE repository with
+  // linked worktrees (`proj.git` + `wtA` + `wtB`, no main checkout) it returns whichever worktree
+  // the caller happens to be in. Each peer therefore marked ITSELF primary, and since the primary
+  // is excluded from the workstream count, N peers always reported N-1:
+  //
+  //     git worktree list      ->  proj.git (bare), wtA [main], wtB [featB]
+  //     holt status from wtA   ->  "holt · …/wtA"   scanned 1/1 workstreams
+  //     holt status from wtB   ->  "holt · …/wtB"   scanned 1/1 workstreams
+  //
+  // Same repository, two different answers depending on the caller's cwd. That layout is the
+  // canonical setup for parallel agent work, so it is this product's exact target audience.
+  //
+  // git's own definition: the main worktree is the directory CONTAINING the common git dir, and it
+  // exists only when that dir is a `.git` INSIDE a working tree. For a bare repository the common
+  // dir is `proj.git` itself and there is no main worktree at all — so the honest answer is that
+  // NOTHING is primary, not that the caller is.
+  //
+  // Protection is unaffected: `isPrimary` exists because git REFUSES to lock the main worktree, so
+  // the hook is its only defence. In a bare layout every worktree is linked and git CAN lock it, so
+  // there is nothing here that needed the exemption.
+  const commonDir = await repoIdentity(root);
+  const mainWorktree = commonDir && /(^|[/\\])\.git$/.test(commonDir) ? path.dirname(commonDir) : null;
+  const canonRoot = mainWorktree
+    ? foldCase(await canonicalPath(mainWorktree))
+    : (commonDir ? Symbol('no-main-worktree') : foldCase(await canonicalPath(root)));
   const workstreams = await Promise.all(records.map(async (w) => ({
     id: path.basename(w.path),
     path: w.path,

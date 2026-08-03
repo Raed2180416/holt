@@ -36,6 +36,16 @@ const SAFE = new Set([
   // input (`--batch -z`, git >= 2.38) before it can frame a spec containing a newline safely.
   'version',
   'rev-parse', 'rev-list', 'log', 'show', 'cat-file', 'ls-files', 'ls-tree',
+  // `hash-object` WITHOUT `-w` computes an object id and writes nothing — the object database is
+  // not opened for writing at all. It is the only correct way to ask "do these working-tree bytes
+  // equal this index blob", because it applies the same clean filter and eol conversion git
+  // itself would: measured on a `text eol=crlf` fixture, a CRLF file whose index blob is LF
+  // hashes to the index oid under hash-object and to a DIFFERENT oid under `--no-filters`, so a
+  // hand-rolled sha1 would report an untouched file as destroyed work. Used by
+  // scan.mjs indexFlagDelta(). The write forms were already forbidden below — FORBIDDEN_SUBVERBS
+  // refuses `-w` and `--stdin-paths`, and that check runs BEFORE this allowlist, so listing the
+  // subcommand here cannot widen it to a write.
+  'hash-object',
   'status', 'diff', 'diff-tree', 'diff-index', 'merge-base', 'name-rev',
   'worktree', 'branch', 'for-each-ref', 'config', 'var', 'symbolic-ref',
   'describe', 'blame', 'shortlog', 'count-objects',
@@ -295,6 +305,99 @@ export function git(argv, {
       },
     );
   });
+}
+
+/* ==========================================================================================
+ * THE ARGUMENT LIST HAS A CEILING, AND A PER-PATH ARGV REACHES IT IN AN ORDINARY REPOSITORY.
+ *
+ * `execve(2)` fails with E2BIG once argv+envp exceeds the kernel's limit — on Linux
+ * `getconf ARG_MAX` is 2,097,152 bytes. holt built several argv lists with ONE ENTRY PER
+ * REPOSITORY PATH, so the ceiling is crossed at roughly `ARG_MAX / average-path-length` files.
+ * MEASURED, on an ordinary monorepo sparse checkout (40,000 paths outside the cone, 65-char
+ * average path, argv 2,600,000 bytes): `git ls-files -s -z -- <40,000 paths>` failed with
+ * `spawn E2BIG`, and because the guard is fail-closed on an instrument that failed, the
+ * worktree became permanently unclassifiable — `rm -rf dist` went from allow to exit 2, on
+ * every invocation, for as long as the checkout stayed sparse. Not recoverable by the developer.
+ *
+ * It is a CLASS, not that one call: `git diff --raw … -- <files>`, `git rev-list … -- <paths>`,
+ * `git add --all --force -- <paths>` and `git hash-object -- <paths>` are all built the same way
+ * and all cross the same ceiling. So the ceiling is enforced in ONE place, here, and every
+ * per-path spawn goes through it. A call site cannot opt out by forgetting.
+ *
+ * THE BUDGET IS THE ONE GNU xargs USES, for the same reason it uses it. findutils' documented
+ * default is "ARG_MAX - 2k, or 128k, whichever is smaller"
+ * (https://www.gnu.org/software/findutils/manual/html_node/find_html/Limiting-Command-Size.html)
+ * — the 128 KiB cap is deliberately far below the kernel limit so that a large environment, a
+ * long interpreter path or a different kernel cannot eat the headroom. On Windows the limit is
+ * not ARG_MAX at all: CreateProcess documents `lpCommandLine` as at most 32,767 characters
+ * including the terminating null
+ * (https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw),
+ * and node spawns git directly rather than through cmd.exe, so that is the number that binds.
+ * ========================================================================================== */
+
+/** Bytes of PATH ARGUMENTS one spawn may carry. Per-platform, deliberately far below the limit. */
+export const ARGV_BYTE_BUDGET = process.platform === 'win32' ? 24_000 : 128 * 1024;
+
+/**
+ * Split `paths` into groups whose argv byte cost fits the budget.
+ *
+ * A single path longer than the whole budget still gets its own group — splitting a path is not
+ * an option, and one over-long path is the kernel's problem to report, not a reason to silently
+ * drop it. Byte cost is measured in UTF-8, because that is what `execve` counts, and a path of
+ * CJK or emoji characters costs three to four bytes per character rather than one.
+ *
+ * @param {string[]} paths
+ * @param {number} [budget]
+ * @param {number} [prefixBytes]  argv the caller adds before the paths (`ls-files -s -z --`)
+ * @returns {string[][]} never empty when `paths` is non-empty
+ */
+export function chunkByArgvBytes(paths, budget = ARGV_BYTE_BUDGET, prefixBytes = 0) {
+  const room = Math.max(1024, budget - prefixBytes);
+  const out = [];
+  let cur = [];
+  let bytes = 0;
+  for (const p of paths) {
+    const cost = Buffer.byteLength(p, 'utf8') + 1;   // +1: execve counts the NUL terminator
+    if (cur.length && bytes + cost > room) { out.push(cur); cur = []; bytes = 0; }
+    cur.push(p);
+    bytes += cost;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+/**
+ * `git <prefix…> <paths…>`, split across as many spawns as the argument-list ceiling requires.
+ *
+ * Only for commands whose answer over a path list is the UNION of its answers over any partition
+ * of that list — `ls-files -s`, `hash-object`, `diff --raw`, `rev-list --objects`, `add`. That is
+ * a property of the caller's command, not of this helper, so each call site states it.
+ *
+ * FAILURE IS NOT AVERAGED. The first batch that exits non-zero ends the walk and its code and
+ * stderr are returned, because a partial answer read as a whole answer is exactly the
+ * "absence of evidence" fault this codebase keeps re-learning. `batches` is reported so a caller
+ * (and a test) can see whether chunking happened at all.
+ *
+ * @returns {Promise<{stdout:string, stderr:string, code:number, batches:number}>}
+ */
+export async function gitPathBatched(prefix, paths, opts = {}) {
+  const prefixBytes = prefix.reduce((n, a) => n + Buffer.byteLength(a, 'utf8') + 1, 0);
+  const groups = chunkByArgvBytes(paths, opts.argvBudget ?? ARGV_BYTE_BUDGET, prefixBytes);
+  let stdout = '';
+  let stderr = '';
+  let batches = 0;
+  for (const group of groups) {
+    batches++;
+    // `git()` rejects rather than resolves when the binary cannot be spawned at all, and E2BIG
+    // arrives on that path — so it is caught here and shaped like any other failure, never
+    // allowed to escape as an exception into a caller that is holding a fail-closed contract.
+    const r = await git([...prefix, ...group], opts)
+      .catch((error) => ({ code: -1, stdout: '', stderr: error?.message ?? String(error) }));
+    stdout += r.stdout;
+    stderr += r.stderr;
+    if (r.code !== 0) return { stdout, stderr, code: r.code, batches };
+  }
+  return { stdout, stderr, code: 0, batches };
 }
 
 /**
@@ -823,6 +926,51 @@ export async function repoRoot(cwd) {
     return p.length > 0 ? p : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * A directory's REPOSITORY IDENTITY — the thing that makes two directories the same repository.
+ *
+ * IDENTITY IS NOT LOCATION, AND repoRoot() ANSWERS THE LOCATION QUESTION. repoRoot() is documented
+ * as "the MAIN worktree", and for a normal `<root>/.git` clone it is; but its `--git-common-dir`
+ * fast path only fires when the common dir ends in `/.git`, so the CANONICAL bare-plus-linked-
+ * worktrees layout — `proj.git` beside `wtA` and `wtB`, which is how every agent fleet holt exists
+ * to serve is laid out — falls through to `rev-parse --show-toplevel`, and show-toplevel returns
+ * WHICHEVER WORKTREE YOU ARE STANDING IN. Measured on that layout:
+ *
+ *   repoRoot(wtA)       = <base>/wtA          repoIdentity(wtA)       = <base>/proj.git
+ *   repoRoot(wtB)       = <base>/wtB          repoIdentity(wtB)       = <base>/proj.git
+ *   repoRoot(proj.git)  = null   (!)          repoIdentity(proj.git)  = <base>/proj.git
+ *
+ * So repoRoot() used as an identity is wrong in BOTH directions at once: two worktrees of one
+ * repository compare as different repositories (an over-refusal of the product's own subject
+ * matter), and every bare repository compares as `null` — which any "null means not a repository,
+ * therefore harmless" branch then waves through (an under-protection). Both were live on the MCP
+ * repository boundary; see guardRepoArg in src/mcp/server.mjs.
+ *
+ * `--git-common-dir` is git's own answer to "which repository is this": every worktree of one
+ * repository — main, linked, and the bare directory itself — reports the SAME absolute path, and
+ * two unrelated repositories can never share one. A submodule reports `<super>/.git/modules/<name>`
+ * and so is correctly a DIFFERENT repository, which it is.
+ *
+ * Returns null only when git itself declines to name a repository here: no repository, a worktree
+ * whose main repository has been moved away (git reports `fatal: not a git repository: (null)` for
+ * every rev-parse in that state, so there is nothing to identify), an unreadable directory, or no
+ * git on PATH. NULL IS NEVER "the same as something else" and never "harmless" — a caller
+ * comparing identities must treat null as UNDETERMINED and say so, not as permission.
+ *
+ * @param {string} cwd  any path
+ * @returns {Promise<string|null>} absolute, or null when git cannot name a repository here
+ */
+export async function repoIdentity(cwd) {
+  try {
+    const r = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd });
+    if (r.code !== 0) return null;
+    const out = r.stdout.trim();
+    return out ? path.resolve(out) : null;
+  } catch {
+    return null; // GitRefused/GitFailed — unidentifiable, not "already seen"
   }
 }
 

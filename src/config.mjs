@@ -160,6 +160,19 @@ function validate(raw, filePath) {
         );
         continue;
       }
+      // An entry that can match a command separator or an arbitrary operand approves a FAMILY,
+      // not the command its author read. Declined, loudly, with the rewrite. See
+      // guardAllowUnbounded.
+      const unbounded = guardAllowUnbounded(pattern);
+      if (unbounded) {
+        process.stderr.write(
+          `holt: ignoring "guardAllow" entry ${JSON.stringify(pattern)} — ${JSON.stringify(unbounded)} `
+          + 'can match a command separator, so this entry would approve commands nobody reviewed '
+          + '(e.g. "cmd; rm -rf ../worktree"). Name the command exactly, or bound the wildcard to '
+          + `the characters an operand can hold (e.g. "[\\\\w./-]+" instead of ".*") — ${filePath}.\n`,
+        );
+        continue;
+      }
       safe.push(pattern);
     }
     out.guardAllow = safe;
@@ -192,12 +205,109 @@ function validate(raw, filePath) {
  * @throws {ConfigError} when the file exists but is structurally invalid (not JSON, not an
  *   object, wrong-type key). Unknown keys produce warnings, not errors.
  */
+/**
+ * AN APPROVAL AUTHORISES THE COMMAND THE HUMAN REVIEWED — NOT EVERY COMMAND CONTAINING IT.
+ *
+ * This used to be `new RegExp(source).test(command)`: an UNANCHORED search for the pattern
+ * anywhere in the raw command text. Measured, with `{"guardAllow":["rm -rf dist"]}`:
+ *
+ *     rm -rf dist                        -> allow   (approved, correct)
+ *     rm -rf ../vc-wt                    -> deny    (control)
+ *     rm -rf dist; rm -rf ../vc-wt       -> ALLOW   (chaining defeated it)
+ *     rm -rf dist && rm -rf ../vc-wt     -> ALLOW   (so did `&&`)
+ *     rm -rf ../vc-wt # rm -rf dist      -> ALLOW   (so did a COMMENT)
+ *     echo "rm -rf dist" && rm -rf ../vc-wt -> ALLOW (so did a string literal)
+ *     rm -rf distant-relative            -> ALLOW   (a different operand, same prefix)
+ *
+ * Six spellings of one fault: the text of an approval was being searched for, when the question
+ * is whether THIS command is the approved one. The match is now ANCHORED to the whole of whatever
+ * it is offered — `^(?:source)$` — and the caller (guardAllowCover in agent.mjs) offers it one
+ * top-level shell segment at a time, so a chain is approved only when every one of its commands
+ * was approved. That is the same rule the host itself applies to its own Bash permission rules:
+ * "A rule must match each subcommand independently." (code.claude.com/docs/en/permissions)
+ *
+ * Wrapping in `(?:…)` keeps an already-anchored entry working (`^(?:^rm -rf dist$)$` still matches
+ * `rm -rf dist`) and keeps a top-level alternation from escaping the anchors.
+ *
+ * A pattern that fails to compile now SKIPS to the next one. It used to `return null`, which
+ * abandoned the whole list: one bad entry silently disabled every later approval.
+ */
 export function guardAllowPattern(command, patterns = []) {
   if (typeof command !== 'string') return null;
   for (const source of patterns) {
     try {
-      if (new RegExp(source).test(command)) return source;
-    } catch { return null; }
+      if (new RegExp(`^(?:${source})$`).test(command)) return source;
+    } catch { continue; }
+  }
+  return null;
+}
+
+/**
+ * CAN THIS ENTRY MATCH MORE THAN THE ONE COMMAND ITS AUTHOR READ?
+ *
+ * Anchoring stops a pattern being found inside a larger command. It does NOT stop the pattern
+ * from spanning one: `^rm -rf dist.*$` matches `rm -rf dist ../wt-holding-the-only-copy` and
+ * `rm -rf dist; rm -rf ../wt` alike. An entry containing a construct that can match a command
+ * separator or an arbitrary operand does not describe "the command I reviewed" — it describes a
+ * family, and the size of that family is exactly what the escape hatch must not be.
+ *
+ * The constructs refused are the ones that can match `;`, `&`, `|` or a newline: an unescaped
+ * `.`, the negated classes `\S` `\W` `\D`, a `[^…]`, and a `[…]` whose members (including ranges)
+ * cover a separator. Everything ordinary still works — `^rm -rf (dist|build)$`,
+ * `^rm -rf dist/[a-z0-9-]+$`, `^npm run test:\w+$`, `\s`, `+`, `*` and `{n,m}` over literals.
+ *
+ * Same treatment as hasNestedQuantifier, and for the same reason: DECLINE the entry, say so, keep
+ * the rest. Declining can only make holt more protective, never less, so it is safe to do
+ * silently-in-effect and loud-on-stderr rather than fatal.
+ *
+ * Grounded in the same place everyone else lands: sudoers(5) on wildcards in command rules —
+ * "wildcards are extremely dangerous and shouldn't be used if you are not 100% sure that a
+ * malicious user is unable to abuse them" — and Claude Code's own permissions documentation,
+ * "Bash permission patterns that try to constrain command arguments are fragile."
+ *
+ * @returns {string|null} the offending construct, or null when the entry names one command shape.
+ */
+export function guardAllowUnbounded(source) {
+  const src = String(source);
+  const SEPARATORS = [';', '&', '|', '\n'];
+  let inClass = false;
+  let negated = false;
+  let members = '';
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === '\\') {
+      const next = src[i + 1] ?? '';
+      if (!inClass && (next === 'S' || next === 'W' || next === 'D')) return `\\${next}`;
+      if (inClass && (next === 'S' || next === 'W' || next === 'D')) return `\\${next}`;
+      if (inClass) members += next;
+      i++;
+      continue;
+    }
+    if (inClass) {
+      if (c === ']') {
+        inClass = false;
+        if (negated) return '[^…]';
+        if (SEPARATORS.some((s) => members.includes(s))) return `[…${members.slice(0, 8)}…]`;
+        // A RANGE covering a separator counts too: `[ -~]` is `.` wearing a hat.
+        for (let k = 1; k + 1 < members.length; k++) {
+          if (members[k] !== '-') continue;
+          const lo = members.charCodeAt(k - 1);
+          const hi = members.charCodeAt(k + 1);
+          if (lo <= hi && SEPARATORS.some((s) => s.charCodeAt(0) >= lo && s.charCodeAt(0) <= hi)) {
+            return `[${members[k - 1]}-${members[k + 1]}]`;
+          }
+        }
+      } else members += c;
+      continue;
+    }
+    if (c === '[') {
+      inClass = true;
+      members = '';
+      negated = src[i + 1] === '^';
+      if (negated) i++;
+      continue;
+    }
+    if (c === '.') return '.';
   }
   return null;
 }

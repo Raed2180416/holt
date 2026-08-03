@@ -213,6 +213,10 @@ async function fingerprint(root) {
  * adds here costs a redundant scan, which is a performance bug. The other direction costs work.
  */
 const CACHE_INERT_OPTS = new Set(['timeout', 'json', 'plain', 'quiet', 'verbose', 'debug', 'cwd']);
+export const CACHE_MAX_FILES = 256;
+export const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const CACHE_MAINTENANCE_INTERVAL_MS = 60_000;
+let lastCacheMaintenance = 0;
 
 /**
  * DEFENCE IN DEPTH: does this cached analysis actually contain what the caller asked about?
@@ -252,6 +256,38 @@ function cacheAnswers(cached, opts) {
  * call into a cold scan — a 20-second stall in the agent's critical path, which is the cost this
  * cache exists to avoid.
  */
+function cacheDirectory() {
+  return path.join(scratchDir(), 'holt-cache');
+}
+
+export async function evictCacheFiles(dir = cacheDirectory(), {
+  maxFiles = CACHE_MAX_FILES, maxAgeMs = CACHE_MAX_AGE_MS, now = Date.now(),
+} = {}) {
+  const names = await fs.readdir(dir).catch(() => []);
+  const candidates = names.filter((name) => /^holt-cache-[a-f0-9]{16}\.json$/.test(name));
+  const entries = await Promise.all(candidates.map(async (name) => {
+    const file = path.join(dir, name);
+    const stat = await fs.stat(file).catch(() => null);
+    return stat?.isFile() ? { file, mtimeMs: stat.mtimeMs } : null;
+  }));
+  // `.filter(Boolean)` does not narrow the null out for checkJS, and an un-narrowed entry here
+  // would be a runtime crash in the eviction path rather than a type nit.
+  const files = /** @type {{file: string, mtimeMs: number}[]} */ (entries.filter((e) => e !== null))
+    .sort((a, b) => a.mtimeMs - b.mtimeMs);
+  const stale = files.filter((entry) => now - entry.mtimeMs > maxAgeMs);
+  const excess = files.slice(0, Math.max(0, files.length - maxFiles));
+  const victims = new Set([...stale, ...excess].map((entry) => entry.file));
+  await Promise.all([...victims].map((file) => fs.rm(file, { force: true }).catch(() => {})));
+  return { scanned: files.length, removed: victims.size };
+}
+
+async function maintainCache(dir) {
+  const now = Date.now();
+  if (now - lastCacheMaintenance < CACHE_MAINTENANCE_INTERVAL_MS) return;
+  lastCacheMaintenance = now;
+  await evictCacheFiles(dir).catch(() => {});
+}
+
 function cachePath(root, opts = {}) {
   const shape = Object.keys(opts)
     .filter((k) => !CACHE_INERT_OPTS.has(k) && opts[k] !== undefined)
@@ -261,7 +297,7 @@ function cachePath(root, opts = {}) {
   const key = createHash('sha256')
     .update(path.resolve(root)).update('\0').update(shape)
     .digest('hex').slice(0, 16);
-  return path.join(scratchDir(), `holt-cache-${key}.json`);
+  return path.join(cacheDirectory(), `holt-cache-${key}.json`);
 }
 
 export async function cachedReport(cwd, opts = {}) {
@@ -269,7 +305,10 @@ export async function cachedReport(cwd, opts = {}) {
   if (!disc.root) throw repoAbsenceError(disc, cwd);
 
   const fp = await fingerprint(disc.root);
+  const dir = cacheDirectory();
   const file = cachePath(disc.root, opts);
+  await fs.mkdir(dir, { recursive: true }).catch(() => {});
+  await maintainCache(dir);
 
   try {
     const cached = JSON.parse(await fs.readFile(file, 'utf8'));
@@ -2967,6 +3006,73 @@ export function lexSegments(command, depth = 0, offset = 0) {
 
   const add = (text, literal) => { buf += text; pat += literal ? escapeGlob(text) : text; };
 
+  const matchingSubstitutionEnd = (start, backtick = false) => {
+    const openLen = backtick ? 1 : 2;
+    let j = start + openLen;
+    let dep = 1;
+    for (; j < command.length; j++) {
+      if (command[j] === '\\') { j++; continue; }
+      if (backtick) { if (command[j] === '`') { dep = 0; break; } continue; }
+      if (command[j] === '(') dep++;
+      else if (command[j] === ')') { dep--; if (dep === 0) break; }
+    }
+    return Math.min(j, command.length - 1);
+  };
+
+  const arithmeticEnd = (start) => {
+    let depth = 0;
+    for (let j = start + 3; j < command.length; j++) {
+      if (command[j] === '\\') { j++; continue; }
+      if (command[j] === '$' && command[j + 1] === '(') {
+        j = command[j + 2] === '(' ? arithmeticEnd(j) : matchingSubstitutionEnd(j);
+        continue;
+      }
+      if (command[j] === '`') { j = matchingSubstitutionEnd(j, true); continue; }
+      if (command[j] === '(') { depth++; continue; }
+      if (command[j] === ')') {
+        if (depth > 0) { depth--; continue; }
+        if (command[j + 1] === ')') return j + 1;
+      }
+    }
+    return command.length - 1;
+  };
+
+  const appendArithmeticCommands = (start, end) => {
+    if (depth >= 4) return false;
+    let found = false;
+    for (let j = start + 3; j < end; j++) {
+      if (command[j] === '\\') { j++; continue; }
+      if (command[j] === '$' && command[j + 1] === '(') {
+        const nestedEnd = command[j + 2] === '(' ? arithmeticEnd(j) : matchingSubstitutionEnd(j);
+        if (command[j + 2] === '(') {
+          found = appendArithmeticCommands(j, nestedEnd) || found;
+        } else {
+          const inner = command.slice(j + 2, nestedEnd);
+          if (inner.trim()) {
+            for (const seg of lexSegments(inner, depth + 1, offset + j + 2)) {
+              nested.push({ ...seg, nested: true });
+            }
+          }
+          found = true;
+        }
+        j = nestedEnd;
+        continue;
+      }
+      if (command[j] === '`') {
+        const nestedEnd = matchingSubstitutionEnd(j, true);
+        const inner = command.slice(j + 1, nestedEnd);
+        if (inner.trim()) {
+          for (const seg of lexSegments(inner, depth + 1, offset + j + 1)) {
+            nested.push({ ...seg, nested: true });
+          }
+        }
+        found = true;
+        j = nestedEnd;
+      }
+    }
+    return found;
+  };
+
   const flushWord = () => {
     if (!has) return;
     if (pending === 'trunc') { truncated.push(buf); truncPatterns.push(pat); }
@@ -3076,17 +3182,19 @@ export function lexSegments(command, depth = 0, offset = 0) {
         // `echo` and no false "the command name comes from a substitution" appears; the inner
         // program is appended as nested segments, which the cwd walk already ignores because a
         // substitution runs in a subshell.
+        if (command[j] === '$' && command[j + 1] === '(' && command[j + 2] === '(') {
+          const k = arithmeticEnd(j);
+          const hasCommand = appendArithmeticCommands(j, k);
+          add(command.slice(j, Math.min(k + 1, command.length)), true);
+          has = true;
+          if (hasCommand) bufLive = true;
+          j = Math.min(k, command.length - 1) + 1;
+          continue;
+        }
         if ((command[j] === '$' && command[j + 1] === '(') || command[j] === '`') {
           const bt = command[j] === '`';
           const open = bt ? 1 : 2;
-          let k = j + open;
-          let dep = 1;
-          for (; k < command.length; k++) {
-            if (command[k] === '\\') { k++; continue; }
-            if (bt) { if (command[k] === '`') { dep = 0; break; } continue; }
-            if (command[k] === '(') dep++;
-            else if (command[k] === ')') { dep--; if (dep === 0) break; }
-          }
+          const k = matchingSubstitutionEnd(j, bt);
           const inner = command.slice(j + open, k);
           if (depth < 4 && inner.trim()) {
             for (const seg of lexSegments(inner, depth + 1, offset + j + open)) nested.push({ ...seg, nested: true });
@@ -3108,6 +3216,16 @@ export function lexSegments(command, depth = 0, offset = 0) {
       }
       has = true;
       i = j;
+      continue;
+    }
+
+    if (ch === '$' && command[i + 1] === '(' && command[i + 2] === '(') {
+      const end = arithmeticEnd(i);
+      const hasCommand = appendArithmeticCommands(i, end);
+      add(command.slice(i, Math.min(end + 1, command.length)), true);
+      has = true;
+      if (hasCommand) bufLive = true;
+      i = Math.min(end, command.length - 1);
       continue;
     }
 
@@ -3374,8 +3492,21 @@ const combinePath = (curr, next) => (path.isAbsolute(next) ? next : (curr ? path
  *
  * What stays unresolvable is exactly what genuinely is: `cd -` (the shell's own OLDPWD, which no
  * pre-execution reader can know), `popd` (a stack holt never saw pushed), `cd $UNSET`, and
- * `cd $(…)`.
+ * command substitutions whose resulting directory is not statically identifiable.
  *
+ * @returns {string|null} a statically known directory, or null when the substitution is opaque
+ */
+function knownDirectorySubstitution(raw) {
+  const nested = lexSegments(String(raw ?? '')).filter((segment) => segment.nested);
+  if (nested.length !== 1) return null;
+  const [segment] = nested;
+  if (segment.live?.some(Boolean)) return null;
+  return segment.words.length === 3 && segment.words[0] === 'git'
+    && segment.words[1] === 'rev-parse' && segment.words[2] === '--show-toplevel'
+    ? '.' : null;
+}
+
+/**
  * @returns {{dir: string|null, resolved: boolean}} `resolved:false` means holt cannot say where
  *   this lands — the caller decides whether that is an ASK or a reason to keep the base it has.
  */
@@ -3385,6 +3516,8 @@ function resolveCdTarget(seg, words, assignments) {
   const to = operands[0];
   if (to === undefined) return { dir: os.homedir(), resolved: true };   // bare `cd` -> $HOME
   if (to === '-') return { dir: null, resolved: false };
+  const known = knownDirectorySubstitution(to);
+  if (known !== null) return { dir: known, resolved: true };
   const live = seg ? (seg.live?.[seg.words.indexOf(to)] ?? true) : true;
   const { value, unresolved } = expandShellTarget(to, assignments, { live });
   if (unresolved || /(?<!\\)[$`]/.test(value)) return { dir: null, resolved: false };
@@ -5713,7 +5846,15 @@ async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnres
         ? [...u.byLayer.uncommitted, ...u.byLayer.untracked, ...u.byLayer.committed]
           .slice(0, 3).map((x) => x.key).join(', ')
         : '';
-      return `  • ${s.id}: ${s.reasons.join('; ')}${sample ? `\n      e.g. ${sample}` : ''}`;
+      const holders = u?.redundantWith ?? [];
+      const durable = new Set(u?.redundantWithDurable ?? []);
+      const observed = holders.filter((id) => !durable.has(id));
+      const relation = holders.length
+        ? `\n      some identical content is also currently held by ${holders.slice(0, 3).join(', ')}`
+          + `${holders.length > 3 ? ` and ${holders.length - 3} more` : ''}`
+          + `${observed.length ? '; no durable copy is proven in those holders' : ''}`
+        : '';
+      return `  • ${s.id}: ${s.reasons.join('; ')}${sample ? `\n      e.g. ${sample}` : ''}${relation}`;
     }).join('\n');
 
   // The one sentence a sweep's message needs and a deletion's does not: what the stash DID find
@@ -5754,7 +5895,7 @@ async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnres
     kind: hit.kind,
     targets: holding.map((h) => h.id).filter(Boolean),
     reason:
-      `holt blocked this: ${hit.kind} would destroy work that exists nowhere else.\n${detail}\n` +
+      `holt blocked this: ${hit.kind} would destroy work with no durable copy elsewhere.\n${detail}\n` +
       (unknown.length
         ? `  ${unknown.length} of these could not be scanned, so holt cannot confirm they are safe.\n`
         : '') +
@@ -5874,12 +6015,19 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
       // fencing the whole thing keeps a name from ending one line and starting another.
       for (const a of d.advice) lines.push(`- ${u.take(a)}`);
       // Drop the header again if it turned out to be all there was.
-      if (lines.length === whenNews + 1 && !d.duplicatedSymbols.length) lines.length = whenNews;
-      if (d.duplicatedSymbols.length) {
+      const duplicated = d.duplicatedSymbols ?? [];
+      if (lines.length === whenNews + 1 && !duplicated.length) lines.length = whenNews;
+      if (duplicated.length) {
         lines.push('Symbols you added that ALSO exist elsewhere (check before building further):');
-        for (const x of d.duplicatedSymbols.slice(0, 5)) {
+        const shown = duplicated.slice(0, 5);
+        for (const x of shown) {
+          const symbols = x.symbols.slice(0, 4);
           lines.push(`  - ${u.take(x.workstream, ID)}: `
-            + `${x.symbols.slice(0, 4).map((s) => u.take(s, ID)).join(', ')}`);
+            + `${symbols.map((s) => u.take(s, ID)).join(', ')}`
+            + `${symbols.length < x.symbols.length ? ` … and ${x.symbols.length - symbols.length} more symbol(s)` : ''}`);
+        }
+        if (duplicated.length > shown.length) {
+          lines.push(`  … and ${duplicated.length - shown.length} more workstream(s) with duplicated symbols`);
         }
       }
     }
@@ -5889,9 +6037,11 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   // shadowing it would silently make `u.take` mean something else inside the callback.
   const risky = report.unique.filter((w) => w.uncommittedOnlyCount > 0);
   if (risky.length) {
+    const shown = risky.slice(0, 5);
     lines.push(
       `${risky.length} workstream(s) hold work existing ONLY as uncommitted changes — ` +
-      `deleting them loses it: ${risky.slice(0, 5).map((r) => u.take(r.id, ID)).join(', ')}.`,
+      `deleting them loses it: ${shown.map((r) => u.take(r.id, ID)).join(', ')}` +
+      `${risky.length > shown.length ? ` … and ${risky.length - shown.length} more.` : '.'}`,
     );
   }
   if (report.counts.collisions > 0) {
@@ -5914,10 +6064,12 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   // stops being mentioned the moment it stops mattering.
   const stashed = report.stash?.atRisk ?? [];
   if (stashed.length) {
+    const shown = stashed.slice(0, 3);
     lines.push(
       `${stashed.length} stash entr(y/ies) hold content NO ref holds — no worktree shows this ` +
       `work and deleting a worktree will not lose it, but \`git stash drop\`/\`clear\` will: ` +
-      `${stashed.slice(0, 3).map((e) => u.take(e.selector, ID)).join(', ')}. ` +
+      `${shown.map((e) => u.take(e.selector, ID)).join(', ')}.` +
+      `${stashed.length > shown.length ? ` … and ${stashed.length - shown.length} more. ` : ' '}` +
       '`git stash apply` then commit, or `holt rescue`, makes it reachable.',
     );
   }

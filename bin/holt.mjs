@@ -20,11 +20,11 @@ import { detectCtags, detectEnry, languageCoverage } from '../src/symbols.mjs';
 import { classify } from '../src/git.mjs';
 import {
   renderSummary, renderRisk, renderCollisions, renderDuplicates,
-  renderPlan, renderContext, renderImpact, paint,
+  renderPlan, renderCollapse, renderHotspots, renderContext, renderImpact, renderOrder, renderPartition, renderBranches, paint,
 } from '../src/render.mjs';
 import { renderHtml } from '../src/graph-html.mjs';
 import { renderClusters } from '../src/ascii-graph.mjs';
-import { assessCommand, buildBrief, cachedReport } from '../src/agent.mjs';
+import { assessCommand, buildBrief, cachedReport, resolveCommand } from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import {
   integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext, mcpTargets,
@@ -34,7 +34,7 @@ import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
 import { landingOrder } from '../src/order.mjs';
 import { branchAudit } from '../src/branches.mjs';
-import { partitionPlan } from '../src/partition.mjs';
+import { partitionPlan, MAX_PARTITION_AGENTS } from '../src/partition.mjs';
 import { readJournal, appendEvent } from '../src/journal.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
 import { git, listTrackedFiles } from '../src/git.mjs';
@@ -82,12 +82,13 @@ COMMANDS
   status              what your workstreams produced and what to do about it  (default)
   risk                unique work and what is provably safe to delete          (P0, P6)
   collisions          workstream pairs that will fight                         (P1)
+  hotspots            files shared by multiple workstreams (aggregated, low-noise)
   duplicates          pairs that built the same thing  [--deep]                (P3)
   context <id>        what an agent in <id> needs to know about its siblings   (P2)
   plan                drop / collapse / land-in-this-order                     (P5)
   impact              who DEPENDS on what another workstream changed  (not a conflict check)
   order               landing order: parallel lanes + min-entanglement sequence
-  partition           pre-flight split for N agents  [--agents <n>]   (collision-free start map)
+  partition           pre-flight split for N agents  [--agents <n>]   (1–256, collision-free start map)
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
   journal             audit trail of every protect / unprotect / rescue / clean / branch-delete,
                       each stamped with WHO (user, host, agent session when one is declared)
@@ -144,6 +145,7 @@ OPTIONS
   --export <fmt>      journal: json | csv  (your own repo log — free)
   --all               collisions: also show bare file overlap (hidden by default: it is
                       high-volume and low-evidence; landing order always uses it)
+  --limit <n>         hotspots/duplicates/collisions: max rows (1–100)
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
   --base <ref>        compare against <ref>            (default: origin/HEAD, then main/master…)
   --family-window <s> seconds within which workstreams created close together count as one dispatch (default: 3600)
@@ -153,6 +155,7 @@ OPTIONS
   --concurrency <n>   parallel git operations          (default: 8)
   --include-primary   also scan the primary worktree
   --deep              duplicates: additionally run jscpd token clone detection
+  --collapse          plan: show exact, durable supersededBy recommendations only
   --html <file>       graph: write an interactive HTML graph
   --global            integrate: ALSO add holt to user-level editor configs.
                       Default is project scope — nothing outside the repo is touched.
@@ -172,6 +175,19 @@ OPTIONS
 CONFIG (optional — see README.md#configuration)
   .holtrc.json        in the repository root: familyOverrides, guardAllow, maintenanceFloor, maintenanceRatio
                       absent is fine; present-and-invalid is a hard error (exit 2), never silent
+
+  guardAllow          THE HUMAN ESCAPE HATCH for the guard. Each entry is a regex that must match
+                      ONE WHOLE command; a compound command is approved only when every one of its
+                      commands is. An entry whose wildcard could span a command separator (".*",
+                      "\\S", "[^…]") is declined with a reason — it would approve commands nobody
+                      read. Every use is journalled and announced to the user.
+                      This is deliberately not something holt asks an AGENT to write: it is your
+                      decision, in a file you review.
+
+  HOLT_HOOK_FAIL_OPEN=1   BREAK GLASS (environment variable, not config). If a bug in holt makes
+                      the guard stop commands it should not, this lets everything through while
+                      you report it. Every command it permits is announced and journalled. The
+                      guard is OFF for as long as it is set.
 
 QUICK START
   holt setup                     # first run: install backends, wire agents, show what's at risk
@@ -201,17 +217,31 @@ function parseArgs(argv) {
       case '--include-primary': opts.includePrimary = true; break;
       case '--global': opts.global = true; break;
       case '--deep': opts.deep = true; break;
+      case '--collapse': opts.collapse = true; break;
       case '--dry-run': opts.dryRun = true; break;
       case '--apply': opts.apply = true; break;
       case '--release': opts.release = true; break;
       case '--force': opts.force = true; break;
       case '--reason': opts.reason = argv[++i]; break;
       case '--run': opts.run = argv[++i]; break;
-      case '--agents': opts.agents = Number(argv[++i]) || 2; break;
+      case '--agents': {
+        const agents = Number(argv[++i]);
+        if (!Number.isInteger(agents) || agents < 1 || agents > MAX_PARTITION_AGENTS) {
+          throw new Error(`--agents must be an integer from 1 to ${MAX_PARTITION_AGENTS}`);
+        }
+        opts.agents = agents;
+        break;
+      }
       case '--autoprotect': opts.autoprotect = true; break;
       case '--export': opts.exportFmt = argv[++i]; break;
       case '--summary': opts.summary = true; break;
       case '--all': opts.includeCoLocated = true; break;
+      case '--limit': {
+        const limit = Number(argv[++i]);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('--limit must be an integer from 1 to 100');
+        opts.limit = limit;
+        break;
+      }
       case '--install': opts.install = true; break;
       case '--yes': case '-y': opts.yes = true; break;
       case '--max-depth': opts.maxDepth = Number(argv[++i]) || 3; break;
@@ -631,6 +661,196 @@ function readStdin(timeoutMs = 4000) {
 }
 
 /**
+ * WHEN holt ITSELF BREAKS, WHAT DOES THE HOST GET TOLD?
+ *
+ * It used to get told "proceed", silently, and that is not a decision anyone made. Every exit
+ * code in the PreToolUse path was produced deliberately EXCEPT this one: an exception anywhere in
+ * the analysis fell past cmdHook to `main().catch`, which is the CLI's error handler and exits 1
+ * because 1 is what a broken CLI exits. For the hook, 1 means the opposite of what it means for a
+ * CLI. The host's documentation is explicit — "For most hook events, only exit code 2 blocks the
+ * action. Claude Code treats exit code 1 as a non-blocking error and proceeds with the action"
+ * (code.claude.com/docs/en/hooks) — so the only effect a crash ever had was to run the command.
+ *
+ * MEASURED, through the real hook, before this existed:
+ *     rm -rf x[z-a] ../vc-wt   ->  exit 1, empty stdout, the worktree deleted.
+ *     rm -rf ../vc-wt          ->  exit 2, blocked.       (the control, same worktree)
+ * Two exit codes, two contracts, one handler, and the destructive one was the accident.
+ *
+ * WHAT IT DOES NOW, and why this shape:
+ *
+ * Every mature policy checker treats "the checker broke" as a THIRD outcome, distinct from allow
+ * and deny, and makes the allow/deny choice for it explicit rather than an accident of control
+ * flow: sudo's plugin API returns -1 for an error separately from 0/1 for the decision; nginx
+ * `auth_request` counts anything that is not 2xx/401/403 as an error and denies; Envoy's
+ * `ext_authz` defaults `failure_mode_allow` to false AND stamps every request that got through on
+ * a failure; Kubernetes admission webhooks default `failurePolicy: Fail`; Cursor ships
+ * `failClosed`. The consistent answer to "but permanent fail-closed on a persistent bug makes it
+ * unusable" is NOT to fail open — it is to SHRINK THE SCOPE so a failure costs less (Kubernetes'
+ * own documented mitigation) and to provide a pre-existing, out-of-band, auditable break-glass.
+ *
+ * So the scope is shrunk with holt's own pure phase. `resolveCommand` is string analysis with
+ * zero I/O; it is what recognises a destructive verb in the first place, and it survives the
+ * inputs that break the layers above it (the measured crash above happens two layers deeper, in
+ * assessFileTargets). If it reports NO destructive shape at all, holt has a positive statement
+ * from an intact check that this command cannot be one of the ones it exists to stop, and the
+ * command proceeds — with the failure stated, never swallowed. If it reports a destructive shape,
+ * or is itself unable to answer, the command STOPS: holt has no verdict, and a command that can
+ * destroy work must not run on a guard's silence.
+ *
+ * The break-glass is `HOLT_HOOK_FAIL_OPEN=1`, deliberately an ENVIRONMENT VARIABLE and not a
+ * config key: `.holtrc.json` is an ordinary in-repo file that the unguarded Write and Edit tools
+ * can author, so an in-repo switch is one an agent can flip for itself. Every command it lets
+ * through is stamped in the host's own user-visible channel and written to the journal, which is
+ * Envoy's `failure_mode_allow_header_add` rule: fail-open may be permitted, never silent.
+ *
+ * @param {string} command
+ * @param {any} error
+ * @param {{failOpen?: boolean}} [opts]
+ * @returns {{decision:'allow'|'ask', reason:string|null, kind:string, targets:any[], files:any[],
+ *   internalError:true, internalErrorMessage:string, systemMessage?:string}}
+ */
+function internalErrorVerdict(command, error, { failOpen = false } = {}) {
+  const msg = error?.message ?? String(error);
+  const detail = `holt's own analysis failed on this command (${msg}).`;
+
+  if (failOpen) {
+    return {
+      decision: 'allow', reason: null, kind: 'holt internal error (HOLT_HOOK_FAIL_OPEN)',
+      targets: [], files: [], internalError: true, internalErrorMessage: msg,
+      systemMessage: `holt did NOT check this command — ${detail} HOLT_HOOK_FAIL_OPEN is set, so it `
+        + 'was allowed unchecked. Every command is unguarded while that variable is set.',
+    };
+  }
+
+  // The cheap, pure, independently-surviving question: is there a destructive verb here at all?
+  // BOTH GRANULARITIES, or the scope is narrower than the thing it is scoping. `matches` is the
+  // worktree-level destructive verb table; `resolvedPaths` is the file layer's set of paths the
+  // command writes over, moves or truncates — measured: without it, `mv <the only copy> /tmp/x`
+  // and `> <the only copy>` proceeded during a total analyser failure, which is the same
+  // file-granular blind spot assessCommand itself already refuses to have.
+  // A FAILURE BEFORE THE COMMAND WAS EVEN READ CANNOT BE SCOPED, so it is not scoped down. The
+  // whole policy rests on a positive statement from an intact check — "this command contains no
+  // verb that can destroy work" — and there is no command here to make that statement about.
+  if (typeof command !== 'string' || !command.trim()) {
+    return {
+      decision: 'ask',
+      kind: 'holt internal error (before the command was read)',
+      targets: [], files: [], internalError: true, internalErrorMessage: msg,
+      reason: `${detail}\nIt failed before it could read the command, so holt cannot say what this `
+        + 'one does. Confirm it yourself.\n'
+        + 'If holt is persistently broken here, set HOLT_HOOK_FAIL_OPEN=1 in the environment that '
+        + 'starts your agent to keep working unguarded, and please report this: '
+        + 'https://github.com/Raed2180416/holt/issues',
+    };
+  }
+
+  let shape = null;
+  try {
+    const resolved = resolveCommand(command);
+    shape = (resolved.matches.length || resolved.unresolved.length || resolved.resolvedPaths.length)
+      ? (resolved.matches[0]?.kind ?? resolved.unresolved[0]
+        ?? `a write to ${resolved.resolvedPaths[0]?.path ?? 'a path'}`)
+      : null;
+  } catch (triageError) {
+    shape = `the triage could not read it either (${triageError?.message ?? triageError})`;
+  }
+
+  if (!shape) {
+    return {
+      decision: 'allow', reason: null, kind: 'holt internal error (no destructive verb)',
+      targets: [], files: [], internalError: true, internalErrorMessage: msg,
+      systemMessage: `${detail} This command contains no verb that can destroy work, so it was `
+        + 'allowed — but holt is broken here and should be reported: '
+        + 'https://github.com/Raed2180416/holt/issues',
+    };
+  }
+
+  return {
+    decision: 'ask',
+    kind: 'holt internal error',
+    targets: [],
+    files: [],
+    internalError: true,
+    internalErrorMessage: msg,
+    reason: `${detail}\n`
+      + `This command reaches "${shape}", so holt has stopped it rather than guessed: an unchecked `
+      + 'command is not a checked one, and this is the shape of command holt exists to check.\n'
+      + 'Confirm it yourself, or re-run it in a form holt can read.\n'
+      + 'If holt is persistently broken here, set HOLT_HOOK_FAIL_OPEN=1 in the environment that '
+      + 'starts your agent to keep working unguarded (every command it lets through is announced '
+      + 'and journalled), and please report this: https://github.com/Raed2180416/holt/issues',
+  };
+}
+
+/**
+ * THE ONE PLACE A PreToolUse INVOCATION IS ALLOWED TO END.
+ *
+ * Emit the verdict in every channel a host might read — the JSON on stdout, the reason on stderr,
+ * and the exit code — and then exit. Having exactly one of these is the entire point: the fault
+ * this replaces was three different code paths each deciding, on their own, what exit code a
+ * PreToolUse invocation ends with, and the one nobody wrote on purpose was the one that ran the
+ * command.
+ */
+/**
+ * The command this process is deciding about, and the cwd it was asked about, recorded the moment
+ * they are known. They exist so the last-resort handler at the bottom of this file can reach the
+ * SAME scoped decision as the in-band one: a crash before the verdict is still a crash about a
+ * specific command, and answering it with "no command, therefore nothing destructive" would
+ * rebuild the fail-open hole one level up.
+ */
+let hookCommandInFlight;
+let hookCwdInFlight;
+let hookVerdictEmitted = false;
+
+/**
+ * @param {any} verdict
+ * @param {any} opts
+ * @param {{command?: string, cwd?: string}} [ctx] the command this verdict is about, when known
+ */
+function emitHookVerdict(verdict, opts, { command, cwd } = {}) {
+  // Re-entry means the emitter itself failed. There is no verdict to report and no way to report
+  // one: stop the command. Fail-closed is the only honest end for a guard that cannot speak.
+  if (hookVerdictEmitted) process.exit(2);
+  hookVerdictEmitted = true;
+  // THE EXIT CODE IS DECIDED FIRST AND CANNOT BE LOST. Everything below it is reporting, and no
+  // failure in reporting — a formatter, a JSON cycle, a journal write — may change the answer or
+  // escape and land back in the CLI's exit(1). This function is the choke point; a choke point
+  // that can itself throw past the exit is not one.
+  const code = verdict.decision === 'allow' ? 0 : 2;
+  try {
+    const body = formatVerdict(verdict, { host: opts.host, eventName: 'PreToolUse' });
+    // `systemMessage` is a universal top-level hook field — "A warning message shown to the user".
+    // It is the channel for an allow that nobody should mistake for a clean bill of health. Exit 2
+    // ignores stdout entirely, so it is only attached when the command is proceeding.
+    if (verdict.decision === 'allow' && verdict.systemMessage) body.systemMessage = verdict.systemMessage;
+    const speak = verdict.decision !== 'allow' || opts.host !== 'claude-code' || body.systemMessage;
+    if (speak) out(JSON.stringify(body));
+    if (verdict.decision !== 'allow' && verdict.reason) process.stderr.write(`${verdict.reason}\n`);
+    // An internal failure is never invisible, whichever way it was resolved.
+    if (verdict.internalError && verdict.decision === 'allow') {
+      process.stderr.write(`holt: ${verdict.systemMessage}\n`);
+    }
+    if (verdict.internalError) {
+      appendEvent(cwd, {
+        action: verdict.decision === 'allow' ? 'internal-error-allowed' : 'internal-error-blocked',
+        command: String(command ?? '').slice(0, 200), error: verdict.internalErrorMessage ?? null,
+      }).catch(() => {});
+    }
+  } catch (reportingError) {
+    // Say what happened on the one channel that needs nothing to work, and keep the verdict.
+    try { process.stderr.write(`holt: could not render its verdict (${reportingError?.message ?? reportingError})\n`); } catch { /* nothing left */ }
+    process.exit(code === 0 ? 2 : code);   // a verdict nobody can read is not an allow
+  }
+  process.exit(code);
+}
+
+/** Is this process a PreToolUse hook invocation? Decides whether exit 1 is survivable. */
+function isPreToolUseInvocation(argv = process.argv) {
+  const args = argv.slice(2).filter((a) => !a.startsWith('-'));
+  return args[0] === 'hook' && (args[1] ?? 'pre-tool-use') === 'pre-tool-use';
+}
+
+/**
  * Hook entry point.
  *
  * Exit codes are part of the contract for hosts that branch on them rather than parsing JSON:
@@ -640,11 +860,19 @@ async function cmdHook(opts) {
   const event = opts._[1] ?? 'pre-tool-use';
   const raw = opts.command ? '' : await readStdin();
 
+  // A LEADING BOM IS NOT AN UNREADABLE PAYLOAD, IT IS THREE BYTES OF ENCODING PREAMBLE.
+  //
+  // JSON.parse throws on it, and everything downstream is fail-closed, so a single BOM turned every
+  // tool call in the session into an "holt could not parse the hook payload" prompt — a guard that
+  // interrupts constantly for a reason the reader cannot act on is a guard that gets uninstalled.
+  // A BOM in front of otherwise valid JSON is emitted by real hosts (any writer using a UTF-8-BOM
+  // encoder), so it is stripped and the payload is processed normally. Anything STILL unparseable
+  // stays an ask: absence of evidence is not evidence of absence.
   let payload = {};
   let payloadError;
   if (raw.trim()) {
     try {
-      payload = JSON.parse(raw);
+      payload = JSON.parse(raw.replace(/^\uFEFF/, ''));
       if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('payload must be a JSON object');
     } catch (error) {
       payload = {};
@@ -683,6 +911,8 @@ async function cmdHook(opts) {
       ?? payload.command                   // Cursor beforeShellExecution, and the generic shape
       ?? payload.input?.command
       ?? payload.arguments?.command;
+    hookCommandInFlight = command;
+    hookCwdInFlight = cwd;
 
     // Only shell-ish tools can destroy a worktree. Anything else is allowed without a scan,
     // which keeps the hook off the critical path for the overwhelming majority of tool calls.
@@ -694,7 +924,15 @@ async function cmdHook(opts) {
       return;
     }
 
-    const verdict = await assessCommand(command, cwd, { guardAllow: opts.guardAllow });
+    // THE ANALYSIS IS ALLOWED TO FAIL. IT IS NOT ALLOWED TO FAIL SILENTLY INTO "PROCEED".
+    // Anything thrown here used to leave through main().catch and exit 1, which the host reads as
+    // a non-blocking error and runs the command. See internalErrorVerdict.
+    let verdict;
+    try {
+      verdict = await assessCommand(command, cwd, { guardAllow: opts.guardAllow });
+    } catch (error) {
+      verdict = internalErrorVerdict(command, error, { failOpen: process.env.HOLT_HOOK_FAIL_OPEN === '1' });
+    }
     if (verdict.allowlisted) {
       await appendEvent(cwd, {
         action: 'allowlisted', source: 'guardAllow', command: String(command).slice(0, 200),
@@ -703,11 +941,25 @@ async function cmdHook(opts) {
     }
     // Record a prevented loss, so `holt journal --summary` can show the champion a real number:
     // "N destructive commands refused." Best-effort — logging must never delay or alter the hook.
+    //
+    // THE REFUSAL USED TO END BY TEACHING THE READER HOW TO SWITCH THE GUARD OFF: "add a matching
+    // guardAllow pattern to .holtrc.json". Every reader of a PreToolUse refusal is an AGENT — that
+    // is the channel's whole purpose — and `.holtrc.json` is an ordinary in-repo file that the
+    // unguarded Write and Edit tools can author. So the deny message closed its own loop: refuse,
+    // hand over the recipe, get overruled by the party that was just refused. An agent does not
+    // invent `.holtrc.json` on its own; it was told.
+    //
+    // The escape hatch still exists and is still documented (`holt hook --help`, the README, and
+    // src/config.mjs) — for a HUMAN, in the places a human looks. It is no longer offered as the
+    // next step to the party being refused. What the message says instead is what the agent can
+    // actually do that does not lose anything: capture it, or report back.
     const renderedVerdict = verdict.decision === 'allow' || !verdict.reason
       ? verdict
       : {
         ...verdict,
-        reason: `${verdict.reason}\nHuman escape: after reviewing this exact command, add a matching guardAllow pattern to .holtrc.json; its use will be journalled.`,
+        reason: `${verdict.reason}\nIf you believe this is wrong, say so and stop — do not edit `
+          + 'holt\'s configuration to get past it. Overruling this is a human decision, and it is '
+          + 'journalled.',
       };
     if (verdict.decision === 'deny') {
       await appendEvent(cwd, {
@@ -715,8 +967,17 @@ async function cmdHook(opts) {
         reason: renderedVerdict.reason ?? null, kind: verdict.kind ?? null,
       }).catch(() => {});
     }
-    if (verdict.decision !== 'allow' || opts.host !== 'claude-code') {
-      out(JSON.stringify(formatVerdict(renderedVerdict, { host: opts.host, eventName: 'PreToolUse' })));
+
+    // A BYPASS THAT NOBODY CAN SEE IS A BYPASS NOBODY CAN AUDIT. An allowlisted destroyer used to
+    // exit 0 emitting nothing at all on this host, so the one command in the session that
+    // overruled holt's evidence was the one command holt said nothing about. Envoy's rule for the
+    // same situation — `failure_mode_allow_header_add` — is that a decision reached by bypass is
+    // stamped. `systemMessage` is the host's own user-visible field for exactly this.
+    if (verdict.allowlisted && !verdict.systemMessage) {
+      verdict.systemMessage = `holt did not check "${String(command).slice(0, 120)}" — a guardAllow `
+        + `entry in .holtrc.json (${verdict.allowlistPattern}) approves it. If you did not put that `
+        + 'entry there, treat it as a change to your safety configuration.';
+      renderedVerdict.systemMessage = verdict.systemMessage;
     }
 
     // THE REFUSAL IS SAID THREE WAYS, BECAUSE ONE OF THEM WAS RELYING ON LUCK.
@@ -732,10 +993,7 @@ async function cmdHook(opts) {
     // the reason on stderr, and exit 2. That is fail-CLOSED under all three documented readings
     // rather than correct under one of them. `ask` shares exit 2 deliberately — a host that
     // cannot express "ask" must stop, not proceed, when holt could not verify what a command does.
-    if (verdict.decision !== 'allow' && verdict.reason) {
-      process.stderr.write(`${verdict.reason}\n`);
-    }
-    process.exit(verdict.decision === 'allow' ? 0 : 2);
+    emitHookVerdict(renderedVerdict, opts, { command, cwd });
   }
 
   if (event === 'session-start' || event === 'user-prompt-submit') {
@@ -1239,41 +1497,31 @@ async function main() {
   // The MUTATING commands, dispatched before buildReport() because each runs its own assessment.
   // These were once implemented, exported and covered by 19 passing tests while `holt protect`
   // printed "unknown command" — nothing exercised the CLI. test/e2e/cli.test.mjs now does.
+  // ORDER / PARTITION / BRANCHES RENDER IN src/render.mjs, NOT HERE. They used to be written out
+  // inline, and inline in this file means outside the one place the untrusted-content gate can
+  // enumerate — which is exactly how `holt order` and `holt partition` came to print a worktree
+  // basename raw while `holt collisions` fenced the same value correctly. See renderOrder().
   if (cmd === 'order') {
     const { report } = await buildReport(opts);
     const plan = landingOrder(report);
     if (opts.json) return emitJson(plan);
-    out(paint('bold', 'holt order') + paint('grey', '  (heuristic — conflictsWithLater names the merges to watch)'));
-    if (plan.parallel.length) {
-      out(`\n  PARALLEL-SAFE  ${paint('grey', 'no observed interaction — land in any order, concurrently')}`);
-      for (const id of plan.parallel) out(`    ${paint('green', id)}`);
-    }
-    for (const lane of plan.lanes) {
-      out(`\n  LANE (${lane.members.length} entangled)`);
-      lane.order.forEach((step, i) => {
-        const later = step.conflictsWithLater.map((c) => `${c.id} (${c.why.join('; ')})`).join(', ');
-        out(`    ${i + 1}. ${step.id}${later ? paint('yellow', `  → watch: ${later}`) : paint('green', '  → clears the lane')}`);
-      });
-    }
-    out('');
+    out(renderOrder(plan));
     return;
   }
   if (cmd === 'partition') {
     const { report, scanned } = await buildReport(opts);
     const plan = partitionPlan(report, await listTrackedFiles(scanned.root), { agents: opts.agents ?? 2 });
     if (opts.json) return emitJson(plan);
-    out(paint('bold', `holt partition — ${plan.agents} agents`) + paint('grey', '  (advisory: a collision-free starting map, not a work plan)'));
-    for (const b of plan.buckets) {
-      out(`\n  AGENT ${b.agent}  ${paint('grey', `${b.weight} tracked file(s)`)}`);
-      out(`    ${b.dirs.join('  ')}`);
-    }
-    if (plan.avoid.length) {
-      out(`\n  ${paint('yellow', 'ALREADY CONTESTED')}  ${paint('grey', 'one owner each — currently touched by multiple live workstreams')}`);
-      for (const a of plan.avoid.slice(0, 15)) {
-        out(`    ${a.file}  ${paint('grey', `held by ${a.currentlyHeldBy.join(', ')}`)}  → agent ${a.assignTo ?? '?'}`);
-      }
-    }
-    out('');
+    out(renderPartition(plan));
+    return;
+  }
+  if (cmd === 'hotspots') {
+    const { report } = await buildReport(opts);
+    const limit = opts.limit ?? 12;
+    const rows = report.hotspots ?? [];
+    if (opts.json) {
+      emitJson({ total: rows.length, returned: Math.min(rows.length, limit), truncated: rows.length > limit, hotspots: rows.slice(0, limit) });
+    } else out(renderHotspots(report, limit));
     return;
   }
   if (cmd === 'branches') {
@@ -1283,25 +1531,7 @@ async function main() {
       process.stderr.write(paint('red', `holt branches: ${audit.reason}\n`));
       process.exit(2);
     }
-    out(paint('bold', 'holt branches') + paint('grey', `  vs ${audit.base.ref ?? audit.base.oid.slice(0, 12)} · ${audit.audited} audited · checked-out excluded: ${audit.excludedCheckedOut.join(', ') || 'none'}`));
-    const section = (label, items, color) => {
-      if (!items.length) return;
-      out(`\n  ${paint(color, label)}`);
-      for (const b of items) {
-        out(`    ${b.name}  ${paint('grey', b.reason)}`);
-        if (b.command) out(`      ${paint('grey', '$')} ${b.command}`);
-        if (b.files) out(`      ${paint('grey', b.files.slice(0, 5).join(', ') + (b.fileCount > 5 ? ` … +${b.fileCount - 5}` : ''))}`);
-      }
-    };
-    section(`LANDED — safe to delete (${audit.landed.length})`, audit.landed, 'green');
-    section(`CONTENT-LANDED — evidence says landed, git ancestry says no (${audit.contentLanded.length})`, audit.contentLanded, 'yellow');
-    section(`UNLANDED — holds work (${audit.unlanded.length})`, audit.unlanded, 'red');
-    section(`UNKNOWN — instrument failed, refusing to classify (${audit.unknown.length})`, audit.unknown, 'red');
-    if (audit.applied.length) {
-      out(`\n  APPLIED`);
-      for (const a of audit.applied) out(`    ${a.name}  ${a.ok ? paint('green', 'deleted (-d)') : paint('red', `refused: ${a.error}`)}`);
-    }
-    out(`\n  ${paint('grey', audit.note)}\n`);
+    out(renderBranches(audit));
     return;
   }
   if (cmd === 'license') {
@@ -1443,7 +1673,33 @@ async function main() {
     const unlanded = audit.unlanded.filter((b) => !ignore.has(b.name));
     const overAge = opts.maxAgeDays
       ? unlanded.filter((b) => b.ageDays != null && b.ageDays > opts.maxAgeDays) : [];
+    // A SHALLOW CLONE CANNOT ANSWER THIS QUESTION, AND SAYING `ok: true` ANYWAY IS THE WORST
+    // FAILURE THIS COMMAND HAS.
+    //
+    // `holt ci` exists to fail a merge that abandons work. `actions/checkout` defaults to
+    // `fetch-depth: 1` — SHALLOW — so the DEFAULT GitHub Actions installation gave a gate that
+    // always passed. Measured on one repository, same command:
+    //     full clone     holt ci --fail-on-unlanded  -> exit 1, unlanded work correctly reported
+    //     shallow clone  holt ci --fail-on-unlanded  -> exit 0, {"ok":true,"unlanded":[],"unknown":[]}
+    // and the word "shallow" appeared nowhere in the output. The `note` below is printed
+    // unconditionally, so it is boilerplate, not a detection — a team adopts the gate, sees green on
+    // every PR, and concludes they are protected.
+    //
+    // That is absence of evidence reported as evidence of absence, inside the one command whose
+    // entire purpose is to fail. It is treated exactly like `audit.unknown` below — the pattern this
+    // function already had for "the instrument could not measure" — and `holt gate` already gets
+    // this right by returning 2 for unknown rather than 0.
+    const shallowR = await git(['rev-parse', '--is-shallow-repository'], { cwd: opts.cwd });
+    const isShallow = shallowR.code === 0 && shallowR.stdout.trim() === 'true';
+
     const failures = [];
+    if (isShallow && (opts.failOnUnlanded || opts.maxAgeDays)) {
+      failures.push(
+        'SHALLOW CLONE — holt cannot see the history this policy is about, so it is refusing to '
+        + 'pass rather than reporting a green it did not verify. Fetch full refs: '
+        + 'actions/checkout with `fetch-depth: 0`.',
+      );
+    }
     if (opts.failOnUnlanded && unlanded.length) {
       failures.push(`${unlanded.length} branch(es) hold unlanded work: ${unlanded.map((b) => `${b.name} (${b.fileCount} file(s)${b.ageDays != null ? `, ${b.ageDays}d old` : ''})`).join(', ')}`);
     }
@@ -1460,6 +1716,10 @@ async function main() {
       unlanded: unlanded.map((b) => ({ name: b.name, files: b.fileCount, ageDays: b.ageDays })),
       contentLanded: audit.contentLanded.map((b) => b.name),
       unknown: audit.unknown.map((b) => b.name),
+      // MEASURED, not asserted. The `note` beneath it is advice and is printed always; this field
+      // says what THIS run actually found, so a reader can tell a verified pass from an unverifiable
+      // one without reading the note and guessing.
+      shallow: isShallow,
       note: 'requires full refs (actions/checkout with fetch-depth: 0)',
     };
     emitJson(result);
@@ -1642,6 +1902,10 @@ async function main() {
     }
 
     case 'plan':
+      if (opts.collapse) {
+        return opts.json ? emitJson({ supersededBy: report.plan.supersededBy ?? report.plan.collapse })
+          : out(renderCollapse(report.plan));
+      }
       return opts.json ? emitJson(report.plan) : out(renderPlan(report));
 
     case 'impact': {
@@ -1768,6 +2032,30 @@ const EXPECTED_STATE = [
 
 main().catch((err) => {
   const msg = err?.message ?? String(err);
+
+  // A PreToolUse INVOCATION MUST NEVER LEAVE THROUGH A CLI ERROR HANDLER.
+  //
+  // This handler exits 1, which is correct for a CLI and catastrophic for a hook: the host reads
+  // 1 as a non-blocking error and runs the tool call. Everything reachable from `holt hook
+  // pre-tool-use` therefore routes to the same scoped decision the in-band path uses, so a crash
+  // ANYWHERE — reading stdin, loading config, resolving the repo, importing a module — produces a
+  // verdict rather than a silent proceed. `hookVerdictEmitted` keeps this from re-entering when
+  // the failure was in the emitter itself.
+  if (isPreToolUseInvocation() && !hookVerdictEmitted) {
+    const hostArg = process.argv.indexOf('--host');
+    const host = hostArg >= 0 ? process.argv[hostArg + 1] : 'generic';
+    const verdict = internalErrorVerdict(hookCommandInFlight ?? '', err, {
+      failOpen: process.env.HOLT_HOOK_FAIL_OPEN === '1',
+    });
+    // A repository STATE holt cannot work in is not a destructive command. Saying so is the same
+    // scoped answer, reached through the same door — never a blanket refusal of every Bash call
+    // in a session that simply has no repository to protect.
+    if (EXPECTED_STATE.some((re) => re.test(msg)) && verdict.decision !== 'allow') {
+      verdict.reason = `${verdict.reason}\nholt could not read this repository (${msg.replace(/^holt:\s*/, '')}).`;
+    }
+    emitHookVerdict(verdict, { host }, { command: hookCommandInFlight, cwd: hookCwdInFlight });
+  }
+
   if (EXPECTED_STATE.some((re) => re.test(msg))) {
     // The message already says what to do; strip any duplicated "holt:" prefix and print it once.
     process.stderr.write(paint('red', `holt: ${msg.replace(/^holt:\s*/, '')}\n`));

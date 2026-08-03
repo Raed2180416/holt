@@ -67,20 +67,27 @@ test('BRANCHES: landed vs content-landed vs unlanded, classified by content not 
   const audit = await branchAudit(fx.root, { base: 'main' });
   assert.equal(audit.ok, true);
 
-  assert.deepEqual(audit.landed.map((b) => b.name), ['landed-ancestor']);
-  assert.equal(audit.landed[0].safe, true);
-  assert.match(audit.landed[0].command, /branch -d landed-ancestor/);
+  assert.ok(audit.landed.some((b) => b.name === 'landed-ancestor'));
+  const landed = audit.landed.find((b) => b.name === 'landed-ancestor');
+  assert.equal(landed.safe, true);
+  assert.match(landed.command, /branch -d landed-ancestor/);
 
-  assert.deepEqual(audit.contentLanded.map((b) => b.name), ['squashed']);
-  assert.equal(audit.contentLanded[0].safe, false, 'content-landed is evidence, never auto-safe');
-  assert.match(audit.contentLanded[0].reason, /NOT an ancestor/);
+  assert.ok(audit.contentLanded.some((b) => b.name === 'squashed'));
+  const contentLanded = audit.contentLanded.find((b) => b.name === 'squashed');
+  assert.equal(contentLanded.safe, false, 'content-landed is evidence, never auto-safe');
+  assert.match(contentLanded.reason, /NOT an ancestor/);
 
-  assert.deepEqual(audit.unlanded.map((b) => b.name), ['wip']);
-  assert.ok(audit.unlanded[0].files.some((f) => f.includes('only-here')),
-    `unlanded must name the held files: ${JSON.stringify(audit.unlanded[0])}`);
+  assert.ok(audit.unlanded.some((b) => b.name === 'wip'));
+  const unlanded = audit.unlanded.find((b) => b.name === 'wip');
+  assert.ok(unlanded.files.some((f) => f.includes('only-here')),
+    `unlanded must name the held files: ${JSON.stringify(unlanded)}`);
 
-  assert.ok(audit.excludedCheckedOut.includes('active'), 'checked-out branches are excluded');
-  assert.ok(!JSON.stringify(audit.landed.concat(audit.contentLanded, audit.unlanded)).includes('"active"'));
+  assert.ok(audit.excludedCheckedOut.includes('active'), 'checked-out branches remain marked report-only');
+  const active = [...audit.landed, ...audit.contentLanded, ...audit.unlanded, ...audit.unknown]
+    .find((b) => b.name === 'active');
+  assert.ok(active, 'a checked-out branch must be audited in a fan-out');
+  assert.equal(active.checkedOut, true);
+  assert.equal(active.safe, false, 'checked-out branches are never auto-deletable');
 });
 
 test('BRANCHES: --apply deletes ONLY the landed bucket with -d, and records it in the journal', async (t) => {
@@ -132,7 +139,7 @@ test('CLI: order / partition / branches / journal are wired, exit 0, and emit va
   const fx = await graveyardFixture();
   t.after(() => fx.cleanup());
 
-  for (const args of [['order'], ['partition', '--agents', '3'], ['branches'], ['journal']]) {
+  for (const args of [['order'], ['partition', '--agents', '3'], ['hotspots'], ['branches'], ['journal'], ['plan', '--collapse']]) {
     const r = await sh(process.execPath, [BIN, ...args, '--json', '--cwd', fx.root], fx.root);
     assert.equal(r.code, 0, `holt ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
     assert.doesNotThrow(() => JSON.parse(r.stdout), `holt ${args.join(' ')} must emit JSON`);
@@ -195,4 +202,66 @@ test('CI GATE: report-only by default; policy flags fail honestly; ignore exempt
 
   const exempt = await sh(process.execPath, [BIN, 'ci', '--fail-on-unlanded', '--ignore', 'wip', '--json', '--cwd', fx.root], fx.root);
   assert.equal(exempt.code, 0, `an exempted branch must not fail the gate: ${exempt.stdout}`);
+});
+
+/**
+ * A SHALLOW CLONE CANNOT ANSWER THIS QUESTION, AND `ok: true` IS THE WORST POSSIBLE ANSWER.
+ *
+ * WHEN THIS BITES, and it is not an edge case: `actions/checkout` defaults to `fetch-depth: 1`.
+ * That is a SHALLOW clone, so the DEFAULT GitHub Actions installation of holt's team gate produced
+ * a gate that always passed. A team adopts `holt ci` specifically to stop work being abandoned,
+ * sees green on every PR, and concludes they are protected.
+ *
+ * MEASURED on one repository, same command, two clones:
+ *     full     holt ci --fail-on-unlanded  -> exit 1, unlanded work correctly reported
+ *     shallow  holt ci --fail-on-unlanded  -> exit 0, {"ok":true,"unlanded":[],"unknown":[]}
+ * and the string "shallow" appeared nowhere in the output — the "requires full refs" note is
+ * printed unconditionally, so it is boilerplate rather than a detection.
+ *
+ * Absence of evidence reported as evidence of absence, inside the one command whose entire purpose
+ * is to fail. It is now treated exactly like `audit.unknown`: the instrument could not measure, so
+ * the policy refuses to pass. `holt gate` already had this right, returning 2 for unknown.
+ */
+test('CI: a shallow clone cannot pass a policy it could not verify', async (t) => {
+  const fx = await graveyardFixture();
+  t.after(() => fx.cleanup());
+
+  const shallowDir = path.join(path.dirname(fx.root), `shallow-${Date.now()}`);
+  t.after(() => fs.rm(shallowDir, { recursive: true, force: true }));
+  // `file://` forces the transport — a plain local clone HARDLINKS and ignores --depth entirely,
+  // which silently produces a full clone and a test that proves nothing. Measured while writing
+  // this: `git clone --depth 1 <path>` gave 218 commits.
+  await sh('git', ['clone', '-q', '--depth', '1', `file://${fx.root}`, shallowDir], path.dirname(fx.root));
+
+  const isShallow = await sh('git', ['rev-parse', '--is-shallow-repository'], shallowDir);
+  assert.equal(isShallow.stdout.trim(), 'true',
+    'PREMISE: the fixture must actually be shallow, or this test proves nothing');
+
+  const strict = await sh(process.execPath, [BIN, 'ci', '--fail-on-unlanded', '--json', '--cwd', shallowDir], shallowDir);
+  assert.equal(strict.code, 1, `a policy that cannot be verified must not pass: ${strict.stdout}`);
+  const body = JSON.parse(strict.stdout);
+  assert.equal(body.ok, false);
+  assert.equal(body.shallow, true, 'the run must SAY it was shallow, not leave it to the static note');
+  assert.match(body.failures.join(' '), /SHALLOW CLONE/,
+    'the failure must name the cause, so a CI log tells someone what to change');
+  assert.match(body.failures.join(' '), /fetch-depth: 0/,
+    'and it must name the fix');
+});
+
+test('CI: NEVER-WORSE — report-only on a shallow clone still reports, and says it was shallow', async (t) => {
+  const fx = await graveyardFixture();
+  t.after(() => fx.cleanup());
+
+  const shallowDir = path.join(path.dirname(fx.root), `shallow-ro-${Date.now()}`);
+  t.after(() => fs.rm(shallowDir, { recursive: true, force: true }));
+  await sh('git', ['clone', '-q', '--depth', '1', `file://${fx.root}`, shallowDir], path.dirname(fx.root));
+
+  // With no policy flag there is nothing to enforce, so failing would be an over-refusal: plain
+  // `holt ci` is a report. But it must still SAY the history was not visible, because a reader
+  // comparing two green runs has no other way to tell a verified pass from an unverifiable one.
+  const plain = await sh(process.execPath, [BIN, 'ci', '--json', '--cwd', shallowDir], shallowDir);
+  assert.equal(plain.code, 0, `report-only must not fail on shallow: ${plain.stderr}`);
+  const body = JSON.parse(plain.stdout);
+  assert.equal(body.ok, true);
+  assert.equal(body.shallow, true, 'it must still disclose that it could not see the history');
 });

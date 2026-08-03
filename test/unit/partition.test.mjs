@@ -53,6 +53,23 @@ test('partition: agents below 2 clamp to 2, and output is deterministic', () => 
     partitionPlan({ collisions: [] }, FILES, { agents: 3 }));
 });
 
+test('partition: deepens path units when one top-level directory cannot feed the fan-out', () => {
+  const plan = partitionPlan({ collisions: [] }, FILES, { agents: 8 });
+  assert.equal(plan.buckets.length, 8);
+  assert.notEqual(plan.granularity, 'top-level-directory');
+  const units = plan.buckets.flatMap((b) => b.dirs);
+  assert.equal(new Set(units).size, units.length);
+  assert.equal(plan.buckets.reduce((sum, b) => sum + b.weight, 0), FILES.length);
+});
+
+test('partition: full collision evidence feeds hotspots even when the visible list is filtered', () => {
+  const plan = partitionPlan({
+    collisions: [],
+    collisionsAll: [{ a: 'wt1', b: 'wt2', sharedFiles: ['src/a.js'] }],
+  }, FILES, { agents: 2 });
+  assert.deepEqual(plan.avoid.map((x) => x.file), ['src/a.js']);
+});
+
 /**
  * THE PROPERTY, NOT ONE EXAMPLE.
  *

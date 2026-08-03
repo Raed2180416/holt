@@ -18,8 +18,8 @@
  *   unknown         — the instrument failed (missing objects, merge-tree error). REFUSED,
  *                     never bucketed as safe. Absence of evidence is not evidence of absence.
  *
- * Branches checked out in ANY worktree are excluded here — they belong to the worktree layer,
- * where the uncommitted dimension exists.
+ * Branches checked out in ANY worktree are audited here too, but never auto-deleted: this lets a
+ * fan-out see landed content while the worktree layer remains responsible for its live files.
  */
 
 import { git, gitOk } from './git.mjs';
@@ -53,6 +53,9 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
 
   const checkedOut = new Set(disc.workstreams.map((w) => w.branch).filter(Boolean));
   const baseShort = base.ref?.replace(/^refs\/heads\//, '');
+  const checkedOutReason = (name) => checkedOut.has(name)
+    ? ' checked out in a worktree — report-only; holt will not delete it until that worktree is gone'
+    : '';
 
   const refs = await git(['for-each-ref', 'refs/heads', '--format=%(refname:short)%00%(objectname)%00%(committerdate:unix)'],
     { cwd: root });
@@ -63,7 +66,8 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     const [name, tip, cdate] = line.split('\0');
     if (!name || !tip) continue;
     const ageDays = cdate ? Math.floor((Date.now() / 1000 - Number(cdate)) / 86400) : null;
-    if (name === baseShort || checkedOut.has(name)) continue;
+    if (name === baseShort) continue;
+    const isCheckedOut = checkedOut.has(name);
 
     const delta = await committedDelta(root, base.oid, tip, {
       strictReadOnly: opts.strictReadOnly === true, timeout: opts.timeout ?? 30_000,
@@ -72,8 +76,8 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     const failed = typeof delta.how === 'string' && delta.how.endsWith('-failed');
     if (failed || delta.how === 'merge-tree-no-tree') {
       branches.push({
-        name, tip, ageDays, status: 'unknown', safe: false,
-        reason: `instrument failed (${delta.how}) — refusing to classify; nothing here licenses a deletion`,
+        name, tip, ageDays, status: 'unknown', safe: false, checkedOut: isCheckedOut,
+        reason: `instrument failed (${delta.how}) — refusing to classify; nothing here licenses a deletion${checkedOutReason(name)}`,
       });
       continue;
     }
@@ -82,16 +86,16 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
       const anc = await git(['merge-base', '--is-ancestor', tip, base.oid], { cwd: root });
       if (anc.code === 0) {
         branches.push({
-          name, tip, ageDays, status: 'landed', safe: true,
-          reason: `content delta vs ${baseShort ?? base.oid.slice(0, 12)} is empty and the tip is an ancestor`,
-          command: `git branch -d ${name}`,
+          name, tip, ageDays, status: 'landed', safe: !isCheckedOut, checkedOut: isCheckedOut,
+          reason: `content delta vs ${baseShort ?? base.oid.slice(0, 12)} is empty and the tip is an ancestor${checkedOutReason(name)}`,
+          command: isCheckedOut ? undefined : `git branch -d ${name}`,
         });
       } else {
         branches.push({
-          name, tip, ageDays, status: 'content-landed', safe: false,
+          name, tip, ageDays, status: 'content-landed', safe: false, checkedOut: isCheckedOut,
           reason: 'every line of content already exists in base, but the tip is NOT an ancestor '
             + '(squash-merge or cherry-pick) — git branch -d will refuse; deleting needs -D, which '
-            + 'holt never runs for you',
+            + 'holt never runs for you' + checkedOutReason(name),
           command: `git branch -D ${name}  # evidence: merge-tree delta vs base is empty`,
         });
       }
@@ -99,8 +103,8 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     }
 
     branches.push({
-      name, tip, ageDays, status: 'unlanded', safe: false,
-      reason: `holds ${delta.files.length} file(s) of content base does not have`,
+      name, tip, ageDays, status: 'unlanded', safe: false, checkedOut: isCheckedOut,
+      reason: `holds ${delta.files.length} file(s) of content base does not have${checkedOutReason(name)}`,
       files: delta.files.slice(0, FILE_CAP),
       fileCount: delta.files.length,
       how: delta.how,
@@ -110,7 +114,7 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
   const journalFailures = [];
   const applied = [];
   if (apply) {
-    for (const b of branches.filter((x) => x.status === 'landed')) {
+    for (const b of branches.filter((x) => x.status === 'landed' && !x.checkedOut)) {
       // Re-derive safety at deletion time from git's OWN check: -d refuses non-ancestors, so
       // even a stale verdict cannot force-delete anything (-D never appears here).
       const del = await gitOk(['branch', '-d', b.name], { cwd: root, allowMutation: true })
@@ -130,7 +134,10 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     ok: true,
     base: { ref: base.ref, oid: base.oid, how: base.how },
     audited: branches.length,
+    // Kept under the old field for machine compatibility; checked-out branches are now included in
+    // the audit, but the field still names the set that cannot be auto-deleted.
     excludedCheckedOut: [...checkedOut].sort(),
+    checkedOut: branches.filter((b) => b.checkedOut).map((b) => b.name).sort(),
     landed: by('landed'),
     contentLanded: by('content-landed'),
     unlanded: by('unlanded'),
