@@ -170,7 +170,7 @@ const TOOLS = [
     name: 'holt_at_risk',
     title: 'Work that exists nowhere else',
     description:
-      'Workstreams holding unique work, ranked by risk. Work that exists only as UNCOMMITTED changes ranks highest because no git command can relate it — deleting that worktree destroys it silently.',
+      'Workstreams holding unique work, ranked by risk, AND stash entries holding content no ref holds. Work existing only as UNCOMMITTED changes ranks highest because no git command can relate it — deleting that worktree destroys it silently.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max rows (default 10, at most 100).' } },
@@ -279,7 +279,7 @@ const TOOLS = [
     name: 'holt_rescue',
     title: 'Preserve a workstream\'s unique work to a verifiable ref',
     description:
-      'Captures a worktree\'s full state — tracked modifications and untracked files — as a commit on refs/holt/rescue/<id>, verifies the capture, and optionally releases holt\'s lock so the worktree becomes disposable. Fails loudly if the capture cannot be verified. Use this when a worktree is locked and you need it gone; never disarm the lock by hand.',
+      'Captures a worktree\'s full state — tracked and untracked — as a commit on refs/holt/rescue/<id>, verifies it, and optionally releases holt\'s lock so the worktree becomes disposable. Fails loudly if the capture cannot be verified. Use when a worktree is locked and you need it gone; never disarm the lock by hand.',
     inputSchema: {
       type: 'object',
       properties: {
