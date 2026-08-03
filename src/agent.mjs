@@ -1235,6 +1235,23 @@ function inlineShellPrograms(command) {
       const at = w.length - util.length;
       if (util.length && SHELLS.has(path.basename(util[0]))) starts.push(at);
     }
+    // `trap ACTION SIGNAL…` HOLDS A PROGRAM AS A STRING and runs it later, in THIS shell. There is
+    // no shell named on the line, so none of the tests above could see it, and it was allowed:
+    //
+    //     trap "rm -rf <wt>/src/only-here.js" EXIT   ->  ALLOW
+    //
+    // A cleanup handler is the single most ordinary reason to write one (`trap 'rm -rf $TMPDIR'
+    // EXIT` is boilerplate), which is exactly why it must be read: the idiom is everywhere, and it
+    // destroys whatever the path turns out to name. Deferred to a signal is still deferred to now
+    // as far as the guard is concerned — nothing else gets to see the command before it runs.
+    //
+    // `trap - EXIT` RESETS a handler and `trap '' EXIT` IGNORES the signal; neither runs anything,
+    // so neither is a program. Options (`-l`, `-p`) are skipped to find the action operand.
+    if (w[0] === 'trap') {
+      const at = w.findIndex((word, j) => j > 0 && !word.startsWith('-'));
+      const action = at > 0 ? w[at] : null;
+      if (action && action !== '-' && action.trim() && action.length < command.length) out.push(action);
+    }
     for (const j of starts) {
       const program = shellInlineProgram(w.slice(j));
       // A payload no shorter than the command it sits in cannot exist, so the recursion below
