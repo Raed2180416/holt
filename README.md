@@ -309,6 +309,30 @@ therefore to holt.
 - **P4 in general remains unsolved.** `verify` decides a *specific suspected pair* empirically; it does not certify compatibility, and the wording is asserted by test.
 - **Scan time is super-linear in worktree count, and file count is worse.** Correctness holds at real scale (800/800 on redis), but a repository the size of the Linux kernel is not usable with symbol extraction today — `--no-symbols` is the working answer there. Measured, with the exact reproduction, in BENCHMARKS §1. The mechanism behind the worktree-count growth is not yet identified.
 
+### Every limit holt puts on itself
+
+holt bounds its own work in six places. They are listed here because a bound you cannot see is
+indistinguishable from an answer — each one announces itself when it binds, and none of them
+quietly shrinks a result.
+
+| Limit | Value | What it bounds | What you see when it binds |
+|---|---|---|---|
+| Taggable file size | 2 MB | files handed to universal-ctags for symbol extraction | the file is named in `symbolsUnmeasuredFiles`, the row reads *"N file(s) holt could not read symbols from … 'uniq' is a floor, not a total"*, and `safeToDelete` will not call that worktree disposable on the strength of it |
+| Text-scan size | 4 MB | files read whole for content identity | the same: named as unmeasured, never counted as empty |
+| Stash entries scanned | 25 | how far `holt stash` walks the reflog | *"holt scanned only the first 25 stash entries — there are more"*, and the response carries `truncated: true` |
+| Stash paths per entry | 400 | paths carried into the reachability walk | the entry is reported as checked-with-a-bound rather than clean |
+| git call timeout | 30 s | any single git invocation | the call **throws** (`git … timed out after 30000ms`); callers record the instrument as failed, and a failed instrument is reported as `unknown` — e.g. `branches` returns *"instrument failed — refusing to classify; nothing here licenses a deletion"* |
+| `partition --agents` | 256 | requested agent count | refused by name with exit 2, never silently clamped |
+
+**The property that matters is not the numbers, it is the direction.** Every one of these fails
+*closed*: when the bound binds, holt says so and lowers its own confidence. None of them lets holt
+answer from partial data as though the data were complete — which is the exact failure it exists to
+prevent, and it would be no more acceptable in holt than in the tools it watches.
+
+Display caps are a separate thing and are always announced: a shortened list prints `… and N more`,
+and every MCP list response carries `returned` and `truncated`, so a cut list can never be mistaken
+for a complete one.
+
 ## Configuration
 
 Optional, and most repositories will never need it. Drop a `.holtrc.json` in the repository root
