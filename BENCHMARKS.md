@@ -212,7 +212,7 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 1063 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| tests | 1064 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
 | deliberate-defect mutations | 79/79 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
