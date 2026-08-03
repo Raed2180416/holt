@@ -391,6 +391,17 @@ export function renderRisk(report) {
         : ''),
     );
   }
+  // A SILENTLY TRUNCATED AT-RISK LIST IS THE ONE TRUNCATION THAT COSTS WORK.
+  //
+  // This is the table a reader scans to decide what must not be deleted, and it stopped at 40 with
+  // no counter and no total in its header — so on a repository with more than 40 workstreams
+  // holding work found nowhere else, the rest simply were not there, and a complete-looking list
+  // said so. Identical in shape to the defect commit 13dc53a13 fixed in the TUI and to the session
+  // brief that counted 8 and named 5; this is the third surface, and the highest-stakes one.
+  if (rows.length > 40) {
+    out.push(c('yellow', `  … and ${rows.length - 40} more workstream(s) hold work found nowhere else `
+      + `— \`holt risk --json\` lists every one`));
+  }
   out.push('');
   out.push(c('bold', 'DISPOSABLE'));
   out.push('');
@@ -403,6 +414,9 @@ export function renderRisk(report) {
   if (unknown.length) {
     out.push('', c('yellow', `UNKNOWN (${unknown.length}) — holt could not scan these, so they are NOT safe`));
     for (const s of unknown.slice(0, 10)) out.push(c('grey', `  ? ${u.cell(s.id, 40, ID)} ${u.take(s.reasons[0])}`));
+    // The header carries the total, so this is not invisible — but a reader following the LIST
+    // still needs to be told the list stopped, not just that the count was larger.
+    if (unknown.length > 10) out.push(c('grey', `  … and ${unknown.length - 10} more`));
   }
   // THE CAVEAT BELONGS ON THE PATH PEOPLE ACTUALLY READ, TOO.
   //
@@ -719,6 +733,10 @@ export function renderPartition(plan) {
     for (const a of plan.avoid.slice(0, 15)) {
       const held = a.currentlyHeldBy.map((h) => u.take(h, ID)).join(', ');
       out.push(`    ${u.take(a.file, ID)}  ${c('grey', `held by ${held}`)}  → agent ${a.assignTo ?? '?'}`);
+    }
+    // A partitioning plan read as complete is a plan that assigns contested files to nobody.
+    if (plan.avoid.length > 15) {
+      out.push(c('grey', `    … and ${plan.avoid.length - 15} more contested file(s) — 'holt partition --json' lists every one`));
     }
   }
   out.push(...provenanceLines(u));
