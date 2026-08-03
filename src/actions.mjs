@@ -21,7 +21,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { git, gitOk, pmap, authorEnv } from './git.mjs';
+import { git, gitOk, gitPathBatched, pmap, authorEnv } from './git.mjs';
 import { discover, isHoltLock, unquotePorcelain, repoAbsenceError } from './discover.mjs';
 import {
   underOrEqualAsync, relativeWithinAsync, relativeLinkAwareAsync, canonicalPath, samePathSync,
@@ -335,11 +335,27 @@ async function lockState(wtPath, cwd) {
  * genuinely can be named `..something` or `x.lock` (detached — git refuses .lock in branch
  * names too), and a rescue that dies at update-ref AFTER building its capture is a confusing
  * failure in the one flow that must not confuse.
+ *
+ * FOUND BY ATTACKING IT AGAIN: the leading-dot strip left the SYMMETRIC rule unhandled — git
+ * also refuses a refname whose final component ENDS in a dot (`git check-ref-format
+ * refs/holt/rescue/release-1.0.` fails: "refusing to update ref with bad name"). A worktree
+ * named `release-1.0.`, `v2.`, or anything ending in `.` is entirely ordinary on Linux and
+ * macOS, and it drove `rescue` into exactly the post-capture update-ref failure this function
+ * exists to prevent: the capture commit was built, then thrown away as a dangling object, and
+ * the one tool holt offers to preserve work-that-exists-nowhere-else refused with a raw git
+ * bad-name error. So trailing dots are stripped per component too (before the `.lock` rewrite,
+ * so `foo.lock.` collapses to `foo_lock` rather than re-growing a `.lock` suffix). The class is
+ * "a refname component that violates git's grammar in a way the sanitizer does not model"; the
+ * structural close is to neutralise BOTH ends of every component, then let the empty-component
+ * filter and the `unnamed` fallback guarantee a non-empty, git-valid result for any input.
  */
 export function refSafeId(id) {
   const cleaned = String(id).replace(/[^A-Za-z0-9._/-]/g, '_').replace(/\.\.+/g, '.');
   const parts = cleaned.split('/')
-    .map((p2) => p2.replace(/^\.+/, '').replace(/\.lock$/i, '_lock'))
+    .map((p2) => p2
+      .replace(/^\.+/, '')            // no component may BEGIN with a dot
+      .replace(/\.+$/, '')            // ...nor END with one — git refuses a refname ending in `.`
+      .replace(/\.lock$/i, '_lock'))  // ...nor end in `.lock`
     .filter((p2) => p2.length > 0);
   return parts.length ? parts.join('/') : 'unnamed';
 }
@@ -361,6 +377,82 @@ export function refSafeId(id) {
  * The index is built in a TEMPORARY index file, so the worktree's own index is untouched — the
  * user's staged changes are not disturbed by a rescue.
  */
+/**
+ * Give a finished capture a durable ref, without ever destroying another one.
+ *
+ * THE WRITE IS THE PROOF. `git update-ref <ref> <new> ""` is a compare-and-swap against "must not
+ * exist" which git evaluates WHILE HOLDING THE REF LOCK. Exit 0 means the name was free at the
+ * instant it was taken. Nothing read afterwards can strengthen that: a later unlocked read reports
+ * a LATER state, so it can manufacture a false failure while being unable to detect a real one.
+ *
+ * This replaces a read of whether the name was free followed by an unconditional write. The whole
+ * interval between the two was unprotected, and it was not theoretical — 8 agents x 3 trials on one
+ * worktree lost 14 of 48 captures, while all 48 reported `verified: true`.
+ *
+ * `""`, NOT FORTY ZEROS. Measured on git 2.55.0: the all-zero oldvalue is rejected outright in a
+ * SHA-256 repository ("not a valid old SHA1") and the ref is never created — so the obvious
+ * spelling would refuse 100% of rescues in a repository format that works today. The empty string
+ * is the documented must-not-exist form and returns 0 on both object formats.
+ *
+ * NO ERROR-STRING TABLE. After a failed CAS the state read is exact — the ref either exists (the
+ * name is genuinely taken) or it does not (transient lock contention) — and that is version-,
+ * backend- and locale-proof. Matching git's prose is not: git wraps EVERY lockfile errno in the
+ * same `Unable to create '…lock'` sentence, so a regex table reports a full disk as contention and
+ * spins on it.
+ *
+ * NEVER THROWS. A ref failure AFTER the commit exists used to throw a raw git error and orphan a
+ * finished capture. Every failure path returns the commit oid, because a capture with no ref is
+ * still recoverable BY OID until gc — and this writes a fallback ref rather than telling the user to.
+ *
+ * @returns {Promise<{ok:true, ref:string, commit:string, idempotent:boolean}
+ *                 |{ok:false, reason:string, commit:string, fallbackRef:string|null, gitError:string}>}
+ */
+async function captureRef(cwd, { baseRef, commit, tree, kind, id }) {
+  const MAX_RETRIES = 24;
+  let ref = baseRef;
+  let lastErr = '';
+  for (let n = 1; n < 1000; n++) {
+    for (let attempt = 0; ; attempt++) {
+      const w = await git(['update-ref', '--create-reflog', ref, commit, ''],
+        { cwd, allowMutation: true }).catch((e) => ({ code: 1, stderr: String(e?.message ?? e) }));
+      if (w.code === 0) return { ok: true, ref, commit, idempotent: false };
+      lastErr = String(w.stderr ?? '').trim();
+
+      const cur = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd })
+        .catch(() => ({ code: 1, stdout: '' }));
+      if (cur.code === 0) break;                    // TAKEN — fall through to the tree comparison
+      if (attempt >= MAX_RETRIES) {
+        // ABSENT and still failing, so this is not contention. A D/F conflict is the one shape
+        // worth one more try: `refs/holt/rescue/p0` as a FILE blocks every name under `p0/`, so
+        // the counter can never escape it. Flattening the id gives a valid sibling in one step.
+        const flat = String(id).replace(/[/\\]/g, '_');
+        if (flat !== String(id)) {
+          const alt = baseRef.replace(/[^/]*$/, flat);
+          const w2 = await git(['update-ref', '--create-reflog', alt, commit, ''],
+            { cwd, allowMutation: true }).catch(() => ({ code: 1 }));
+          if (w2.code === 0) return { ok: true, ref: alt, commit, idempotent: false };
+        }
+        return { ok: false, reason: 'ref-write-failed', commit, fallbackRef: null, gitError: lastErr };
+      }
+      await new Promise((r) => { setTimeout(r, 2 + Math.random() * 25); });
+    }
+
+    // TAKEN. Compare TREES, not commits. `commit-tree` embeds the wall clock, so two captures of
+    // byte-identical content ALWAYS have different commit oids — which is why the previous
+    // `oid === commit` idempotence branch was dead in practice (measured: 3 serial rescues of
+    // unchanged content produced 3 refs and 1 tree). The tree IS the content, so comparing it makes
+    // the idempotence this function's contract already claimed actually true.
+    const held = (await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd })).stdout.trim();
+    const ht = await git(['rev-parse', '--verify', '--quiet', `${held}^{tree}`], { cwd })
+      .catch(() => ({ code: 1, stdout: '' }));
+    if (ht.code === 0 && ht.stdout.trim() === tree) {
+      return { ok: true, ref, commit: held, idempotent: true };
+    }
+    ref = `${baseRef}-${n + 1}`;
+  }
+  return { ok: false, reason: 'name-space-exhausted', commit, fallbackRef: null, gitError: lastErr };
+}
+
 export async function rescue(cwd, id, { dryRun = false, release = false, ...opts } = {}) {
   const { report, scanned } = await assess(cwd, opts);
   const ws = scanned.workstreams.find((w) => w.id === id);
@@ -442,25 +534,36 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       ['commit-tree', tree, '-p', ws.head, '-m', msg],
       { cwd: ws.path, env, allowMutation: true },
     );
-    const commit = commitR.stdout.trim();
+    // `let`: captureRef may hand back the commit ALREADY held by the ref when an identical capture
+    // is reused, and reporting the one we built rather than the one that is reachable is the same
+    // class of lie this whole change exists to remove.
+    let commit = commitR.stdout.trim();
 
-    // Allocate the ref non-destructively, now that the commit exists:
-    //   - name free            -> use it
-    //   - name holds THIS commit -> reuse it (re-rescuing identical content is idempotent)
-    //   - name holds ANOTHER commit -> suffix, never overwrite
-    // Without this, a reused directory basename silently destroyed the earlier capture.
-    for (let n = 2; n < 1000; n++) {
-      const cur = await git(['rev-parse', '--verify', '--quiet', ref], { cwd: ws.path });
-      const oid = cur.code === 0 ? cur.stdout.trim() : '';
-      if (!oid || oid === commit) break;
-      ref = `${baseRef}-${n}`;
+    // Declared before the capture because the failure path below reports through it too: a rescue
+    // that could not write its ref still has to say so, and still has to carry any journal warning.
+    const journalFailures = [];
+
+    // THE WRITE IS THE PROOF — see captureRef. This replaces a READ of whether the name was free
+    // followed by an unconditional write, which left the whole interval between them unprotected:
+    // measured, 14 of 48 concurrent captures were silently overwritten while all 48 reported
+    // verified. `ref` and `commit` are whatever actually landed, which is not always what we built.
+    const alloc = await captureRef(ws.path, { baseRef, commit, tree, kind: 'rescue', id });
+    if (!alloc.ok) {
+      return withJournalWarning({
+        ok: false, id, commit, ref: alloc.fallbackRef,
+        capturedFiles: files.length,
+        verified: false,
+        reason: alloc.reason,
+        gitError: alloc.gitError,
+        note: alloc.fallbackRef
+          ? `the capture SUCCEEDED and is held by ${alloc.fallbackRef}, but its intended name could `
+            + `not be written. Nothing was released and nothing was deleted.`
+          : `the capture succeeded as commit ${commit} but NO ref could be written, so it is `
+            + `reachable only by that oid until gc. Nothing was released and nothing was deleted.`,
+      }, journalFailures);
     }
-
-    // `--create-reflog` forces a reflog for this ref even though refs/holt/* is outside git's
-    // default logged namespaces. Belt-and-braces on top of the never-overwrite rule above: if a
-    // future change ever did move one of these refs, the previous value would still be
-    // recoverable from `git reflog show <ref>` instead of becoming unreachable silently.
-    await gitOk(['update-ref', '--create-reflog', ref, commit], { cwd: ws.path, allowMutation: true });
+    ref = alloc.ref;
+    commit = alloc.commit;
 
     // VERIFY before claiming success. A rescue that silently captured nothing is worse than no
     // rescue at all, because it licenses a deletion.
@@ -524,7 +627,6 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       };
     }
 
-    const journalFailures = [];
     let released = null;
     if (release) {
       const un = await unprotect(cwd, { id, ...opts });
@@ -542,16 +644,40 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       path: ws.path, branch: ws.branch ?? null, head: ws.head ?? null,
       capturedFiles: files.length, released: release,
     }, journalFailures);
+    // `verified` IS DERIVED, NOT ASSERTED. This was the literal `true`, computed from nothing and
+    // printed even for the 14 of 48 concurrent captures whose ref had been overwritten. It now
+    // means one checkable thing: the ref resolves, right now, to the commit being reported.
+    //
+    // The CAS above already proved the write landed; this re-read is what makes the WORD honest
+    // rather than a restatement of the same fact — if anything moved the ref between then and now,
+    // the caller is told, instead of being handed a sentence it cannot check.
+    const readback = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: ws.path })
+      .catch(() => ({ code: 1, stdout: '' }));
+    const verified = readback.code === 0 && readback.stdout.trim() === commit;
+
     return withJournalWarning({
       ok: true, id, ref, commit,
       capturedFiles: files.length,
-      verified: true,
+      verified,
       released,
-      restore: `git checkout ${ref} -- .`,
+      // THE IMMUTABLE HANDLE COMES FIRST. A ref is the one part of a capture that can still move;
+      // the commit oid cannot. `git checkout <ref> -- .` was also a command holt's own guard
+      // refuses whenever the worktree is dirty — which is exactly the state a user reaching for
+      // this is in — and it copies bytes onto themselves while leaving the commit reachable from
+      // nothing. `git worktree add` gives the content back somewhere safe without touching the
+      // tree that is already in trouble.
+      restore: `git worktree add /tmp/holt-restore-${id} ${commit}`,
+      restoreInPlace: `git checkout ${commit} -- .`,
       inspect: `git show ${commit} --stat`,
-      note: released
-        ? 'work is captured and verified; protection released, the worktree is now disposable'
-        : 'work is captured and verified. Pass --release to also unlock the worktree.',
+      note: verified
+        ? (released
+          ? 'work is captured and verified; protection released, the worktree is now disposable'
+          : 'work is captured and verified. Pass --release to also unlock the worktree.')
+        // Says the true thing rather than the reassuring one. The capture exists — the commit is
+        // named above and `inspect` reads it — but something moved the ref, so the NAME is not a
+        // handle to trust. Nothing is released on this path.
+        : `work is captured as commit ${commit}, but ${ref} no longer resolves to it. `
+          + 'Use the commit oid, not the ref.',
     }, journalFailures);
   } finally {
     await fs.rm(tmpIndex, { force: true }).catch(() => {});
@@ -707,6 +833,36 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
   const ws = resolved[0].owner;
   const rel = await Promise.all(resolved.map((r) => relativeLinkAwareAsync(ws.path, r.abs)));
 
+  // NAMING THE WORKTREE ITSELF IS A DIFFERENT COMMAND, AND SAYING SO IS THE WHOLE FIX.
+  //
+  // A worktree root resolves to the empty relative path, which reached git as `add --force -- ''`
+  // and came back "fatal: empty string is not a valid pathspec". holt then reported
+  // `capture is INCOMPLETE — 1 path(s) not captured: ` with an empty name, which tells the reader
+  // nothing about what they did or what to do instead.
+  //
+  // WHY THIS MATTERS MORE THAN A BAD ERROR STRING: this is the ESCAPE HATCH, and the escape hatch
+  // is what keeps the guard installed. The refusal a developer just hit says "commit or discard it
+  // explicitly first", so `holt discard ../my-worktree` is the obvious next thing to type — and it
+  // dead-ended. Every failed escape is a step toward switching the guard off, which costs all of
+  // the protection rather than some of it.
+  //
+  // It is NOT fixed by making discard swallow a whole worktree. `discard` captures PATHS and
+  // reverts or removes them, leaving the worktree registered; `rescue` captures a WORKTREE so it
+  // can then be removed. Those are different operations and conflating them would make the
+  // dangerous one reachable by accident.
+  const namedWorktreeRoot = resolved.find((r, i) => rel[i] === '' || rel[i] === '.');
+  if (namedWorktreeRoot) {
+    return {
+      ok: false,
+      error: `'${namedWorktreeRoot.input}' is a worktree, not a path inside one — discard captures paths`,
+      hint: `to throw away the whole worktree: holt rescue ${ws.id}   (captures and verifies it to a ref)`
+        + `, then remove it with git. To discard only its contents, name them:`
+        + ` holt discard ${namedWorktreeRoot.input}/<file> …`,
+      worktree: ws.id,
+      note: 'NOTHING WAS CAPTURED OR REMOVED.',
+    };
+  }
+
   if (dryRun) {
     return { ok: true, dryRun: true, worktree: ws.id, paths: rel, note: 'nothing was captured or removed' };
   }
@@ -723,7 +879,11 @@ export async function discard(cwd, paths, { dryRun = false, ...opts } = {}) {
     await gitOk(['read-tree', '--empty'], { cwd: ws.path, env, allowMutation: true });
     // --force so gitignored paths are captured too — those are precisely the ones git cannot
     // bring back, and the ones the guard refuses hardest.
-    const added = await git(['add', '--all', '--force', '--', ...rel],
+    // Batched under the OS argument-list ceiling: a discard of a whole build tree can name tens
+    // of thousands of paths, and `execve` answers E2BIG rather than adding them. `add` into one
+    // scratch index accumulates, so adding in groups leaves exactly the index adding at once
+    // would have — and a partial add would be caught by the read-back verification below anyway.
+    const added = await gitPathBatched(['add', '--all', '--force', '--'], rel,
       { cwd: ws.path, env, allowMutation: true });
 
     const treeR = await gitOk(['write-tree'], { cwd: ws.path, env, allowMutation: true });
