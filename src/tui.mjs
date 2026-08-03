@@ -28,6 +28,7 @@ import process from 'node:process';
 import { discover, repoAbsenceError } from './discover.mjs';
 import { scan } from './scan.mjs';
 import { analyze } from './analyze.mjs';
+import { budget, PROVENANCE_NOTE } from './untrusted.mjs';
 
 /* ------------------------------------------------------------------ ansi ---- */
 
@@ -76,7 +77,19 @@ function visibleWidth(s) {
  * "visible" content. This walks the string keeping every complete escape sequence intact,
  * counts only real columns against the budget, and always closes with an explicit reset so a
  * colour started before the cut can never bleed into whatever the caller prints next.
+ *
+ * AND THE SAME LESSON A SECOND TIME, FOR A SECOND ALPHABET. Keeping ANSI sequences whole was only
+ * half of it: since the boundary landed, these lines also carry holt's OWN escape tokens, `⟨U+009B⟩`
+ * and `⟨+29 more⟩`, and cutting by code point sliced them into `⟨U+0`. That is not merely ugly —
+ * `decodeMarked` cannot recover it, and `residualHazards` reports the dangling introducer, so the
+ * frame carried a value the module cannot decode. It is exactly the [A-3] defect that
+ * `clipToWidth` fixed inside src/untrusted.mjs, in the one clipper that predates the boundary. A
+ * holt escape token is therefore atomic here too: it fits in the remaining columns whole, or it
+ * does not go in at all.
  */
+const HOLT_ESC_OPEN = '⟨';
+const HOLT_ESC_CLOSE = '⟩';
+
 function truncateAnsi(s, width) {
   const str = String(s);
   if (visibleWidth(str) <= width) return str;
@@ -88,6 +101,16 @@ function truncateAnsi(s, width) {
     ANSI_RE.lastIndex = i;
     const m = ANSI_RE.exec(str);
     if (m && m.index === i) { out += m[0]; i += m[0].length; continue; }
+    if (str[i] === HOLT_ESC_OPEN) {
+      const end = str.indexOf(HOLT_ESC_CLOSE, i + 1);
+      if (end !== -1) {
+        const token = str.slice(i, end + 1);
+        const w = [...token].length;
+        if (seen + w > budget) break;   // whole, or not at all
+        out += token; i = end + 1; seen += w;
+        continue;
+      }
+    }
     if (seen >= budget) break;
     // codePointAt(i) is only undefined when i is out of range, and the while guard above
     // already guarantees i < str.length — the fallback is for the type checker, never live.
@@ -181,13 +204,38 @@ export async function buildModel(cwd, opts = {}) {
 
 /* ---------------------------------------------------------------- render ---- */
 
+/**
+ * THE BOUNDARY, in the TUI.
+ *
+ * Every id, branch, path, symbol key and reason on this screen is repository-controlled. The TUI
+ * was the worst of the unguarded surfaces: a worktree basename with a newline in it did not just
+ * add a line, it desynchronised the whole frame, because `renderFrame` composes exactly `height`
+ * lines and joins them. Same rule as everywhere else — nothing repository-derived reaches a line
+ * except through the budget — and one line of the frame is now reserved for the provenance label,
+ * so the reader is never left guessing which half of the screen holt wrote.
+ *
+ * The compact single line, rather than `provenanceLines`' up-to-four, is a TUI constraint: the
+ * frame must be exactly `height` lines or the terminal scrolls and the redraw tears.
+ */
+function provenanceFooter(u) {
+  if (!u.used) return paint('grey', ' ');
+  const bits = [PROVENANCE_NOTE];
+  if (u.markedValues > 0) bits.push(paint('yellow', `⚠ ${u.markedValues} carried control/bidi/zero-width, shown ⟦fenced⟧`));
+  if (u.escapedValues > 0) bits.push(`${u.escapedValues} contain a holt marker character, shown escaped`);
+  if (u.clippedValues > 0) bits.push(`${u.clippedValues} clipped at holt's per-value cap`);
+  if (u.omittedValues > 0) bits.push(paint('yellow', `⚠ ${u.omittedValues} withheld — over budget`));
+  return paint('grey', ` ${bits.join('  ·  ')}`);
+}
+
 export function renderFrame(model, state, size) {
   const { rows, report } = model;
+  const u = budget();
   const width = Math.max(80, size.columns ?? 120);
   const height = Math.max(20, size.rows ?? 34);
   const listW = Math.min(46, Math.floor(width * 0.38));
   const detailW = width - listW - 3;
-  const bodyH = height - 5;
+  // One line fewer than before: the last is the provenance label. See provenanceFooter.
+  const bodyH = height - 6;
 
   const filtered = state.filter === 'all' ? rows : rows.filter((r) => r.bucket === state.filter);
   const sel = Math.min(state.selected, Math.max(0, filtered.length - 1));
@@ -198,8 +246,8 @@ export function renderFrame(model, state, size) {
   // header
   const k = report.counts;
   out.push(
-    paint('bold', ' holt ') + paint('grey', '· ') + paint('cyan', model.root)
-    + paint('grey', `  base ${report.base.ref}@${report.base.oid.slice(0, 8)}`),
+    paint('bold', ' holt ') + paint('grey', '· ') + paint('cyan', u.take(model.root))
+    + paint('grey', `  base ${u.take(report.base.ref, { ident: true })}@${String(report.base.oid).slice(0, 8)}`),
   );
   const disposableRows = rows.filter((r) => r.bucket === 'disposable');
   const redundantOnly = disposableRows.filter(isRedundantSafe).length;
@@ -215,7 +263,7 @@ export function renderFrame(model, state, size) {
   out.push(paint('grey', '─'.repeat(width)));
 
   // body
-  const detail = detailLines(filtered[sel], detailW, bodyH);
+  const detail = detailLines(filtered[sel], detailW, bodyH, u);
   for (let i = 0; i < bodyH; i++) {
     const r = filtered[scroll + i];
     let left;
@@ -231,7 +279,7 @@ export function renderFrame(model, state, size) {
       // LABEL_W, not a guessed 6 — see the comment on LABEL_W: a fixed 6 truncated every label
       // but HOLDS into an unreadable stub. The id column absorbs the difference.
       const label = pad(redundant ? `${r.bucketMeta.label}*` : r.bucketMeta.label, LABEL_W + 1);
-      const line = ` ${mark} ${pad(r.id, listW - LABEL_W - 5)} ${paint('grey', label)}`;
+      const line = ` ${mark} ${u.cell(r.id, listW - LABEL_W - 5, { ident: true })} ${paint('grey', label)}`;
       left = (scroll + i === sel) ? `${ansi.inverse}${line}${ansi.reset}` : line;
     }
     out.push(`${left} ${paint('grey', '│')} ${detail[i] ?? ''}`);
@@ -248,29 +296,34 @@ export function renderFrame(model, state, size) {
       paint('bold', 'r') + paint('grey', ' rescan'),
       paint('bold', 'q') + paint('grey', ' quit'),
     ].join('   ')
-    + (state.message ? `   ${paint('cyan', state.message)}` : ''),
+    // `state.message` is holt's own sentence about the last action, but it interpolates a
+    // workstream id, so it crosses the boundary like anything else.
+    + (state.message ? `   ${paint('cyan', u.take(state.message, { max: width }))}` : ''),
   );
+  out.push(provenanceFooter(u));
 
   return out.join('\n');
 }
 
-function detailLines(row, width, height) {
+function detailLines(row, width, height, u = budget()) {
   if (!row) return [paint('grey', 'no workstreams match this filter')];
   const L = [];
   const b = row.bucketMeta;
 
-  const redundant = row.verdict?.redundantWith ?? [];
-  L.push(paint('bold', row.id) + (row.branch ? paint('grey', `  [${row.branch}]`) : paint('grey', '  (detached)')));
+  const redundant = (row.verdict?.redundantWith ?? []).map((x) => u.take(x, { ident: true }));
+  L.push(paint('bold', u.take(row.id, { ident: true }))
+    + (row.branch ? paint('grey', `  [${u.take(row.branch, { ident: true })}]`) : paint('grey', '  (detached)')));
   // "provably nothing to lose" is TRUE for an empty worktree and FALSE for a redundant one — it
   // holds real committed work, it is just work a living sibling also holds right now. Saying the
   // generic hint here is the exact equivalence this pane must not draw.
   L.push(paint(b.colour, `${b.label}`) + paint('grey', redundant.length
     ? ` — safe only because a living sibling holds the identical content (${redundant.join(', ')})`
     : ` — ${b.hint}`));
+  // `redundant` above is already marked; the join is of marked values, never of raw ids.
   L.push('');
   if (row.verdict) {
     L.push(paint('grey', 'verdict   ') + (row.verdict.safe ? paint('green', 'safe to delete') : paint('red', 'do not delete')));
-    for (const reason of row.verdict.reasons ?? []) L.push(paint('grey', '          ') + reason);
+    for (const reason of row.verdict.reasons ?? []) L.push(paint('grey', '          ') + u.take(reason, { max: width }));
   }
   if (redundant.length) {
     L.push(paint('grey', 'redundant ') + `identical to work also held by ${redundant.join(', ')}`);
@@ -287,10 +340,27 @@ function detailLines(row, width, height) {
   if (layers.length) {
     L.push('');
     L.push(paint('bold', 'unique work') + paint('grey', ' (what deletion would lose)'));
-    for (const [layer, key] of layers.slice(0, Math.max(3, height - L.length - 8))) {
-      L.push(`  ${paint(layer === 'committed' ? 'yellow' : 'red', '▪')} ${pad(key, width - 18)} ${paint('grey', layer)}`);
+    // HOW MANY FIT IS COMPUTED ONCE, AND THE REMAINDER IS DERIVED FROM IT.
+    //
+    // This was three expressions for one quantity — `height - L.length - 8` chose the slice,
+    // `height - L.length - 6` decided whether to print the line, and `height - (8)` computed the
+    // number in it — and `L.length` GROWS as the loop pushes, so the second one did not even read
+    // the same value as the first. On a short terminal the slice floored at 3 while the counter
+    // subtracted a window that no longer matched, and the pane printed impossible things:
+    //
+    //     12 unique symbols, height 26  ->  "… and 0 more"     (printed at all is wrong)
+    //     12 unique symbols, height 28  ->  "… and -2 more"    (measured)
+    //
+    // Deriving the remainder from what was actually shown makes both impossible by construction:
+    // `rest` cannot exceed `layers.length`, cannot go negative, and the line cannot appear when
+    // there is nothing left to mention.
+    const budget = Math.max(3, height - L.length - 8);
+    const shown = layers.slice(0, budget);
+    for (const [layer, key] of shown) {
+      L.push(`  ${paint(layer === 'committed' ? 'yellow' : 'red', '▪')} ${u.cell(key, width - 18, { ident: true })} ${paint('grey', layer)}`);
     }
-    if (layers.length > height - L.length - 6) L.push(paint('grey', `  … and ${layers.length - (height - 8)} more`));
+    const rest = layers.length - shown.length;
+    if (rest > 0) L.push(paint('grey', `  … and ${rest} more`));
   }
 
   if (row.collisions.length) {
@@ -298,14 +368,14 @@ function detailLines(row, width, height) {
     L.push(paint('bold', 'collisions'));
     for (const c of row.collisions.slice(0, 4)) {
       const other = c.a === row.id ? c.b : c.a;
-      L.push(`  ${paint(c.severity === 'high' ? 'red' : 'yellow', '⚡')} ${other} ${paint('grey', c.kind)}`);
+      L.push(`  ${paint(c.severity === 'high' ? 'red' : 'yellow', '⚡')} ${u.take(other, { ident: true })} ${paint('grey', u.take(c.kind))}`);
     }
   }
 
   L.push('');
   L.push(paint('grey', row.verdict?.safe
     ? 'holt clean --apply would remove this'
-    : `holt rescue ${row.id} --release preserves then unlocks`));
+    : `holt rescue ${u.take(row.id, { ident: true })} --release preserves then unlocks`));
 
   // truncateAnsi, never a raw slice: `l.slice(0, width)` counts escape bytes as columns and cuts
   // colour codes in half — the terminal then receives a dangling `\x1b[9` that is not text, and

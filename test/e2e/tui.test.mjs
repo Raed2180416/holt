@@ -235,3 +235,56 @@ test('TUI: a redundant-but-safe workstream never looks identical to a genuinely 
   assert.match(emptyDetail, /no committed delta/, 'a genuinely empty workstream must still say so');
   assert.doesNotMatch(emptyDetail, /redundant\s+identical to/, 'nothing to attribute to a sibling here');
 });
+
+/**
+ * THE OVERFLOW COUNTER MUST BE DERIVED FROM WHAT WAS SHOWN.
+ *
+ * The detail pane lists the symbols a deletion would lose, truncates them to fit, and says how many
+ * it left out. That count was computed from a THIRD expression — the slice used
+ * `height - L.length - 8`, the decision to print used `height - L.length - 6`, and the number itself
+ * used `height - 8` — and `L.length` grows as the loop pushes, so the second did not even read the
+ * same value as the first. On a short terminal the slice floored at 3 while the counter subtracted a
+ * window that no longer matched, and the pane printed things that cannot be true:
+ *
+ *     12 unique symbols at height 26  ->  "… and 0 more"
+ *     12 unique symbols at height 28  ->  "… and -2 more"
+ *
+ * Both measured. Nothing failed, because no test read this line at any height — the frame-height
+ * gate asserts the pane is the right SIZE, not that its contents are arithmetically possible.
+ *
+ * This is the project's recurring shape at display level: one quantity, several readers, drifting.
+ * The fix derives the remainder from the slice that was actually taken, which makes a negative and a
+ * spurious zero unrepresentable rather than merely unobserved — so this test asserts the property
+ * across the whole height range, not the two values that happened to break.
+ */
+test('TUI: the overflow counter is never negative, never zero, and never exceeds the total', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  // The standard fixture's at-risk worktree holds ONE unique symbol, so its detail pane never
+  // overflows and every assertion below would pass while reading nothing. Enough symbols to force
+  // truncation at every height in the range is the whole precondition of this test.
+  await fx.write('src/many_unique.js',
+    Array.from({ length: 30 }, (_, i) => `export function ONLY_SYMBOL_${i}() { return ${i}; }\n`).join(''),
+    fx.wt('uniqueUncommitted'));
+
+  const model = await buildModel(fx.root);
+  const atRisk = model.rows.findIndex((r) => r.bucket === 'atRisk');
+  assert.ok(atRisk >= 0, 'PREMISE: the fixture must have an at-risk row or this test reads nothing');
+
+  let sawCounter = false;
+  for (let rows = 14; rows <= 60; rows++) {
+    const frame = strip(renderFrame(model, { selected: atRisk, filter: 'all', message: '' },
+      { columns: 110, rows }));
+    const m = frame.match(/… and (-?\d+) more/);
+    if (!m) continue;
+    sawCounter = true;
+    const n = Number(m[1]);
+    assert.ok(n > 0, `the overflow counter must be a real remainder at height ${rows}, got "${m[0]}"`);
+  }
+
+  // ANTI-VACUITY. A fixture whose detail pane never overflows would pass every assertion above
+  // while reading nothing at all — which is exactly how this line went untested in the first place.
+  assert.ok(sawCounter,
+    'PREMISE BROKEN — no height in 14..60 produced an overflow line, so nothing was measured');
+});
