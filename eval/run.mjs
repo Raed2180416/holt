@@ -326,7 +326,79 @@ const AGENTS = {
 };
 const AGENT = opt('agent', 'crush');
 
-function runAgent(prompt, cwd, model, timeoutMs = 300_000) {
+/**
+ * THE NAKED ARM WAS NEVER NAKED, AND THE HARNESS SAID SO WITHOUT ACTING ON IT.
+ *
+ * The child was launched with `env: { ...process.env }`, which hands the no-holt arm PATH, HOME,
+ * XDG_CONFIG_HOME and XDG_DATA_HOME unchanged — so `holt` still resolved, `~/.claude/settings.json`
+ * still registered a PreToolUse hook, a global AGENTS.md was still read, and the agent CLI's own
+ * per-project memory was still there from previous trials. The only decontamination anywhere was
+ * prep.mjs's nakedArmIsActuallyNaked(), which DETECTS holt on PATH and prints a warning its own
+ * comment marks "Recorded rather than fatal."
+ *
+ * An A/B whose control arm is contaminated does not measure the treatment. Detecting that and
+ * continuing is worse than not detecting it, because the run still produces a number.
+ *
+ * So the naked arm now gets a scrubbed environment AND a hard assertion that the scrub worked. The
+ * assertion is the load-bearing half: a scrub nobody verifies is a comment. If holt is still
+ * reachable, the trial THROWS — it does not warn and proceed.
+ */
+async function armEnv(arm, sandboxHome) {
+  const base = { ...process.env, HOLT_TMPDIR: process.env.HOLT_TMPDIR ?? undefined };
+  if (arm !== 'naked') return base;
+
+  // Drop every PATH entry that actually contains a `holt` executable — resolved by looking, not by
+  // guessing at install locations.
+  const entries = (base.PATH ?? '').split(path.delimiter).filter(Boolean);
+  const keep = [];
+  for (const dir of entries) {
+    const hit = await fs.stat(path.join(dir, 'holt')).then((st) => st.isFile()).catch(() => false);
+    if (!hit) keep.push(dir);
+  }
+
+  // A private HOME per trial: this is what closes ~/.claude/settings.json (the global PreToolUse
+  // hook), ~/.config/opencode/AGENTS.md, and ~/.local/share/crush/projects.json in one move, rather
+  // than enumerating files that will grow a new sibling next release.
+  await fs.mkdir(sandboxHome, { recursive: true });
+  return {
+    ...base,
+    PATH: keep.join(path.delimiter),
+    HOME: sandboxHome,
+    XDG_CONFIG_HOME: path.join(sandboxHome, '.config'),
+    XDG_DATA_HOME: path.join(sandboxHome, '.local', 'share'),
+    XDG_STATE_HOME: path.join(sandboxHome, '.local', 'state'),
+  };
+}
+
+/** Prove the scrub closed, from the CHILD's environment. Throws rather than warns. */
+async function assertNaked(env, cwd) {
+  const open = [];
+
+  const resolved = await new Promise((resolve) => {
+    execFile('sh', ['-c', 'command -v holt || true'], { env, cwd }, (e, out) => resolve(String(out ?? '').trim()));
+  });
+  if (resolved) open.push(`holt still resolves on PATH as ${resolved}`);
+
+  for (const [label, rel] of [
+    ['a global agent hook config', '.claude/settings.json'],
+    ['a global AGENTS.md', '.config/opencode/AGENTS.md'],
+    ['agent per-project memory', '.local/share/crush/projects.json'],
+  ]) {
+    const p = path.join(env.HOME, rel);
+    if (await fs.stat(p).then(() => true).catch(() => false)) open.push(`${label} is present at ${p}`);
+  }
+
+  for (const rel of ['.mcp.json', 'AGENTS.md', 'CLAUDE.md']) {
+    const p = path.join(cwd, rel);
+    if (await fs.stat(p).then(() => true).catch(() => false)) open.push(`${rel} is present in the trial repo`);
+  }
+
+  if (open.length) {
+    throw new Error(`the naked arm is NOT naked, so this trial cannot measure anything:\n  - ${open.join('\n  - ')}`);
+  }
+}
+
+function runAgent(prompt, cwd, model, timeoutMs = 300_000, env = null) {
   const spec = AGENTS[AGENT];
   if (!spec) throw new Error(`unknown agent '${AGENT}' (have: ${Object.keys(AGENTS).join(', ')})`);
   return new Promise((resolve) => {
@@ -336,7 +408,7 @@ function runAgent(prompt, cwd, model, timeoutMs = 300_000) {
       spec.args(prompt, model),
       {
         cwd, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024,
-        env: { ...process.env, HOLT_TMPDIR: process.env.HOLT_TMPDIR ?? undefined },
+        env: env ?? { ...process.env, HOLT_TMPDIR: process.env.HOLT_TMPDIR ?? undefined },
       },
       (err, stdout, stderr) => resolve({
         ok: !err,
@@ -449,14 +521,19 @@ async function runTrial(scenario, arm, trial) {
   // implausibly fast, or timed out mid-decision, is NOT retried — that is data, and retrying it
   // until it looks better is exactly how a benchmark starts lying. RETRYABLE is the strict subset
   // of failures where no agent decision was ever made.
+  // THE CONTROL ARM IS SCRUBBED AND THE SCRUB IS PROVEN, BEFORE ANY TOKENS ARE SPENT. assertNaked
+  // throws; a contaminated trial must not produce a number that later gets averaged.
+  const trialEnv = await armEnv(arm, path.join(WORK, `${scenario.name}-${arm}-${trial}`, 'home'));
+  if (arm === 'naked') await assertNaked(trialEnv, cwd);
+
   const RETRYABLE = /rate.?limit|quota|overload|429|503|temporarily unavailable|connection reset|socket hang up|ECONNRESET|ETIMEDOUT/i;
-  let run = await runAgent(scenario.prompt, cwd, MODEL);
+  let run = await runAgent(scenario.prompt, cwd, MODEL, 300_000, trialEnv);
   let validity = validateRun(run);
   for (let attempt = 1; attempt <= RETRY_LIMIT && !validity.valid && RETRYABLE.test(validity.reason ?? ''); attempt++) {
     const waitMs = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
     process.stdout.write(` [${validity.reason}; retry ${attempt}/${RETRY_LIMIT} in ${Math.round(waitMs / 1000)}s]`);
     await new Promise((r) => setTimeout(r, waitMs));
-    run = await runAgent(scenario.prompt, cwd, MODEL);
+    run = await runAgent(scenario.prompt, cwd, MODEL, 300_000, trialEnv);
     validity = validateRun(run);
   }
 
