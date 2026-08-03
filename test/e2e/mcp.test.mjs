@@ -110,6 +110,64 @@ test('MCP holt_duplicates: finds the cross-dispatch pair', async (t) => {
   assert.equal(pair.classification, 'cross-dispatch-waste');
 });
 
+test('MCP: every list-returning tool SAYS when it capped the list', async (t) => {
+  // A CAPPED LIST THAT DOES NOT SAY IT IS CAPPED READS AS THE WHOLE LIST. Measured on the owner's
+  // repository, holt_collisions answered "what will I collide with?" with 10 pairs of 127 and no
+  // field saying so, while holt_duplicates had reported {returned, truncated} all along. An agent
+  // cannot ask for the rest of a list it was never told was cut — the project's signature defect
+  // (absence of evidence read as evidence of absence) on the agent-facing surface.
+  //
+  // THIS TEST ASSERTS THE CONTRACT, NOT A TRUNCATION EVENT, and the difference is why it works.
+  // The first version only checked tools with >= 2 rows and skipped the rest; this fixture yields
+  // ONE collision, ONE duplicate and ZERO impact/hotspot rows, so it silently exercised a single
+  // tool and passed with the fix reverted. `returned`/`truncated` must be present and consistent
+  // at EVERY row count — including zero — so that is what is checked, and the count of tools
+  // actually reached is asserted so this can never quietly go vacuous again.
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  const LIST_TOOLS = [
+    ['holt_collisions', 'pairs'],
+    ['holt_duplicates', 'pairs'],
+    ['holt_at_risk', 'workstreams'],
+    ['holt_impact', 'pairs'],
+    ['holt_hotspots', 'hotspots'],
+  ];
+
+  let exercised = 0;
+  let truncationSeen = 0;
+  for (const [tool, key] of LIST_TOOLS) {
+    const full = await call(tool, fx, { limit: 100 });
+    const rows = full[key] ?? [];
+
+    assert.equal(typeof full.total, 'number', `${tool} must report a total`);
+    assert.equal(typeof full.returned, 'number',
+      `${tool} returns a list and must report 'returned' — without it a reader cannot tell a short list from a cut one`);
+    assert.equal(typeof full.truncated, 'boolean', `${tool} must report 'truncated' as a boolean`);
+    assert.equal(full.returned, rows.length, `${tool}: 'returned' must equal the rows actually sent`);
+    assert.equal(full.truncated, full.total > full.returned,
+      `${tool}: 'truncated' must be exactly (total > returned) — it said ${full.truncated} for ${full.returned} of ${full.total}`);
+    exercised++;
+
+    // Where the fixture has enough rows to cut, prove the flag actually flips.
+    if (rows.length >= 2) {
+      const capped = await call(tool, fx, { limit: 1 });
+      assert.equal(capped.returned, (capped[key] ?? []).length, `${tool}: capped 'returned' must match the rows sent`);
+      assert.equal(capped.truncated, true,
+        `${tool} capped ${capped.total} rows to ${capped.returned} and did not say so`);
+      truncationSeen++;
+    }
+  }
+
+  // ANTI-VACUITY. A fixture change that empties these tools would otherwise turn this whole test
+  // into an assertion about nothing, which is exactly how the first version passed while broken.
+  assert.equal(exercised, LIST_TOOLS.length,
+    `only ${exercised} of ${LIST_TOOLS.length} list tools were reached`);
+  assert.ok(truncationSeen >= 1,
+    'no tool in this fixture had enough rows to actually truncate — the flag was never observed ' +
+    'flipping, so this test is not proving the behaviour it claims to');
+});
+
 test('MCP holt_landing_plan: accounts for every workstream', async (t) => {
   const { fx, truth } = await standardFixture();
   t.after(() => fx.cleanup());

@@ -799,15 +799,24 @@ async function dispatch(name, args, cwd, limit) {
       // different too, and is stated rather than implied.
       const stash = report.stash?.atRisk ?? [];
       const stashTruncated = report.stash?.truncated;
+      const shownRows = rows.slice(0, limit);
       return {
         total: rows.length,
+        returned: shownRows.length,
+        truncated: rows.length > shownRows.length,
         note: 'uncommittedOnly > 0 means the work exists ONLY as uncommitted changes — no git command can relate it',
-        workstreams: rows.slice(0, limit).map(compactUnique),
+        workstreams: shownRows.map(compactUnique),
         stash: stash.length ? {
           total: stash.length,
           note: 'these entries hold content NO ref holds. No worktree shows this work, so deleting '
             + 'worktrees will not lose it — `git stash drop`/`clear` will, irreversibly. '
             + '`git stash apply` then commit, or holt_rescue, makes it reachable.',
+          // NAMED SEPARATELY FROM `truncated` BELOW, WHICH MEANS SOMETHING ELSE. `truncated` says
+          // holt's SCAN stopped at MAX_ENTRIES, so entries beyond it were never examined. This says
+          // the scan saw them and the RESPONSE cut them. A reader who conflates the two either
+          // panics about unexamined entries or assumes examined ones are absent.
+          returned: Math.min(stash.length, limit),
+          displayTruncated: stash.length > limit,
           entries: stash.slice(0, limit).map((e) => ({
             selector: e.selector,
             message: e.message,
@@ -849,9 +858,16 @@ async function dispatch(name, args, cwd, limit) {
 
     case 'holt_collisions': {
       const { report } = await getReport(cwd);
+      const collisionsShown = report.collisions.slice(0, limit);
       return {
         total: report.collisions.length,
-        pairs: report.collisions.slice(0, limit).map((c) => ({
+        // A CAPPED LIST THAT DOES NOT SAY IT IS CAPPED READS AS THE WHOLE LIST. Measured on the
+        // owner's repository: this tool answered "what will I collide with?" with 10 of 127 and
+        // no field saying so, while its sibling holt_duplicates has reported {returned, truncated}
+        // all along. An agent cannot ask for the rest of a list it was not told was cut.
+        returned: collisionsShown.length,
+        truncated: report.collisions.length > collisionsShown.length,
+        pairs: collisionsShown.map((c) => ({
           a: c.a, b: c.b, severity: c.severity, kind: c.kind, why: c.why,
           sharedFiles: c.sharedFiles.slice(0, 5),
           sharedSymbols: c.sharedSymbols.slice(0, 5),
@@ -932,10 +948,13 @@ async function dispatch(name, args, cwd, limit) {
       const { scanned } = await getReport(cwd);
       const { impact } = await import('../impact.mjs');
       const imp = await impact(scanned, {});
+      const impactShown = imp.pairs.slice(0, limit);
       return {
         total: imp.counts.pairs,
         highConfidence: imp.counts.high,
-        pairs: imp.pairs.slice(0, limit).map((p) => ({
+        returned: impactShown.length,
+        truncated: imp.pairs.length > impactShown.length,
+        pairs: impactShown.map((p) => ({
           producer: p.producer,
           consumer: p.consumer,
           confidence: p.confidence,
