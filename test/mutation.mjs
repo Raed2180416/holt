@@ -800,6 +800,44 @@ export const MUTATIONS = [
     replace: "    if (verdict.decision === 'allow') return { hookSpecificOutput: { hookEventName: eventName, permissionDecision: 'allow' } };",
     tests: ['test/e2e/integration.test.mjs'],
   },
+
+  /* ---- the supply-chain audit -------------------------------------------------- *
+   * These four are the ways a security-evidence tool fails WITHOUT throwing: it keeps
+   * printing "✓ 7/7 checks passed" while the property it claims is false. That is the
+   * only failure mode that matters for an artefact a buyer acts on, so each mutation
+   * below leaves the audit GREEN unless the suite is actually watching.                */
+  {
+    id: 'sc-network-blind',
+    defect: 'the audit stops detecting import-free network globals, so a fetch() added to the analysis engine passes as clean — the exact claim the README makes',
+    file: 'src/supply-chain.mjs',
+    find: "  if (NETWORK_GLOBALS.test(stripComments(source))) caps.add('network');",
+    replace: '  // mutated: fetch()/WebSocket no longer count as network capability',
+    tests: ['test/unit/supply-chain.test.mjs'],
+  },
+  {
+    id: 'sc-integrity-fail-open',
+    defect: 'a MISSING manifest reports the installation as verified — absent evidence read as good news, which is this project\'s most repeated defect class',
+    file: 'src/supply-chain.mjs',
+    find: "      ok: false, code: 'no-manifest', signature: 'absent',",
+    replace: "      ok: true, code: 'no-manifest', signature: 'absent',",
+    tests: ['test/unit/supply-chain.test.mjs'],
+  },
+  {
+    id: 'sc-dynamic-spawn-blind',
+    defect: 'subprocesses whose executable is a variable stop being inventoried, so `execFile(anything, …)` never appears in the list a reviewer reads',
+    file: 'src/supply-chain.mjs',
+    find: "      if (t.startsWith('<dynamic:')) foundSites.add(`${rel}:${t.slice(9, -1)}`);",
+    replace: "      if (t.startsWith('<dynamic:')) { /* mutated: dynamic call sites invisible */ }",
+    tests: ['test/unit/supply-chain.test.mjs'],
+  },
+  {
+    id: 'sc-ledger-one-way',
+    defect: 'a capability declared with no code behind it stops being a finding — the security statement can then outlive the code and become a false claim, exactly as the paid tier once advertised three unbuilt features',
+    file: 'src/supply-chain.mjs',
+    find: "    for (const c of want) if (!actual.has(c)) staleDeclarations.push({ file: rel, capability: c, kind: 'declared-but-absent' });",
+    replace: '    // mutated: declarations are never checked against reality',
+    tests: ['test/unit/supply-chain.test.mjs'],
+  },
 ];
 
 export function run(cmd, args, cwd, timeout = 600_000) {
@@ -820,6 +858,11 @@ export async function applyMutation(work, m) {
     return { ok: false, original, error: `anchor not found in ${m.file}: ${m.find.slice(0, 70)}` };
   }
   await fs.writeFile(file, original.replace(m.find, m.replace), 'utf8');
+  // Re-seal the integrity manifest in the SCRATCH COPY. Without this, every mutation would be
+  // "killed" by the manifest-currency test noticing the source changed — a trivial kill that
+  // proves nothing about the behaviour under test and hides survivors behind a green number.
+  // It is also the realistic threat model: whoever changes a file can recompute a hash list.
+  await run(process.execPath, [path.join(work, 'scripts/gen-manifest.mjs')], work, 60_000);
   return { ok: true, original, file };
 }
 

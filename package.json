@@ -13,7 +13,10 @@
   "files": [
     "bin",
     "src",
-    "README.md"
+    "README.md",
+    "MANIFEST.sha256",
+    "MANIFEST.sha256.sig",
+    "SUPPLY-CHAIN.md"
   ],
   "engines": {
     "node": ">=18"
@@ -39,7 +42,10 @@
     "typecheck": "node scripts/typecheck.mjs",
     "hosts:generate": "node scripts/generate-hosts.mjs",
     "hosts:check": "node scripts/generate-hosts.mjs --check",
-    "lint:paths": "node scripts/lint-native-paths.mjs"
+    "lint:paths": "node scripts/lint-native-paths.mjs",
+    "manifest": "node scripts/gen-manifest.mjs",
+    "audit:supply-chain": "node bin/holt.mjs audit",
+    "prepack": "node scripts/gen-manifest.mjs"
   },
   "keywords": [
     "git",

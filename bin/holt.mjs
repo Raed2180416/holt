@@ -13,6 +13,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { discover, repoAbsenceError } from '../src/discover.mjs';
+// fileURLToPath, never URL.pathname: on Windows the latter yields "/C:/x", which is not a path.
+// The CI matrix exists because that exact bug shipped once.
+import { fileURLToPath } from 'node:url';
 import { scan } from '../src/scan.mjs';
 import { analyze, contextDigest } from '../src/analyze.mjs';
 import { deepDuplicates, detectJscpd } from '../src/deep.mjs';
@@ -117,6 +120,10 @@ COMMANDS
   tui                 interactive risk-sorted dashboard  [--snapshot]
   setup               ONE-COMMAND FIRST RUN: install backends, wire agents, show what is at risk
   doctor              environment and backend check  [--install [--yes]]
+  audit               supply-chain evidence for THIS installation: integrity against the signed
+                      manifest, and every capability it holds — what it reads, writes, executes
+                      and sends. Offline, no repository needed, free on every tier.
+                      [--json] [--require-signature]   exits non-zero on any failure
 
 ACTING  (these MUTATE the repo; everything above is read-only)
   auto                do everything that cannot lose data, and report what needs you
@@ -338,6 +345,7 @@ function parseArgs(argv) {
       case '--debug': opts.debug = true; break;
       case '--quiet': opts.quiet = true; break;
       case '--plain': opts.plain = true; break;
+      case '--require-signature': opts.requireSignature = true; break;
       default:
         if (a.startsWith('--')) throw new Error(`unknown option: ${a}\n  Run 'holt --help' for valid options.`);
         opts._.push(a);
@@ -491,6 +499,48 @@ function cmdAction(result, opts = {}) {
   if (lines.length) out(lines.join('\n'));
   else emitJson(result);
   return result;
+}
+
+/**
+ * `holt audit` — the supply-chain evidence, run by the CUSTOMER against the copy they installed.
+ *
+ * Deliberately FREE, and deliberately not gated behind a licence. A security reviewer decides
+ * whether holt may be installed at all; asking them to buy a licence in order to check whether
+ * the tool is safe to buy is not a business model, it is a closed loop. It is also the wrong
+ * shape of evidence: a claim only a paying customer can verify is a claim.
+ *
+ * Runs against the INSTALLED package, not the repository, and needs no network, no git
+ * repository and no configuration — a review laptop with nothing on it can run this.
+ */
+async function cmdAudit(opts) {
+  const { audit } = await import('../src/supply-chain.mjs');
+  const root = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
+  const rep = audit({ root, requireSignature: !!opts.requireSignature });
+
+  if (opts.json) {
+    emitJson(rep);
+    // Exit code, not just a field: a CI step that pipes this to a file must fail on a bad
+    // result even if nobody reads the JSON. Silence with exit 0 is how an audit becomes decor.
+    process.exit(rep.ok ? 0 : 1);
+  }
+
+  out(paint('bold', `holt supply-chain audit`)
+    + paint('grey', `   ${rep.package.name} ${rep.package.version} · ${rep.package.files} files`));
+  out(paint('grey', `  ${rep.package.root}`));
+  out(paint('grey', `  tree digest  ${rep.treeDigest}`));
+  out('');
+  for (const c of rep.checks) {
+    const mark = c.ok ? paint('green', '✓') : paint('red', '✗');
+    out(`  ${mark} ${paint(c.ok ? 'reset' : 'red', c.title)}`);
+    out(`      ${paint('grey', c.summary)}`);
+  }
+  out('');
+  out(rep.ok
+    ? paint('green', `  ${rep.passed}/${rep.total} checks passed.`)
+      + paint('grey', '  Publisher authenticity is a separate question — SUPPLY-CHAIN.md has the two commands.')
+    : paint('red', `  ${rep.total - rep.passed}/${rep.total} checks FAILED. This installation does not match what holt claims to be.`));
+  out('');
+  process.exit(rep.ok ? 0 : 1);
 }
 
 async function cmdDoctor(opts) {
@@ -1684,6 +1734,7 @@ async function main() {
   }
   opts.configPath = configPath;
   if (cmd === 'doctor') return cmdDoctor(opts);
+  if (cmd === 'audit') return cmdAudit(opts);
   if (cmd === 'hook') return cmdHook(opts);
   if (cmd === 'tui') {
     return runTui(opts.cwd, {

@@ -305,10 +305,52 @@ therefore to holt.
 
 ---
 
+## Prove the "no network" claim yourself — `holt audit`
+
+Every dev tool says it doesn't phone home. holt ships the evidence, and it is the *customer* who
+runs it, on the copy they installed, offline, with no repository and no account:
+
+```console
+$ holt audit
+holt supply-chain audit   holt 0.2.0 · 52 files
+  tree digest  22c5c0dc4960e101f23606967326306ef8095a8c6349775b7bb50f2ab6d4b8f6
+
+  ✓ the installed files match the manifest that shipped with them
+  ✓ the detector can still see the code it is judging
+  ✓ every shipped file holds only the capabilities it declares
+  ✓ network egress matches the declared destinations
+  ✓ no networked git verb is reachable, with or without the mutation opt-in
+  ✓ every external binary the package can execute is declared, including the ones named by a variable
+  ✓ every environment variable read is declared
+
+  7/7 checks passed.
+```
+
+`src/supply-chain.mjs` **declares** every capability the package holds — every file that can
+touch the filesystem, spawn a process, evaluate code or open a socket; every binary it can
+execute, including the call sites where the executable is a *variable*; every environment
+variable it reads; the one network destination it has and what triggers it. `holt audit` compares
+that declaration against the bytes on disk and **fails in both directions**: an undeclared
+capability, or a declaration with nothing behind it.
+
+Exactly one file in the package can reach the network — the pinned, hash-verified `ctags`
+download behind `holt setup`, which you can skip entirely. And git cannot reach it either: every
+networked git verb is outside the argv allowlist, which the audit proves by *calling* the
+classifier rather than reading a list.
+
+Free on every tier, and deliberately so — asking a security reviewer to buy a licence before they
+can check whether the tool is safe to buy is a closed loop.
+
+**Zero required runtime dependencies.** SBOMs in CycloneDX 1.5 and SPDX 2.3, SLSA v1.0 Build L2
+provenance, and `gh attestation verify` for publisher authenticity:
+[SUPPLY-CHAIN.md](SUPPLY-CHAIN.md) · [security questionnaire](docs/SECURITY-QUESTIONNAIRE.md).
+
 ## Honest boundaries
 
 - **P4 in general remains unsolved.** `verify` decides a *specific suspected pair* empirically; it does not certify compatibility, and the wording is asserted by test.
 - **Scan time is super-linear in worktree count, and file count is worse.** Correctness holds at real scale (800/800 on redis), but a repository the size of the Linux kernel is not usable with symbol extraction today — `--no-symbols` is the working answer there. Measured, with the exact reproduction, in BENCHMARKS §1. The mechanism behind the worktree-count growth is not yet identified.
+- **`holt audit` runs inside the package it audits.** It detects a substituted or modified package; it is not a defence against an attacker who already owns the machine. Pair it with `gh attestation verify`, which is signed outside the package.
+- **SLSA Build L2, not L3.** L3 needs the build to run in a reusable workflow. It is on the list and it is not claimed.
 
 ### Every limit holt puts on itself
 
