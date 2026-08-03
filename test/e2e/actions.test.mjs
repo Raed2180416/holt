@@ -2129,3 +2129,42 @@ test('DISCARD: NEVER-WORSE — naming an actual file still captures, verifies an
   await assert.rejects(() => fs.readFile(path.join(wt, 'scratch.js'), 'utf8'),
     'the file must actually be gone');
 });
+
+test('RESURRECTION: a second discard must NEVER overwrite an earlier capture ref', async (t) => {
+  // The same class the rescue RESURRECTION test above pins, reached through a different door.
+  // `discard` allocated its ref with a bare `update-ref` — no must-not-exist old-value — so two
+  // discards landing on one name replaced the first capture's ONLY pointer. discard DELETES
+  // untracked files, so nothing else holds that content and the orphaned commit lives only until
+  // gc. The `-${stamp}` suffix made the collision unlikely, never impossible, and "unlikely" is
+  // the argument captureRef's own comment refuses.
+  //
+  // The stamp is injected because a wall-clock ref name cannot be made to collide on purpose —
+  // which is exactly why this path had no test and no mutation covering it.
+  const fx = await newRepo('discard-id-reuse');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('recycled');
+  const STAMP = 'FIXED-STAMP-FOR-COLLISION';
+
+  await fx.write('first.txt', 'the only copy of the FIRST thing\n', wt);
+  const r1 = await discard(fx.root, [path.join(wt, 'first.txt')], { stamp: STAMP });
+  assert.equal(r1.ok, true, `first discard must succeed: ${JSON.stringify(r1)}`);
+  const firstCommit = (await sh('git', ['rev-parse', r1.ref], fx.root)).stdout.trim();
+  assert.ok(firstCommit, 'the first capture must have a resolvable ref');
+
+  // A SECOND discard, same worktree id, same stamp => the same baseRef is requested.
+  await fx.write('second.txt', 'the only copy of the SECOND thing\n', wt);
+  const r2 = await discard(fx.root, [path.join(wt, 'second.txt')], { stamp: STAMP });
+  assert.equal(r2.ok, true, `second discard must succeed: ${JSON.stringify(r2)}`);
+
+  // THE INVARIANT: the first capture is still there, unchanged, and still holds its content.
+  assert.notEqual(r2.ref, r1.ref, 'the second discard must get its own ref, not clobber the first');
+  const firstStill = (await sh('git', ['rev-parse', '--verify', '--quiet', r1.ref], fx.root)).stdout.trim();
+  assert.equal(firstStill, firstCommit, 'the FIRST capture must survive a same-name second discard');
+
+  const firstShow = await sh('git', ['show', `${r1.ref}:first.txt`], fx.root);
+  assert.equal(firstShow.stdout, 'the only copy of the FIRST thing\n',
+    'the first capture must still be RECOVERABLE — a surviving ref that lost its content is no better');
+  const secondShow = await sh('git', ['show', `${r2.ref}:second.txt`], fx.root);
+  assert.equal(secondShow.stdout, 'the only copy of the SECOND thing\n',
+    'and the second capture holds its own content');
+});

@@ -496,6 +496,14 @@ export const MUTATIONS = [
     tests: ['test/unit/order.test.mjs'],
   },
   {
+    id: 'discard-ref-clobber',
+    defect: 'a discard capture ref is written unconditionally, so a second discard destroys the first capture',
+    file: 'src/actions.mjs',
+    find: "    const alloc = await captureRef(ws.path, { baseRef, commit, tree, kind: 'discard', id: ws.id });",
+    replace: "    await gitOk(['update-ref', '--create-reflog', baseRef, commit], { cwd: ws.path, allowMutation: true }); const alloc = { ok: true, ref: baseRef, commit }; // mutated: unconditional write",
+    tests: ['test/e2e/actions.test.mjs'],
+  },
+  {
     id: 'rescue-ref-clobber',
     defect: 'a reused worktree id silently overwrites an earlier rescue ref — destroying a capture',
     file: 'src/actions.mjs',
