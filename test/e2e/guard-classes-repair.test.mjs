@@ -385,7 +385,7 @@ test('[B] the existence filter did not blind the instrument: a flagged file ON D
   assert.deepEqual(r.atRisk, ['app/config/local.json'],
     'the flagged file that IS on disk and IS modified must still be reported');
   assert.deepEqual(r.unknown, [], 'the flagged file that is on disk and unmodified is clean, not unknown');
-  await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 /* =======================================================================================
