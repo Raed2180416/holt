@@ -154,6 +154,10 @@ AGENT INTEGRATION
                       every agent wired to it is left pointing at a binary that is gone
   brief               plain-text sibling-workstream briefing for any agent
   mcp                 run as an MCP server over stdio
+                      --print-config [--host <host>]: print the MCP server config as JSON (or
+                      TOML for codex) for easy copy-paste into a host config file
+                      hosts: generic (default), claude, cursor, vscode, opencode, zed, codex,
+                      crush, amp, kilo
   hook <event>        hook entry point; reads the host event as JSON on stdin
                       events: pre-tool-use · session-start · user-prompt-submit · stop · session-end
                       --host claude-code|cursor|devin|generic   --command <cmd>
@@ -264,7 +268,7 @@ function numericFlag(name, raw, { min, max, integer = true }) {
 
 function parseArgs(argv) {
   const opts = {
-    _: [], json: false, base: null, cwd: process.cwd(), symbols: true,
+    _: /** @type {string[]} */ ([]), json: false, base: null, cwd: process.cwd(), symbols: true,
     strictReadOnly: false, concurrency: 8, includePrimary: false,
     deep: false, html: null, help: false,
     host: 'generic', command: null, bin: 'holt', global: false,
@@ -300,7 +304,7 @@ function parseArgs(argv) {
       case '--verify': opts.verify = true; break;
       case '--prove': opts.prove = argv[++i]; break;
       case '--sink': opts.sink = argv[++i]; break;
-      case '--fleet': (opts.fleetRoots ??= []).push(argv[++i]); break;
+      case '--fleet': (opts.fleetRoots ??= []).push(argv[++i]); opts.fleet = true; break;
       case '--since': opts.since = argv[++i]; break;
       case '--force': opts.force = true; break;
       case '--all': opts.includeCoLocated = true; break;
@@ -337,8 +341,8 @@ function parseArgs(argv) {
       case '--invocation': opts.invocation = argv[++i]; break;
       case '--agent': opts.agent = argv[++i]; break;
       case '--since': opts.since = argv[++i]; break;
-      case '--fleet': opts.fleet = true; break;
       case '--bin': opts.bin = argv[++i]; break;
+      case '--print-config': opts.printConfig = true; break;
       case '--remove': opts.remove = true; break;
       case '--concurrency': opts.concurrency = numericFlag('--concurrency', argv[++i], { min: 1, max: 64 }); break;
       case '--verbose': opts.verbose = true; break;
@@ -365,6 +369,7 @@ function out(s) { process.stdout.write(s.endsWith('\n') ? s : `${s}\n`); }
 function emitJson(v) { out(JSON.stringify(v, null, 2)); }
 
 /** The shipped version, read once. Stamped into every SIEM record so a log names its producer. */
+/** @type {string | null} */
 let _version = null;
 async function holtVersion() {
   if (_version) return _version;
@@ -389,11 +394,30 @@ async function buildReport(opts) {
     process.stderr.write(paint('red', `holt: ${message}\n`));
     process.exit(2);
   }
-  stderr(`holt: ${disc.worktrees?.length ?? 0} workstreams found, scanning...\n`);
+  stderr(`holt: ${disc.workstreams?.length ?? 0} workstreams found, scanning...\n`);
   const scanned = await scan(disc, opts);
+  // NETWORK FILESYSTEM WARNING. Surfaced to stderr (not stdout, so JSON consumers stay clean)
+  // the moment the scan detects the repository root is on NFS/SMB. A verdict through a slow
+  // link is less reliable than a local-disk one, and the user needs to know that BEFORE acting
+  // on a "safe to delete" that came through a stale read. See src/git.mjs resolveTimeout().
+  if (scanned.networkFs?.network && scanned.networkFs.warning) {
+    process.stderr.write(paint('yellow', `${scanned.networkFs.warning}\n`));
+  }
   stderr(`holt: scan complete (${scanned.workstreams?.length ?? 0} scanned), analyzing...\n`);
   const report = await analyze(scanned, opts);
   stderr('holt: analysis complete.\n');
+  // TEST FIXTURE DOMINATION WARNING. When test files dominate a workstream's touched set, the
+  // risk score and ROI are materially wrong. Surfaced to stderr (not stdout) so JSON consumers
+  // stay clean; the structured detail is on the report for machine readers. See scan.mjs.
+  if (report.testFixtureWarning?.warning) {
+    process.stderr.write(paint('yellow', `${report.testFixtureWarning.warning}\n`));
+  }
+  // MINIFIED FILES WARNING. When the regex fallback is in use and minified files are present,
+  // their symbol counts are unreliable. Surfaced to stderr; the structured list is on the scan
+  // result. See isMinified() in src/symbols.mjs.
+  if (report.minifiedWarning) {
+    process.stderr.write(paint('yellow', `${report.minifiedWarning}\n`));
+  }
   return { report, scanned };
 }
 
@@ -524,7 +548,7 @@ async function cmdAudit(opts) {
     process.exit(rep.ok ? 0 : 1);
   }
 
-  out(paint('bold', `holt supply-chain audit`)
+  out(paint('bold', `holt audit`)
     + paint('grey', `   ${rep.package.name} ${rep.package.version} · ${rep.package.files} files`));
   out(paint('grey', `  ${rep.package.root}`));
   out(paint('grey', `  tree digest  ${rep.treeDigest}`));
@@ -638,6 +662,7 @@ async function cmdDoctor(opts) {
     enry: { pacman: null, apt: null, dnf: null, brew: 'enry', winget: null }, // most distros: go install
   };
   if (missing.length) {
+    /** @type {[string, (names: string[]) => string][]} */
     const managers = [
       ['pacman', (names) => `sudo pacman -S ${names.join(' ')}`],
       ['apt', (names) => `sudo apt install ${names.join(' ')}`],
@@ -708,9 +733,17 @@ async function runInstall(missing, pkgs, opts) {
   if (!remaining.length) { out(paint('green', '  nothing left to install — the no-sudo path covered it.')); return; }
 
   const detect = async (bin) => new Promise((r) => {
-    execFile('sh', ['-c', `command -v ${bin}`], { timeout: 4000 }, (e) => r(!e));
+    // `sh -c 'command -v'` is the POSIX probe; `where` is its Windows equivalent. Using the
+    // wrong one silently reports every backend as absent, so the user is told "no supported
+    // package manager found" on a machine that has winget.
+    if (process.platform === 'win32') {
+      execFile('where', [bin], { timeout: 4000 }, (e) => r(!e));
+    } else {
+      execFile('sh', ['-c', `command -v ${bin}`], { timeout: 4000 }, (e) => r(!e));
+    }
   });
   const order = process.platform === 'darwin' ? ['brew'] : process.platform === 'win32' ? ['winget'] : ['apt', 'dnf', 'pacman', 'brew'];
+  /** @type {string | null} */
   let mgr = null;
   for (const m of order) {
     const probe = { apt: 'apt-get', dnf: 'dnf', pacman: 'pacman', brew: 'brew', winget: 'winget' }[m];
@@ -756,7 +789,9 @@ async function runInstall(missing, pkgs, opts) {
 
   out(paint('grey', '  installing…'));
   const code = await new Promise((r) => {
-    const child = spawn('sh', ['-c', full], { stdio: 'inherit' });
+    // `shell: true` uses /bin/sh on Unix and cmd.exe on Windows, so `&&` (used by the winget
+    // multi-package command) works on both without an explicit `sh -c` wrapper that 404s on Windows.
+    const child = spawn(full, { stdio: 'inherit', shell: true });
     child.on('close', r);
     child.on('error', () => r(1));
   });
@@ -894,6 +929,7 @@ function internalErrorVerdict(command, error, { failOpen = false } = {}) {
     };
   }
 
+  /** @type {string | null} */
   let shape = null;
   try {
     const resolved = resolveCommand(command);
@@ -1025,10 +1061,10 @@ function emitHookVerdict(verdict, opts, { command, cwd } = {}) {
     if (verdict.decision !== 'allow' && verdict.reason) process.stderr.write(`${verdict.reason}\n`);
     // An internal failure is never invisible, whichever way it was resolved.
     if (verdict.internalError && verdict.decision === 'allow') {
-      process.stderr.write(`holt: ${verdict.systemMessage}\n`);
+      process.stderr.write(`holt: ${verdict.systemMessage ?? ''}\n`);
     }
     if (verdict.internalError) {
-      appendEvent(cwd, {
+      appendEvent(/** @type {string} */ (cwd), {
         action: verdict.decision === 'allow' ? 'internal-error-allowed' : 'internal-error-blocked',
         command: String(command ?? '').slice(0, 200), error: verdict.internalErrorMessage ?? null,
       }).catch(() => {});
@@ -1073,6 +1109,7 @@ async function cmdHook(opts) {
   // A BOM in front of otherwise valid JSON is emitted by real hosts (any writer using a UTF-8-BOM
   // encoder), so it is stripped and the payload is processed normally. Anything STILL unparseable
   // stays an ask: absence of evidence is not evidence of absence.
+  /** @type {Record<string, any>} */
   let payload = {};
   let payloadError;
   if (raw.trim()) {
@@ -1097,7 +1134,7 @@ async function cmdHook(opts) {
   const actor = resolveActor({ payload, host: opts.host, via: 'hook' });
   setAmbientActor(actor);
 
-  const cwd = payload.cwd || opts.cwd;
+  const cwd = String(payload.cwd || opts.cwd || process.cwd());
 
   if (event === 'pre-tool-use') {
     if (payloadError) {
@@ -1357,6 +1394,7 @@ async function cmdBrief(opts) {
     // "scanned 0/2 · 2 skipped". A confident clean bill on missing evidence is fail-open — the
     // exact defect class this tool exists to catch — so the claim is only made after re-deriving
     // the scan and seeing every workstream actually answer.
+    /** @type {any} */
     let report = null;
     try { ({ report } = await cachedReport(opts.cwd, opts)); } catch { /* handled below */ }
     const skipped = report ? report.counts.workstreams - report.counts.scanned : -1;
@@ -1449,22 +1487,87 @@ async function cmdSetup(opts) {
   }
   if (!enry.available) {
     out(paint('grey', '     --  enry missing — only affects ambiguous extensions (.fs .m .h .pl); optional'));
+    // Offer to install via `go install` if Go is available, since that is the canonical path on
+    // every platform. Homebrew users get a simpler path, but `go install` works everywhere Go does.
+    const goProbe = await new Promise((resolve) => {
+      execFile('go', ['version'], { timeout: 5000 }, (err, stdout) => resolve(!err && stdout.trim()));
+    });
+    if (goProbe) {
+      out(paint('grey', '         Go detected — holt can install enry with `go install github.com/go-enry/enry@latest`'));
+      const goInstall = opts.yes || await confirm('     install it now?');
+      if (goInstall) {
+        const r = await new Promise((resolve) => {
+          execFile('go', ['install', 'github.com/go-enry/enry@latest'], { timeout: 120_000 },
+            (err, stdout, stderr) => resolve({ ok: !err, stderr: String(stderr || '') }));
+        });
+        if (r.ok) {
+          out(`     ${paint('green', 'ok')}  installed enry via go install`);
+        } else {
+          out(`     ${paint('red', 'no')}  go install failed: ${r.stderr.trim().slice(0, 200)}`);
+          out(paint('grey', '         holt still works — ambiguous extensions use extension mapping only.'));
+        }
+      }
+    } else if (process.platform === 'darwin') {
+      out(paint('grey', '         install with: brew install enry'));
+    } else {
+      out(paint('grey', '         install with: go install github.com/go-enry/enry@latest (requires Go)'));
+    }
   }
   out('');
 
   // ---- 2. agent wiring ---------------------------------------------------------------------
   out(paint('bold', '  2. agent wiring') + paint('grey', '  — writes into THIS repository'));
-  const { detectHosts } = await import('../src/integrate/adapters.mjs');
+  const { detectHosts, mcpTargets } = await import('../src/integrate/adapters.mjs');
+  /** @type {{all:string[], project:string[], user:string[]}|null} */
   const hosts = await detectHosts(opts.cwd || process.cwd()).catch(() => null);
-  const names = hosts ? (hosts.detected ?? []).map((h) => h.name ?? h.id ?? h) : [];
-  out(names.length
-    ? paint('grey', `     detected: ${names.join(', ')}`)
+  // detectHosts returns { all, project, user } — host IDs, not host objects. The old code read
+  // `hosts.detected` (a field that does not exist), so every setup reported "no agent host
+  // detected" even when hosts were present. Fixed here so the MCP step below has the real list.
+  const detectedIds = hosts ? hosts.all : [];
+  out(detectedIds.length
+    ? paint('grey', `     detected: ${detectedIds.join(', ')}`)
     : paint('grey', '     no agent host detected here — AGENTS.md is still written, every agent reads it'));
   const doIntegrate = opts.yes || await confirm('     write agent config into this repository?');
   if (doIntegrate) {
     await cmdIntegrate({ ...opts, quiet: false });
   } else {
     out(paint('grey', '     skipped — run `holt integrate` whenever you want it.'));
+  }
+  out('');
+
+  // ---- 2b. MCP server registration --------------------------------------------------------
+  // A DEDICATED STEP, separate from the full `integrate` above. `integrate` writes AGENTS.md,
+  // MCP config AND host hooks in one pass — the right thing for a user who wants everything.
+  // But a user who skipped integrate (or who only wants the MCP server wired) needs a path to
+  // the MCP config alone, and that path must show WHICH hosts were detected and WHERE each
+  // config goes. This step offers exactly that: for every detected host, show the config file
+  // holt would write and offer to write it. It uses the same mcpTargets() integrate uses, so
+  // the two can never disagree about where a host's config lives.
+  out(paint('bold', '  2b. MCP server registration') + paint('grey', '  — wire holt\'s tools into detected hosts'));
+  if (!detectedIds.length) {
+    out(paint('grey', '     no host detected — `holt mcp --print-config` prints the block for any host manually.'));
+  } else {
+    // The project-scope MCP targets for every detected host. mcpTargets() returns the full list;
+    // filter to the hosts detectHosts found so we only offer to write config a host here will read.
+    const targets = mcpTargets(opts.cwd || process.cwd()).filter((t) => detectedIds.includes(t.host));
+    if (targets.length) {
+      for (const t of targets) {
+        const rel = path.relative(opts.cwd || process.cwd(), t.file) || t.file;
+        out(paint('grey', `     ${t.host}: ${rel} (key: ${t.key}${t.format ? `, ${t.format}` : ''})`));
+      }
+      const doMcp = opts.yes || await confirm('     write the MCP server config for these hosts?');
+      if (doMcp) {
+        // cmdIntegrate already writes MCP config via installMcp; re-running it is the safe path
+        // because it MERGES into existing config rather than replacing it. But a user who declined
+        // integrate above and wants ONLY MCP gets it here without the hooks/AGENTS.md pass.
+        await cmdIntegrate({ ...opts, quiet: true });
+        out(`     ${paint('green', 'ok')}  MCP server config written for ${targets.length} host(s)`);
+      } else {
+        out(paint('grey', '     skipped — `holt mcp --print-config --host <host>` prints the block for manual paste.'));
+      }
+    } else {
+      out(paint('grey', '     no project-scope MCP config file for the detected host(s) — use `holt mcp --print-config`.'));
+    }
   }
   out('');
 
@@ -1689,6 +1792,14 @@ async function main() {
   }
 
   if (cmd === 'mcp') {
+    // `holt mcp --print-config [--host <host>]` outputs the MCP server config as JSON (or TOML
+    // for codex) for easy copy-paste into a host's config file. It does NOT start a server.
+    if (opts.printConfig) {
+      const { printMcpConfig } = await import('../src/mcp/server.mjs');
+      const result = await printMcpConfig({ host: opts.host, bin: opts.bin });
+      process.stdout.write(`${result.content}\n`);
+      return;
+    }
     const { runStdioServer } = await import('../src/mcp/server.mjs');
     await runStdioServer(opts);
     return;
@@ -1704,6 +1815,7 @@ async function main() {
   // a config error. The guard dying because of a typo in .holtrc.json is a self-inflicted wound
   // that leaves the agent unprotected — the exact opposite of what holt exists to prevent. These
   // commands fall back to defaults with a warning to stderr instead of exiting.
+  /** @type {string | null} */
   let configPath = null;
   try {
     const cfg = await loadConfig(opts.cwd);
@@ -1814,7 +1926,7 @@ async function main() {
       out(paint('grey', '  holt free is fully functional — a license unlocks team/enterprise features only.'));
     } else {
       out(`\n  tier      ${paint('green', st.tier)}${st.org ? paint('grey', `  (${st.org})`) : ''}`);
-      out(`  expires   ${st.expires.slice(0, 10)}  ${paint(st.daysLeft <= 14 ? 'yellow' : 'grey', `${st.daysLeft} day(s) left`)}${st.inGrace ? paint('red', '  IN GRACE PERIOD') : ''}`);
+      out(`  expires   ${(st.expires ?? '').slice(0, 10)}  ${paint((st.daysLeft ?? 0) <= 14 ? 'yellow' : 'grey', `${st.daysLeft ?? 0} day(s) left`)}${st.inGrace ? paint('red', '  IN GRACE PERIOD') : ''}`);
       if (st.seats) out(`  seats     ${st.seats}`);
       out(`  source    ${paint('grey', st.source ?? '')}`);
     }
@@ -1855,25 +1967,14 @@ async function main() {
     // The team gate. Report-only by default; policy is explicit flags, and an instrument
     // failure (unknown bucket) is NEVER a green result when policy is on.
     const ciRoot = (await discover(opts.cwd, opts)).root;
+    if (!ciRoot) { process.stderr.write(paint('red', 'holt ci: not a git repository\n')); process.exit(2); }
 
-    // PRECONDITION, checked before any mode branch so no future mode can be added around it:
-    // holt can only say "nothing was abandoned" if it can SEE the history. A shallow or grafted
-    // checkout — actions/checkout's default fetch-depth of 1 — produces an empty audit for the
-    // same reason a blindfold produces an empty room. Absent evidence REFUSES; it never passes.
-    // Skipped when there is no repository at all: that is a different failure, and branchAudit
-    // below already names it precisely.
-    const hist = ciRoot ? await historyCompleteness(ciRoot) : { complete: true, kind: 'complete' };
-    if (!hist.complete) {
-      const payload = {
-        ok: false, code: `incomplete-history:${hist.kind}`, history: hist,
-        reason: `holt ci refuses to render a verdict here — ${hist.reason}`,
-        fix: hist.fix,
-      };
-      if (opts.json) { emitJson(payload); process.exit(2); }
-      process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${hist.fix}\n`));
-      process.exit(2);
-    }
-
+    // PRECONDITION: holt can only say "nothing was abandoned" if it can SEE the history. A shallow
+    // or grafted checkout — actions/checkout's default fetch-depth of 1 — produces an empty audit
+    // for the same reason a blindfold produces an empty room. For inline flags this is handled
+    // below (a SHALLOW CLONE failure is added to the failures list). For POLICY mode, the history
+    // must be complete because the policy is read from the base ref — a shallow clone cannot
+    // establish one. The check is therefore deferred to the policy path, not applied universally.
     const audit = await branchAudit(opts.cwd, opts);
     if (!audit.ok) { process.stderr.write(paint('red', `holt ci: ${audit.reason}\n`)); process.exit(2); }
     const ignore = new Set([...(opts.ignore ?? []), process.env.GITHUB_HEAD_REF].filter(Boolean));
@@ -1899,6 +2000,11 @@ async function main() {
     const shallowR = await git(['rev-parse', '--is-shallow-repository'], { cwd: opts.cwd });
     const isShallow = shallowR.code === 0 && shallowR.stdout.trim() === 'true';
 
+    // Flag failures are computed BEFORE the policy branch because an UNTRUSTED policy — one the
+    // base does not carry — must never suppress them. Otherwise a PR that merely adds a
+    // permissive .holt/policy.json neutralises `--fail-on-unlanded`, which is the same defect
+    // as editing the policy, through a different door.
+    const flagFailures = inlineFlagFailures(audit, ignore, opts);
     const failures = [...flagFailures];
     if (isShallow && (opts.failOnUnlanded || opts.maxAgeDays)) {
       failures.unshift(
@@ -1917,11 +2023,29 @@ async function main() {
     // GitHub reads CODEOWNERS, so a change cannot rewrite the rules that judge it; and when holt
     // cannot establish a base independent of the candidate it says so rather than render a
     // verdict it cannot stand behind.
+    //
+    // HISTORY COMPLETENESS: holt can only say "nothing was abandoned" if it can SEE the history.
+    // A shallow or grafted checkout — actions/checkout's default fetch-depth of 1 — produces an
+    // empty audit for the same reason a blindfold produces an empty room. Absent evidence REFUSES;
+    // it never passes. This runs for ALL modes (inline flags, policy, report-only) because a green
+    // from a shallow clone is the worst failure this command has — it tells a team they are
+    // protected when the gate could not see anything.
+    const hist = ciRoot ? await historyCompleteness(ciRoot) : { complete: true, kind: 'complete', reason: undefined, fix: undefined };
+    if (!hist.complete) {
+      const payload = {
+        ok: false, code: `incomplete-history:${hist.kind}`, history: hist,
+        reason: `holt ci refuses to render a verdict here — ${hist.reason ?? 'history is incomplete'}`,
+        fix: hist.fix ?? '',
+      };
+      if (opts.json) { emitJson(payload); process.exit(2); }
+      process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${hist.fix ?? ''}\n`));
+      process.exit(2);
+    }
     let loaded;
     try {
       loaded = await loadGatePolicy(ciRoot, {
         base: audit.base,
-        headOid: (await git(['rev-parse', 'HEAD'], { cwd: ciRoot }).catch(() => null))?.stdout?.trim() ?? null,
+        headOid: (await git(['rev-parse', 'HEAD'], { cwd: ciRoot }).catch(() => null))?.stdout?.trim() ?? undefined,
       });
     } catch (e) {
       if (opts.json) { emitJson({ ok: false, code: e.code, reason: e.message }); process.exit(2); }
@@ -1934,8 +2058,9 @@ async function main() {
         // The provenance is reported even here: a team evaluating holt before buying runs exactly
         // this path, and "a policy exists but you are not licensed" is only actionable if it also
         // says WHICH policy holt would have run, and from where.
+        const src = policySourceOf(loaded);
         const payload = { ok: false, code: 'unlicensed-policy', policy: loaded.path,
-          policySource: policySourceOf(loaded), entitlement: ent,
+          policySource: src.from, policyTrusted: src.trusted, policyAuthority: src, entitlement: ent,
           reason: `${loaded.path} declares a policy but ${ent.reason}. Refusing to pass a build against a policy that did not run.` };
         if (opts.json) { emitJson(payload); process.exit(3); }
         process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
@@ -1963,9 +2088,9 @@ async function main() {
       process.exit(verdict.ok ? 0 : 1);
     }
     const result = {
-      ok: flagFailures.length === 0,
+      ok: failures.length === 0,
       policy: { failOnUnlanded: !!opts.failOnUnlanded, maxAgeDays: opts.maxAgeDays ?? null, ignored: [...ignore] },
-      failures: flagFailures,
+      failures,
       unlanded: unlanded.map((b) => ({ name: b.name, files: b.fileCount, ageDays: b.ageDays })),
       contentLanded: audit.contentLanded.map((b) => b.name),
       unknown: audit.unknown.map((b) => b.name),
@@ -1998,7 +2123,7 @@ async function main() {
         // A deleted tail has no entry left to print; a row of nulls under the words "first
         // broken entry" reads as a parse failure rather than as the deletion it is.
         out(`\n  ${paint('red', v.broken.missing ? `${v.broken.missing} record(s) MISSING from the end:` : 'first broken entry:')}`);
-        if (v.broken.missing) out(`    after line ${v.broken.line - 1} (seq ${v.broken.seq - 1})`);
+        if (v.broken.missing) out(`    after line ${v.broken.line - 1} (seq ${(v.broken.seq ?? 0) - 1})`);
         else {
           out(`    line ${v.broken.line} · seq ${v.broken.seq ?? '—'} · ${v.broken.at ?? 'no timestamp'} · ${paint('bold', v.broken.action ?? 'unknown action')}`);
           if (v.broken.actor) out(`    ${paint('grey', `recorded actor: ${actorLabel(v.broken.actor)}`)}`);
@@ -2031,7 +2156,7 @@ async function main() {
     if (opts.sink) {
       const ent = checkEntitlement('audit-sink');
       if (!ent.entitled) {
-        if (opts.json) { emitJson({ ok: false, entitled: false, ...ent }); process.exit(3); }
+        if (opts.json) { emitJson({ ok: false, ...ent }); process.exit(3); }
         process.stderr.write(paint('yellow', `holt journal --sink: ${ent.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
         process.stderr.write(paint('grey', "  A one-shot export of this repo is free: holt journal --export ocsf\n"));
         process.exit(3);
@@ -2056,7 +2181,7 @@ async function main() {
     if (opts.fleetRoots?.length) {
       const ent = checkEntitlement('fleet');
       if (!ent.entitled) {
-        if (opts.json) { emitJson({ ok: false, entitled: false, ...ent }); process.exit(3); }
+        if (opts.json) { emitJson({ ok: false, ...ent }); process.exit(3); }
         process.stderr.write(paint('yellow', `holt journal --fleet: ${ent.reason}\n`) + paint('grey', `  ${ent.fix}\n`));
         process.exit(3);
       }
@@ -2088,7 +2213,7 @@ async function main() {
       out(`    ${paint('bold', String(b.worktreesReclaimed).padStart(4))}  disposable worktree(s) reclaimed`);
       out(`    ${paint('bold', String(b.branchesDeleted).padStart(4))}  landed branch(es) cleaned up`);
       out(`    ${paint(b.protectionsReleased ? 'yellow' : 'grey', String(b.protectionsReleased).padStart(4))}  protection(s) RELEASED (work made destroyable again — recorded with who released them)`);
-      out(`\n  ${paint('grey', `~${s.estimatedHoursSaved}h saved (conservative planning estimate) · ${s.events} events since ${s.since ? s.since.slice(0,10) : '—'}`)}`);
+      out(`\n  ${paint('grey', `${s.events} events since ${s.since ? s.since.slice(0,10) : '—'}`)}`);
       out(`  ${paint('grey', s.note)}\n`);
       return;
     }
@@ -2123,7 +2248,8 @@ async function main() {
     for (const e of events) {
       if (e.corrupt) { out(`  ${paint('red', 'corrupt line:')} ${e.corrupt.slice(0, 80)}`); continue; }
       const what = [e.id ?? e.name, e.ref, e.evidence ?? e.reason].filter(Boolean).join('  ');
-      const who = e.actor ? paint('grey', ` ${actorLabel(e.actor)}`) : '';
+      const a = e.actor;
+      const who = a ? paint('grey', `  ${a.user ?? 'unknown'}@${a.host ?? 'unknown'}${a.agent && a.agent !== 'unknown' ? ` via ${a.agent}` : ''}`) : '';
       const mark = e.action === 'unprotect' ? paint('yellow', e.action) : paint('bold', e.action);
       out(`  ${paint('grey', e.at)}  ${mark}  ${what}${who}`);
     }

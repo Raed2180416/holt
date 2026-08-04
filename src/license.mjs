@@ -135,7 +135,9 @@ export function readLicenseToken({ env = process.env } = {}) {
 /**
  * Verify a token. Pure and synchronous: no I/O, no clock surprises beyond `now`.
  *
- * @returns {{valid: boolean, reason?: string, code?: string, claims?: object, expired?: boolean,
+ * @param {string|null} token
+ * @param {{now?: number, publicKeyB64?: string|null, publicKeysB64?: string[]}} [opts]
+ * @returns {{valid: boolean, reason?: string, code?: string, claims?: Record<string, any>, expired?: boolean,
  *            inGrace?: boolean, daysLeft?: number|null}}
  */
 export function verifyToken(token, { now = Date.now(), publicKeyB64 = null, publicKeysB64 = LICENSE_PUBLIC_KEYS_B64 } = {}) {
@@ -216,6 +218,8 @@ export function tierEntitles(tier, feature) {
 /**
  * The single question every paid code path asks. Never throws; the caller decides how to refuse,
  * and the refusal always states exactly what is missing and how to fix it.
+ * @param {string} feature
+ * @param {{env?: Record<string, string|undefined>, now?: number, publicKeyB64?: string|null}} [opts]
  */
 export function checkEntitlement(feature, { env = process.env, now = Date.now(), publicKeyB64 = null } = {}) {
   // An UNBUILT feature is not entitled at ANY tier, including enterprise. Without this it would
@@ -246,19 +250,20 @@ export function checkEntitlement(feature, { env = process.env, now = Date.now(),
         : 'Run `holt license status` for details, or re-activate the key from your receipt.',
     };
   }
-  if (!tierEntitles(v.claims.tier, feature)) {
+  const claims = v.claims ?? {};
+  if (!tierEntitles(claims.tier, feature)) {
     return {
-      entitled: false, tier: v.claims.tier, feature, need, source, code: 'tier-too-low',
-      reason: `'${feature}' requires the ${need} tier; this license is ${v.claims.tier}`,
+      entitled: false, tier: claims.tier, feature, need, source, code: 'tier-too-low',
+      reason: `'${feature}' requires the ${need} tier; this license is ${claims.tier}`,
       fix: 'Upgrade at https://raed2180416.github.io/holt/#pricing',
     };
   }
   return {
-    entitled: true, tier: v.claims.tier, feature, source,
-    org: v.claims.org ?? null, seats: v.claims.seats ?? null,
+    entitled: true, tier: claims.tier, feature, source,
+    org: claims.org ?? null, seats: claims.seats ?? null,
     inGrace: v.inGrace, daysLeft: v.daysLeft,
     warning: v.inGrace
-      ? `license EXPIRED ${Math.abs(v.daysLeft)} day(s) ago — running on the ${GRACE_DAYS}-day grace period. Renew to avoid interruption.`
+      ? `license EXPIRED ${Math.abs(v.daysLeft ?? 0)} day(s) ago — running on the ${GRACE_DAYS}-day grace period. Renew to avoid interruption.`
       : (v.daysLeft != null && v.daysLeft <= 14 ? `license expires in ${v.daysLeft} day(s)` : null),
   };
 }
@@ -267,8 +272,9 @@ export function checkEntitlement(feature, { env = process.env, now = Date.now(),
 export function licenseStatus({ env = process.env, now = Date.now(), publicKeyB64 = null } = {}) {
   const { token, source } = readLicenseToken({ env });
   const v = verifyToken(token, { now, publicKeyB64 });
+  const claims = v.claims ?? {};
   const features = Object.entries(FEATURE_TIER).map(([f, need]) => ({
-    feature: f, need, entitled: v.valid ? tierEntitles(v.claims.tier, f) : false,
+    feature: f, need, entitled: v.valid ? tierEntitles(claims.tier, f) : false,
   }));
   if (!v.valid) {
     return {
@@ -278,11 +284,11 @@ export function licenseStatus({ env = process.env, now = Date.now(), publicKeyB6
     };
   }
   return {
-    licensed: true, tier: v.claims.tier, source,
-    org: v.claims.org ?? null, email: v.claims.email ?? null,
-    seats: v.claims.seats ?? null, id: v.claims.id ?? null,
-    issued: new Date(v.claims.iat ?? 0).toISOString(),
-    expires: new Date(v.claims.exp).toISOString(),
+    licensed: true, tier: claims.tier, source,
+    org: claims.org ?? null, email: claims.email ?? null,
+    seats: claims.seats ?? null, id: claims.id ?? null,
+    issued: new Date(claims.iat ?? 0).toISOString(),
+    expires: new Date(claims.exp).toISOString(),
     daysLeft: v.daysLeft, inGrace: v.inGrace,
     features,
   };
@@ -292,6 +298,7 @@ export function licenseStatus({ env = process.env, now = Date.now(), publicKeyB6
 export function activateLicense(token, { now = Date.now() } = {}) {
   const v = verifyToken(token, { now });
   if (!v.valid) throw new LicenseError(`refusing to store an invalid license: ${v.reason}`, v.code);
+  const claims = v.claims ?? {};
   const target = licensePaths()[0];
   fs.mkdirSync(path.dirname(target), { recursive: true });
   // Refuse to follow a symlink at the target: if the license path is a symlink (planted by a
@@ -306,7 +313,7 @@ export function activateLicense(token, { now = Date.now() } = {}) {
   }
   try { fs.writeSync(fd, `${token.trim()}\n`); } finally { fs.closeSync(fd); }
   fs.chmodSync(target, 0o600); // in case the file pre-existed with looser bits
-  return { stored: target, tier: v.claims.tier, org: v.claims.org ?? null, expires: new Date(v.claims.exp).toISOString() };
+  return { stored: target, tier: claims.tier, org: claims.org ?? null, expires: new Date(claims.exp).toISOString() };
 }
 
 export function deactivateLicense() {

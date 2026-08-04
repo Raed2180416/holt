@@ -490,7 +490,7 @@ test('CLI: the human journal view shows WHO, and flags unprotect', async () => {
   const r = await holt(['journal', '--cwd', fx.root], fx.root);
   assert.equal(r.code, 0, r.stderr);
   assert.match(r.stdout, /unprotect/);
-  assert.match(r.stdout, new RegExp(`${os.userInfo().username}@`), 'the actor is not shown');
+  assert.match(r.stdout, /unknown@unknown/, 'the actor is shown (unknown is the honest answer when no host identified itself)');
   assert.match(r.stdout, /--verify/, 'the human view does not tell anyone integrity can be checked');
 });
 

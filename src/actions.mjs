@@ -319,6 +319,7 @@ async function lockState(wtPath, cwd) {
   // holds /var/...; a raw comparison finds no worktree, lockState reports "not locked", and
   // protect/unprotect/clean silently act as though a lock that exists is not there.
   const target = await canonicalPath(wtPath);
+  /** @type {string | null} */
   let current = null;
   for (const line of r.stdout.split('\n')) {
     if (line.startsWith('worktree ')) current = await canonicalPath(line.slice(9));
@@ -633,6 +634,7 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
       };
     }
 
+    /** @type {boolean | null} */
     let released = null;
     if (release) {
       const un = await unprotect(cwd, { id, ...opts });
@@ -1017,6 +1019,7 @@ export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride
 
 /** The worktree a path lives in, chosen by the LONGEST match so nested worktrees resolve right. */
 async function findOwningWorktree(abs, disc) {
+  /** @type {{path:string, id?:string}|null} */
   let best = null;
   for (const w of disc.workstreams) {
     if (!w.path) continue;
@@ -1053,13 +1056,15 @@ export async function rescues(cwd) {
  * @param {object}   opts
  * @param {boolean}  opts.apply     actually delete (default: dry run)
  * @param {boolean}  opts.branches  also delete the worktree's branch when merged
- * @param {Function} opts.onBeforeRemove  called with each candidate immediately before its
+ * @param {Function|null} opts.onBeforeRemove  called with each candidate immediately before its
  *   re-verification. A destructive loop over N worktrees should be able to report progress, and
  *   it is also the seam that makes the TOCTOU re-check testable DETERMINISTICALLY rather than by
  *   racing a timer — a flaky test for this would be worse than none, because the behaviour it
  *   guards is "do not delete on a stale verdict".
  */
 export async function clean(cwd, { apply = false, branches = true, onBeforeRemove = null, ...opts } = {}) {
+  /** @type {Function | null} */
+  const onBefore = onBeforeRemove;
   const { report } = await assess(cwd, opts);
 
   const disposable = report.safe.filter((s) => s.safe);
@@ -1092,7 +1097,7 @@ export async function clean(cwd, { apply = false, branches = true, onBeforeRemov
   const journalFailures = [];
   const done = [];
   for (const p of plan) {
-    if (onBeforeRemove) await onBeforeRemove(p);
+    if (onBefore) await /** @type {(p: any) => any} */ (onBefore)(p);
 
     // Re-verify immediately before deleting. The scan may be seconds old and a worktree can gain
     // work in that window; for a destructive action, a stale verdict is not good enough.

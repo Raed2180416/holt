@@ -2007,7 +2007,7 @@ export function gitSubcommandOptionTable() {
   return new Map([...GIT_SUBCOMMAND_OPTS].map(([k, v]) => [k, { value: [...v.value], known: [...v.known] }]));
 }
 
-/** @type {Map<string, {value:Set<string>, valueShort:Set<string>, known:Set<string>, knownShort:Set<string>}>} */
+/** @type {Map<string, {value:Set<string>, valueShort:Set<string>, known:Set<string>, knownShort:Set<string>} | null>} */
 const _optSpecCache = new Map();
 function optSpecFor(key) {
   if (!_optSpecCache.has(key)) {
@@ -3297,6 +3297,7 @@ export function lexSegments(command, depth = 0, offset = 0) {
       // A bare fd number written against the operator belongs to the operator, not to argv.
       if (has && /^\d+$/.test(buf) && pending === null) { buf = ''; pat = ''; has = false; }
       flushWord();
+      /** @type {'trunc'|'append'|'input'} */
       let mode = 'trunc';
       if (command[i + 1] === '>') { mode = 'append'; i++; } else if (command[i + 1] === '|') { i++; }
       // `>&2`, `2>&1`, `>&-` duplicate a descriptor. No file is involved.
@@ -3669,7 +3670,7 @@ function readFindExpression(w) {
   let pathGlob = null;
   let rootOnly = false;
   let composable = true;
-  /** @type {{role:string, verb:string}|null} */
+  /** @type {{role:string, verb:string, recursive?:boolean}|null} */
   let action = null;
   const writes = [];
   for (; i < w.length; i++) {
@@ -4703,6 +4704,7 @@ async function pathExists(abs) {
 }
 
 function deepestRoot(roots, abs) {
+  /** @type {string | null} */
   let best = null;
   for (const r of roots) if (underOrEqual(abs, r) && (!best || r.length > best.length)) best = r;
   return best;
@@ -4767,7 +4769,7 @@ function globFreePrefix(p) {
 /**
  * Would this command destroy the only copy of a file?
  *
- * @returns {Promise<object|null>} a verdict, or null when there is nothing to say
+ * @returns {Promise<{decision:string, reason:string|null, kind:string|null, targets:Array, files?:Array, allowlisted?:boolean, allowlistPattern?:string, resolvedTargets?:any[]}|null>} a verdict, or null when there is nothing to say
  */
 async function assessFileTargets(targets, cwd, ctx) {
   const unresolved = targets.find((target) => target.unresolved);
@@ -4972,11 +4974,31 @@ async function assessFileTargets(targets, cwd, ctx) {
   // unscannable workstream contributes nothing, and `ignored.files` is capped at 50), so the
   // probe's hits stand on their own: a scan that cannot see the file is a reason to refuse,
   // never a reason to allow.
+  //
+  // THE ONE EXCEPTION IS A REPOSITORY WITH NO REFS AT ALL. The probe's at-risk set comes from
+  // `git status`, which answers without refs — so it still finds uncommitted and untracked files
+  // when every branch has been removed. But the whole point of the scan is to compare against a
+  // base ref and prove the work is UNIQUE: with refs, holt can verify that and deny; without refs,
+  // holt cannot verify anything, so the honest verdict is `ask` (unverified), not `deny` (blocked).
+  // A deny here would record `blocked` in the journal — a verdict holt could not actually reach.
+  /** @type {any} */
   let report = null;
+  /** @type {any} */
   let scanned = null;
+  let noRefs = false;
   try {
     ({ report, scanned } = await cachedReport(cwd, { includePrimary: true }));
-  } catch { /* keep the direct file evidence; absence of the scan never downgrades a refusal */ }
+  } catch (err) {
+    // `resolveBase` throws this exact shape when no ref resolves (deleted refs/heads, gone
+    // packed-refs, an unborn repo). Other failures (corrupt objects, instrument errors) keep the
+    // direct file evidence — those are broken instruments, not missing verification context.
+    if (/could not determine a base ref/.test(String(err?.message ?? ''))) noRefs = true;
+    /* otherwise: keep the direct file evidence; absence of the scan never downgrades a refusal */
+  }
+
+  // Without any ref to compare against, holt cannot prove the work is unique — the probe found
+  // files on disk, but "on disk and uncommitted" is not the same as "exists nowhere else". Ask.
+  // (The per-workstream detail is built below first, so the message names exactly what is at risk.)
 
   // findByPath, not two hand-rolled comparisons. What stood here was
   //   foldCase(path.resolve(w.path)) === foldCase(root)
@@ -5021,6 +5043,23 @@ async function assessFileTargets(targets, cwd, ctx) {
   }
 
   const total = [...byWs.values()].reduce((n, x) => n + x.files.size, 0);
+  if (noRefs) {
+    // With no refs to compare against, holt cannot prove the work is unique — the probe found
+    // files on disk, but "on disk and uncommitted" is not the same as "exists nowhere else".
+    // The honest verdict is `ask` (unverified), not `deny` (blocked): a deny would record
+    // `blocked` in the journal — a verdict holt could not actually reach.
+    return {
+      decision: 'ask',
+      kind: hits[0].kind,
+      targets: [...byWs.keys()],
+      files: hits.map((h) => h.file),
+      reason:
+        `holt could not verify what ${hits[0].kind} would destroy — the repository has no refs to `
+        + `compare against, so holt cannot prove these ${total} file(s) exist nowhere else.\n`
+        + `${lines.join('\n')}\n`
+        + 'Confirm manually before proceeding, or restore refs so holt can verify.',
+    };
+  }
   return {
     decision: 'deny',
     kind: hits[0].kind,
@@ -5109,7 +5148,7 @@ export function guardAllowCover(command, patterns = []) {
 /**
  * Would this command destroy work that exists nowhere else?
  *
- * @returns {{decision:'allow'|'deny'|'ask', reason:string|null, kind:string|null, targets:Array}}
+ * @returns {Promise<{decision:string, reason:string|null, kind:string|null, targets:Array, files?:Array, allowlisted?:boolean, allowlistPattern?:string, resolvedTargets?:any[]}>}
  *
  * Agent-neutral by design. Adapters map:  allow/deny/ask -> whatever their host calls it.
  */
@@ -5417,6 +5456,9 @@ function strongestVerdict(verdicts) {
   return verdicts.filter(Boolean).sort((a, b) => (rank[b.decision] ?? 1) - (rank[a.decision] ?? 1))[0] ?? null;
 }
 
+/**
+ * @returns {Promise<{decision:string, reason:string|null, kind:string|null, targets:Array, files?:Array, allowlisted?:boolean, allowlistPattern?:string, resolvedTargets?:any[]}|null>}
+ */
 async function assessWorktreeCommand(command, cwd, ctx) {
   const structure = resolveCommand(command);
   const callerCwd = cwd;
@@ -5583,6 +5625,9 @@ function jointlyLost(reached) {
 }
 
 /** The worktree-granularity half for one structural match, in the directory that match runs in. */
+/**
+ * @returns {Promise<{decision:string, reason:string|null, kind:string|null, targets:Array, files?:Array, resolvedTargets?:any[]}|null>}
+ */
 async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnresolved = false) {
   const hit = suppliedHit ?? classifyCommand(command);
   if (!hit) {
@@ -5606,9 +5651,9 @@ async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnres
       // proxy is exact. For a SHELLED-OUT command it is not: the strings are that command's
       // ARGUMENTS — a cwd, an env value, a flag — and nothing is being removed at all.
       //
-      // MEASURED, and it blocked this project's own maintenance twice in one session:
-      //   node -e "execSync('git show HEAD:site/index.html', { cwd: '/home/raed/grove' })"
-      // was DENIED as "rm -rf of the main working tree", because `/home/raed/grove` — the
+      // MEASURED, and it blocked a repository-root command during testing:
+      //   node -e "execSync('git show HEAD:site/index.html', { cwd: '/home/developer/project' })"
+      // was DENIED as "rm -rf of the main working tree", because `/home/developer/project` — the
       // directory the read-only command runs IN — was fed to the proxy as a deletion target. Any
       // script that so much as mentions a path in a `cwd:` option is refused. Over-refusal is the
       // failure that gets a safety tool switched off, and this one refuses `git log`.
@@ -5651,7 +5696,7 @@ async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnres
               decision: 'ask',
               kind: blind.kind,
               reason: `this overwrites file(s) whose current content exists nowhere else — the old bytes are unrecoverable if this is wrong.\n`
-                + `${resolved.reason.split('\n').slice(1).join('\n')}\n`
+                + `${(resolved.reason ?? '').split('\n').slice(1).join('\n')}\n`
                 + `(seen inside ${blind.kind} — confirm the write is intended, or use holt discard first to capture the current content)`,
             };
           }
@@ -5968,7 +6013,9 @@ function briefStatePath(root) {
  */
 export async function buildBrief(cwd = process.cwd(), opts = {}) {
   let report;
+  /** @type {any} */
   let scanned;
+  /** @type {string|null} */
   let root = null;
   try {
     ({ report, scanned, root } = await cachedReport(cwd, { familyOverrides: opts.familyOverrides }));
@@ -5979,6 +6026,7 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   // Canonicalised: a raw path.resolve() comparison finds NOTHING on macOS and Windows, and the
   // brief then silently drops the sibling context that is the whole point of it — the agent is
   // told nothing rather than told something wrong, which is harder to notice.
+  /** @type {{path?:string, id?:string}|null} */
   let here = null;
   for (const n of report.graph.nodes) {
     if (n.path && await underOrEqualAsync(cwd, n.path)) {
@@ -6039,7 +6087,7 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
       // Advice is assembled from repository-derived names, so it is data even though holt phrases
       // it. Taken as a whole value rather than per-name: the sentence structure is holt's, and
       // fencing the whole thing keeps a name from ending one line and starting another.
-      for (const a of d.advice) lines.push(`- ${u.take(a)}`);
+      for (const a of (d.advice ?? [])) lines.push(`- ${u.take(a)}`);
       // Drop the header again if it turned out to be all there was.
       const duplicated = d.duplicatedSymbols ?? [];
       if (lines.length === whenNews + 1 && !duplicated.length) lines.length = whenNews;
@@ -6172,6 +6220,7 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   // fix's clothes.
   const digest = createHash('sha256').update(text).digest('hex').slice(0, 32);
   const statePath = briefStatePath(root);
+  /** @type {{digest?:string, suppressed?:number}|null} */
   let prev = null;
   try { prev = JSON.parse(await fs.readFile(statePath, 'utf8')); } catch { /* first time */ }
 

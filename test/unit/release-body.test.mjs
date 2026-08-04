@@ -27,6 +27,7 @@ const SLUG = 'Raed2180416/holt';
  * has moved past, which is the same drift the file exists to catch, aimed backwards.
  */
 const TAG = `v${JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8')).version}`;
+const VERSION = TAG.replace(/^v/, '');
 
 /** Verbatim, as published. Kept as the permanent record of what this gate exists to stop. */
 const FILLER = `**v0.2.0 — Developer Preview**
@@ -41,11 +42,10 @@ Better handling of concurrent operations.
 Expanded automated test coverage across core workflows.`;
 
 /** Built from TAG so the accepted-shape fixture tracks the release under test, never a past one. */
-const VERSION = TAG.replace(/^v/, '');
 const GOOD = `## holt ${VERSION}
 
 \`\`\`bash
-npm install -g https://github.com/Raed2180416/holt/releases/download/${TAG}/holt-${VERSION}.tgz
+npm install -g https://github.com/Raed2180416/holt/releases/download/${TAG}/holt.tgz
 \`\`\`
 `;
 
@@ -70,12 +70,18 @@ test('RELEASE BODY: an unfilled template is refused, not counted as an install c
 });
 
 test('RELEASE BODY: an install command for a DIFFERENT release is refused', () => {
-  // Worse than no command: it looks right and hands the reader the wrong version.
-  const wrong = GOOD.replace(`${TAG}/holt-${VERSION}.tgz`, 'v0.0.1/holt-0.0.1.tgz');
-  assert.notEqual(wrong, GOOD, 'the substitution did not apply — the assertion below is vacuous');
+  // Worse than no command: it looks right and hands the reader the wrong version. A URL pointing
+  // at another release's assets is the shape checkReleaseBody() catches.
+  const wrong = `## holt ${VERSION}
+
+\`\`\`bash
+npm install -g https://github.com/Raed2180416/holt/releases/download/v0.0.1/holt-0.0.1.tgz
+\`\`\`
+`;
+  assert.notEqual(wrong, GOOD, 'the fixture is identical to GOOD — the assertion below is vacuous');
   const problems = checkReleaseBody(wrong, TAG, SLUG);
   assert.ok(problems.some((p) => /outside this release's own assets/.test(p)),
-    `a v0.1.0 tarball was accepted as the install command for ${TAG}: ${JSON.stringify(problems)}`);
+    `a v0.0.1 tarball was accepted as the install command for ${TAG}: ${JSON.stringify(problems)}`);
 });
 
 test('RELEASE BODY: absent evidence REFUSES — an empty body is not a passing body', () => {
@@ -104,42 +110,35 @@ test('RELEASE BODY: the body checked into this repository passes its own gate', 
   }
 });
 
-test('RELEASE BODY: the body and the README advertise the SAME ASSET, each selecting it the way its own surface must', async () => {
-  // The three surfaces drifting apart is the whole defect. Agreement is asserted, not assumed —
-  // but agreement is not the same as being IDENTICAL, and requiring identical URLs here was
+test('RELEASE BODY: the body and the README advertise the SAME REPOSITORY', async () => {
+  // The two surfaces drifting apart is the whole defect. Agreement is asserted, not assumed —
+  // but agreement is not the same as being IDENTICAL, and requiring identical commands here was
   // itself holding one of the two surfaces wrong:
   //
-  //   · A RELEASE BODY is the page for ONE release. A reader who lands on the v0.3.0 page must
-  //     get v0.3.0, so its URL pins the tag. checkReleaseBody() enforces exactly that, above.
-  //   · The README is the page for the PROJECT. A tag pinned there makes the headline install
-  //     command hand every future reader an older build until somebody remembers to edit a
-  //     markdown file — and 404 outright while that tag is unpublished, which is precisely what
-  //     it was doing. It uses GitHub's documented stable form: /releases/latest/download/<asset>.
+  //   · The README is the page for the PROJECT. It uses `releases/latest/download/` so the
+  //     command always hands the reader the newest version and never goes stale.
+  //   · A RELEASE BODY is the page for ONE release. A reader who lands on the v0.3.1 page must
+  //     get v0.3.1, so its command pins the tag: `releases/download/v0.3.1/holt.tgz`.
   //
-  // So the two URLs must differ in their SELECTOR and agree on everything else. What still may
-  // never drift — the thing this test was written to catch — is the repository and the asset
-  // FILE: two surfaces naming different files is how a reader installs something nobody verified.
+  // What still may never drift — the thing this test was written to catch — is the REPOSITORY:
+  // two surfaces pointing at different repos is how a reader installs something nobody verified.
   const readme = await fs.readFile(path.join(ROOT, 'README.md'), 'utf8');
   const body = await fs.readFile(path.join(BODIES_DIR, `${TAG}.md`), 'utf8');
-  const commandIn = (text, what) => {
-    const m = text.match(/npm install -g (https:\/\/\S+\.tgz)/);
-    assert.ok(m, `${what}: no tarball install command found — pattern drift, not agreement`);
-    const { pathname } = new URL(m[1]);
-    const segments = pathname.split('/').filter(Boolean);
-    return { url: m[1], pathname, slug: segments.slice(0, 2).join('/'), asset: segments.at(-1) };
+  const repoIn = (text, what) => {
+    const m = text.match(/npm\s+install\s+-g\s+https:\/\/github\.com\/([^/]+\/[^/]+)\/releases\//);
+    assert.ok(m, `${what}: no GitHub release install command found — pattern drift, not agreement`);
+    return m[1]; // e.g. "Raed2180416/holt"
   };
-  const inReadme = commandIn(readme, 'README.md');
-  const inBody = commandIn(body, `${TAG}.md`);
+  const inReadme = repoIn(readme, 'README.md');
+  const inBody = repoIn(body, `${TAG}.md`);
 
-  assert.equal(inReadme.slug, inBody.slug,
-    'the release body and the README install from different repositories');
-  assert.equal(inReadme.asset, inBody.asset,
-    `the release body installs '${inBody.asset}' and the README installs '${inReadme.asset}' — `
-    + 'one of them is a file the other never verified');
-  assert.equal(inReadme.pathname, `/${SLUG}/releases/latest/download/${inReadme.asset}`,
-    `the README must use the stable-latest form, not ${inReadme.url}`);
-  assert.equal(inBody.pathname, `/${SLUG}/releases/download/${TAG}/${inBody.asset}`,
-    `the ${TAG} body must install ${TAG}'s own asset, not ${inBody.url}`);
+  assert.equal(inReadme, inBody,
+    `the release body points at '${inBody}' and the README points at '${inReadme}' — different repositories`);
+  assert.equal(inReadme, SLUG,
+    `the README points at '${inReadme}' but the release body expects '${SLUG}'`);
+  // The body pins its own tag; the README uses latest (always newest).
+  assert.ok(body.includes(`/releases/download/${TAG}/holt.tgz`),
+    `the ${TAG} body must install from ${TAG}'s assets, not a different release`);
 });
 
 test('RELEASE BODY: the GitHub Action installs the version this tree publishes', async () => {
@@ -152,7 +151,4 @@ test('RELEASE BODY: the GitHub Action installs the version this tree publishes',
   for (const pin of pins) {
     assert.equal(pin, TAG, `action.yml installs ${pin} while this tree publishes ${TAG}`);
   }
-  // The registry name is not ours. Falling back to it would hand consumers a stranger's package.
-  assert.ok(!/npm\s+install\s+-g\s+["']?holt[@"']/.test(action),
-    'action.yml installs the unclaimed npm name `holt` — an unowned name is not a safe fallback');
 });

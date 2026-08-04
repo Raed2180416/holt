@@ -118,11 +118,15 @@ function runCommand(command, cwd, timeoutMs) {
 async function runAgainstTree(root, tree, command, { timeoutMs, label }) {
   const scratch = await fs.mkdtemp(path.join(scratchDir(), `holt-verify-${label}-`));
   const wt = path.join(scratch, 'wt');
+  /** @type {string|null} */
   let commit = null;
   try {
     const c = await gitOk(['commit-tree', tree, '-m', `holt verify: ${label}`],
       { cwd: root, allowMutation: true, env: await authorEnv(root) });
     commit = c.stdout.trim();
+    if (!commit) {
+      return { label, ran: false, reason: 'commit-tree produced no output' };
+    }
 
     const add = await git(['worktree', 'add', '--detach', '--no-checkout', wt, commit],
       { cwd: root, allowMutation: true });
@@ -230,8 +234,8 @@ export function extractFailures(text, { workdir = null } = {}) {
  * @param {string} idA
  * @param {string} idB
  * @param {object} opts
- * @param {string} opts.run      the test command. REQUIRED — holt never guesses one.
- * @param {number} opts.timeout  per-run timeout in ms (default 10 min)
+ * @param {string|null} [opts.run]      the test command. REQUIRED — holt never guesses one.
+ * @param {number} [opts.timeout]  per-run timeout in ms (default 10 min)
  */
 export async function verifyPair(cwd, idA, idB, { run = null, timeout = 600_000, ...opts } = {}) {
   const disc = await discover(cwd, opts);

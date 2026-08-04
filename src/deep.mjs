@@ -64,6 +64,7 @@ export async function detectJscpd() {
 /** Extract just the '+' lines of a unified diff, per file. */
 function addedLinesByFile(unifiedDiff) {
   const byFile = new Map();
+  /** @type {string|null} */
   let current = null;
   for (const raw of String(unifiedDiff).split('\n')) {
     const line = raw.replace(/\r$/, '');
@@ -138,7 +139,7 @@ function runJscpd(bin, args, cwd) {
 /**
  * Deep duplicate detection across workstreams.
  *
- * @returns {{ran: boolean, reason?: string, pairs: Array, clones: number, tool: string}}
+ * @returns {Promise<any>}
  */
 export async function deepDuplicates(scanResult, { minTokens = 50, minLines = 5, timeout = 300_000 } = {}) {
   const probe = await detectJscpd();
@@ -175,6 +176,7 @@ export async function deepDuplicates(scanResult, { minTokens = 50, minLines = 5,
       tmpRoot,
     );
 
+    /** @type {any} */
     let report = null;
     for (const name of ['jscpd-report.json', 'report.json']) {
       try {
@@ -193,6 +195,7 @@ export async function deepDuplicates(scanResult, { minTokens = 50, minLines = 5,
     // Attribute each clone to the two workstreams whose directories it spans.
     // Split on '/', because relativeWithinAsync returns POSIX separators on every platform.
     const ownerOf = (p) => String(p).split('/').filter(Boolean)[0] ?? null;
+    /** @type {Map<string, any>} */
     const byPair = new Map();
     const clones = report.duplicates ?? report.clones ?? [];
 

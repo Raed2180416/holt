@@ -52,6 +52,7 @@ import path from 'node:path';
 import { pmap } from './git.mjs';
 import { discriminativeSymbols } from './analyze.mjs';
 
+/** @type {Promise<any>|null} */
 let _rgProbe = null;
 
 export async function detectRipgrep() {
@@ -175,7 +176,7 @@ async function referencesInFallback(cwd, files, names, { maxBytes = 2 * 1024 * 1
 /**
  * Cross-workstream impact.
  *
- * @returns {{ran, tool, pairs, counts, caveats}}
+ * @returns {Promise<any>}
  */
 export async function impact(scanResult, { limitPerSide = 300, concurrency = 4 } = {}) {
   const live = scanResult.workstreams.filter((w) => w.ok && w.touched.length);

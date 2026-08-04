@@ -37,8 +37,7 @@ export async function inspect(cwd = process.cwd(), opts = {}) {
   const disc = await discover(cwd, opts);
   if (!disc.root) {
     const base = _repoAbsenceError(disc, cwd);
-    const err = new Error(disc.bare ? base.message : `holt: not a git repository (searched from ${cwd})`);
-    err.code = base.code;
+    const err = Object.assign(new Error(disc.bare ? base.message : `holt: not a git repository (searched from ${cwd})`), { code: base.code });
     throw err;
   }
   const scanned = await scan(disc, opts);

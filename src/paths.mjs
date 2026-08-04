@@ -178,3 +178,118 @@ export async function relativeLinkAwareAsync(root, abs) {
   const [r, dir] = await Promise.all([canonicalPath(root), canonicalPath(path.dirname(abs))]);
   return path.relative(r, path.join(dir, path.basename(abs))).split(path.sep).join('/');
 }
+
+/**
+ * NETWORK FILESYSTEM DETECTION — NFS/SMB latency handling.
+ *
+ * WHY THIS EXISTS. holt's git operations assume local-disk latency: a `git status` that takes
+ * 30s on an NFS mount times out at the default 30s ceiling and reads as "instrument failed",
+ * which fail-closed classification turns into "refusing to classify" — the right safety call,
+ * but a call the user never needed to make, because the repository is fine and only the mount
+ * is slow. A stale read on SMB (the working copy cached while the server's copy moved on) is
+ * the other half: holt reports a delta that no longer exists. Neither is a defect holt can fix,
+ * but both are defects holt can NAME, so the user knows the verdict came through a slow link
+ * rather than from the repository itself.
+ *
+ * DETECTION is best-effort and never throws: a mount table that cannot be read yields
+ * `{ network: false, reason: 'unreadable' }`, which is the safe default (treat as local) —
+ * because refusing to scan a local disk we misclassified as networked is the same class of
+ * false positive this whole module exists to close.
+ *
+ * On Linux, `/proc/mounts` is the kernel's own mount table and is always present. On macOS,
+ * `mount` output carries the type (`nfs`, `smbfs`, `cifs`). On Windows, `net use` lists SMB
+ * shares; NFS is rare there and reported the same way. A path is on a network filesystem when
+ * its canonical location is UNDER a mount whose type is one of the known network types.
+ */
+const NETWORK_FS_TYPES = new Set([
+  'nfs', 'nfs4', 'smbfs', 'cifs', 'smb2', 'smb3', 'fuse.sshfs', 'fuse.osxfs',
+  'afp', 'afpfs', 'webdav', 'davfs',
+]);
+
+/**
+ * Read the system mount table as a list of { device, mountPoint, type, opts }.
+ *
+ * Best-effort: returns [] when the table cannot be read (non-Linux without `mount`, a
+ * containerised environment with no mounts, a permission error). Callers treat [] as "no
+ * network mounts detected", which is the safe default — see the note above.
+ */
+async function readMounts() {
+  // Linux: /proc/mounts is the kernel's own view, always present and always readable.
+  if (process.platform === 'linux') {
+    try {
+      const raw = await fs.readFile('/proc/mounts', 'utf8');
+      return raw.split('\n').filter(Boolean).map((line) => {
+        const [device, mountPoint, type, opts] = line.split(/\s+/);
+        return { device, mountPoint: mountPoint ? decodeURIComponent(mountPoint) : '', type, opts };
+      });
+    } catch { /* unreadable — fall through to the `mount` command */ }
+  }
+  // macOS / other Unix: `mount` prints `device on mountPoint (type, opts)`.
+  try {
+    const { execFile } = await import('node:child_process');
+    const out = await new Promise((resolve) => {
+      execFile('mount', [], { timeout: 5000 }, (err, stdout) => resolve(err ? '' : String(stdout)));
+    });
+    return out.split('\n').filter(Boolean).map((line) => {
+      // `device on /mount/point (nfs, nodev, nosuid)`  or  `//server/share on /mnt (smbfs,...)`
+      const m = line.match(/^(.*?)\s+on\s+(.*?)\s+\(([^,)]+)/);
+      if (!m) return { device: '', mountPoint: '', type: '', opts: '' };
+      return { device: m[1], mountPoint: decodeURIComponent(m[2]), type: m[3], opts: '' };
+    });
+  } catch { return []; }
+}
+
+/**
+ * Is `p` on a network filesystem (NFS/SMB/SSHFS/WebDAV/AFS)?
+ *
+ * Canonicalises `p` first, then checks whether any network-typed mount is an ancestor of it.
+ * Returns `{ network: boolean, type?: string, mountPoint?: string, reason?: string }`.
+ *
+ * Never throws: an unreadable mount table yields `{ network: false, reason: 'mount-table-unreadable' }`.
+ * The safe default is "treat as local" — a false "network" would refuse to scan a local disk,
+ * which is the same class of false positive this module exists to close.
+ *
+ * @param {string} p
+ */
+export async function detectNetworkFilesystem(p) {
+  assertUsablePath(p, 'path');
+  let canon;
+  try { canon = await canonicalPath(p); } catch { canon = path.resolve(p); }
+  const mounts = await readMounts();
+  if (!mounts.length) return { network: false, reason: 'mount-table-unreadable' };
+
+  // Find the longest mount point that is an ancestor of (or equal to) the canonical path.
+  // A path under /mnt/nfs/projects/repo is on the /mnt/nfs mount, not on /.
+  /** @type {{device:string, mountPoint:string, type:string, opts:string}|null} */
+  let best = null;
+  const folded = foldCase(canon);
+  for (const m of mounts) {
+    if (!m.mountPoint) continue;
+    const mp = foldCase(m.mountPoint);
+    const prefix = mp.endsWith(path.sep) ? mp : mp + path.sep;
+    if (folded === mp || folded.startsWith(prefix)) {
+      if (!best || m.mountPoint.length > best.mountPoint.length) best = m;
+    }
+  }
+  if (!best) return { network: false };
+  if (NETWORK_FS_TYPES.has(String(best.type).toLowerCase())) {
+    return { network: true, type: best.type, mountPoint: best.mountPoint };
+  }
+  return { network: false, type: best.type, mountPoint: best.mountPoint };
+}
+
+/**
+ * A human-readable warning for when a network filesystem is detected.
+ *
+ * Exported so the CLI and the scan can surface the SAME text, rather than each deriving its
+ * own — a second copy of a warning drifts, and the scan's "this came through a slow link"
+ * caveat is the one a user acts on.
+ *
+ * @param {{ type?: string, mountPoint?: string }} info  from detectNetworkFilesystem()
+ */
+export function networkFilesystemWarning(info) {
+  const where = info?.mountPoint ? ` (mount: ${info.mountPoint}, type: ${info.type ?? 'unknown'})` : '';
+  return `holt: this path is on a network filesystem${where}. git operations may time out or ` +
+    'produce stale reads; verdicts through a slow link are less reliable than local-disk ones. ' +
+    'If a scan fails with an instrument error, re-run from a local checkout.';
+}

@@ -30,10 +30,44 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
-import { parse as jsoncParse, modify as jsoncModify, applyEdits as jsoncApplyEdits } from 'jsonc-parser';
 import { HOSTS, getHost, strengthLabel, CLOUD_CAVEAT } from './hosts.mjs';
 import { recordCreated, readReceipt, holtOwnsFile, clearReceipt } from './receipt.mjs';
 import { relativeWithinAsync } from '../paths.mjs';
+
+/**
+ * jsonc-parser is an OPTIONAL dependency (see package.json optionalDependencies). A static import
+ * would throw ERR_MODULE_NOT_FOUND on an install that omits optionals (`npm i --omit=optional`,
+ * some corporate mirrors, older `--production`), killing the CLI before it prints anything — even
+ * `holt --help`. So it is loaded dynamically, cached, and a missing install is reported as a clear
+ * error at the point of use rather than at module load.
+ *
+ * The synchronous helpers below (parseJsonc, jsoncWrite, …) read from the cache, which is preloaded
+ * once at module init via the top-level await. In an install without jsonc-parser the preload
+ * catches the failure, leaves the cache empty, and the helpers throw a clear message when a JSONC
+ * edit is actually attempted — every other code path (including `--help`) works unchanged.
+ */
+/** @type {any} */
+let _jsonc = null;
+async function loadJsonc() {
+  if (_jsonc !== null) return _jsonc;
+  try {
+    _jsonc = await import('jsonc-parser');
+  } catch {
+    _jsonc = false; // sentinel: loaded but absent
+  }
+  return _jsonc;
+}
+// Preload at module init so the synchronous helpers below can read the cache.
+await loadJsonc();
+function missingJsonc() {
+  throw new Error(
+    "holt requires the optional 'jsonc-parser' dependency to read and edit JSONC config files, " +
+    "and it is not installed. Install it with: npm install jsonc-parser",
+  );
+}
+const jsoncParse = (text, errors, options) => { if (!_jsonc) missingJsonc(); return _jsonc.parse(text, errors, options); };
+const jsoncModify = (text, jsonPath, value, options, errors) => { if (!_jsonc) missingJsonc(); return _jsonc.modify(text, jsonPath, value, options, errors); };
+const jsoncApplyEdits = (text, edits, options) => { if (!_jsonc) missingJsonc(); return _jsonc.applyEdits(text, edits, options); };
 
 // The receipt's paths go through relativeWithinAsync (src/paths.mjs), which canonicalises BOTH
 // sides before comparing. A private `path.relative(repoRoot, abs)` here was the raw form the path
@@ -632,6 +666,10 @@ export function tomlWithoutHoltServer(existing) {
  * `onlyExisting` (default) touches only files that already exist, so holt never fabricates
  * config for tools the user does not have installed.
  */
+/**
+ * @param {string} repoRoot
+ * @param {{bin?: string, home?: string, scope?: string, hosts?: string[]|null}} [opts]
+ */
 export async function installMcp(repoRoot, {
   bin = 'holt', home = os.homedir(), scope = 'project', hosts = null,
 } = {}) {
@@ -681,6 +719,7 @@ export async function installMcp(repoRoot, {
 
     let cfg = {};
     let exists = true;
+    /** @type {string|null} */
     let rawText = null;
     // ABSENT AND UNREADABLE ARE NOT THE SAME STATE, and only one of them makes it safe to write.
     // Conflating them in a single catch is what let a legal trailing comma cost a team both of
@@ -723,6 +762,7 @@ export async function installMcp(repoRoot, {
     await fs.mkdir(path.dirname(t.file), { recursive: true });
     // JSONC-PRESERVING WRITE: if we have the original text, use jsonc-parser to surgically
     // edit only the holt key, preserving comments. For a new file, use JSON.stringify.
+    /** @type {string} */
     let output;
     if (rawText != null) {
       output = jsoncWrite(rawText, [[[t.key], cfg[t.key]]], { tabSize: 2, insertSpaces: true });
@@ -750,7 +790,7 @@ export async function installMcp(repoRoot, {
  * used a different bin string (an absolute dev path, `npx holt`, a future/past flag set, a
  * renamed binary) and that check would then find no match, so integrate PUSHED A SECOND ENTRY
  * rather than recognising and replacing the first. Reproduced end-to-end: seeding
- * `.claude/settings.json` with `node /Users/dev/projects/holt/bin/holt.mjs hook pre-tool-use
+ * `.claude/settings.json` with `node /Users/developer/project/bin/holt.mjs hook pre-tool-use
  * --host claude-code` and re-running `holt integrate` left that entry untouched and appended
  * `holt hook pre-tool-use --host claude-code` next to it — every Bash call now fires BOTH, and if
  * the stale absolute path no longer exists (the ordinary case after an upgrade or a machine
@@ -957,7 +997,10 @@ const CURSOR_EVENT_SUBCOMMAND = {
 
 export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(repoRoot, '.cursor', 'hooks.json');
+  /** @type {string|null} */
+  /** @type {string|null} */
   let rawText = null;
+  /** @type {any} */
   let cfg = {};
   let created = true;
   try {
@@ -997,6 +1040,7 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
 
   await fs.mkdir(path.dirname(file), { recursive: true });
   // JSONC-PRESERVING WRITE: use element-level reconciliation to preserve comments.
+  /** @type {string} */
   let output;
   if (rawText != null) {
     let result = rawText;
@@ -1100,7 +1144,9 @@ const CLAUDE_EVENT_SUBCOMMAND = {
  */
 export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(repoRoot, '.claude', 'settings.json');
+  /** @type {string|null} */
   let rawText = null;
+  /** @type {any} */
   let cfg = {};
   let created = true;
   try {
@@ -1198,6 +1244,7 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
 
   // JSONC-PRESERVING WRITE: if we have the original text, use element-level reconciliation
   // to preserve comments. For a new file, fall back to JSON.stringify.
+  /** @type {string} */
   let output;
   if (rawText != null) {
     // First, ensure cfg.hooks exists in the text (it may not if the user file had no hooks key)
@@ -1600,7 +1647,7 @@ export async function hostsReport(repoRoot, home = os.homedir()) {
 /**
  * Resolve the command every integration should reference.
  *
- * MEASURED: with integrations written as `node /Users/dev/projects/holt/bin/holt.mjs`, agents read
+ * MEASURED: with integrations written as `node /Users/developer/project/bin/holt.mjs`, agents read
  * AGENTS.md, chose the correct action, and were then STOPPED by the host's permission classifier
  * — "the permission classifier is blocking the execution". An absolute path to a script under a
  * developer's home directory is exactly the shape a Bash allowlist refuses, and the agent froze
@@ -1609,6 +1656,9 @@ export async function hostsReport(repoRoot, home = os.homedir()) {
  * A plain `holt` on PATH is both what a real installation looks like and what a classifier will
  * accept. So: prefer the installed binary, and only fall back to an explicit path when there
  * genuinely is no installation — saying so, because the fallback is the shape that gets blocked.
+ */
+/**
+ * @param {string|null} [preferred]
  */
 export async function resolveBin(preferred = null) {
   if (preferred && preferred !== 'holt') return { bin: preferred, how: 'explicit' };
@@ -1659,6 +1709,7 @@ async function foreignHookReport(repoRoot, scope) {
     ['claude-code', '.claude/settings.json', path.join(repoRoot, '.claude', 'settings.json')],
     ['cursor', '.cursor/hooks.json', path.join(repoRoot, '.cursor', 'hooks.json')],
   ];
+  /** @type {any[]} */
   const out = [];
   for (const [host, rel, file] of TARGETS) {
     let cfg;
@@ -1694,11 +1745,18 @@ async function foreignHookReport(repoRoot, scope) {
   return out;
 }
 
+/**
+ * @param {string} repoRoot
+ * @param {{bin?: string, home?: string, hosts?: string[]|null, scope?: string}} [opts]
+ */
 export async function integrate(repoRoot, {
   bin = 'holt', home = os.homedir(), hosts = null, scope = 'project',
 } = {}) {
-  const detected = hosts ?? await detectHosts(repoRoot, home);
-  const present = detected.all ?? detected;
+  const rawDetected = hosts ?? await detectHosts(repoRoot, home);
+  const detected = Array.isArray(rawDetected)
+    ? { all: rawDetected, project: rawDetected, user: [] }
+    : rawDetected;
+  const present = detected.all;
   const results = [];
 
   // Every integration references the SAME command, and it must be one a host will actually run.

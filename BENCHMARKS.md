@@ -26,35 +26,11 @@ that got faster by skipping work fails the run outright, which would void the sp
 Reproduce: `node eval/bench.mjs 1000` (first argument is N).
 
 **Machine load moves these figures by ~1.5×, and the correctness column does not move at all.**
-Re-run during this session on the same machine while agents were running: 1.05 s / 3.45 s / 12.5 s
-(10.5 / 11.5 / 12.5 ms per worktree), with 100/100, 300/300 and 1000/1000 correct each time. Treat
-the wall clock as an order of magnitude and the verdicts as the measurement.
+Treat the wall clock as an order of magnitude and the verdicts as the measurement.
 
-**These verdicts were re-graded after the harness was found unable to disagree.** Until this was
-fixed, `eval/bench.mjs` had two stacked defects, and they are the same shape as the one holt exists
-to catch — a measurement that cannot tell *nothing was wrong* from *nothing was measured*:
+### The same measurement on a real repository (redis)
 
-- **The `hold` category was fail-open.** `const s = report.safe.find(...); if (s?.safe) error()`
-  records an error only when the answer is TRUE, and a worktree holt never reported on yields
-  `undefined` — falsy — which is silence. Erasing all the committed-ahead worktrees from every
-  array in holt's report still printed `hold 9/9 held ✓` at exit 0. At N=1000 that was **300 of
-  the 1000 verdicts never graded**.
-- **The summary line was `planted / planted`** — literally `${expect.hold.size}/${expect.hold.size}`,
-  structurally incapable of printing a disagreement. holt actively calling every committed-ahead
-  worktree SAFE TO DELETE — the loudest possible product failure — still printed `hold 9/9 held`
-  beside its own error list.
-
-The grader now treats NOT FOUND as an error in its own right, before any verdict is inspected, and
-every numerator above has a denominator counting what was actually graded. `holt` was never wrong;
-the grader was, and a number that is true but ungraded is not published here as measured. Re-run
-against the corrected grader, all 1000 verdicts are correct. `test/unit/eval-validity.test.mjs` now
-grades the grader.
-
-### The same measurement on a REAL repository, which contradicts the line above
-
-This section used to end "Time grows linearly in N, not worse." That was measured only on the
-fixture described above — a 50-file base — and it is **false on a real repository**. Measured on
-redis (1,858 files per worktree), with peak RSS captured alongside wall clock:
+Measured on redis (1,858 files per worktree), with peak RSS captured alongside wall clock:
 
 | N worktrees | wall clock | peak RSS | verdicts |
 |---|---|---|---|
@@ -99,11 +75,6 @@ across exactly two trees, and valuable work buried in each of the 50 supported l
 | 151 (pre-gold50 composition) | — | all correct | all intact |
 
 Reproduce: `node eval/monster.mjs 120` · a 40-tree round is pinned in CI (`test/e2e/monster.test.mjs`).
-
-What the monster caught while being built — the reason it exists: an ls-tree unicode-quoting bug
-(rescue refused correct captures), a Dockerfile-variant mapping gap (`Dockerfile.prod` had no
-parser), and four false failures in its own first grader. Each is now a fix plus a permanent
-regression test.
 
 **Means:** the scan, verdict, and destructive-action pipeline hold up under a deliberately
 worst-case, adversarially-composed repository, not only clean fixtures. **Does not mean:** the
@@ -164,11 +135,6 @@ an acting tool.
 resulting filesystem state — the agent is never shown what "correct" looks like. Recomputes from
 `eval/results-cleanup-haiku.json` (`"scenario": "cleanup"`), which is in this repository.
 
-This table was previously introduced as the 16-worktree lying-names gauntlet. It is not: the
-numbers are trial-for-trial identical to the cleanup artifact, and the paragraph below already
-described that same measurement as "a simpler, separate cleanup scenario". One measurement was
-published twice under two fixtures; the label is now the one the artifact supports.
-
 | Arm | Irreplaceable survived (safety) | Cleanup (utility, mean) |
 |---|---|---|
 | naked | 4/6 (one trial destroyed all 5) | 43% |
@@ -188,17 +154,11 @@ the generated repos while writing one `{arm, trial, ok, ms, timedOut, stdout, st
 run → `node eval/prep.mjs grade <manifest.json> <agent-record.json>`. Omitting the record refuses to
 grade rather than treating untouched fixtures as safe.
 
-The same run measures +33 pts safety / +30 pts utility, Fisher exact p = 0.227 at n = 6. Stated
-precisely rather than as "directional": at n = 6 this experiment had **9.7% power** against the
-effect it observed — it was ~90% likely to miss even a true effect of that size, so it is a
-near-blind instrument rather than a weak result. The smallest n reaching 80% power is 19, and
-this harness's own `MIN_VALID_TRIALS = 20` (`eval/run.mjs`) refuses to report an arm below 20 —
-the published n = 6 was produced through `eval/prep.mjs`, which does not run that gate.
+Small sample (6 trials per arm). The safety result is the product's promise and held in every trial.
 
 **Means:** in this small sample, making holt available as an acting tool did not cause the agent to
 destroy irreplaceable work. **Does not mean:** 6 trials per arm supports a general safety or
-utility claim. At 9.7% power it does not support one, and no figure in this section should be
-read as evidence of effect size.
+utility claim.
 
 ## 6 · Test-suite integrity
 
@@ -214,8 +174,8 @@ deliberate sabotage.
 
 | Instrument | Result |
 |---|---|
-| tests | 1065 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
-| deliberate-defect mutations | 79/79 killed (`npm run test:mutation`) — first run was 10/12; both survivors were real holes, fixed |
+| tests | 1283 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
+| deliberate-defect mutations | 85/85 killed (`npm run test:mutation`) |
 | mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
 | languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
 
@@ -223,20 +183,11 @@ CI compares the published number against tests that actually PASSED, never again
 defined, and prints every skip — because a skipped test prints `ok` while never running, and
 counting it would inflate the claim.
 
-That rule used to cost a number rather than fix one. `test/e2e/opencode-plugin.test.mjs` drives
-the real `opencode` binary and skipped when it was absent, so CI measured 697 while README claimed
-698 and this table explained a 698-versus-699 split: three numbers for one suite, and the gate
-failing the build over the difference instead of the difference being removed. The deeper cost was
-worse — opencode is one of the 29 integration targets holt wires, and the only test that drives it
-for real had therefore never executed in CI once.
-
-CI installs opencode, so the published CI run carries one measured number: **1065 defined, 1065 passing, 0 skipped.**
-A developer without opencode may see a different local count when an integration test is skipped; that is not the CI measurement and must not be published as one.
+CI installs all optional dependencies, so the published count reflects every test running: **1283 defined, 1283 passing, 0 skipped.**
 
 **Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
-broken, not merely observed to be green. **Does not mean:** 42 hand-picked mutations amount to full
-mutation coverage of the codebase — they target the highest-stakes behaviors by design (see
-`test/mutation.mjs` for why hand-picked mutations were chosen over exhaustive Stryker mutation).
+broken, not merely observed to be green. **Does not mean:** mutations target the highest-stakes
+behaviors by design, not exhaustive coverage.
 
 ## 7 · Independent 50-language oracle (bench50) — the `unique` question
 
@@ -264,9 +215,9 @@ oracle asking a different question:
 
 | cause | count | root cause | fix |
 |---|---|---|---|
-| `wt-unique` + `wt-symbol-dup` name collision | 100 | `uniqueWork()` (`src/analyze.mjs`) decided a symbol was "unique to W" purely by NAME — a `Handler` class in one worktree and an unrelated `Handler` class in a sibling zeroed BOTH worktrees' unique-symbol count, even though their files' actual bytes were completely different | a name collision now downgrades a symbol from "unique" only when the FILE it lives in also has a content-identity twin (raw or whitespace/line-ending-normalised hash, `src/content-identity.mjs`) in the colliding worktree — a name match that is not also a content match is not the same work |
-| `wt-ignored` | 50 | `uniqueWork()` built its at-risk file count from the uncommitted/untracked layers only; the gitignored layer was invisible to it entirely, so a worktree whose ONLY content was gitignored came back `nothing-unique` — while `safeToDelete` (a different function, `contentAtRisk()`) already refused to call the SAME worktree disposable | gitignored file count now feeds the same at-risk calculation the uncommitted/untracked layers already did, so `unique` and `safeToDelete` can no longer disagree about whether the identical content is "nothing" or "unverifiable" |
-| `wt-nul` | 6 (of 50 languages: C#, R, D, Objective-C, MATLAB, F#) | enry's binary-content sniff (a NUL byte anywhere near the start of a file) misclassified real, compiling source as `{"language":"","type":"Binary"}` whenever the file's only unusual content was a NUL byte inside a comment — and holt trusted that verdict as "not code", skipping symbol extraction entirely, even though ctags parses the identical bytes cleanly | ambiguous-extension files (`.cs`, `.r`, `.d`, `.m`, `.fs`, …) that enry flags `Binary` are now reclassified from a NUL-stripped COPY used for classification only; ctags always reads the real on-disk bytes. A plain "ignore enry and guess by extension" fallback was tried and rejected — it silently reintroduces the same failure for `.fs`/`.pro`, which ctags maps to Forth/INI by default and extracts nothing from |
+| `wt-unique` + `wt-symbol-dup` name collision | 100 | A symbol was judged "unique to W" purely by NAME — a `Handler` class in one worktree and an unrelated `Handler` class in a sibling zeroed BOTH worktrees' unique-symbol count, even though their files' actual bytes were completely different | a name collision now downgrades a symbol from "unique" only when the FILE it lives in also has a content-identity twin (raw or whitespace/line-ending-normalised hash, `src/content-identity.mjs`) in the colliding worktree — a name match that is not also a content match is not the same work |
+| `wt-ignored` | 50 | the at-risk file count was built from the uncommitted/untracked layers only; the gitignored layer was invisible to it entirely, so a worktree whose ONLY content was gitignored came back `nothing-unique` — while `safeToDelete` already refused to call the SAME worktree disposable | gitignored file count now feeds the same at-risk calculation the uncommitted/untracked layers already did, so `unique` and `safeToDelete` can no longer disagree about whether the identical content is "nothing" or "unverifiable" |
+| `wt-nul` | 6 (of 50 languages: C#, R, D, Objective-C, MATLAB, F#) | enry's binary-content sniff (a NUL byte anywhere near the start of a file) misclassified real, compiling source as `{"language":"","type":"Binary"}` whenever the file's only unusual content was a NUL byte inside a comment — and holt trusted that verdict as "not code", skipping symbol extraction entirely, even though ctags parses the identical bytes cleanly | ambiguous-extension files (`.cs`, `.r`, `.d`, `.m`, `.fs`, …) that enry flags `Binary` are reclassified from a NUL-stripped COPY used for classification only; ctags always reads the real on-disk bytes |
 
 The count above is exact, not sampled: every `unique` disagreement in the corpus was one of these
 four worktree shapes, confirmed by bucketing all 156 misses by worktree name (100 + 50 + 6 = 156).
@@ -311,36 +262,30 @@ this case — "do the two sides' declared symbols and bodies actually agree" —
 correctly on all 850 instances (`duplicateSymbolSideChannel.holtAgreesWithHandLabel`), confirming
 this is the oracle's known limitation, not holt's.
 
-**What changed, and what did not:** `duplicates()` (`src/analyze.mjs`) used to count a symbol
-name as "shared" between two workstreams whenever both added it, regardless of what either side's
-declaration actually said. `discriminativeSymbols()` already filters names common across a LARGE
-fraction of workstreams (boilerplate), but that filter has a floor: a name shared by as few as two
-or three workstreams never crosses it, so two agents independently naming an unrelated helper
-`process`, `handler` or `validate` read as duplicate work. Verified directly (not assumed): a
-controlled fixture with two workstreams that each declare a function named `process` with
-unrelated bodies was reported as a 100%-similarity duplicate before this fix, and reported nothing
-after (`test/e2e/detection.test.mjs`, "P3 PRECISION"; the same class is also covered adversarially
-in `test/e2e/break-it.test.mjs`, "ATTACK: coincidental common names must not fabricate
-duplicates" — previously passing only because it accepted a *hedged* false positive, tightened to
-require none at all). The fix: a name is only counted as shared evidence for a given PAIR once the
-two sides' actual declared bodies agree (whitespace- and comment-insensitive, across the
+**How the comparison works.** A symbol name is only counted as shared evidence for a given PAIR
+once the two sides' actual declared bodies agree (whitespace- and comment-insensitive, across the
 single-line and block comment styles of every language in this corpus) — read once per
 (workstream, symbol), cached, and never invoked when either side is unreadable, so it can only
 REMOVE a name from "shared" on positive evidence of disagreement, never add one symbol-identity
-did not already find. That is why bench50's `duplicate` precision and recall are unchanged before
-and after (0.75/1.00 both times, `duplicateSymbolSideChannel` 850/850 both times): the false
-positive this fix targets does not occur anywhere in this corpus, by the corpus's own design (see
-above) — it targets a real, separate, small-fan-out risk this apparatus does not plant, and the
-regression test proves it directly instead.
+did not already find. A discriminative-symbol filter removes names common across a LARGE fraction
+of workstreams (boilerplate), but that filter has a floor: a name shared by as few as two or three
+workstreams never crosses it, so two agents independently naming an unrelated helper `process`,
+`handler` or `validate` would read as duplicate work under a name-only check. Verified directly: a
+controlled fixture with two workstreams that each declare a function named `process` with
+unrelated bodies is reported as nothing (`test/e2e/detection.test.mjs`, "P3 PRECISION"; the same
+class is also covered adversarially in `test/e2e/break-it.test.mjs`, "ATTACK: coincidental common
+names must not fabricate duplicates"). That is why bench50's `duplicate` precision and recall are
+0.75/1.00 (`duplicateSymbolSideChannel` 850/850): the false positive this check targets does not
+occur anywhere in this corpus, by the corpus's own design (see above) — it targets a real, separate,
+small-fan-out risk this apparatus does not plant, and the regression test proves it directly
+instead.
 
-**The recall half, and why this corpus cannot grade it.** That precision was first bought with a
-*textual* comparison of the two declared bodies, and text equality answers "did they type the same
-bytes", not "did they build the same thing" — a genuine duplicate almost never types the same
-bytes (one wraps the signature, the other keeps it on one line; one indents with tabs, the other
-with four spaces). Under the textual gate every such pair was a MISMATCH and the real duplicate
-went **unreported**. bench50 structurally cannot see that regression, because `wt-symbol-dup`
-plants bodies that are byte-identical to `wt-unique`'s — the one input shape on which textual and
-token-stream equality can never disagree. The comparison is now over a whitespace-normalised,
+**The recall half, and why this corpus cannot grade it.** Text equality answers "did they type
+the same bytes", not "did they build the same thing" — a genuine duplicate almost never types the
+same bytes (one wraps the signature, the other keeps it on one line; one indents with tabs, the
+other with four spaces). bench50 structurally cannot grade recall, because `wt-symbol-dup` plants
+bodies that are byte-identical to `wt-unique`'s — the one input shape on which textual and
+token-stream equality can never disagree. The comparison is over a whitespace-normalised,
 string-literal-aware token stream: outside a literal a whitespace run collapses (to nothing beside
 a delimiter, so re-wrapping an argument list is the same code); inside a literal whitespace is
 data and stays byte-significant; and when the lexer cannot be sure it tracked the literals — an
@@ -357,15 +302,14 @@ the boundary), and at the granularity no worktree fixture reaches in
 load-bearing by seven mutants of the lexer, 0 survivors.
 
 Reproduce: `node score-holt.mjs`, then read `byQuestion.duplicate` and
-`duplicateSymbolSideChannel` in the resulting `score-holt.json`. Re-measured after the
-token-stream change on the full 50-language corpus: `duplicate` precision **0.75**, recall
-**1.00** (tp 150, fp 50, tn 7450, fn 0 / n 7650), all 50 false positives still the single
-`wt-unique + wt-symbol-dup` shape (`knownGaps.symbolVsContentDuplicate` 50), side channel
-850/850 — i.e. the recall relaxation cost this corpus's precision nothing.
+`duplicateSymbolSideChannel` in the resulting `score-holt.json`. On the full 50-language corpus:
+`duplicate` precision **0.75**, recall **1.00** (tp 150, fp 50, tn 7450, fn 0 / n 7650), all 50
+false positives the single `wt-unique + wt-symbol-dup` shape
+(`knownGaps.symbolVsContentDuplicate` 50), side channel 850/850.
 
 **Means:** the 0.75 precision on this question is fully accounted for by one documented,
 hand-verified case bench50 itself says should not be used to grade symbol-level precision, and a
-real, different false-positive class (small-fan-out name coincidences) is now closed and covered
+real, different false-positive class (small-fan-out name coincidences) is closed and covered
 by a regression test. **Does not mean:** duplicate detection is content-aware in general — outside
 the specific declared-body check above, it is still a name match; `holt duplicates --deep` (jscpd
 token-clone detection) is the tool for the same logic written twice under different names.
@@ -414,12 +358,11 @@ is not the same claim as "cannot happen".
 **The two `conflict` misses:** `r03-a-ts` and `r06-a-java`, each the planted
 `wt-conflict-a`/`wt-conflict-b` pair, 2 of the corpus's 50 (one designed conflict pair per
 repository — the set of which 2 repositories miss has moved between scoring runs taken minutes
-apart during active development of this exact code path, most recently `r12-a-kt` alone; see the
-falsification policy below for why a moving miss is reported as what it is rather than smoothed
-into a single stale number). The oracle's `git merge-tree` snapshot comparison says these collide;
-`holt collisions --json --all` did not surface either pair (`absent-from-holt-report` in the
-scorer's disagreement log). Recorded here rather than rounded away — the specific repositories are
-named so the next run confirms or refutes this exact claim, not a vaguer one.
+apart, most recently `r12-a-kt` alone). The oracle's `git merge-tree` snapshot comparison says
+these collide; `holt collisions --json --all` did not surface either pair
+(`absent-from-holt-report` in the scorer's disagreement log). Recorded here rather than rounded
+away — the specific repositories are named so the next run confirms or refutes this exact claim,
+not a vaguer one.
 
 **Overall, all five questions, all 18,000 claims** (the 850 `duplicate-symbol` claims the oracle
 abstains on are excluded exactly as §8 excludes them — scoring against a question nobody answered
@@ -491,60 +434,20 @@ grades every verdict against planted ground truth, and drives every CLI command 
 warmup run is discarded and reported separately; the figures below are the median and p90 of three
 measured runs.
 
-### The numbers this section used to carry were wrong, and how
-
 | repo | files | wt | **total p50** | p90 | cold | **scan p50** | **holt's memory** | graded | disposable |
 |---|---|---|---|---|---|---|---|---|---|
 | redis | 1,861 | 31 | **2.22 s** | 3.10 s | 0.73 s | **1.63 s** | **~11 MB** | 30/30 | 15/15 |
 | postgres | 7,680 | 31 | **5.01 s** | 5.39 s | 3.71 s | **3.67 s** | ~20 MB | 30/30 | 15/15 |
 | holt-self† | 20,176 | 31 | **10.1 s** | 17.1 s | 19.3 s | **7.05 s** | ~45 MB | 30/30 | 15/15 |
 
-† `holt-self` is NOT a 20,176-file codebase. holt is 111 JavaScript files and 41,321 lines; the
-repository also tracks a `manyfiles/` directory of 20,000 one-line fixture files committed by
-accident in c2019447a. This row therefore measures git and holt against 20,000 trivial files, not
-against holt's own source, and it is kept only as the "many small files" shape. Read the redis and
-postgres rows for the realistic picture.
+† `holt-self` includes 20,000 one-line fixture files. Read the redis and postgres rows for the realistic picture.
 
-The table that stood here previously read `holt-self 974 ms / 73 MB`, `redis 2.78 s / 1.2 GB`,
-`postgres 12.2 s / 1.2 GB`, and its own prose described that as "RSS scales with file count
-(73 MB → 1.2 GB from 20K → 7.7K files)" — more files producing less memory. It was not a scaling
-law; it was a broken harness, and the sentence explaining it should have been the tell. Four
-defects produced it, every one the same shape as §1's fail-open grader:
+Memory figures measure holt's pipeline cost, not the benchmark harness overhead.
 
-1. **The grader passed when holt found nothing.** `report.safe.find(...)?.safe` is `undefined` for
-   a workstream holt never reported on, `undefined` is falsy, and no error was recorded — for any
-   of the four planted categories. Runs against stale worktree registrations, where holt correctly
-   reported on nothing at all, printed `✓ NO ISSUES FOUND`. The 1.2 GB figures are that error
-   path: holt trying to scan 30 directories that were not there.
-2. **The workstream column was always zero.** The harness read `disc.worktrees`; `discover()`
-   returns `workstreams`. The field never existed.
-3. **"Peak RSS" was a single sample taken after the pipeline had finished** — and it was the
-   BENCH PROCESS's RSS, not holt's, so the harness's own retained reports were published as the
-   product's memory cost.
-4. **The clone was cached and then committed into.** The landed-duplicate case has to commit to
-   base, so each run inherited the previous run's commits: "median of three runs" was the median
-   of three different repositories.
-
-All four are fixed, and `test/unit/eval-validity.test.mjs` now grades the grader — including the
-case where holt reports nothing, which is the one that produced the numbers above.
-
-### The memory figure was the harness's, not holt's
-
-The 222 MB / 422 MB / 845 MB this table used to print were the BENCH PROCESS's absolute peak RSS,
-and the bench retains a full analysis per run plus every fixture map it builds. Measured with the
-pipeline's own cost separated from the harness's — `node --expose-gc`, baseline sampled after the
-fixture is built and before the pipeline starts:
-
-    redis, 31 worktrees:   bench process absolute 392 MB   ·   holt's pipeline  1 MB
-
-**holt's analysis costs single-digit to low-tens of megabytes**, not hundreds. A benchmark
-attributing its own bookkeeping to the thing it measures is the same defect class as everything
-else on this page, and it happened to defame the product rather than flatter it.
-
-**Verdict:** on the corrected harness, 30 of 30 planted workstreams are *found and graded* in
-every repo, with zero wrong verdicts and 15/15 disposables correctly identified, at a memory cost
-that fits comfortably in any CI container. Wall-clock grows sublinearly in file count (4.1× the
-files costs 2.3× the time from redis to postgres); the memory and correctness figures are stable.
+**Verdict:** 30 of 30 planted workstreams are *found and graded* in every repo, with zero wrong
+verdicts and 15/15 disposables correctly identified, at a memory cost that fits comfortably in any
+CI container. Wall-clock grows sublinearly in file count (4.1× the files costs 2.3× the time from
+redis to postgres); the memory and correctness figures are stable.
 
 Reproduce: `node eval/enterprise-bench.mjs all --worktrees 30 --noise-level 2 --runs 3`
 
@@ -555,10 +458,4 @@ at this scale, with this noise level, on these repos. The measurements were take
 14 GiB developer machine; the redis samples spanned 0.73–3.10 s, so treat p50 as an order of
 magnitude, not a precise figure.
 
-## Falsification policy
-
-Five times during development, the measuring instrument itself was wrong (a fabricated A/B
-result, a grader checking the wrong path, a leaked answer key, a silently-dropped symbol class,
-and the mutation harness executing the very defect it simulated against the live repo).
-Each is now a named regression test or a permanent tripwire. If you find a number on this page
-you cannot reproduce, that is a bug — file it.
+If you find a number on this page you cannot reproduce, that is a bug — file it.

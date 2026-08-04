@@ -77,7 +77,10 @@ export async function readCursor(cwd, destination) {
   }
 }
 
-/** Load an Ed25519 signing key from a PEM path, or return null. Never throws on absence. */
+/**
+ * Load an Ed25519 signing key from a PEM path, or return null. Never throws on absence.
+ * @param {{signingKey?: string|null, signingKeyPath?: string|null, env?: Record<string, string|undefined>}} [opts]
+ */
 async function loadSigningKey({ signingKey = null, signingKeyPath = null, env = process.env } = {}) {
   if (signingKey) return createPrivateKey(signingKey);
   const p = signingKeyPath ?? env.HOLT_AUDIT_SIGNING_KEY ?? null;
@@ -90,17 +93,10 @@ async function loadSigningKey({ signingKey = null, signingKeyPath = null, env = 
  * Export everything the sink has not shipped yet.
  *
  * @param {string} cwd                any path inside the repository
- * @param {object} opts
- * @param {string} opts.to            destination file (appended), or a directory (daily files)
- * @param {string} opts.format        ocsf | ecs | cef | json | csv   (default ocsf)
- * @param {boolean} opts.dryRun       compute everything, write nothing
- * @param {string} opts.signerName    note signer name for the batch checkpoint
- * @param {string} opts.publicKeyB64  licence public key override. An ARGUMENT ONLY, never an env
- *   var — an env override would be a forgery hole (anyone could point holt at a key they mint
- *   licences with). A caller who can pass an argument can already edit this file, so it grants
- *   nothing new; it exists so the suite can drive the paid path with a throwaway keypair. Same
- *   rule, same reasoning, as src/license.mjs.
- * @returns {Promise<object>} {emitted, fromSeq, toSeq, destination, cursor, checkpoint, verification}
+ * @param {{to?: string|null, format?: string, dryRun?: boolean, env?: Record<string, string|undefined>, now?: number|null,
+ *          signerName?: string|null, signingKey?: string|null, signingKeyPath?: string|null,
+ *          publicKeyB64?: string|null}} [opts]
+ * @returns {Promise<any>}
  */
 export async function sinkExport(cwd, {
   to = null, format = 'ocsf', dryRun = false, env = process.env, now = null,
@@ -118,11 +114,10 @@ export async function sinkExport(cwd, {
   // 1. VERIFY BEFORE EMITTING. A broken chain stops the sink dead.
   const verification = await verifyJournal(cwd);
   if (!verification.ok) {
-    const err = new Error(
+    const err = Object.assign(new Error(
       `audit sink REFUSED: this journal does not verify (${verification.code}) — ${verification.reason}. `
-      + 'Nothing was exported: shipping records from a log that may have been rewritten launders the tampering.');
-    err.code = 'EINTEGRITY';
-    err.verification = verification;
+      + 'Nothing was exported: shipping records from a log that may have been rewritten launders the tampering.'),
+      { code: 'EINTEGRITY', verification });
     throw err;
   }
 
@@ -134,17 +129,17 @@ export async function sinkExport(cwd, {
   const cursor = await readCursor(cwd, to);
   if (cursor) {
     if (cursor.seq > chained.length) {
-      const err = new Error(
-        `audit sink REFUSED: the cursor has already exported ${cursor.seq} record(s) but the journal now holds ${chained.length} — the log SHRANK behind the sink.`);
-      err.code = 'EREWRITE';
+      const err = Object.assign(new Error(
+        `audit sink REFUSED: the cursor has already exported ${cursor.seq} record(s) but the journal now holds ${chained.length} — the log SHRANK behind the sink.`),
+        { code: 'EREWRITE' });
       throw err;
     }
     if (cursor.seq > 0) {
       const seen = leaves[cursor.seq - 1]?.toString('hex') ?? null;
       if (seen !== cursor.leaf) {
-        const err = new Error(
-          `audit sink REFUSED: record ${cursor.seq - 1}, already exported, no longer hashes to what was exported — history was REWRITTEN behind the sink.`);
-        err.code = 'EREWRITE';
+        const err = Object.assign(new Error(
+          `audit sink REFUSED: record ${cursor.seq - 1}, already exported, no longer hashes to what was exported — history was REWRITTEN behind the sink.`),
+          { code: 'EREWRITE' });
         throw err;
       }
     }
@@ -173,6 +168,7 @@ export async function sinkExport(cwd, {
     root,
   });
   let checkpointText = checkpointBody;
+  /** @type {string|null} */
   let signedBy = null;
   const key = await loadSigningKey({ signingKey, signingKeyPath, env });
   if (key) {

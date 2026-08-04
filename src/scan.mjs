@@ -108,7 +108,7 @@ async function pathUsable(p) {
 /** COMMITTED delta: what does base lack from head? */
 export async function committedDelta(root, baseOid, headOid, { strictReadOnly, timeout }) {
   if (!headOid || headOid === baseOid) {
-    return { files: [], how: 'identical-to-base', conflicted: false };
+    return { files: [], how: 'identical-to-base', conflicted: false, error: undefined };
   }
 
   if (strictReadOnly) {
@@ -119,6 +119,7 @@ export async function committedDelta(root, baseOid, headOid, { strictReadOnly, t
       how: 'three-dot-approximate',
       conflicted: false,
       caveat: 'strictReadOnly: over-reports content base already acquired by another route',
+      error: undefined,
     };
   }
 
@@ -169,6 +170,7 @@ export async function committedDelta(root, baseOid, headOid, { strictReadOnly, t
     how: 'merge-tree',
     conflicted: mt.code === 1,
     mergedTree: tree,
+    error: undefined,
   };
 }
 
@@ -621,6 +623,7 @@ async function uncommittedDelta(wtPath, { timeout }) {
     untracked,
     unmeasured: flags.unknown,
     how: 'status+diff-HEAD',
+    error: undefined,
   };
 }
 
@@ -833,6 +836,92 @@ export function looksGenerated(p, activeDirs) {
 }
 
 /**
+ * TEST FIXTURE DETECTION — test files and fixtures counted as production code.
+ *
+ * WHY THIS EXISTS. holt's metrics count every touched file as production code, so a workstream
+ * that added 200 test fixtures and 3 source files reported 203 "symbols" and a risk score
+ * driven by the fixtures. The ROI was inflated (test churn read as productive work) and the
+ * risk score was wrong (a test fixture that exists nowhere else is not the same risk class as
+ * a source file that exists nowhere else). A tool whose whole job is "what did this workstream
+ * actually contribute" cannot answer that question while test scaffolding reads as authorship.
+ *
+ * DETECTION is by CONVENTION, not by content: the directories and file patterns the ecosystem
+ * has converged on (test/, tests/, __tests__, spec/, specs/, *.test.*, *.spec.*, *_test.*).
+ * Content-based detection ("this file has `assert` in it") is exactly the kind of heuristic
+ * that misclassifies a source file that happens to validate its inputs, so it is not used.
+ *
+ * NOT FILTERED OUT BY DEFAULT. A test file CAN hold the only copy of something (a fixture that
+ * documents a bug, a regression test that is itself the spec), so holt does not silently drop
+ * them from the at-risk set the way it drops node_modules/. Instead they are FLAGGED —
+ * `isTestFile` on the path — so the analysis can report "test fixtures dominate this workstream"
+ * and the user can decide whether the risk is real. This is the same principle GENERATED_DIRS
+ * follows: name the provenance, let the verdict use it.
+ */
+
+/** Directory segments that conventionally hold test code. */
+const TEST_DIR_SEGMENTS = new Set([
+  'test', 'tests', '__tests__', '__test__', 'spec', 'specs', '__specs__',
+]);
+
+/** File patterns that conventionally mark a test file. */
+const TEST_FILE_PATTERNS = [
+  /\.test\.[A-Za-z0-9]+$/,
+  /\.spec\.[A-Za-z0-9]+$/,
+  /_test\.[A-Za-z0-9]+$/,
+  /(^|\/)test_[A-Za-z0-9_]+\.[A-Za-z0-9]+$/,  // Python: test_foo.py
+  /(^|\/)[A-Za-z0-9_]+_test\.[A-Za-z0-9]+$/,  // Go/Rust: foo_test.go
+];
+
+/**
+ * Is `p` a test file or fixture, by conventional directory or file-name pattern?
+ *
+ * Pure and exported so the analysis layer and the CLI agree on what counts as a test — a
+ * second copy of this rule drifts, and the "test fixtures dominate" warning is the one a user
+ * acts on, so it must come from one place.
+ *
+ * @param {string} p  a repo-relative or absolute path
+ * @returns {boolean}
+ */
+export function isTestFile(p) {
+  if (!p) return false;
+  // Directory segment match: any path containing a test-dir segment is a test file.
+  const segs = String(p).split(/[/\\]/);
+  for (const s of segs) {
+    if (TEST_DIR_SEGMENTS.has(s)) return true;
+  }
+  // File-name pattern match.
+  const base = segs[segs.length - 1];
+  for (const re of TEST_FILE_PATTERNS) {
+    if (re.test(base)) return true;
+  }
+  return false;
+}
+
+/**
+ * How many of `paths` are test files, and does that dominate?
+ *
+ * "Dominates" = more than half of the touched files are test files. That is the threshold at
+ * which the risk score and ROI are materially wrong: below it, test files are a minority and
+ * the production-code majority drives the verdict; above it, the verdict is driven by fixtures.
+ *
+ * @param {string[]} paths
+ * @returns {{ testCount: number, totalCount: number, testFraction: number, dominates: boolean, testPaths: string[] }}
+ */
+export function testFixtureProfile(paths) {
+  const testPaths = (paths ?? []).filter(isTestFile);
+  const totalCount = (paths ?? []).length;
+  const testCount = testPaths.length;
+  const testFraction = totalCount > 0 ? testCount / totalCount : 0;
+  return {
+    testCount,
+    totalCount,
+    testFraction,
+    dominates: totalCount > 0 && testCount > totalCount / 2,
+    testPaths,
+  };
+}
+
+/**
  * THE AT-RISK FILE SET, in one place.
  *
  * The files in a scanned workstream whose content exists ONLY on disk: nothing in git holds them,
@@ -970,7 +1059,7 @@ async function ignoredContent(wtPath, { timeout, activeDirs }) {
     // disposable — verified, not assumed.
     files.push(p);
   }
-  return { files: files.sort(), how: 'status --ignored' };
+  return { files: files.sort(), how: 'status --ignored', error: undefined };
 }
 
 /** Phase 1: file-level deltas for one workstream. */
@@ -1023,11 +1112,11 @@ async function scanFiles(ws, ctx) {
       // Asking git for status inside a jj workspace would fail (no .git) and, worse, a failure
       // there would read as "clean".
       ws.vcs === 'jj'
-        ? Promise.resolve({ files: [], untracked: [], how: 'jj-snapshot (working copy is part of @)' })
+        ? Promise.resolve({ files: [], untracked: [], unmeasured: [], how: 'jj-snapshot (working copy is part of @)', error: undefined })
         : uncommittedDelta(ws.path, { timeout }),
       // Ignored content cannot be analysed, but it CAN be destroyed — so it must be seen.
       ws.vcs === 'jj'
-        ? Promise.resolve({ files: [], how: 'n/a (jj)' })
+        ? Promise.resolve({ files: [], how: 'n/a (jj)', error: undefined })
         : ignoredContent(ws.path, { timeout, activeDirs }),
     ]);
 
@@ -1175,6 +1264,12 @@ async function scanFiles(ws, ctx) {
       addedSymbols: 0,
     };
 
+    // TEST FIXTURE PROFILE. Flagged, not filtered: a test file CAN hold the only copy of
+    // something, so it stays in the at-risk set. But when test files DOMINATE the touched set
+    // the risk score and ROI are materially wrong, and the analysis layer needs to say so.
+    // See isTestFile()/testFixtureProfile() above for the convention-based detection.
+    result.testFixture = testFixtureProfile(touchedFiles);
+
     // CONTENT IDENTITY, PER FILE — what `safeToDelete` needs to prove "a living sibling holds
     // this exact work" when the sibling holds it at a DIFFERENT PATH or in a different
     // indentation style. mergedTree (above) only catches the whole worktree matching another
@@ -1211,7 +1306,7 @@ async function scanFiles(ws, ctx) {
 /**
  * Scan every workstream.
  *
- * @param {object} disc  result of discover()
+ * @param {{root: string|null, vcs: string|null, workstreams: any[], jj: any, error: string|null, bare?: boolean}} disc  result of discover()
  * @param {{base?: string, strictReadOnly?: boolean, concurrency?: number, timeout?: number,
  *          symbols?: boolean, includePrimary?: boolean, symbolBackend?: string}} [opts]
  */
@@ -1224,11 +1319,25 @@ export async function scan(disc, opts = {}) {
   }
 
   const base = await resolveBase(disc.root, opts.base);
+  // NETWORK FILESYSTEM TIMEOUT ESCALATION. When the repository root is on a detected NFS/SMB
+  // mount and no explicit timeout was given, escalate the default so a slow link does not
+  // become a false instrument failure. The warning is carried on the scan result so every
+  // surface (CLI, MCP, TUI) can say "this verdict came through a slow link" rather than
+  // silently changing the timeout. See src/git.mjs resolveTimeout().
+  /** @type {{network: boolean, warning?: string}|null} */
+  let networkFs = null;
+  let resolvedTimeout = opts.timeout ?? 60_000;
+  if (opts.timeout === undefined || opts.timeout === null) {
+    const { resolveTimeout } = await import('./git.mjs');
+    const rt = await resolveTimeout(disc.root);
+    resolvedTimeout = rt.timeout;
+    if (rt.network) networkFs = { network: true, warning: rt.warning };
+  }
   const ctx = {
     root: disc.root,
     base,
     strictReadOnly: !!opts.strictReadOnly,
-    timeout: opts.timeout ?? 60_000,
+    timeout: resolvedTimeout,
   };
 
   // THE PRIMARY IS EXCLUDED ONLY WHEN THERE IS SOMETHING ELSE TO TALK ABOUT.
@@ -1264,6 +1373,7 @@ export async function scan(disc, opts = {}) {
   // of the zero workstreams scanned and false of the repository. One porcelain status call
   // records whether the unscanned primary is dirty, so every surface can say what holt is NOT
   // vouching for instead of implying it checked.
+  /** @type {{id: any, path: any, dirtyFiles: number|null}|null} */
   let primaryUnscanned = null;
   const primary = disc.workstreams.find((w) => w.isPrimary);
   if (primary && !includePrimary) {
@@ -1282,6 +1392,8 @@ export async function scan(disc, opts = {}) {
 
   // ---- Phase 2: symbols -----------------------------------------------------------
   let backend = { kind: 'disabled', label: 'symbols disabled', degraded: false };
+  /** @type {string|null} */
+  let minifiedWarning = null;
   if (opts.symbols !== false) {
     backend = await resolveBackend({ force: opts.symbolBackend });
 
@@ -1322,5 +1434,13 @@ export async function scan(disc, opts = {}) {
     // those two empty states apart from the output alone.
     soloPrimary,
     strictReadOnly: ctx.strictReadOnly,
+    // Present (and {network:true}) when the repository root was detected on an NFS/SMB mount and
+    // the timeout was escalated as a result. Carries a human-readable warning. See resolveTimeout
+    // in src/git.mjs. null when the root is on a local disk or an explicit timeout was given.
+    networkFs,
+    // A human-readable warning when the regex fallback is in use and minified files were
+    // detected — their symbol counts are unreliable. null when ctags is in use (it is immune
+    // to minification) or when no minified files were found. See isMinified() in symbols.mjs.
+    minifiedWarning,
   };
 }

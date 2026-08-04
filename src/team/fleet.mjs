@@ -137,6 +137,7 @@ export async function fleetScan(roots, { concurrency = 4, maxDepth = 3, env = pr
         if (!disc.root) { failures.push({ repo: root, error: repoAbsenceError(disc, root).message }); continue; }
         const scanned = await scan(disc, opts);
         const report = await analyze(scanned, opts);
+        /** @type {any} */
         let branches = null;
         try { branches = await branchAudit(root, opts); } catch (e) { branches = { ok: false, reason: e.message }; }
 

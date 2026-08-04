@@ -218,7 +218,7 @@ test('GATE POLICY: a change that DELETES the policy is still judged by the base 
 
   assert.equal((await loadPolicy(dir)).found, false, 'control: the working tree really has none');
 
-  const gate = await loadGatePolicy(dir, { baseRef: oid });
+  const gate = await loadGatePolicy(dir, { base: { oid, ref: 'main', how: 'test' }, headRef: 'test-branch' });
   assert.equal(gate.found, true, 'the base copy must still govern');
   assert.equal(gate.source, 'base');
   assert.equal(gate.trusted, true);
@@ -231,19 +231,19 @@ test('GATE POLICY: a change that WEAKENS the policy is judged by the base copy, 
 
   assert.equal((await loadPolicy(dir)).policy.rules[0].id, 'whatever', 'control: the tree is lax');
 
-  const gate = await loadGatePolicy(dir, { baseRef: oid });
+  const gate = await loadGatePolicy(dir, { base: { oid, ref: 'main', how: 'test' }, headRef: 'test-branch' });
   assert.equal(gate.policy.rules[0].type, 'no-unlanded', 'the strict base rule must be the one enforced');
   assert.equal(gate.trusted, true);
 });
 
 test('GATE POLICY: a repo with NO base policy still works — the working tree is the fallback', async () => {
   const { dir, oid } = await gitRepoWithPolicy(null);
-  assert.equal((await loadGatePolicy(dir, { baseRef: oid })).found, false,
+  assert.equal((await loadGatePolicy(dir, { base: { oid, ref: 'main', how: 'test' }, headRef: 'test-branch' })).found, false,
     'no policy anywhere means no policy — absence is not an error');
 
   await fs.mkdir(path.join(dir, '.holt'), { recursive: true });
   await fs.writeFile(path.join(dir, '.holt', 'policy.json'), STRICT);
-  const gate = await loadGatePolicy(dir, { baseRef: oid });
+  const gate = await loadGatePolicy(dir, { base: { oid, ref: 'main', how: 'test' }, headRef: 'test-branch' });
   assert.equal(gate.found, true, 'adopting a policy for the first time must work');
   assert.equal(gate.source, 'worktree');
   assert.equal(gate.trusted, false, 'a policy the base has not reviewed is never trusted');
@@ -257,7 +257,7 @@ test('GATE POLICY MUST REFUSE: the base declares a policy whose content cannot b
 
   // "I cannot read the rules" must never collapse into "there are no rules" — that is the same
   // absent-evidence-reads-as-pass defect, and it would hand the bypass straight back.
-  await assert.rejects(() => loadGatePolicy(dir, { baseRef: oid }), (e) => {
+  await assert.rejects(() => loadGatePolicy(dir, { base: { oid, ref: 'main', how: 'test' }, headRef: 'test-branch' }), (e) => {
     assert.equal(e.code, 'POLICY_BASE_UNREADABLE');
     assert.match(e.message, /refusing/);
     return true;

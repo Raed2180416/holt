@@ -26,13 +26,6 @@
  * test/unit/safety.test.mjs, which proves a full scan changes nothing byte-for-byte.
  */
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
-
 import { discover, repoAbsenceError } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze, contextDigest } from '../analyze.mjs';
@@ -44,6 +37,33 @@ import { deepDuplicates } from '../deep.mjs';
 import { loadConfig, ConfigError } from '../config.mjs';
 import { assertUsablePath, samePathAsync } from '../paths.mjs';
 import { resolveActor, setAmbientActor } from '../actor.mjs';
+
+/**
+ * @modelcontextprotocol/sdk is an OPTIONAL dependency (see package.json optionalDependencies). A
+ * static import would throw ERR_MODULE_NOT_FOUND on an install that omits optionals (`npm i
+ * --omit=optional`, some corporate mirrors, older `--production`), killing the CLI before it
+ * prints anything — even `holt --help`. The SDK is loaded dynamically only when a server is
+ * actually started (createServer / runStdioServer); the test entry point (__test) and every other
+ * code path never need it, so the module loads fine without the SDK installed.
+ */
+/** @type {any} */
+let _mcp = null;
+async function loadMcp() {
+  if (_mcp) return _mcp;
+  try {
+    _mcp = {
+      server: await import('@modelcontextprotocol/sdk/server/index.js'),
+      transport: await import('@modelcontextprotocol/sdk/server/stdio.js'),
+      types: await import('@modelcontextprotocol/sdk/types.js'),
+    };
+  } catch {
+    throw new Error(
+      "holt requires the optional '@modelcontextprotocol/sdk' dependency to run the MCP server, " +
+      "and it is not installed. Install it with: npm install @modelcontextprotocol/sdk",
+    );
+  }
+  return _mcp;
+}
 
 /* --------------------------------------------------------------- caching ---- */
 
@@ -62,6 +82,10 @@ const cache = new Map();
  *   verdict is read at T0 and the agent acts at T0+10s, inside the TTL, after a human or another
  *   agent has written new work into that worktree. Advisory/aggregate tools may use the cache;
  *   the per-workstream safety verdict never does.
+ */
+/**
+ * @param {string} cwd
+ * @param {Record<string, any>} [opts]
  */
 async function getReport(cwd, opts = {}, { fresh = false } = {}) {
   // MCP CONFIG PARITY: load .holtrc.json so the MCP server honours the same config the CLI
@@ -938,7 +962,7 @@ async function dispatch(name, args, cwd, limit) {
         alreadyBuiltElsewhere: (d.duplicatedSymbols ?? []).map((x) => ({
           workstream: x.workstream, symbols: x.symbols.slice(0, 5), count: x.count,
         })),
-        contestedFiles: d.contestedFiles.map((x) => ({
+        contestedFiles: (d.contestedFiles ?? []).map((x) => ({
           workstream: x.workstream, files: x.files.slice(0, 5),
           count: x.fileCount, theirsUncommitted: x.hasUncommitted,
         })),
@@ -1080,7 +1104,10 @@ const respond = (payload, isError = false) => ({
   content: [{ type: 'text', text: JSON.stringify(sanitizeForModel(payload), null, 2) }],
 });
 
-export function createServer(opts = {}) {
+export async function createServer(opts = {}) {
+  const mcp = await loadMcp();
+  const { Server } = mcp.server;
+  const { CallToolRequestSchema, ListToolsRequestSchema } = mcp.types;
   const server = new Server(
     { name: 'holt', version: '0.2.0' },
     { capabilities: { tools: {} } },
@@ -1139,9 +1166,81 @@ export function createServer(opts = {}) {
 }
 
 export async function runStdioServer(opts = {}) {
-  const server = createServer(opts);
+  const server = await createServer(opts);
+  const mcp = await loadMcp();
+  const { StdioServerTransport } = mcp.transport;
   const transport = new StdioServerTransport();
   await server.connect(transport);
+}
+
+/**
+ * `holt mcp --print-config` — output the MCP server config as JSON for easy copy-paste.
+ *
+ * WHY THIS EXISTS. A user who wants to wire holt into a host manually (rather than running
+ * `holt integrate`, which writes the file for them) has to know the host's config file path,
+ * the key the host reads, and the entry shape it expects. Getting any of those wrong produces
+ * a config the host silently ignores — the same "wrote it, never worked" failure `integrate`
+ * was built to prevent. This command prints the exact JSON block for a given host so a user
+ * can paste it into the right file without memorising three schemas.
+ *
+ * SUPPORTED FORMATS, each confirmed against the host's own docs (the same research
+ * mcpTargets() in src/integrate/adapters.mjs encodes):
+ *   generic (default) — the standard { mcpServers: { holt: { command, args, env } } } shape
+ *                       Claude Code, Cursor, Continue, Gemini CLI, Copilot, Roo, Amazon Q, etc.
+ *   claude            — alias for generic; Claude Code's .mcp.json uses mcpServers.
+ *   cursor            — alias for generic; Cursor's .cursor/mcp.json uses mcpServers.
+ *   vscode            — VS Code's own mcp.json, key `servers` instead of `mcpServers`.
+ *   opencode          — OpenCode/Kilo's { mcp: { holt: { type, command, enabled } } } shape.
+ *   zed               — Zed's { context_servers: { holt: { source, command, args, env } } }.
+ *   codex             — Codex's TOML [mcp_servers.holt] block (returned as a string, not JSON).
+ *
+ * @param {{ host?: string, format?: string, bin?: string }} [opts]
+ * @returns {Promise<{ format: string, content: string }>}  `content` is JSON (or TOML for codex)
+ */
+export async function printMcpConfig(opts = {}) {
+  const host = String(opts.host ?? opts.format ?? 'generic').toLowerCase();
+  const bin = opts.bin ?? 'holt';
+  // mcpServerEntry knows every host's entry shape; reusing it here means this command and
+  // `holt integrate` can never disagree about what the entry looks like.
+  const { mcpServerEntry } = await import('../integrate/adapters.mjs');
+  const entry = mcpServerEntry(bin, shapeFor(host));
+
+  if (host === 'codex') {
+    return { format: 'codex', content: codexToml(bin) };
+  }
+  if (host === 'vscode') {
+    return { format: 'vscode', content: JSON.stringify({ servers: { holt: entry } }, null, 2) };
+  }
+  if (host === 'opencode' || host === 'kilo') {
+    return { format: host, content: JSON.stringify({ mcp: { holt: entry } }, null, 2) };
+  }
+  if (host === 'zed') {
+    return { format: 'zed', content: JSON.stringify({ context_servers: { holt: entry } }, null, 2) };
+  }
+  if (host === 'crush') {
+    return { format: 'crush', content: JSON.stringify({ mcp: { holt: entry } }, null, 2) };
+  }
+  if (host === 'amp') {
+    return { format: 'amp', content: JSON.stringify({ 'amp.mcpServers': { holt: entry } }, null, 2) };
+  }
+  // generic / claude / cursor / continue / gemini-cli / copilot / roo / amazon-q / factory /
+  // junie / warp / devin-desktop — all use the standard { mcpServers: { holt: {...} } } shape.
+  return { format: host, content: JSON.stringify({ mcpServers: { holt: entry } }, null, 2) };
+}
+
+/** Map a host name to the entry shape mcpServerEntry expects. */
+function shapeFor(host) {
+  if (host === 'opencode' || host === 'kilo') return 'opencode';
+  if (host === 'crush') return 'crush';
+  if (host === 'zed') return 'zed';
+  return 'standard';
+}
+
+/** Codex's TOML block for [mcp_servers.holt]. */
+function codexToml(bin) {
+  const [cmd, ...prefix] = String(bin).trim().split(/\s+/);
+  const args = [...prefix, 'mcp'].map((a) => `"${a.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(', ');
+  return `[mcp_servers.holt]\ncommand = "${cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"\nargs = [${args}]\n`;
 }
 
 /**
@@ -1157,4 +1256,5 @@ export const __test = {
   sanitizeForModel, validateArgs, guardRepoArg, neutralise, respond,
   repoBoundary,
   MAX_AGENTS, MAX_LIMIT, STR_CAP, TOTAL_CAP,
+  printMcpConfig,
 };

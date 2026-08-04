@@ -1,0 +1,31 @@
+{
+    "version": "0.3.1",
+    "description": "Know what your agents made, and don't lose any of it — git-worktree safety for AI coding agents.",
+    "homepage": "https://raed2180416.github.io/holt/",
+    "license": "FSL-1.1-MIT",
+    "depends": "nodejs-lts",
+    "url": "https://github.com/Raed2180416/holt/releases/download/v0.3.1/holt.tgz",
+    "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "script": [
+        "npm install -g \"$dir\\holt.tgz\""
+    ],
+    "uninstaller": {
+        "script": [
+            "npm uninstall -g holt"
+        ]
+    },
+    "checkver": {
+        "url": "https://github.com/Raed2180416/holt/releases/latest",
+        "re": "/releases/download/v([\\d.]+)/holt\\.tgz"
+    },
+    "autoupdate": {
+        "url": "https://github.com/Raed2180416/holt/releases/download/v$version/holt.tgz",
+        "hash": {
+            "url": "$baseurl/SHA256SUMS",
+            "regex": "holt\\.tgz\\s+([a-f0-9]{64})"
+        },
+        "script": [
+            "npm install -g \"$dir\\holt.tgz\""
+        ]
+    }
+}

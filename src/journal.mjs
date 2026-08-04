@@ -278,6 +278,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  */
 export async function withLock(lockPath, fn, { timeoutMs = 5_000, staleMs = 30_000 } = {}) {
   const deadline = Date.now() + timeoutMs;
+  /** @type {import('node:fs/promises').FileHandle | null} */
   let handle = null;
   for (;;) {
     try {
@@ -306,12 +307,14 @@ export async function withLock(lockPath, fn, { timeoutMs = 5_000, staleMs = 30_0
 /** Raw read: the lines exactly as stored, plus the parse of each. Verification needs both. */
 export async function readJournalRaw(cwd) {
   const { journal, checkpoint } = await journalPaths(cwd);
+  /** @type {string | null} */
   let raw = null;
   try {
     raw = await fs.readFile(journal, 'utf8');
   } catch (e) {
     if (e.code !== 'ENOENT') throw e;
   }
+  /** @type {string | null} */
   let checkpointText = null;
   try {
     checkpointText = await fs.readFile(checkpoint, 'utf8');
@@ -355,6 +358,30 @@ function chainHead(entries) {
   };
 }
 
+/**
+ * Normalise an actor for journal storage: every identity field becomes a string, with null
+ * replaced by UNKNOWN. The actor module keeps `session: null` as a first-class value (so
+ * `actorKey` can return null and refuse to correlate unattributed events), but a journal entry
+ * is a durable record — a missing field and a field that says 'unknown' are different things to
+ * a reader months later, and the audit-chain test verifies that every entry carries all four
+ * identity fields as non-empty strings.
+ */
+function normaliseActorForJournal(a) {
+  if (!a || typeof a !== 'object') return { user: UNKNOWN, host: UNKNOWN, agent: UNKNOWN, session: UNKNOWN, source: UNKNOWN };
+  return {
+    user: a.user ?? UNKNOWN,
+    host: a.host ?? UNKNOWN,
+    agent: a.agent ?? UNKNOWN,
+    agentVersion: a.agentVersion ?? null,
+    session: a.session ?? UNKNOWN,
+    invocation: a.invocation ?? null,
+    via: a.via ?? 'cli',
+    source: a.confidence ?? UNKNOWN,
+    confidence: a.confidence ?? 'unknown',
+    evidence: a.evidence ?? [],
+  };
+}
+
 function defaultOrigin(dir) {
   // C2SP requires a unique origin line. It is set ONCE, on the first append, and then inherited
   // from the existing checkpoint forever — so moving or renaming the repository can never make
@@ -374,8 +401,8 @@ function defaultOrigin(dir) {
  * able to overwrite them by naming them in its payload.
  *
  * @param {string} cwd    any path inside the repository
- * @param {object} event  the caller's payload (action, id, path, …)
- * @param {object} [opts] {actor, env, payload, now}
+ * @param {Record<string, any>} event  the caller's payload (action, id, path, …)
+ * @param {{actor?: object|null, env?: object, payload?: any, now?: number|string|Date|null}} [opts]
  */
 export async function appendEvent(cwd, event, { actor = null, env = process.env, payload = null, now = null } = {}) {
   try {
@@ -408,7 +435,7 @@ export async function appendEvent(cwd, event, { actor = null, env = process.env,
 
       const record = {
         at: new Date(now ?? Date.now()).toISOString(),
-        actor: actor ?? currentActor(),
+        actor: normaliseActorForJournal(actor ?? currentActor()),
         ...clipEventDeep(event),
         // LAST, deliberately: a caller must not be able to overwrite the chain fields by naming
         // them in its payload. That would be a self-service forgery primitive.
@@ -471,7 +498,9 @@ export async function readJournal(cwd) {
  * failure is a journal written before chaining existed, which is reported as `legacy` with an
  * explicit count and an explicit statement that those entries cannot be verified.
  *
- * @returns {{ok:boolean, code:string, broken:object|null, ...}}
+ * @returns {Promise<{ok:boolean, code:string, broken:{index:number, line:number, seq:number|null, at:string|null, action:string|null, actor:object|null, reason:string, missing?:number}|null, reason?:string, legacy?:number, chained?:number, entries?:number, root?:string|null, size?:number, checkpoint?:{origin:string, size:number, root:string, signed:boolean, signatureValid:boolean|null, signers:string[]}|null}>}
+ * @param {string} cwd
+ * @param {{trustedKeys?: any[]}} [opts]
  */
 export async function verifyJournal(cwd, { trustedKeys = [] } = {}) {
   const { entries, checkpointText, journalExists } = await readJournalRaw(cwd);
@@ -540,7 +569,9 @@ export async function verifyJournal(cwd, { trustedKeys = [] } = {}) {
 
   const root = chained.length ? merkleRoot(head.leaves) : null;
 
+  /** @type {{origin:string, size:number, root:Buffer, extensions:string[]} | null} */
   let cp = null;
+  /** @type {{valid:boolean, body:any, signatures:any[], reason:string|null} | null} */
   let note = null;
   if (checkpointText) {
     note = verifyNote(checkpointText, { keys: trustedKeys });
@@ -581,6 +612,10 @@ export async function verifyJournal(cwd, { trustedKeys = [] } = {}) {
       reason: `the checkpoint that pins ${chained.length} entry(ies) is absent, so removal of the most recent records cannot be detected. It belongs beside journal.jsonl.`,
     };
   }
+  // cp is guaranteed non-null here: checkpointText is truthy (we returned otherwise),
+  // and parseCheckpoint either succeeded or returned early in its catch. This guard
+  // is dead code that satisfies the type checker without changing behavior.
+  if (!cp) return { ...common, ok: false, code: 'checkpoint-unreadable', reason: 'unreachable' };
   if (cp.size !== chained.length) {
     const removed = cp.size > chained.length;
     const at = Math.min(cp.size, chained.length);

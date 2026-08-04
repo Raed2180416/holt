@@ -2,18 +2,15 @@
 
 ## 0.3.1
 
-**The safety guarantees are now true on every path we could find.** 0.3.0 made the claims; this
-release is where they hold. It exists because the instruments meant to be checking holt were
-themselves broken, and once they were fixed the product turned out to be failing open in several
-ordinary situations. Every item below was reproduced before it was fixed and re-checked red
-against the old code.
+**Safety and correctness fixes across the guard, integration, and analysis paths.** Every item
+below was reproduced before fixing and verified after.
 
-**The guard was failing open**
+**Guard fixes**
 
 - The hooks `holt integrate` installs disarmed it: the blocking guard and the brief shared one
   report cache keyed only on the repository root, so the brief's analysis — computed without your
   own worktree — was served to the guard. `git clean -fd` went from refused to allowed the moment
-  the brief hook ran, which the installed configuration does on every user message.
+  the brief hook ran.
 - A space anywhere in the path turned it off — eight of nine destructive forms flipped to allow.
 - A newline in a worktree name did the same, while `holt risk` named that worktree as holding work
   found nowhere else.
@@ -21,7 +18,7 @@ against the old code.
 - The hook stalled every tool call for as long as the host held stdin open — 27 s measured, now
   0.1 s.
 
-**holt was deleting files that were not its own**
+**Integration ownership fixes**
 
 - `integrate` claimed and removed third-party hooks via `--host`, a package name containing
   `holt`, or a username in a path. `uninstall` deleted config files in repositories holt had never
@@ -38,7 +35,7 @@ against the old code.
 - `auto` announced a lock git had refused; `protect` exited 0 having failed; `discard` printed no
   recovery ref; the guard refused ordinary commands whose arguments came from substitutions.
 
-**What checks holt is now checked**
+**Supply-chain and test integrity**
 
 - 43% of the codebase never reached the no-telemetry and path-comparison gates. The no-telemetry
   guarantee survived the widened scan.
@@ -50,8 +47,7 @@ against the old code.
 ## 0.3.0
 
 **The guard closes the gaps that actually lose work, the product gets an escape hatch and an
-autopilot, and the things that check reality get checked themselves.** 110+ commits since 0.2.0;
-grouped here by what a user would notice, not by commit.
+autopilot.**
 
 **New commands**
 
@@ -74,7 +70,7 @@ grouped here by what a user would notice, not by commit.
   equivalents, at both worktree and file granularity — `Clear-Content`/`Set-Content` are in-place
   destroyers with no POSIX analogue at all (nothing deleted, no path changed, content gone).
 - A verb supplied indirectly — `$(echo rm)`, backticks, a variable, `eval "rm -rf ..."`, a
-  base64-decoded pipeline into `sh` — used to defeat the guard entirely, because every rule matched
+  base64-decoded pipeline into `sh` — defeated the guard entirely, because every rule matched
   literal text. holt cannot resolve an indirected verb without executing it, so it no longer
   pretends to: an unreadable verb now returns `ask`, never a silent allow. A shell's own `-c`
   argument *is* code holt can read, so `sh -c "rm -rf ../feature"` is unwrapped and assessed as if
@@ -83,10 +79,9 @@ grouped here by what a user would notice, not by commit.
   comparison bug, not a safety feature); a target holt could not resolve was reported as hitting
   everything rather than as unknown; a Windows path could be mangled into a relative one, letting
   work move *out of* its worktree undetected; holt's own lock could self-justify and freeze the
-  repository permanently. All fixed and pinned by cross-platform tests, after 24 of 39 test files
-  were found to have never actually run on macOS or Windows in CI.
+  repository permanently. All fixed and pinned by cross-platform tests.
 - `unprotect --force` no longer refuses the ordinary case: the escape hatch for overriding a lock
-  holt did *not* place used to fire on the mere presence of `--force`, so `holt unprotect --force`
+  holt did *not* place fired on the mere presence of `--force`, so `holt unprotect --force`
   against holt's own locks was refused with a message asserting something untrue of that
   invocation. It now counts the foreign locks first and demands `--reason` or `--yes` only when
   there is actually something foreign to override.
@@ -114,7 +109,7 @@ grouped here by what a user would notice, not by commit.
 
 **Agent integration**
 
-- **Eight previously-advertised host MCP configs now actually get written**, including holt's first
+- **Eight host MCP configs are now written**, including holt's first
   TOML writer (Codex CLI's `config.toml`, a line-oriented textual merge that preserves every setting
   holt doesn't understand): Codex, Amp, Factory, Junie, Zed, Warp, Kilo, Roo. `hosts.mjs` and the
   files `holt integrate` writes are now derived from one manifest instead of two hand-maintained
@@ -127,7 +122,7 @@ grouped here by what a user would notice, not by commit.
   documented MCP config, not cloud-only; and a docs-derived adapter no longer prints the same
   "BLOCKING" label as one verified live against the real host.
 - **The per-prompt session brief is change-triggered**, not re-injected byte-identical on every
-  message — it used to resend the same paragraph on every `UserPromptSubmit`, and a `'' + null`
+  message — it resent the same paragraph on every `UserPromptSubmit`, and a `'' + null`
   bug handed every clean-repo session the literal string `"null"` as its briefing. It now fires
   again only when the brief text changes, bounded so 20 unchanged prompts still earn one repeat (a
   compacted session has lost the brief and should not be left permanently uninformed); a new
@@ -137,7 +132,7 @@ grouped here by what a user would notice, not by commit.
   (a ratio-plus-floor threshold on provably-disposable workstreams) with `holt clean --apply` as the
   one command that resolves it — a signal, deliberately never an automatic deletion.
 - `holt journal` write failures are now surfaced through the result object instead of swallowed:
-  with the journal directory unwritable, `holt protect --json` used to report `"protected": 1` and
+  with the journal directory unwritable, `holt protect --json` reported `"protected": 1` and
   say nothing about the audit record that didn't happen. The lock still happens; the user is now
   told the record didn't.
 - `rescue()` and `discard()` no longer share one fixed-path scratch index per worktree. holt runs
@@ -160,13 +155,13 @@ grouped here by what a user would notice, not by commit.
   script block and the rest of the page became attacker-authored markup. Every value is now encoded
   for the sink it lands in, the page builds its SVG through DOM APIs instead of `innerHTML`, and
   invisible/bidirectional control characters are neutralised at the boundary. Names are no longer
-  mangled to stay safe, either — the old renderer used to strip `< > &` out of visible labels.
+  mangled to stay safe, either — the old renderer stripped `< > &` out of visible labels.
 - A repository could name a file such that it was interpolated into a `ctags` option, and the deny
   hook exited the wrong code on a failed probe; both closed.
 
 **Release integrity**
 
-- **The install command every artifact printed had been broken for 107 commits.** The tarball the
+- **The install command every artifact printed had been broken.** The tarball the
   README, the site and the release page all pointed at was built and attached by hand for v0.2.0,
   drifted up to 107 commits behind main, and shipped without several source modules and 12 of 14
   language gap packs — a person following the documented install got

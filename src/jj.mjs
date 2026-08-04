@@ -165,7 +165,7 @@ async function verifyWorkspace(p) {
 /**
  * Discover jj workspaces.
  *
- * @returns {{available:boolean, reason:string|null, workstreams:Array, unresolved:Array}}
+ * @returns {Promise<any>}
  */
 export async function discoverJjWorkspaces(cwd) {
   const probe = await detectJj(cwd);
@@ -193,6 +193,7 @@ export async function discoverJjWorkspaces(cwd) {
 
   // 2. Paths from the internal index, resolved against the repo dir.
   const repoDir = await resolveRepoDir(cwd);
+  /** @type {Map<string, string>|null} */
   let index = null;
   if (repoDir) {
     try {

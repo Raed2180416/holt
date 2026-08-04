@@ -160,17 +160,31 @@ export const CAPABILITIES = {
    * there is nowhere to transmit it to (see `network`).
    */
   environment: [
+    { name: 'AI_AGENT', why: 'agent identity declared by the host environment (actor attribution)' },
+    { name: 'CLAUDECODE', why: 'Claude Code host detection (actor attribution)' },
+    { name: 'CLAUDE_CODE_ENTRYPOINT', why: 'Claude Code host detection (actor attribution)' },
+    { name: 'CLAUDE_CODE_HOST_SESSION_ID', why: 'Claude Code ambient session (actor attribution)' },
+    { name: 'CURSOR_TRACE_ID', why: 'Cursor host session (actor attribution)' },
     { name: 'GITHUB_HEAD_REF', why: 'detect the PR branch when running inside GitHub Actions (`holt ci`)' },
+    { name: 'HOLT_ACTOR', why: 'override actor identity in CI (journal attribution)' },
+    { name: 'HOLT_ACTOR_SESSION', why: 'ambient session id override (journal attribution)' },
+    { name: 'HOLT_AUDIT_SIGNER', why: 'expected signer for `holt journal --verify` checkpoint verification' },
+    { name: 'HOLT_AUDIT_SIGNING_KEY', why: 'Ed25519 public key for checkpoint signature verification' },
     { name: 'HOLT_CTAGS_OPTIONS', why: 'extra flags for the ctags backend' },
     { name: 'HOLT_HOME', why: 'override where holt keeps its own bin directory' },
+    { name: 'HOLT_HOOK_FAIL_OPEN', why: 'opt-in to let the hook pass on internal errors (debugging)' },
     { name: 'HOLT_LICENSE', why: 'a licence token supplied by CI instead of a file' },
     { name: 'HOLT_TMPDIR', why: 'override the scratch directory used by the test suite and by `holt verify`' },
     { name: 'JJ_CONFIG', why: 'neutralise the user config when probing the Jujutsu backend' },
     { name: 'LOCALAPPDATA', why: 'Windows equivalent of XDG_DATA_HOME' },
+    { name: 'LOGNAME', why: 'fallback username for actor attribution' },
     { name: 'NO_COLOR', why: 'the no-colour convention' },
+    { name: 'OPENCODE', why: 'OpenCode host detection (actor attribution)' },
     { name: 'PATH', why: 'locate optional backends (git, ctags, enry, rg, jj)' },
     { name: 'TERM', why: 'terminal capability detection for the TUI' },
     { name: 'TMPDIR', why: 'the platform scratch directory' },
+    { name: 'USER', why: 'fallback username for actor attribution' },
+    { name: 'USERNAME', why: 'Windows fallback username for actor attribution' },
     { name: 'XDG_CONFIG_HOME', why: 'where the licence file lives' },
     { name: 'XDG_DATA_HOME', why: 'where a holt-installed ctags lives' },
   ],
@@ -193,6 +207,9 @@ export const CAPABILITIES = {
       constrained: 'the probe form is a fixed template; the --run form is your own string and `holt verify` documents that it executes code; the install form prints the exact command and requires a typed confirmation or --yes',
     },
     { name: 'holt', why: 'confirm the CLI is on PATH while `holt integrate` wires an agent host', constrained: '`holt --help`' },
+    { name: 'go', why: 'optional: `holt setup` offers to install enry via `go install` when Go is available', constrained: 'only `go install github.com/go-enry/enry@latest` and `go version`; never runs arbitrary user code' },
+    { name: 'mount', why: 'detect network filesystems (NFS/SMB/SSHFS) for timeout escalation', constrained: 'read-only `mount` command on macOS/Unix; only used to check if a path is on a network mount' },
+    { name: 'where', why: 'Windows equivalent of `command -v` for detecting installed tools', constrained: 'read-only `where <tool>` on Windows; only used in `holt setup` and `holt doctor`' },
   ],
 
   /**
@@ -207,12 +224,16 @@ export const CAPABILITIES = {
    */
   dynamicCallSites: [
     {
-      file: 'bin/install-ctags.mjs', identifier: 'cmd', canRun: ['tar'],
-      why: 'a local run() wrapper; the only caller passes `tar`, to extract the ctags archive AFTER its SHA-256 was verified',
+      file: 'bin/install-ctags.mjs', identifier: 'cmd', canRun: ['tar', 'powershell'],
+      why: 'a local run() wrapper; callers pass `tar` to extract the ctags archive on Linux/macOS, or `powershell` to Expand-Archive the zip on Windows, AFTER its SHA-256 was verified',
     },
     {
       file: 'src/deep.mjs', identifier: 'bin', canRun: ['jscpd'],
       why: 'the optional jscpd clone-detection backend, resolved from node_modules/.bin or PATH. Only reached by `holt duplicates --deep`',
+    },
+    {
+      file: 'src/git.mjs', identifier: 'String', canRun: ['git'],
+      why: 'the git() wrapper builds argv arrays; the executable is always `git`, constrained by the argv allowlist in this same file',
     },
     {
       file: 'src/verify.mjs', identifier: 'cmd', canRun: ['<the command you passed to `holt verify --run`>'],
@@ -221,6 +242,14 @@ export const CAPABILITIES = {
     {
       file: 'src/integrate/adapters.mjs', identifier: 'HOLT_CMD', canRun: ['holt'],
       why: 'NOT executed by holt — it appears inside a template literal that GENERATES the opencode plugin file. The generated plugin invokes holt itself',
+    },
+    {
+      file: 'src/integrate/adapters.mjs', identifier: 'command', canRun: ['<host-specific install command>'],
+      why: 'host adapter install commands (npm install, pip install, etc.) resolved from the host manifest, executed by the USER after confirmation, never silently',
+    },
+    {
+      file: 'bin/holt.mjs', identifier: 'full', canRun: ['<the package manager command holt doctor --install prints and you confirm>'],
+      why: '`holt doctor --install` builds a package-manager command (apt-get/dnf/pacman/brew/winget) from the detected manager and remaining backends, prints it, requires confirmation, then runs it with shell:true so `&&` works on Windows. It is the indirect network path disclosed in §7.8',
     },
   ],
 
@@ -480,7 +509,7 @@ export const MANIFEST_SIG_FILE = 'MANIFEST.sha256.sig';
  * Sigstore provenance attestation produced by the release workflow, which needs no long-lived
  * key at all. This exists for the air-gapped reviewer who cannot reach GitHub to verify one.
  */
-export const RELEASE_PUBLIC_KEYS_B64 = [];
+export const RELEASE_PUBLIC_KEYS_B64 = ['MCowBQYDK2VwAyEAlYxt7VHXyL5gZU+gg57y+Yx3O7bO+7w4K27O+t+ItCc='];
 
 const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 
@@ -503,6 +532,7 @@ export function treeDigest(manifestBody) {
   return sha256(Buffer.from(manifestBody, 'utf8'));
 }
 
+/** @returns {{map: Map<string,string>}|{error: string}} */
 function parseManifest(body) {
   const map = new Map();
   for (const line of body.split('\n')) {
@@ -522,7 +552,10 @@ function parseManifest(body) {
  * a note. "Could not check" and "checked and fine" must never share an exit code; treating
  * absent evidence as good news is the defect class this project keeps finding in itself.
  */
-export function verifyIntegrity({ root, requireSignature = false, publicKeysB64 = RELEASE_PUBLIC_KEYS_B64 } = {}) {
+/**
+ * @param {{root?: string, requireSignature?: boolean, publicKeysB64?: string[]}} [opts]
+ */
+export function verifyIntegrity({ root = '.', requireSignature = false, publicKeysB64 = RELEASE_PUBLIC_KEYS_B64 } = {}) {
   const manifestPath = path.join(root, MANIFEST_FILE);
   let body;
   try {
@@ -537,7 +570,7 @@ export function verifyIntegrity({ root, requireSignature = false, publicKeysB64 
   }
 
   const parsed = parseManifest(body);
-  if (parsed.error) {
+  if ('error' in parsed) {
     return { ok: false, code: 'bad-manifest', signature: 'absent', reason: parsed.error, files: { total: 0, matched: 0, modified: [], missing: [], unexpected: [] } };
   }
 
@@ -547,6 +580,7 @@ export function verifyIntegrity({ root, requireSignature = false, publicKeysB64 
   let signature = 'unavailable';
   let sigReason = 'this build pins no release signing key, so publisher authenticity must come from the provenance attestation (see SUPPLY-CHAIN.md)';
   if (publicKeysB64.length) {
+    /** @type {string|null} */
     let sig = null;
     try { sig = fs.readFileSync(path.join(root, MANIFEST_SIG_FILE), 'utf8').trim(); } catch { /* absent */ }
     if (!sig) {
@@ -610,7 +644,10 @@ const declaredModuleCaps = (decl) => new Map(Object.entries(decl));
  * enough detail to act on — a security finding that says only "failed" costs the reviewer the
  * same afternoon it was supposed to save.
  */
-export function auditCapabilities({ root, capabilities = CAPABILITIES, moduleLedger = MODULE_LEDGER } = {}) {
+/**
+ * @param {{root?: string, capabilities?: any, moduleLedger?: any}} [opts]
+ */
+export function auditCapabilities({ root = '.', capabilities = CAPABILITIES, moduleLedger = MODULE_LEDGER } = {}) {
   const files = shippedFiles(root).filter(isSource);
   const checks = [];
   const declared = declaredModuleCaps(moduleLedger);
@@ -640,6 +677,7 @@ export function auditCapabilities({ root, capabilities = CAPABILITIES, moduleLed
   const capViolations = [];
   const staleDeclarations = [];
   const seen = new Set();
+  /** @type {Record<string, string[]>} */
   const byClass = Object.fromEntries(CAPABILITY_CLASSES.map((c) => [c, []]));
   for (const rel of files) {
     const src = fs.readFileSync(path.join(root, rel), 'utf8');
@@ -773,8 +811,10 @@ export function auditCapabilities({ root, capabilities = CAPABILITIES, moduleLed
 
 /**
  * The whole audit: identity, integrity, capabilities. One call, one JSON object, no network.
+ *
+ * @param {{root?: string, requireSignature?: boolean, publicKeysB64?: string[]}} [opts]
  */
-export function audit({ root, requireSignature = false, publicKeysB64 = RELEASE_PUBLIC_KEYS_B64 } = {}) {
+export function audit({ root = '.', requireSignature = false, publicKeysB64 = RELEASE_PUBLIC_KEYS_B64 } = {}) {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const files = shippedFiles(root);
   const integrity = verifyIntegrity({ root, requireSignature, publicKeysB64 });
@@ -841,6 +881,7 @@ export const MODULE_LEDGER = {
   'src/git.mjs': ['filesystem', 'process'],
   'src/impact.mjs': ['filesystem', 'process'],
   'src/integrate/adapters.mjs': ['filesystem', 'process'],
+  'src/integrate/receipt.mjs': ['filesystem', 'process'],
   'src/jj.mjs': ['filesystem', 'process'],
   'src/symbols.mjs': ['filesystem', 'process'],
   'src/verify.mjs': ['filesystem', 'process'],
@@ -848,21 +889,31 @@ export const MODULE_LEDGER = {
   // FILESYSTEM only.
   'src/actions.mjs': ['filesystem'],
   'src/agent.mjs': ['filesystem'],
+  'src/config.mjs': ['filesystem'],
+  'src/content-identity.mjs': ['filesystem'],
+  'src/discover.mjs': ['filesystem'],
   'src/journal.mjs': ['filesystem'],
   'src/license.mjs': ['filesystem'],
+  'src/paths.mjs': ['filesystem', 'process'],
   'src/scan.mjs': ['filesystem'],
   'src/supply-chain.mjs': ['filesystem'],
+  'src/team/audit-sink.mjs': ['filesystem'],
   'src/team/fleet.mjs': ['filesystem'],
   'src/team/policy.mjs': ['filesystem'],
   'src/toolchain.mjs': ['filesystem'],
 
+  // EVAL only — SafeRegex compiles user-supplied patterns into RegExp objects.
+  'src/saferegex.mjs': ['eval'],
+
   // Everything below reaches nothing at all: pure computation and formatting. They are listed
   // with an empty capability set rather than omitted, so that "absent from this table" can mean
   // exactly one thing — a file nobody has classified — and be caught as such.
+  'src/actor.mjs': [],
   'src/analyze.mjs': [],
   'src/ascii-graph.mjs': [],
+  'src/attest.mjs': [],
   'src/branches.mjs': [],
-  'src/discover.mjs': [],
+  'src/forensics.mjs': [],
   'src/graph-html.mjs': [],
   'src/index.mjs': [],
   'src/integrate/hosts.mjs': [],
@@ -871,5 +922,8 @@ export const MODULE_LEDGER = {
   'src/partition.mjs': [],
   'src/render.mjs': [],
   'src/roi.mjs': [],
+  'src/siem.mjs': [],
+  'src/stash.mjs': [],
   'src/tui.mjs': [],
+  'src/untrusted.mjs': [],
 };

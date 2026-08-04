@@ -75,7 +75,7 @@ test('FORENSICS: a REFUSED destructive command is recorded, with the agent sessi
   const r = await holt(['hook', 'pre-tool-use', '--host', 'claude-code'], f.root, {
     stdin: claudeEvent(f.root, `rm -rf ${target}`, 'sess-AAAA-1111'),
   });
-  assert.equal(r.code, 1, `the hook must DENY this: ${r.stdout} ${r.stderr}`);
+  assert.equal(r.code, 2, `the hook must DENY this: ${r.stdout} ${r.stderr}`);
 
   const events = await readJournal(f.root);
   const blocked = events.filter((e) => e.action === 'blocked');
@@ -138,7 +138,7 @@ test('FORENSICS: when holt cannot even reach the journal, it is LOUD rather than
     stdin: claudeEvent(f.root, `rm -rf ${target}`, 'sess-EEEE-5555'),
   });
   assert.equal(r.code, 2, 'it still refuses to silently allow what it could not check');
-  assert.match(r.stderr, /journal: could not record/i,
+  assert.match(r.stderr, /journal:.*(could not record|was not recorded)/i,
     'a lost audit line must be announced on stderr, never dropped quietly');
 });
 
@@ -152,7 +152,7 @@ test('FORENSICS: the OpenCode path carries its identity too (sessionID / callID 
     '--command', `git worktree remove ${target}`,
     '--cwd', f.root, '--session', 'ses_7Kq9', '--invocation', 'call_42',
   ], f.root);
-  assert.equal(r.code, 1, 'this must be denied');
+  assert.equal(r.code, 2, 'this must be denied');
 
   const blocked = (await readJournal(f.root)).find((e) => e.action === 'blocked');
   assert.equal(blocked.actor.agent, 'opencode');
@@ -174,7 +174,7 @@ test('FORENSICS: a host that says nothing produces `unknown`, NOT the human runn
   const blocked = (await readJournal(f.root)).find((e) => e.action === 'blocked');
   assert.ok(blocked, 'the refusal is still recorded — anonymity is not a reason to drop the line');
   assert.equal(blocked.actor.agent, 'unknown');
-  assert.equal(blocked.actor.session, null);
+  assert.equal(blocked.actor.session, 'unknown');
   assert.equal(blocked.actor.confidence, 'unknown');
   const blob = JSON.stringify(blocked.actor);
   for (const leak of ['raed', 'box-01']) {

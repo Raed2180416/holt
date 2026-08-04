@@ -41,6 +41,11 @@ async function journal(cwd, event, failures) {
   return r;
 }
 
+/**
+ * @param {string} cwd
+ * @param {{apply?: boolean, base?: string|null, strictReadOnly?: boolean, timeout?: number,
+ *          familyOverrides?: any[], includeJj?: boolean, familyWindowMs?: number, [key: string]: any}} [opts]
+ */
 export async function branchAudit(cwd, { apply = false, base: baseRef = null, ...opts } = {}) {
   const disc = await discover(cwd, opts);
   if (!disc.root) throw repoAbsenceError(disc, cwd);

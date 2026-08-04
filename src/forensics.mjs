@@ -159,8 +159,7 @@ async function rescueRefs(root) {
 export async function forensics(cwd, { id = null, since = null, agent = null, ...opts } = {}) {
   const disc = await discover(cwd, opts);
   if (!disc.root) {
-    const e = new Error(`not a git repository: ${cwd}`);
-    e.code = 'ENOTREPO';
+    const e = Object.assign(new Error(`not a git repository: ${cwd}`), { code: 'ENOTREPO' });
     throw e;
   }
   const root = disc.root;
@@ -169,8 +168,7 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
 
   const sinceMs = since ? Date.parse(since) : null;
   if (since && Number.isNaN(sinceMs)) {
-    const e = new Error(`--since is not a date holt can parse: ${since}`);
-    e.code = 'EBADDATE';
+    const e = Object.assign(new Error(`--since is not a date holt can parse: ${since}`), { code: 'EBADDATE' });
     throw e;
   }
 
@@ -185,6 +183,7 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
   // Live state. The scan is what makes "what survived" a verified claim rather than a guess:
   // the journal says a worktree was removed, the scan says whether one by that id exists now,
   // and a disagreement between them is itself a finding.
+  /** @type {any} */
   let report = null;
   let scanError = null;
   try {

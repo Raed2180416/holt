@@ -314,6 +314,10 @@ function clusterBySingleLink(items, windowMs) {
  * an intervening commit on main makes it confidently wrong (two worktrees created 17ms apart
  * get different fork points and lose their sibling relationship). Creation time + naming are
  * the two signals that survive both cases.
+ *
+ * @param {string} root
+ * @param {any[]} workstreams
+ * @param {{familyOverrides?: any[], familyWindowMs?: number, stemBridgeWindowMs?: number, base?: string|null}} [opts]
  */
 export async function assignFamilies(root, workstreams, {
   familyOverrides = [],
@@ -537,7 +541,10 @@ export function parseWorktreePorcelain(stdout) {
   return out;
 }
 
-/** Discover git worktrees from any path inside the repo. */
+/**
+ * Discover git worktrees from any path inside the repo.
+ * @returns {Promise<{root: string|null, workstreams: any[], vcs: string|null, bare?: boolean, error?: string}>}
+ */
 export async function discoverGitWorktrees(cwd) {
   const root = await repoRoot(cwd);
   if (!root) {
@@ -641,6 +648,11 @@ export { discoverJjWorkspaces } from './jj.mjs';
  * Full discovery. Returns every workstream holt can see, tagged by backend,
  * with families assigned.
  */
+/**
+ * @param {string} cwd
+ * @param {{familyOverrides?: any[], includeJj?: boolean, familyWindowMs?: number, base?: string|null}} [opts]
+ * @returns {Promise<{root: string|null, vcs: string|null, workstreams: any[], jj: any, error: string|null, bare?: boolean}>}
+ */
 export async function discover(cwd, {
   familyOverrides = [], includeJj = true, familyWindowMs = DEFAULT_FAMILY_WINDOW_MS, base = null,
 } = {}) {
@@ -652,6 +664,7 @@ export async function discover(cwd, {
     };
   }
 
+  /** @type {{available:boolean, workstreams:any[], unresolved:any[], reason:string|null} | null} */
   let jj = null;
   if (includeJj) {
     try {

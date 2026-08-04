@@ -51,7 +51,7 @@ const PRINTABLE_CONTROLS = new Set([9, 10, 13]);
 
 function neutralize(s) {
   return String(s ?? '').replace(INVISIBLE, (ch) => {
-    const cp = ch.codePointAt(0);
+    const cp = ch.codePointAt(0) ?? 0;
     return PRINTABLE_CONTROLS.has(cp)
       ? ch
       : `<U+${cp.toString(16).toUpperCase().padStart(4, '0')}>`;

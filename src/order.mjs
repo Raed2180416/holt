@@ -23,7 +23,7 @@
 const CONFLICT_KINDS = new Set(['proven', 'predicted', 'semantic-overlap']);
 
 /**
- * @param {object} report - the analyze() report (uses .safe, .unique, .collisions, .duplicates)
+ * @param {Record<string, any>} report - the analyze() report (uses .safe, .unique, .collisions, .duplicates)
  * @returns {{lanes: Array, parallel: string[], note: string}}
  */
 export function landingOrder(report) {

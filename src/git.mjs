@@ -151,6 +151,10 @@ export class GitRefused extends Error {
 }
 
 export class GitFailed extends Error {
+  /**
+   * @param {string} msg
+   * @param {{ code?: number, stderr?: string, argv?: string[] }} [info]
+   */
   constructor(msg, { code, stderr, argv } = {}) {
     super(msg);
     this.name = 'GitFailed';
@@ -164,7 +168,7 @@ export class GitFailed extends Error {
  * Decide whether an argv is permitted. Exported so the safety test can assert on it
  * directly without spawning processes.
  *
- * @returns {{allowed: boolean, tier?: 'SAFE'|'OBJECT_WRITE', reason?: string}}
+ * @returns {{allowed: boolean, tier?: 'SAFE'|'OBJECT_WRITE'|'MUTATE', reason?: string, gate?: string}}
  */
 export function classify(argv, { allowMutation = false } = {}) {
   if (!Array.isArray(argv) || argv.length === 0) {
@@ -243,8 +247,48 @@ export function classify(argv, { allowMutation = false } = {}) {
   return { allowed: false, reason: `'git ${sub}' is not on holt's allowlist` };
 }
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+export const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
+
+/**
+ * NETWORK FILESYSTEM TIMEOUT ESCALATION.
+ *
+ * holt's timeouts assume local-disk latency. On NFS/SMB a `git status` that takes 30s locally
+ * can take minutes, and the default ceiling reads as "instrument failed" — fail-closed
+ * classification then refuses to scan, which is the right safety call but the wrong user
+ * experience: the repository is fine, only the mount is slow. When a network filesystem is
+ * detected (src/paths.mjs), the timeout is multiplied so a slow link does not become a false
+ * instrument failure.
+ *
+ * The multiplier is deliberately conservative: 3x local-disk time, capped at 180s, so a
+ * genuinely hung process still fails rather than hanging the scan indefinitely. A network
+ * mount that needs more than 3 minutes for a single git read has a problem holt cannot solve.
+ */
+export const NETWORK_FS_TIMEOUT_MULTIPLIER = 3;
+export const NETWORK_FS_TIMEOUT_CEILING_MS = 180_000;
+
+/**
+ * Resolve the effective timeout for operations against `cwd`.
+ *
+ * If `cwd` is on a detected network filesystem and no explicit timeout was given, the default
+ * is escalated (multiplied, capped) so a slow link does not produce a false instrument
+ * failure. An explicit `timeout` is always honoured as-is — the caller knows their latency.
+ *
+ * Returns `{ timeout, network: boolean, warning?: string }`. The warning is present when the
+ * timeout was escalated, so the scan/CLI can surface it rather than silently changing behaviour.
+ *
+ * @param {string} cwd
+ * @param {number} [timeout]  explicit timeout; when omitted, the default (possibly escalated) is used
+ */
+export async function resolveTimeout(cwd, timeout) {
+  if (timeout !== undefined && timeout !== null) return { timeout, network: false };
+  const { detectNetworkFilesystem, networkFilesystemWarning } = await import('./paths.mjs');
+  /** @type {{network: boolean, type?: string, mountPoint?: string, reason?: string}} */
+  const info = await detectNetworkFilesystem(cwd).catch(() => ({ network: false }));
+  if (!info.network) return { timeout: DEFAULT_TIMEOUT_MS, network: false };
+  const escalated = Math.min(DEFAULT_TIMEOUT_MS * NETWORK_FS_TIMEOUT_MULTIPLIER, NETWORK_FS_TIMEOUT_CEILING_MS);
+  return { timeout: escalated, network: true, warning: networkFilesystemWarning(info) };
+}
 
 /**
  * Run git. Rejects on refusal; resolves {stdout, stderr, code} otherwise.
@@ -794,10 +838,36 @@ export async function readWorktreeFile(root, relPath) {
     if (!st.isFile() || st.size > 2 * 1024 * 1024) return null;
     const buf = await fs.readFile(abs);
     if (buf.includes(0)) return null;
-    return buf.toString('utf8');
+    const text = buf.toString('utf8');
+    // LFS pointer files are small text files that stand in for large binaries. Without this check,
+    // holt would treat the pointer as the file's actual content — producing garbage symbols and
+    // wrong "this file is tiny" metrics. The pointer format is:
+    //   version https://git-lfs.github.com/spec/v1
+    //   oid sha256:<hex>
+    //   size <digits>
+    if (isLfsPointer(text)) return null;
+    return text;
   } catch {
     return null;
   }
+}
+
+/**
+ * Detect a git-lfs pointer file. The pointer is a 3-line text file with a fixed format:
+ *   version https://git-lfs.github.com/spec/v1
+ *   oid sha256:<64 hex chars>
+ *   size <digits>
+ * Real content can start with "version https://..." but won't have the oid+size lines.
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function isLfsPointer(text) {
+  if (text.length > 500) return false; // pointers are tiny; real files can be too, but not huge
+  const lines = text.split('\n');
+  if (lines.length < 3) return false;
+  return lines[0].startsWith('version https://git-lfs.github.com/spec/v')
+    && /^oid sha256:[0-9a-f]{64}/.test(lines[1])
+    && /^size \d+/.test(lines[2]);
 }
 
 /**

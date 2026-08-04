@@ -74,7 +74,11 @@ function extras(e) {
 
 /* =================================================================== OCSF ==== */
 
-/** One journal entry as an OCSF 1.7.0 API Activity (6003) event. */
+/**
+ * One journal entry as an OCSF 1.7.0 API Activity (6003) event.
+ * @param {any} e
+ * @param {{repo?: string|null, product?: string, vendor?: string, version?: string|null}} [opts]
+ */
 export function toOcsf(e, { repo = null, product = 'holt', vendor = 'Contrare', version = null } = {}) {
   const m = mapOf(e.action);
   const a = actorOf(e);
@@ -123,7 +127,11 @@ export function toOcsf(e, { repo = null, product = 'holt', vendor = 'Contrare', 
 
 /* ==================================================================== ECS ==== */
 
-/** One journal entry as an ECS 8 document. */
+/**
+ * One journal entry as an ECS 8 document.
+ * @param {any} e
+ * @param {{repo?: string|null, version?: string|null}} [opts]
+ */
 export function toEcs(e, { repo = null, version = null } = {}) {
   const m = mapOf(e.action);
   const a = actorOf(e);
@@ -169,7 +177,11 @@ const cefValue = (s) => String(s)
   .replace(/\\/g, '\\\\').replace(/=/g, '\\=')
   .replace(/\r\n|\r|\n/g, '\\n');
 
-/** One journal entry as a CEF:0 line (no trailing newline). */
+/**
+ * One journal entry as a CEF:0 line (no trailing newline).
+ * @param {any} e
+ * @param {{repo?: string|null, product?: string, vendor?: string, version?: string|null}} [opts]
+ */
 export function toCef(e, { repo = null, product = 'holt', vendor = 'Contrare', version = '0' } = {}) {
   const m = mapOf(e.action);
   const a = actorOf(e);
@@ -217,6 +229,10 @@ export function toCef(e, { repo = null, product = 'holt', vendor = 'Contrare', v
  */
 export const HOLT_PREDICATE_TYPE = 'https://holt.dev/attestation/journal-checkpoint/v1';
 
+/**
+ * @param {any} verification
+ * @param {{repo?: string|null, product?: string, version?: string|null}} [opts]
+ */
 export function toInToto(verification, { repo = null, product = 'holt', version = null } = {}) {
   const cp = verification.checkpoint ?? {};
   return {
@@ -252,6 +268,11 @@ export function toInToto(verification, { repo = null, product = 'holt', version 
  * that checked out. When forced, every record carries `holt.integrity` saying so, so the SIEM
  * itself can alert on it rather than the warning being lost on a terminal nobody read.
  */
+/**
+ * @param {any[]} events
+ * @param {string} format
+ * @param {{verification?: any, repo?: string|null, version?: string|null, force?: boolean, ndjson?: boolean}} [opts]
+ */
 export function exportJournal(events, format, {
   verification = null, repo = null, version = null, force = false, ndjson = true,
 } = {}) {
@@ -261,10 +282,9 @@ export function exportJournal(events, format, {
   }
   const broken = verification && verification.ok === false;
   if (broken && !force && fmt !== 'intoto') {
-    const err = new Error(
-      `refusing to export: this journal does not verify (${verification.code}) — ${verification.reason}`);
-    err.code = 'EINTEGRITY';
-    err.verification = verification;
+    const err = Object.assign(new Error(
+      `refusing to export: this journal does not verify (${verification.code}) — ${verification.reason}`),
+      { code: 'EINTEGRITY', verification });
     throw err;
   }
   const integrity = verification

@@ -99,6 +99,7 @@ export async function detectCtags() {
  *
  * Returns the set of language names ctags reports, plus the ones holt's own optlib pack adds.
  */
+/** @type {Promise<any>|null} */
 let _langProbe = null;
 export async function ctagsLanguages() {
   if (_langProbe) return _langProbe;
@@ -171,7 +172,9 @@ const PROBE_SOURCES = {
   Scala: ['holt-probe.scala', 'object HoltProbeObj {\n  def holtProbe = 1\n}\n', 'holtProbe'],
 };
 
+/** @type {Promise<any>|null} */
 let _demoProbe = null;
+/** @type {Promise<any>|null} */
 let _compat = null;
 let _inProbe = false;   // guards the probe's own extraction from re-entering ensureCompat()
 
@@ -260,7 +263,7 @@ async function ensureCompat() {
 /** Which languages this toolchain can extract, AFTER holt has closed what it can. */
 async function demonstratedLanguages() {
   if (_demoProbe) return _demoProbe;
-  _demoProbe = ensureCompat().then((c) => c.supported);
+  _demoProbe = ensureCompat().then((c) => c?.supported);
   return _demoProbe;
 }
 
@@ -446,9 +449,10 @@ function optionFlags() {
 
 /**
  * Run ctags over a set of files in one invocation.
- * @returns {Promise<Map<string, Array<{name,kind,line,scope}>>>} keyed by the given rel path
+ * @returns {Promise<Map<string, Array<{name,kind,line,scope}>> & {failed: string[]}>} keyed by the given rel path
  */
 export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400, languageForce = null } = {}) {
+  /** @type {any} */
   const result = new Map();
   if (relPaths.length === 0) { result.failed = []; return result; }
 
@@ -721,6 +725,7 @@ export async function resolveAmbiguous(cwd, relPaths) {
   // from real F#), so skipping enry's classification would silently reintroduce the same
   // zero-symbols failure for exactly those two languages. Reclassifying keeps the real language
   // name flowing into `forcedName()` the same way a non-NUL file already does.
+  /** @type {string|null} */
   let sanitizedRoot = null;
   const ensureSanitizedRoot = async () => {
     if (!sanitizedRoot) sanitizedRoot = await fs.mkdtemp(path.join(scratchDir(), 'holt-enry-nul-'));
@@ -803,14 +808,35 @@ export function extractKeys(file, content) {
 /* ------------------------------------------------------- regex fallback ---- */
 
 const FALLBACK_DECL = [
+  // JavaScript / TypeScript — the original patterns, kept verbatim
   [/^\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/, 'function'],
   [/^\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/, 'class'],
   [/^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/, 'binding'],
   [/^\s*(?:export\s+)?(?:type|interface|enum)\s+([A-Za-z_$][\w$]*)/, 'type'],
+  // Python
   [/^\s*(?:async\s+)?def\s+([A-Za-z_][\w]*)/, 'function'],
+  [/^\s*class\s+([A-Za-z_][\w]*)/, 'class'],
+  // Go
   [/^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)/, 'function'],
+  [/^\s*(?:type\s+)?struct\s*\{/, 'type'], // anonymous struct — no name, but marks the file as having structure
+  [/^\s*type\s+([A-Za-z_][\w]*)\s/, 'type'],
+  // Rust
   [/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][\w]*)/, 'function'],
   [/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:struct|enum|trait)\s+([A-Za-z_][\w]*)/, 'type'],
+  [/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:type|mod|use)\s+([A-Za-z_][\w]*)/, 'type'],
+  // Java / Kotlin / Scala
+  [/^\s*(?:public|private|protected|internal)?\s*(?:abstract\s+)?(?:class|interface|enum|object)\s+([A-Za-z_$][\w$]*)/, 'class'],
+  [/^\s*(?:public|private|protected|internal)?\s*(?:static\s+)?(?:final\s+)?(?:void|int|boolean|String|[A-Z][\w]*)\s+([A-Za-z_$][\w$]*)\s*\(/, 'function'],
+  // Ruby
+  [/^\s*(?:def\s+)(?:self\.)?([A-Za-z_][\w]*)/, 'function'],
+  [/^\s*(?:module|class)\s+([A-Z][\w]*)/, 'class'],
+  // C / C++
+  [/^\s*(?:static\s+)?(?:inline\s+)?(?:void|int|char|double|float|size_t|bool|auto)\s+\*?([A-Za-z_][\w]*)\s*\(/, 'function'],
+  [/^\s*(?:typedef\s+)?struct\s+([A-Za-z_][\w]*)/, 'type'],
+  [/^\s*#define\s+([A-Z_][A-Z0-9_]*)/, 'macro'],
+  // Shell / Bash
+  [/^\s*([A-Za-z_][\w]*)\s*\(\s*\)\s*\{/, 'function'],
+  // Config / constants — the original pattern, kept verbatim
   [/^\s*['"]?([A-Z][A-Z0-9_]{2,})['"]?\s*[:=]/, 'key'],
 ];
 
@@ -831,6 +857,65 @@ export function fallbackExtract(file, content) {
     }
   }
   return out;
+}
+
+/**
+ * MINIFIED FILE DETECTION — wrong symbol counts from the regex fallback.
+ *
+ * WHY THIS EXISTS. The regex fallback (fallbackExtract) is line-oriented: it matches a
+ * declaration at the START of a line. A minified file is one or two enormous lines with every
+ * statement separated by `;` or `,`, so the regex sees a single 50,000-character "line",
+ * matches the FIRST declaration on it, and reports ONE symbol for a file that contains hundreds.
+ * That is not reduced coverage — it is a confidently wrong number, and a worktree whose only
+ * delta is a minified bundle then looks like it contributed almost nothing.
+ *
+ * THE HEURISTIC, and why it is tokens-per-line rather than a name list. A list of "known
+ * minified filename patterns" (*.min.js, bundle.js, vendor.js) is exactly the kind of
+ * blocklist analyze.mjs rejected for symbols: it cannot generalise, and a hand-written
+ * bundle.js is not minified. The MEASURED signal is the average line length: real source has
+ * 30–80 chars per line; a minified file has thousands. The threshold (>500 chars/line on
+ * average) sits well above the noisiest real source (a long URL or a generated config table)
+ * and well below a minified bundle, so it does not flag prose and does not miss minification.
+ *
+ * NOT APPLIED TO CTAGS. ctags parses the language grammar, so minification does not confuse
+ * it — it extracts every function regardless of line layout. This is a REGEX-FALLBACK guard
+ * only, because that is the only path where line-orientation produces a wrong count.
+ *
+ * @param {string} content
+ * @returns {boolean}
+ */
+export function isMinified(content) {
+  if (!content) return false;
+  const text = String(content);
+  // A NUL byte means binary — not minified, just not text. Handled elsewhere (readTextIfSmall
+  // returns null for binary), but defensive here in case a caller bypasses it.
+  if (text.includes('\0')) return false;
+  const lines = text.split('\n');
+  // A file with no newlines at all and >500 chars is a single minified line.
+  if (lines.length <= 1) return text.length > 500;
+  // Average chars per line, excluding a trailing empty line from the split.
+  const nonEmpty = lines[lines.length - 1] === '' ? lines.length - 1 : lines.length;
+  if (nonEmpty === 0) return false;
+  const avg = text.length / nonEmpty;
+  return avg > 500;
+}
+
+/**
+ * A human-readable warning for when minified files are detected in a scan.
+ *
+ * Exported so the scan/CLI can surface the SAME text. A second copy of a warning drifts, and
+ * "these symbol counts are wrong because the file is minified" is the one a user acts on.
+ *
+ * @param {string[]} files  the minified file paths detected
+ */
+export function minifiedFilesWarning(files) {
+  if (!files || !files.length) return null;
+  const list = files.slice(0, 5).join(', ');
+  const more = files.length > 5 ? ` (+${files.length - 5} more)` : '';
+  return `holt: ${files.length} minified file(s) detected (${list}${more}). ` +
+    'Symbol counts for these are unreliable under the regex fallback (a minified file is one ' +
+    'long line, so line-oriented extraction misses most declarations). ' +
+    'Install universal-ctags for accurate counts, or exclude minified files from the scan.';
 }
 
 /* ------------------------------------------------------------ orchestration ---- */
@@ -876,6 +961,7 @@ export function symbolKey(sym) {
 
 /** Symbols for files as they exist on disk in `dir`. */
 export async function symbolsOnDisk(dir, relPaths, backend) {
+  /** @type {any} */
   const result = new Map();
   // Aggregated from every ctagsBatch below. An extraction that ERRORED is not an empty answer,
   // and callers must be able to tell the difference — see the note in ctagsBatch.
@@ -1100,6 +1186,9 @@ export function diffSymbols(headByFile, baseByFile) {
 }
 
 /** Resolve which backend is in play, once. */
+/**
+ * @param {{force?: string}} [opts]
+ */
 export async function resolveBackend({ force } = {}) {
   if (force === 'regex') return { kind: 'regex', label: 'regex-fallback', degraded: true, enry: false };
   const [ctags, enry] = await Promise.all([detectCtags(), detectEnry()]);

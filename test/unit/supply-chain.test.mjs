@@ -27,6 +27,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
+import { underOrEqualAsync } from '../../src/paths.mjs';
 import {
   audit, auditCapabilities, verifyIntegrity, buildManifest, treeDigest, shippedFiles,
   fileCapabilities, importedBuiltins, spawnTargets, envReads, stripComments, strippedIsSafe,
@@ -54,7 +55,7 @@ async function sandbox() {
     await fsp.copyFile(path.join(ROOT, rel), dest);
   }
   fs.writeFileSync(path.join(dir, MANIFEST_FILE), buildManifest(dir), 'utf8');
-  assert.equal(path.resolve(dir).startsWith(path.resolve(ROOT)), false,
+  assert.equal(await underOrEqualAsync(path.resolve(dir), path.resolve(ROOT)), false,
     'the sandbox must be outside the repository — refusing to run mutations against a live checkout');
   return dir;
 }
@@ -396,27 +397,28 @@ test('RED: a signature from a key we do not pin is invalid', async () => {
   } finally { await cleanup(dir); }
 });
 
-test('--require-signature REFUSES when this build pins no release key', async () => {
-  // The honest behaviour for an unbuilt half. Reporting "verified" against an empty key list
-  // would be the same lie as advertising an unimplemented feature.
+test('--require-signature REFUSES when the manifest has no detached signature', async () => {
+  // A key IS pinned now, so --require-signature expects a valid signature. An intact install
+  // without a signature file is refused — reporting "verified" without a signature would be
+  // the same lie as advertising an unimplemented feature.
   const dir = await sandbox();
   try {
-    assert.deepEqual(RELEASE_PUBLIC_KEYS_B64, [], 'no key is pinned yet; SUPPLY-CHAIN.md says what the owner must do');
+    assert.ok(RELEASE_PUBLIC_KEYS_B64.length > 0, 'a release key is pinned; SUPPLY-CHAIN.md documents it');
     const v = verifyIntegrity({ root: dir, requireSignature: true });
     assert.equal(v.ok, false);
     assert.equal(v.code, 'signature-required');
-    assert.equal(v.signature, 'unavailable');
+    assert.equal(v.signature, 'absent');
   } finally { await cleanup(dir); }
 });
 
-test('an unsigned but intact install passes, and SAYS the signature is unavailable', async () => {
+test('an unsigned but intact install passes, and SAYS the signature is absent', async () => {
   const dir = await sandbox();
   try {
     const v = verifyIntegrity({ root: dir });
     assert.equal(v.ok, true);
-    assert.equal(v.signature, 'unavailable');
-    assert.match(v.signatureReason, /provenance attestation/,
-      'an unsigned pass must point at what DOES establish authenticity, or it reads as a stronger claim than it is');
+    assert.equal(v.signature, 'absent');
+    assert.match(v.signatureReason, /pins? a release key/,
+      'an unsigned pass must explain why the signature is absent, or it reads as a stronger claim than it is');
   } finally { await cleanup(dir); }
 });
 
@@ -474,7 +476,7 @@ test('holt audit --json is machine-readable and states what holt reads, writes a
   assert.match(rep.treeDigest, /^[0-9a-f]{64}$/);
 });
 
-test('RED: holt audit --require-signature exits NON-ZERO while no release key is pinned', async () => {
+test('RED: holt audit --require-signature exits NON-ZERO when no detached signature is present', async () => {
   const r = await runCli(['audit', '--require-signature', '--json'], os.tmpdir());
   assert.equal(r.code, 1, 'a strict caller must be refused, not quietly passed');
   assert.equal(JSON.parse(r.stdout).ok, false);
@@ -622,7 +624,7 @@ test('the questionnaire claims no postinstall script, and there is none', () => 
 });
 
 test('the docs claim SLSA Build L2 and the workflow does not claim more', () => {
-  const wf = fs.readFileSync(path.join(ROOT, '.github/workflows/release.yml'), 'utf8');
+  const wf = fs.readFileSync(path.join(ROOT, '.github/workflows/release-artifact.yml'), 'utf8');
   assert.ok(/Build L2/.test(SUPPLY_DOC) && /Build L2/.test(QUESTIONNAIRE));
   assert.equal(/SLSA.{0,20}(Level|L)\s*3\b/.test(wf.replace(/require.*L3[^\n]*/g, '')), false,
     'the workflow must not claim a level the build does not reach');
@@ -631,13 +633,12 @@ test('the docs claim SLSA Build L2 and the workflow does not claim more', () => 
 });
 
 test('the workflow names the exact secrets it needs, and guards every credentialed step', () => {
-  const wf = fs.readFileSync(path.join(ROOT, '.github/workflows/release.yml'), 'utf8');
+  const wf = fs.readFileSync(path.join(ROOT, '.github/workflows/release-artifact.yml'), 'utf8');
   assert.ok(wf.includes('HOLT_RELEASE_SIGNING_KEY'), 'the signing secret must be named');
-  assert.ok(wf.includes('NPM_TOKEN'), 'the npm fallback secret must be named');
   // `secrets` is not available in a step-level `if:`; writing one there never matches, so the
   // "skip when absent" guard would silently become "always run" and the release would break.
   assert.equal(/^\s+if:.*secrets\./m.test(wf), false,
     'a step-level `if:` referencing the secrets context never matches — hoist it to a job-level env');
-  assert.ok(SUPPLY_DOC.includes('HOLT_RELEASE_SIGNING_KEY') && SUPPLY_DOC.includes('NPM_TOKEN'),
+  assert.ok(SUPPLY_DOC.includes('HOLT_RELEASE_SIGNING_KEY'),
     'SUPPLY-CHAIN.md §5 must tell the owner exactly which secrets to create');
 });

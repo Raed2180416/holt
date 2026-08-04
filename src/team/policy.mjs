@@ -82,9 +82,36 @@
  */
 
 import fs from 'node:fs/promises';
-import { parse as jsoncParse } from 'jsonc-parser';
 import path from 'node:path';
 import { git } from '../git.mjs';
+
+/**
+ * jsonc-parser is an OPTIONAL dependency (see package.json optionalDependencies). A static import
+ * would throw ERR_MODULE_NOT_FOUND on an install that omits optionals, killing the CLI before it
+ * prints anything. It is loaded dynamically, cached, and preloaded once at module init so the
+ * synchronous parsePolicy() below can read the cache. A missing install is reported as a clear
+ * error when a policy file is actually parsed, not at module load.
+ */
+/** @type {any} */
+let _jsonc = null;
+async function loadJsonc() {
+  if (_jsonc !== null) return _jsonc;
+  try {
+    _jsonc = await import('jsonc-parser');
+  } catch {
+    _jsonc = false; // sentinel: loaded but absent
+  }
+  return _jsonc;
+}
+// Preload at module init so the synchronous parsePolicy() can read the cache.
+await loadJsonc();
+function missingJsonc() {
+  throw new Error(
+    "holt requires the optional 'jsonc-parser' dependency to parse policy files, " +
+    "and it is not installed. Install it with: npm install jsonc-parser",
+  );
+}
+const jsoncParse = (text, errors, options) => { if (!_jsonc) missingJsonc(); return _jsonc.parse(text, errors, options); };
 
 export const POLICY_PATHS = ['.holt/policy.json', '.holt/policy.jsonc'];
 
@@ -416,7 +443,7 @@ const declaredBase = (env) => {
  *     meaningless verdict, so it REFUSES and names the flag that fixes it. A gate whose own
  *     preconditions failed must not render a verdict at all.
  *
- * @param {string|null} headRef  the checked-out branch's short name, or null when detached.
+ * @param {{base?: any, headOid?: string|null, headRef?: string|null, env?: object}} [opts]
  */
 export function baseAuthority({ base = null, headOid = null, headRef = null, env = process.env } = {}) {
   const declared = declaredBase(env);
@@ -492,6 +519,10 @@ export async function currentBranch(root) {
  * `headDiffers` is reported whenever the working tree's copy is not the enforced one, so a
  * reviewer is told, in the build output, that this change proposes altering the gate.
  */
+/**
+ * @param {string} root
+ * @param {{base?: any, headOid?: string|null, headRef?: string|null, env?: object}} [opts]
+ */
 export async function loadGatePolicy(root, { base = null, headOid = null, headRef, env = process.env } = {}) {
   const ref = headRef === undefined ? await currentBranch(root) : headRef;
   const authority = baseAuthority({ base, headOid, headRef: ref, env });
@@ -510,12 +541,13 @@ export async function loadGatePolicy(root, { base = null, headOid = null, headRe
     };
   }
 
-  const fromBase = await loadPolicyFromRef(root, base.oid);
+  const fromBase = await loadPolicyFromRef(root, base?.oid);
   if (fromBase.found) {
     // Did the candidate propose a change to the gate? Read the working tree WITHOUT validating
     // it: a candidate's malformed proposal must not be able to fail a build for the base's rules.
     let headDiffers = false;
     for (const rel of POLICY_PATHS) {
+      /** @type {string|null} */
       let raw = null;
       try { raw = await fs.readFile(path.join(root, rel), 'utf8'); } catch { /* absent */ }
       if (rel === fromBase.path) headDiffers = raw !== fromBase.raw;
@@ -528,7 +560,7 @@ export async function loadGatePolicy(root, { base = null, headOid = null, headRe
   if (!fromTree.found) return { found: false, authority };
   return {
     ...fromTree, trusted: false, authority, headDiffers: true,
-    note: `no policy exists in the base (${base.ref}); using the working-tree copy, which is NOT trusted and cannot suppress any other check`,
+    note: `no policy exists in the base (${base?.ref}); using the working-tree copy, which is NOT trusted and cannot suppress any other check`,
   };
 }
 
@@ -542,6 +574,9 @@ export async function loadGatePolicy(root, { base = null, headOid = null, headRe
  *
  * A TRUSTED policy keeps the original behaviour exactly: it is the reviewed statement of what
  * this repository wants enforced, so it supersedes the flags as it always did.
+ */
+/**
+ * @param {{policyResult?: any, flagFailures?: any[], trusted?: boolean}} [opts]
  */
 export function gateVerdict({ policyResult = null, flagFailures = [], trusted = false } = {}) {
   const carried = trusted === true ? [] : [...flagFailures];
@@ -576,6 +611,9 @@ export function policySourceOf(loaded) {
  *
  * `trusted` is derived here rather than passed in, so no call site can supply the wrong one.
  */
+/**
+ * @param {{loaded?: any, policyResult?: any, flagFailures?: any[], entitlement?: any}} [opts]
+ */
 export function ciPolicyOutcome({ loaded, policyResult, flagFailures = [], entitlement = null } = {}) {
   const verdict = gateVerdict({ policyResult, flagFailures, trusted: loaded?.trusted === true });
   return {
@@ -601,6 +639,9 @@ export function ciPolicyOutcome({ loaded, policyResult, flagFailures = [], entit
 /**
  * Evaluate a loaded policy against a branch audit (+ optional worktree report).
  * Pure function: all I/O happened upstream, so this is exhaustively testable.
+ *
+ * @param {any} policy
+ * @param {{audit?: any, report?: any, ignore?: any[]}} [opts]
  */
 export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {}) {
   const violations = [];

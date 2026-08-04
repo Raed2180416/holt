@@ -2,17 +2,16 @@
 /**
  * holt — social-proof gate.
  *
- * A README that displays "8 stars · 21 downloads/week" argues against the project. Below a
+ * A README that displays "8 stars" argues against the project. Below a
  * credible threshold, showing nothing is strictly better than showing the truth badly. So the
  * marketing block lives in the README as an HTML comment from day one and switches itself on,
  * once, when the numbers can carry it.
  *
- * THRESHOLD (either, not both):
- *   - 500 GitHub stars, or
- *   - 1,000 npm downloads in the last week
+ * THRESHOLD:
+ *   - 500 GitHub stars
  *
- * Both are points where a reader's reaction flips from "who else uses this?" to "this is
- * established". Below them the badges are a liability; above them they are the strongest thing
+ * That is the point where a reader's reaction flips from "who else uses this?" to "this is
+ * established". Below it the badges are a liability; above it they are the strongest thing
  * on the page.
  *
  *   node scripts/milestone.mjs --check     # report the numbers, exit 0 if the gate is met
@@ -22,7 +21,7 @@
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
-export const THRESHOLDS = { stars: 500, weeklyDownloads: 1000 };
+export const THRESHOLDS = { stars: 500 };
 
 export const BEGIN = '<!-- HOLT:SOCIAL-PROOF:BEGIN';
 export const END = 'HOLT:SOCIAL-PROOF:END -->';
@@ -30,18 +29,15 @@ const BEGIN_ON = '<!-- HOLT:SOCIAL-PROOF:BEGIN -->';
 const END_ON = '<!-- HOLT:SOCIAL-PROOF:END -->';
 
 /** Pure: given counts, is the gate met and why. */
-export function evaluate({ stars = 0, weeklyDownloads = 0 } = {}) {
+export function evaluate({ stars = 0 } = {}) {
   const reasons = [];
   if (stars >= THRESHOLDS.stars) reasons.push(`${stars} stars ≥ ${THRESHOLDS.stars}`);
-  if (weeklyDownloads >= THRESHOLDS.weeklyDownloads) reasons.push(`${weeklyDownloads} weekly downloads ≥ ${THRESHOLDS.weeklyDownloads}`);
   return {
     met: reasons.length > 0,
     reasons,
     stars,
-    weeklyDownloads,
     shortfall: {
       stars: Math.max(0, THRESHOLDS.stars - stars),
-      weeklyDownloads: Math.max(0, THRESHOLDS.weeklyDownloads - weeklyDownloads),
     },
   };
 }
@@ -63,9 +59,8 @@ export function enable(readme) {
   return { changed: true, readme: next, reason: 'social-proof block enabled' };
 }
 
-async function fetchCounts({ repo, pkg, fetchImpl = fetch } = {}) {
+async function fetchCounts({ repo, fetchImpl = fetch } = {}) {
   let stars = 0;
-  let weeklyDownloads = 0;
   const errors = [];
   try {
     const r = await fetchImpl(`https://api.github.com/repos/${repo}`, {
@@ -74,20 +69,14 @@ async function fetchCounts({ repo, pkg, fetchImpl = fetch } = {}) {
     if (r.ok) stars = (await r.json()).stargazers_count ?? 0;
     else errors.push(`github ${r.status}`);
   } catch (e) { errors.push(`github ${e.message}`); }
-  try {
-    const r = await fetchImpl(`https://api.npmjs.org/downloads/point/last-week/${pkg}`);
-    if (r.ok) weeklyDownloads = (await r.json()).downloads ?? 0;
-    else errors.push(`npm ${r.status}`);
-  } catch (e) { errors.push(`npm ${e.message}`); }
   // A failed lookup must never be read as "threshold met" — counts stay at zero and the
   // errors are reported, so a rate-limited API cannot flip the README on by accident.
-  return { stars, weeklyDownloads, errors };
+  return { stars, errors };
 }
 
 async function main() {
   const repo = process.env.HOLT_REPO || 'raed2180416/holt';
-  const pkg = process.env.HOLT_PKG || 'holt';
-  const counts = await fetchCounts({ repo, pkg });
+  const counts = await fetchCounts({ repo });
   const verdict = evaluate(counts);
 
   if (counts.errors.length) process.stderr.write(`milestone: lookup issues — ${counts.errors.join(', ')}\n`);

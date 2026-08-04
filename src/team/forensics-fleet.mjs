@@ -45,7 +45,8 @@ const DESTRUCTIVE_ACTIONS = new Set(['clean-remove', 'removed', 'branch-delete']
  * @param {number} [o.maxDepth]
  * @param {string|null} [o.since] ISO date filter
  * @param {string|null} [o.agent] restrict to one agent id
- * @param {object} [o.env]
+ * @param {Record<string, string|undefined>} [o.env]
+ * @param {string|null} [o.publicKeyB64]
  */
 export async function fleetForensics(roots, {
   maxDepth = 3, since = null, agent = null, env = process.env, publicKeyB64 = null,
@@ -62,8 +63,7 @@ export async function fleetForensics(roots, {
 
   const sinceMs = since ? Date.parse(since) : null;
   if (since && Number.isNaN(sinceMs)) {
-    const e = new Error(`--since is not a date holt can parse: ${since}`);
-    e.code = 'EBADDATE';
+    const e = Object.assign(new Error(`--since is not a date holt can parse: ${since}`), { code: 'EBADDATE' });
     throw e;
   }
 

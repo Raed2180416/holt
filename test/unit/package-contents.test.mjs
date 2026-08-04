@@ -176,8 +176,11 @@ test('package: every external module the shipped code imports is a declared DEPE
     .filter((p) => p.endsWith('.mjs') && packed.has(rel(p)));
 
   // Bare specifiers only: relative ones are the other test's job, node: builtins need nothing.
+  // The `from` regex requires `import` or `export` before it, to avoid matching the word "from"
+  // inside a string literal — e.g. a sentence like "tell X from Y" in a comment-as-string would
+  // otherwise be parsed as an import of 'Y'.
   const BARE = [
-    /\bfrom\s+['"]([^.'"][^'"]*)['"]/g,
+    /\b(?:import|export)\s[^;]*?\bfrom\s+['"]([^.'"][^'"]*)['"]/g,
     /\bimport\s*\(\s*['"]([^.'"][^'"]*)['"]\s*\)/g,
   ];
   const pkgNameOf = (spec) => (spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0]);

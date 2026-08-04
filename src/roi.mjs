@@ -70,9 +70,8 @@ export function summarizeJournal(events, { now = null } = {}) {
         ? `holt is protecting ${protectedWt} workstream(s) that hold work found nowhere else`
         : 'no prevented losses recorded yet — the record starts the first time something is protected, rescued, or refused'),
     note: 'Every figure here is a count of events that actually fired, taken from the journal. '
-      + 'estimatedHoursSaved is a conservative planning figure (2h per prevented loss, 15m per '
-      + 'reclaim), not a measurement. preventedLosses counts events that actually fired, and '
-      + 'EXCLUDES attemptsHoltCouldNotVerify — holt did not prevent those, it declined to judge them. '
+      + 'preventedLosses counts events that actually fired, and EXCLUDES '
+      + 'attemptsHoltCouldNotVerify — holt did not prevent those, it declined to judge them. '
       + 'Audit them with `holt journal --export json`.',
   };
 }

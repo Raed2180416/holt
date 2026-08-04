@@ -150,7 +150,7 @@ export function overlappingPairs(workstreams) {
  * but has not committed them" is a true and useful observation. It is simply not a licence to
  * delete the copy that IS committed.
  *
- * @param {object[]} live  scanned workstreams with `ok === true`
+ * @param {Record<string, any>[]} live  scanned workstreams with `ok === true`
  */
 function contentOwnership(live) {
   const all = new Map();      // content-identity key -> Set(workstream id) — every holder
@@ -214,7 +214,7 @@ function contentOwnership(live) {
  * Only NON-NULL oids are compared. `strictReadOnly` scans have no merged tree at all, and a
  * `null === null` grouping would have declared every one of them a twin of every other.
  *
- * @param {object[]} live  scanned workstreams with `ok === true`
+ * @param {Record<string, any>[]} live  scanned workstreams with `ok === true`
  * @returns {Map<string, string[]>}  workstream id -> OTHER ids whose merged tree is the same oid
  */
 function mergedTreeTwins(live) {
@@ -335,6 +335,7 @@ export function uniqueWork(scanResult) {
         const file = symbolFile.get(k);
         return file ? fileIsContentUnique(w, file) : false;
       });
+      /** @type {Record<string, any[]>} */
       const byLayer = { committed: [], uncommitted: [], untracked: [] };
       const uniqueSet = setOf(uniqueSymbols);
       for (const s of w.added ?? []) {
@@ -910,6 +911,8 @@ export function safeToDelete(scanResult, unique = null) {
  * We never call a predicted collision proven. The literature names "shared hotspot files
  * (routes, configs, registries)" as the top collision class, and those live overwhelmingly in
  * the uncommitted layer while an agent is still working — precisely where proof is impossible.
+ *
+ * @returns {Promise<any[] & {all?: any[], hidden?: any[], hotspots?: any[]}>}
  */
 export async function collisions(scanResult, opts = {}) {
   const { concurrency = 6, timeout = 60_000 } = opts;
@@ -994,6 +997,7 @@ export async function collisions(scanResult, opts = {}) {
         }
       }
 
+      /** @type {boolean | null} */
       let proven = null;
       if (!identicalState && !scanResult.strictReadOnly && aSide && bSide) {
         const mt = await git(['merge-tree', '--write-tree', aSide, bSide], {
@@ -1096,6 +1100,7 @@ export async function collisions(scanResult, opts = {}) {
   // So: `visible` is what humans read, `all` is what order/plan/gate consume, and `hotspots`
   // aggregates the hidden bucket BY FILE — "5 workstreams edit config/registry.mjs" is one
   // finding carrying the same information as ten pairwise rows, without the explosion.
+  /** @type {any[] & {all?: any[], hidden?: any[], hotspots?: any[]}} */
   const visible = keepLow ? ranked : ranked.filter((r) => r.severity !== 'low');
   visible.all = ranked;
   visible.hidden = ranked.filter((r) => r.severity === 'low');
@@ -1614,6 +1619,10 @@ function buildAdvice(contested, alreadyBuilt, hasPeers = true) {
  * Executing the rebases is explicitly NOT holt's job — git-machete, stack-pr and Graphite
  * already do stacked-branch restacking well. holt produces the order; they apply it.
  */
+/**
+ * @param {Record<string, any>} scanResult
+ * @param {{collisions?: any[], duplicates?: any[], collapse?: boolean}} [opts]
+ */
 export function landingPlan(scanResult, {
   collisions: cols = [], duplicates: dups = [], collapse = true,
 } = {}) {
@@ -1815,6 +1824,10 @@ export function reviewSurface(live, safeIds = new Set()) {
 /* ------------------------------------------------------------- the graph ---- */
 
 /** Nodes + edges, for rendering or for an agent to reason over. */
+/**
+ * @param {Record<string, any>} scanResult
+ * @param {{collisions?: any[], duplicates?: any[]}} [opts]
+ */
 export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups = [] } = {}) {
   const live = scanResult.workstreams.filter((w) => w.ok);
   const uniq = uniqueWork(scanResult);
@@ -1899,6 +1912,7 @@ export async function analyze(scanResult, opts = {}) {
   const safe = safeToDelete(scanResult, uniq);
   // Machine consumers get the FULL evidence (co-located included): sequencing conservatively
   // costs a little parallelism, sequencing wrongly costs a failed apply.
+  /** @type {any[]} */
   const colsAll = cols.all ?? cols;
   const plan = landingPlan(scanResult, {
     collisions: colsAll, duplicates: dups, collapse: opts.collapse !== false,
@@ -1976,6 +1990,18 @@ export async function analyze(scanResult, opts = {}) {
     // vouching for; see the comment at the collection site in scan.mjs.
     primaryUnscanned: scanResult.primaryUnscanned ?? null,
     soloPrimary: !!scanResult.soloPrimary,
+    // Carried from the scan so every surface can name a slow-link verdict. See src/git.mjs.
+    networkFs: scanResult.networkFs ?? null,
+    // Carried from the scan: a warning when the regex fallback is in use and minified files
+    // were detected (their symbol counts are unreliable). null when ctags is in use or no
+    // minified files were found. See isMinified() in src/symbols.mjs.
+    minifiedWarning: scanResult.minifiedWarning ?? null,
+    // TEST FIXTURE DOMINATION. When more than half of a workstream's touched files are test
+    // fixtures, the risk score and ROI are materially wrong: test churn reads as productive
+    // work, and a fixture that exists nowhere else is not the same risk class as a source file
+    // that exists nowhere else. Named here so the CLI/MCP can warn the user rather than silently
+    // publishing inflated numbers. See testFixtureProfile() in scan.mjs.
+    testFixtureWarning: testFixtureDominationWarning(live),
     filtering: {
       rule: `a symbol carried by more than ${limit} of ${live.length} workstream(s) is treated as boilerplate and excluded from PAIR evidence only`,
       droppedCount: dropped.length,
@@ -1983,4 +2009,25 @@ export async function analyze(scanResult, opts = {}) {
       note: 'per-workstream added/unique symbol lists are NOT filtered',
     },
   };
+}
+
+/**
+ * Which workstreams are dominated by test fixtures, and a single warning string when any are.
+ *
+ * A workstream is "dominated" when testFixtureProfile().dominates is true on its touched set.
+ * The warning is the one a user acts on, so it is built in ONE place (here) and surfaced by
+ * every consumer, rather than each deriving its own — a second copy of a warning drifts.
+ *
+ * @param {Record<string, any>[]} live  scanned workstreams with `ok === true`
+ * @returns {{ dominated: any[], warning: string|null }}
+ */
+function testFixtureDominationWarning(live) {
+  const dominated = live.filter((w) => w.testFixture?.dominates)
+    .map((w) => ({ id: w.id, testCount: w.testFixture.testCount, totalCount: w.testFixture.totalCount }));
+  if (!dominated.length) return { dominated: [], warning: null };
+  const list = dominated.slice(0, 5).map((d) => `${d.id} (${d.testCount}/${d.totalCount} test files)`).join(', ');
+  const warning = `holt: test fixtures dominate the analysis for ${dominated.length} workstream(s): ` +
+    `${list}. Risk scores and ROI may be inflated — test churn is counted as production work. ` +
+    `Test files are flagged (not filtered) because a fixture can hold the only copy of something.`;
+  return { dominated, warning };
 }

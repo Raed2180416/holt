@@ -54,7 +54,7 @@ const unitOf = (file, depth) => {
 };
 
 /**
- * @param {object} report - analyze() report (uses full collision evidence when available)
+ * @param {Record<string, any>} report - analyze() report (uses full collision evidence when available)
  * @param {string[]} trackedFiles - repo-relative paths from `git ls-files`
  * @param {{agents?: number}} opts
  */
@@ -145,6 +145,7 @@ export function partitionPlan(report, trackedFiles, { agents = 2 } = {}) {
   // Greedy balanced assignment: heaviest UNIT first, always into the lightest bucket. A unit may
   // be several directories glued together by the conflict graph above; gluing, not the individual
   // directory, is the thing that may never be split across buckets.
+  /** @type {{agent: number, dirs: string[], weight: number}[]} */
   const buckets = Array.from({ length: n }, (_, i) => ({ agent: i + 1, dirs: [], weight: 0 }));
   const byWeight = units
     .map((u) => ({ dirs: [...u.dirs].sort(), weight: u.weight }))

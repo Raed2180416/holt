@@ -43,6 +43,12 @@ import path from 'node:path';
 const CTAGS_TAG = '2026.07.28+45e7781196f227cc8503e57d0ee45312205dcd28';
 const CTAGS_BASE = `https://github.com/universal-ctags/ctags-nightly-build/releases/download/${CTAGS_TAG}`;
 
+// Windows builds come from a different upstream repo (universal-ctags/ctags-win32) because the
+// nightly-build repo does not produce Windows binaries. The win32 repo publishes daily builds as
+// zip files; we pin a specific tag and verify the checksum the same way.
+const CTAGS_WIN_TAG = 'p6.2.20260802.0';
+const CTAGS_WIN_BASE = `https://github.com/universal-ctags/ctags-win32/releases/download/${CTAGS_WIN_TAG}`;
+
 /** Measured from the upstream assets. A mismatch is a refusal, never a warning. */
 const CTAGS_ASSETS = {
   'linux-x64': {
@@ -60,6 +66,12 @@ const CTAGS_ASSETS = {
   'darwin-arm64': {
     file: 'uctags-2026.07.28-macos-11.0-arm64.release.tar.xz',
     sha256: 'db28f3840777b50a2d29fa975a92d1a135c309231e3e9529ce455c8ea5e4c5a9',
+  },
+  'win32-x64': {
+    file: `ctags-${CTAGS_WIN_TAG}-x64.zip`,
+    sha256: '9189a0f4f7a31f3ba93d30c43229e0bf69bf7fa6bf8927b08511b909bd6e4677',
+    zip: true,
+    url: `${CTAGS_WIN_BASE}/ctags-${CTAGS_WIN_TAG}-x64.zip`,
   },
 };
 
@@ -83,7 +95,9 @@ export function portableTarget() {
   const key = `${process.platform}-${process.arch}`;
   const asset = CTAGS_ASSETS[key];
   if (!asset) return null;
-  return { key, url: `${CTAGS_BASE}/${asset.file}`, file: asset.file, sha256: asset.sha256 };
+  // Windows assets have their own URL (different upstream repo); others use CTAGS_BASE.
+  const url = asset.url || `${CTAGS_BASE}/${asset.file}`;
+  return { key, url, file: asset.file, sha256: asset.sha256, zip: !!asset.zip };
 }
 
 let _pathEnsured = false;

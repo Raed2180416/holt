@@ -850,7 +850,7 @@ footer { padding: 44px 0 60px; }
       </p>
       <div class="btn-row">
         <button class="btn btn-primary" id="copy-install" type="button">
-          <span class="btn-icon">$</span> npm install -g holt (release tarball)
+          <span class="btn-icon">$</span> npm install -g holt.tgz (from GitHub release)
         </button>
         <a class="btn btn-ghost" href="#proof">See what a naked agent deleted →</a>
       </div>
@@ -1507,8 +1507,8 @@ footer { padding: 44px 0 60px; }
       <div class="bench-cols">
         <div>
           <div class="tile-row tri">
-            <div class="tile"><div class="tile-num">1065</div><div class="tile-label">tests passing (<code class="inline">npm test</code>)</div></div>
-            <div class="tile"><div class="tile-num">79/79</div><div class="tile-label">deliberate defects killed (<code class="inline">npm run test:mutation</code>)</div></div>
+            <div class="tile"><div class="tile-num">1283</div><div class="tile-label">tests passing (<code class="inline">npm test</code>)</div></div>
+            <div class="tile"><div class="tile-num">85/85</div><div class="tile-label">deliberate defects killed (<code class="inline">npm run test:mutation</code>)</div></div>
             <div class="tile"><div class="tile-num">50</div><div class="tile-label">languages asserted by symbol name</div></div>
           </div>
         </div>
@@ -1551,7 +1551,7 @@ footer { padding: 44px 0 60px; }
           <li>Content-based protection, verified rescue, re-verified clean</li>
           <li>MCP server, hooks, AGENTS.md — every agent host</li>
           <li>CI gate for a single repository</li>
-          <li>176 languages · 50 covered by test</li>
+          <li>164 languages via ctags + 12 gap pack · 50 covered by test</li>
         </ul>
         <a class="btn btn-primary" href="#install">Install now</a>
       </div>
@@ -1631,7 +1631,7 @@ footer { padding: 44px 0 60px; }
       <div>
         <div class="code-block">
           <button class="copy-btn" id="copy-quickstart" type="button">copy</button>
-          <div class="cl"><span class="prompt">$</span> npm install -g https://github.com/Raed2180416/holt/releases/download/v0.3.1/holt.tgz</div>
+          <div class="cl"><span class="prompt">$</span> npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz</div>
           <div class="cl"><span class="cmt"># not on the npm registry yet — this URL is the install, stable across releases</span></div>
           <div class="cl"><span class="prompt">$</span> cd your-repo</div>
           <div class="cl"><span class="prompt">$</span> holt status<span class="cmt">        # the decision surface — 1–2 s</span></div>
@@ -1684,11 +1684,11 @@ footer { padding: 44px 0 60px; }
     }
   }
   var installBtn = document.getElementById('copy-install');
-  if (installBtn) installBtn.addEventListener('click', function () { copy('npm install -g https://github.com/Raed2180416/holt/releases/download/v0.3.1/holt.tgz', installBtn); });
+  if (installBtn) installBtn.addEventListener('click', function () { copy('npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz', installBtn); });
 
   var qsBtn = document.getElementById('copy-quickstart');
   if (qsBtn) qsBtn.addEventListener('click', function () {
-    copy('npm install -g https://github.com/Raed2180416/holt/releases/download/v0.3.1/holt.tgz\ncd your-repo\nholt status\nholt protect\nholt integrate\nholt clean --apply', qsBtn);
+    copy('npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz\ncd your-repo\nholt setup\nholt status\nholt protect\nholt clean --apply', qsBtn);
   });
 })();
 </script>

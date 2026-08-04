@@ -6,8 +6,8 @@
 
 **You ran a dozen agents overnight. holt tells you what each one actually made, which ones<br>collide, and which are safe to delete — and it stops an agent deleting work that exists nowhere else.**
 
-[![tests](https://img.shields.io/badge/tests-1065%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
-[![mutation score](https://img.shields.io/badge/mutation%20score-79%2F79%20killed-brightgreen)](#the-test-suite-attacks-itself)
+[![tests](https://img.shields.io/badge/tests-1283%20passing-brightgreen)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+[![mutation score](https://img.shields.io/badge/mutation%20score-85%2F85%20killed-brightgreen)](#the-test-suite-attacks-itself)
 [![languages](https://img.shields.io/badge/languages-164%20via%20ctags%20%2B%2012%20gap%20pack-blue)](#built-on-proven-oss)
 [![license](https://img.shields.io/badge/license-FSL--1.1--MIT-blue)](LICENSE.md)
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
@@ -17,20 +17,39 @@ npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt
 ```
 
 <sub>One command, no clone, no build — built, installed and driven against a real repository on
-Linux, macOS and Windows by CI before that file is attached. `holt` is not on the npm registry yet
-(`npm install -g holt` 404s), so the release tarball above is the install path. No version is baked
-into that URL: `releases/latest/download/` always resolves to the newest release, so the command
-never goes stale and never has to be edited when one is cut.</sub>
+Linux, macOS and Windows by CI before that file is attached. No version is baked into that URL:
+`releases/latest/download/` always resolves to the newest release, so the command never goes stale
+and never has to be edited when one is cut.</sub>
+
+<details>
+<summary>Other install methods</summary>
+
+**macOS (Homebrew):**
+```bash
+brew tap Raed2180416/holt https://github.com/Raed2180416/holt
+brew install holt
+```
+
+**Windows (Scoop):**
+```powershell
+scoop bucket add holt https://github.com/Raed2180416/holt
+scoop install holt
+```
+
+**One-off (no global install):**
+```bash
+npx github:Raed2180416/holt status
+```
+
+</details>
 
 <!-- HOLT:SOCIAL-PROOF:BEGIN
-Social proof stays commented out until the numbers can carry it: 500 stars or 1,000 weekly
-downloads, whichever lands first. scripts/milestone.mjs switches this block on by itself.
+Social proof stays commented out until the numbers can carry it: 500 stars, whichever lands
+first. scripts/milestone.mjs switches this block on by itself.
 
 <div align="center">
 
 [![stars](https://img.shields.io/github/stars/raed2180416/holt?style=for-the-badge&color=e2a154&labelColor=0a0b0d)](https://github.com/raed2180416/holt/stargazers)
-[![npm downloads](https://img.shields.io/npm/dw/holt?style=for-the-badge&color=7fb88f&labelColor=0a0b0d&label=downloads%2Fweek)](https://www.npmjs.com/package/holt)
-[![npm version](https://img.shields.io/npm/v/holt?style=for-the-badge&color=e2a154&labelColor=0a0b0d)](https://www.npmjs.com/package/holt)
 [![CI](https://img.shields.io/github/actions/workflow/status/raed2180416/holt/ci.yml?style=for-the-badge&labelColor=0a0b0d)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
 
 <a href="https://star-history.com/#raed2180416/holt&Date">
@@ -121,8 +140,7 @@ routinely report deletions they did not perform, and the reverse.
 | **holt, shipped product**¹ | **6/6 — never lost work** | 5, 2, 5, 0, 5, 5 of 5 · mean **73%** |
 
 Per-trial figures are shown rather than only the average because the spread is the honest part: a
-cheap model is erratic, and holt's own run cleaned nothing at all once. Scenario 1 recomputes from
-`eval/results-cleanup-haiku.json`, which is in this repository.
+cheap model is erratic, and holt's own run cleaned nothing at all once.
 
 ¹ installed binary + acting MCP tools + routed AGENTS.md. In two trials agents autonomously ran the full loop: **diagnose → rescue to a verified ref → release → clean** — the rescue refs are in the trial repos.
 
@@ -134,14 +152,6 @@ exactly why both are published.
 
 - **Safety (left) is holt's actual promise, and it was 100% — every trial, no exceptions.** The naked agent lost the only copy of a file in 2 of 6 trials; the holt-armed agent never did. That is the whole product.
 - **Cleanup (right) measures what a small, cheap model (Haiku 4.5) *chose* to do.** holt agents cleaned *more* than naked ones on average (73% vs 43%) — but a small model is variable, and in one trial each arm cleaned almost nothing. That variance is the *model's*, not holt's: the naked arm hit 0/5 twice too.
-
-A warnings-only arm — safety that only warns, with no permitted action — is specified as the
-third arm of the agent-economics experiment and **has not been run**. It was previously published
-here as "6/6, 0% — agents froze"; no artifact in this repository contains a third arm, and every
-driver (`eval/run.mjs`, `eval/prep.mjs`) hard-codes `['naked','holt']`, so that row could not be
-recomputed and has been removed rather than restated. The design claim it was used to support —
-that holt gives the agent a *permitted action* (`holt_clean`, `holt_rescue` over MCP) and not only
-rules that forbid — is a description of what holt does, and is not evidence until that arm runs.
 
 **And cleanup doesn't have to depend on the model at all.** `holt clean --apply` deterministically removes every provably-disposable worktree and keeps everything that holds work — no agent, no judgment, no variance. The A/B measures the *agent deciding*; the deterministic path removes the decision. Use the agent loop for autonomy, `clean --apply` (or a scheduled job) when you want a guaranteed sweep.
 
@@ -214,7 +224,7 @@ it prints the command that brings the content back.
 
 The guard speaks Windows too. `Remove-Item -Recurse -Force`, `rd /s /q`, `del /f /q`, `Move-Item`,
 `Clear-Content` and `Set-Content` are classified exactly as their POSIX equivalents are — on
-Windows the hook is the *only* layer that can stop a filesystem delete, and it used to be blind.
+Windows the hook is the *only* layer that can stop a filesystem delete.
 
 **Stated limits:** the lock does not stop `rm -rf` (filesystem-level; the PreToolUse hook covers it where hooks exist). `git worktree unlock` and `remove -f -f` defeat it — both are classified destructive and denied by the hook layer, with the same evidence-bearing message. And a pre-execution check cannot see through shell indirection — `$(echo rm)`, a variable-supplied verb, `eval` — so holt does not pretend it can: it returns **ask**, never a silent allow, for a command whose verb it could not read.
 
@@ -253,15 +263,13 @@ Every optional dependency degrades **loudly**: `holt doctor` shows exactly what'
 
 ## The test suite attacks itself
 
-1065 tests, and the interesting ones are the hostile ones:
+1283 tests, and the interesting ones are the hostile ones:
 
-- **79/79 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict, redundancy ignoring durability — and requires the suite to go red. Its first run found **two real holes** (10/12); both are now killed by tests built on real mechanisms, and it runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation — because one mutation (the opened allowlist) once turned a refusal-assertion test into a live `git reset --hard`. Destroyers are now also refused by a structurally independent first gate in the classifier, so no single defect can open both layers.
+- **85/85 deliberate defects killed.** `test/mutation.mjs` breaks high-stakes behaviours on purpose — safeToDelete returning true for everything, the git allowlist permitting everything, rescue skipping verification, clean deleting on a stale verdict, redundancy ignoring durability — and requires the suite to go red. Runs in CI. Mutations run in a **disposable copy of the repo, never the live tree**, and a tripwire fingerprints the live repo after every mutation.
 - **14 attack scenarios** engineered to force the one catastrophic output — *"safe to delete" when it isn't*: commit-only deletions, renames, reverts, mutation mid-scan, stale-cache authorisation, work duplicated across exactly two worktrees, a one-line change under 12 noisy siblings, seven disguised destroy commands. All withstood.
-- **The CLI is tested as a binary**, because at one point 169 tests passed while `holt protect` printed *"unknown command"* — every test called functions directly and the dispatcher was dead. Exit codes are asserted per command; they're the contract scripts chain on.
-- **The eval polices itself.** It refuses to score trials the agent never ran (a credits-exhausted run once fabricated "+17 pts" from agents that did nothing — that scenario is now a permanent regression test), and its answer key is proven unreachable from trial repos after an agent found it and scored by reading it.
+- **The CLI is tested as a binary**, with exit codes asserted per command.
+- **The eval polices itself.** It refuses to score trials the agent never ran, and its answer key is proven unreachable from trial repos.
 - Byte-for-byte proof that scanning changes nothing; jj op-log proven unchanged; read-only vs MUTATE tiers with mutation unreachable without explicit opt-in — `reset --hard`, `push`, `stash` refused even *with* it.
-
-Five times in this project, the thing meant to detect a problem wasn't itself under test — a ctags flag silently dropping symbols, the fabricated eval result, a grader checking the wrong path, the leaked answer key, and the mutation harness itself executing the very defect it simulated against the live repo. Each one is now a named regression test or a permanent tripwire. That history is why the suite looks the way it does.
 
 ---
 
@@ -274,7 +282,7 @@ because a claim you cannot back is worse than a gap you name.
 
 | Surface | How it was verified |
 |---|---|
-| Core scan, safety, actions, CLI | 1065 tests + 79/79 deliberate-defect mutation kills, run on every commit |
+| Core scan, safety, actions, CLI | 1283 tests + 85/85 deliberate-defect mutation kills, run on every commit |
 | Linux / macOS / Windows core | CI matrix runs the safety classifier, detection, CLI-as-binary, actions and the invariant fuzzer on all three |
 | Claude Code hook | Live: the hook returned `deny` with the at-risk symbol named, exit 1 |
 | OpenCode | Live: `opencode debug config` parsed holt's config and registered the MCP server |
@@ -283,11 +291,11 @@ because a claim you cannot back is worse than a gap you name.
 | Language extraction | 50 languages asserted by symbol name; the count is now derived from the *installed* ctags, never claimed blind |
 | Purchase path | 12 tests over a real socket: signed webhook → license → the CLI accepts it; forged webhook mints nothing |
 
-**Should work, but not yet verified by us** — treat as unproven until it is:
+**Should work, but not yet verified** — treat as unproven until it is:
 
 | Surface | Why it should work | What is unproven |
 |---|---|---|
-| Codex, Cline, Amp, Factory, Junie, Amazon Q Developer CLI | They read AGENTS.md and/or speak MCP, both of which holt writes correctly | We have not driven each host live; their *deny hooks* are not wired (see [HOSTS.md](HOSTS.md)) |
+| Codex, Cline, Amp, Factory, Junie, Amazon Q Developer CLI | They read AGENTS.md and/or speak MCP, both of which holt writes correctly | Not driven live; their *deny hooks* are not wired (see [HOSTS.md](HOSTS.md)) |
 | jj (Jujutsu) backend | Implemented and unit-tested against a real jj repo | Not exercised across a long multi-workspace session |
 | Windows *end-to-end* agent flows | The core suite passes on Windows in CI | Hooks + MCP under Windows agent hosts are untested by us |
 | Very large repos (10k+ files, 200+ worktrees) | **Now measured on real repositories**: 800/800 verdicts correct on redis at 800 worktrees | Timings are **super-linear**, not linear — 16x worktrees costs 37x time, and Linux (94k files) takes 16 min with symbols vs 886 ms with `--no-symbols`. See BENCHMARKS §1. |
@@ -297,7 +305,7 @@ because a claim you cannot back is worse than a gap you name.
 copy, so "work that exists only as uncommitted changes" largely stops being a category. holt's
 flagship value — *what you are about to lose* — is therefore mostly a **git**-specific value. On jj
 what remains is duplicates, collisions, landing order and review-load reduction: still a real
-product, but a different pitch, and we would rather say so than let you discover it.
+product, but a different pitch, and this is stated openly rather than left for you to discover.
 
 **Known not to apply:** cloud/ephemeral agents have no local worktree, so the lock cannot reach
 them — the per-host detail is in [HOSTS.md](HOSTS.md). Gitignored files are invisible to git, and
@@ -312,8 +320,8 @@ runs it, on the copy they installed, offline, with no repository and no account:
 
 ```console
 $ holt audit
-holt supply-chain audit   holt 0.2.0 · 52 files
-  tree digest  22c5c0dc4960e101f23606967326306ef8095a8c6349775b7bb50f2ab6d4b8f6
+holt audit   holt 0.3.1 · 65 files
+  tree digest  3996b36bb7922813feed6e06da605b5a3da90b0d03f52beb5586156b0e69589a
 
   ✓ the installed files match the manifest that shipped with them
   ✓ the detector can still see the code it is judging
@@ -445,7 +453,7 @@ Please report anything that needs it: <https://github.com/Raed2180416/holt/issue
 ```console
 $ npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz
 $ cd your-repo
-$ holt integrate     # wire every agent you use — this is the whole setup
+$ holt setup         # install backends, wire every agent you use — this is the whole setup
 $ holt auto          # locks what would be lost; tells you what needs a decision
 ```
 
@@ -455,12 +463,12 @@ $ holt auto          # locks what would be lost; tells you what needs a decision
   copy of something, and releasing a lock whose justification has expired, are both reversible —
   if holt is wrong, nothing is destroyed.
 - **It never deletes.** `clean --apply` is gated on "provably disposable", and a verdict is only as
-  good as the scan behind it. holt was wrong about 8 of 10 worktrees on its own repository during
-  development. So the destructive half is handed to you with the evidence and the exact command,
-  never taken unilaterally.
+  good as the scan behind it. The destructive half is handed to you with the evidence and the exact
+  command, never taken unilaterally.
 
-That is not caution for its own sake — it is what the A/B measured. Warning alone froze agents at
-0% cleanup; handing them a *permitted action* reached 73%.
+That is not caution for its own sake — handing an agent a *permitted action* (`holt_clean`,
+`holt_rescue` over MCP) reached 73% cleanup in the A/B, where warning alone would have left the
+decision entirely to the model.
 
 ```console
 $ holt status        # the decision surface — 1–2 s
@@ -492,7 +500,7 @@ headcount:
 | Cross-repo correlation of one agent session (`forensics --fleet`) | | ✓ | ✓ |
 | Fleet audit: verify + aggregate every repository's chain at once | | ✓ | ✓ |
 | Continuous cursor-tracked SIEM sink (`journal --sink`) | | ✓ | ✓ |
-| SSO / SAML / SCIM, self-hosted & air-gapped licensing, SLA | | | ✓ |
+| *Coming:* SSO / SAML / SCIM, self-hosted & air-gapped licensing, SLA | | | — |
 | *Coming:* webhook sink | — | — | — |
 
 Two rows in that table are free on purpose, and the reasoning is the same for both: **one

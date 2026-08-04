@@ -237,18 +237,19 @@ test('CI: a shallow clone cannot pass a policy it could not verify', async (t) =
   assert.equal(isShallow.stdout.trim(), 'true',
     'PREMISE: the fixture must actually be shallow, or this test proves nothing');
 
+  // A shallow clone REFUSES (exit 2) rather than reporting a green it could not verify. The
+  // history completeness check fires before any mode branch, so this is the same for inline
+  // flags, policy, and report-only — a shallow clone cannot answer the question at all.
   const strict = await sh(process.execPath, [BIN, 'ci', '--fail-on-unlanded', '--json', '--cwd', shallowDir], shallowDir);
-  assert.equal(strict.code, 1, `a policy that cannot be verified must not pass: ${strict.stdout}`);
+  assert.equal(strict.code, 2, `a shallow clone must REFUSE, not pass: ${strict.stdout}`);
   const body = JSON.parse(strict.stdout);
   assert.equal(body.ok, false);
-  assert.equal(body.shallow, true, 'the run must SAY it was shallow, not leave it to the static note');
-  assert.match(body.failures.join(' '), /SHALLOW CLONE/,
-    'the failure must name the cause, so a CI log tells someone what to change');
-  assert.match(body.failures.join(' '), /fetch-depth: 0/,
-    'and it must name the fix');
+  assert.equal(body.code, 'incomplete-history:shallow');
+  assert.match(`${body.reason} ${body.fix}`, /fetch-depth: 0/,
+    'the refusal must name the fix, so a CI log tells someone what to change');
 });
 
-test('CI: NEVER-WORSE — report-only on a shallow clone still reports, and says it was shallow', async (t) => {
+test('CI: NEVER-WORSE — report-only on a shallow clone still REFUSES, and says it was shallow', async (t) => {
   const fx = await graveyardFixture();
   t.after(() => fx.cleanup());
 
@@ -256,12 +257,12 @@ test('CI: NEVER-WORSE — report-only on a shallow clone still reports, and says
   t.after(() => fs.rm(shallowDir, { recursive: true, force: true }));
   await sh('git', ['clone', '-q', '--depth', '1', `file://${fx.root}`, shallowDir], path.dirname(fx.root));
 
-  // With no policy flag there is nothing to enforce, so failing would be an over-refusal: plain
-  // `holt ci` is a report. But it must still SAY the history was not visible, because a reader
-  // comparing two green runs has no other way to tell a verified pass from an unverifiable one.
+  // Report-only mode also refuses on a shallow clone: a green from a shallow clone is the worst
+  // failure this command has, because it tells a team they are protected when the gate could not
+  // see anything. The refusal is a property of the EVIDENCE, not of the flags.
   const plain = await sh(process.execPath, [BIN, 'ci', '--json', '--cwd', shallowDir], shallowDir);
-  assert.equal(plain.code, 0, `report-only must not fail on shallow: ${plain.stderr}`);
+  assert.equal(plain.code, 2, `report-only must refuse on shallow: ${plain.stderr}`);
   const body = JSON.parse(plain.stdout);
-  assert.equal(body.ok, true);
-  assert.equal(body.shallow, true, 'it must still disclose that it could not see the history');
+  assert.equal(body.ok, false);
+  assert.equal(body.code, 'incomplete-history:shallow');
 });

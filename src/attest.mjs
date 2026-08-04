@@ -232,6 +232,9 @@ export function signNote(body, { name, privateKey }) {
  * Verify a signed note against a set of trusted public keys.
  * Returns {valid, body, signatures:[{name, keyId, verified}]}. An unsigned note is `valid:false`
  * with `reason` — absence of a signature is never silently treated as a pass.
+ *
+ * @param {string} text
+ * @param {{keys?: any[]}} [opts]
  */
 export function verifyNote(text, { keys = [] } = {}) {
   const sep = text.indexOf('\n\n');

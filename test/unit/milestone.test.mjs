@@ -9,21 +9,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { evaluate, enable, isDisabled, THRESHOLDS, BEGIN, END } from '../../scripts/milestone.mjs';
 
-test('milestone: below threshold on both metrics is not met, and says how far off', () => {
-  const v = evaluate({ stars: 12, weeklyDownloads: 40 });
+test('milestone: below threshold is not met, and says how far off', () => {
+  const v = evaluate({ stars: 12 });
   assert.equal(v.met, false);
   assert.equal(v.shortfall.stars, THRESHOLDS.stars - 12);
-  assert.equal(v.shortfall.weeklyDownloads, THRESHOLDS.weeklyDownloads - 40);
 });
 
-test('milestone: either metric alone is enough', () => {
-  assert.equal(evaluate({ stars: THRESHOLDS.stars, weeklyDownloads: 0 }).met, true);
-  assert.equal(evaluate({ stars: 0, weeklyDownloads: THRESHOLDS.weeklyDownloads }).met, true);
-  assert.equal(evaluate({ stars: THRESHOLDS.stars - 1, weeklyDownloads: THRESHOLDS.weeklyDownloads - 1 }).met, false);
+test('milestone: meeting the star threshold is enough', () => {
+  assert.equal(evaluate({ stars: THRESHOLDS.stars }).met, true);
+  assert.equal(evaluate({ stars: THRESHOLDS.stars - 1 }).met, false);
 });
 
 test('SAFETY: missing or zeroed counts can never satisfy the gate', () => {
-  for (const counts of [{}, { stars: 0 }, { weeklyDownloads: 0 }, { stars: undefined, weeklyDownloads: null }]) {
+  for (const counts of [{}, { stars: 0 }, { stars: undefined }, { stars: null }]) {
     assert.equal(evaluate(counts).met, false, `a failed lookup must not enable badges: ${JSON.stringify(counts)}`);
   }
 });

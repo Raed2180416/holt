@@ -124,6 +124,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with: { ref: '${{ github.event.inputs.tag || github.ref_name }}' }
@@ -178,3 +180,43 @@ jobs:
             "${{ needs.build.outputs.tarball }}" holt.tgz SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" --clobber
           echo "attached ${{ needs.build.outputs.tarball }} + holt.tgz (sha256 ${{ needs.build.outputs.sha256 }})"
+
+      # SLSA Build L2: generate a provenance attestation for the tarball. This ties the artifact
+      # to the exact workflow run that built it, so a user can verify the tarball they downloaded
+      # was produced by this repository's CI and not swapped. Requires `id-token: write` and
+      # `attestations: write` permissions, both declared above on this job.
+      - name: generate provenance attestation
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "holt.tgz" --repo "$GITHUB_REPOSITORY" 2>/dev/null \
+            && echo "attestation already exists" && exit 0
+          echo "Generating SLSA Build L2 provenance attestation for holt.tgz"
+          gh attestation create "holt.tgz" --repo "$GITHUB_REPOSITORY" \
+            --predicate-type "https://slsa.dev/provenance/v1" \
+            --predicate-path - <<'EOF'
+          {"builder":{"id":"https://github.com/Raed2180416/holt/.github/workflows/release-artifact.yml@refs/tags/${TAG}"},"buildType":"https://slsa.dev/github-actions-workflow/v1","subject":[{"name":"holt.tgz","digest":{"sha256":"${{ needs.build.outputs.sha256 }}"}}]}
+          EOF
+
+      # Detached manifest signature: sign the SHA256SUMS file with the release signing key so
+      # `holt audit --require-signature` can verify the installed tree against a known key. The
+      # secret is a PKCS#8 PEM private key; the matching public key is in RELEASE_PUBLIC_KEYS_B64
+      # in src/supply-chain.mjs. Hoisted to job-level env so the step runs unconditionally and
+      # degrades gracefully when the secret is absent (empty string → skip signing, warn).
+      - name: sign the manifest
+        env:
+          HOLT_RELEASE_SIGNING_KEY: ${{ secrets.HOLT_RELEASE_SIGNING_KEY }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HOLT_RELEASE_SIGNING_KEY" ]; then
+            echo "::warning::HOLT_RELEASE_SIGNING_KEY is not set — the manifest will be unsigned"
+            echo "  Set it as a repository secret (PKCS#8 PEM) to enable detached signatures."
+            exit 0
+          fi
+          printf '%s' "$HOLT_RELEASE_SIGNING_KEY" > /tmp/signing-key.pem
+          openssl pkeyutl -sign -inkey /tmp/signing-key.pem -in SHA256SUMS -out SHA256SUMS.sig
+          rm /tmp/signing-key.pem
+          gh release upload "$TAG" SHA256SUMS.sig --repo "$GITHUB_REPOSITORY" --clobber
+          echo "signed SHA256SUMS and uploaded SHA256SUMS.sig"

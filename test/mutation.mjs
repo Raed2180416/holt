@@ -398,8 +398,8 @@ export const MUTATIONS = [
     id: 'policy-silent-pass',
     defect: 'an unparseable policy file is ignored instead of refusing — the team believes rules ran',
     file: 'src/team/policy.mjs',
-    find: "        throw Object.assign(",
-    replace: "        if (true) { doc = { version: 1, rules: [] }; } else throw Object.assign(",
+    find: "      refuse('POLICY_PARSE',",
+    replace: "      if (true) { doc = { version: 1, rules: [] }; } else refuse('POLICY_PARSE',",
     tests: ['test/unit/policy.test.mjs'],
   },
   {
@@ -434,8 +434,8 @@ export const MUTATIONS = [
     id: 'journal-anonymous',
     defect: 'journal entries lose their actor, so an audit trail records what and when but never who',
     file: 'src/journal.mjs',
-    find: '    const line = { at: new Date().toISOString(), ...clipEventDeep(event), actor: actor ?? currentActor() };',
-    replace: '    const line = { at: new Date().toISOString(), ...clipEventDeep(event) };',
+    find: '        actor: normaliseActorForJournal(actor ?? currentActor()),',
+    replace: '        // mutated: actor dropped',
     tests: ['test/e2e/team.test.mjs'],
   },
   {
@@ -452,8 +452,8 @@ export const MUTATIONS = [
     defect: 'the gate reads .holt/policy.json from the WORKING TREE, so a pull request that '
       + 'deletes or weakens it is judged by its own edited copy',
     file: 'src/team/policy.mjs',
-    find: '  if (baseRef) {\n    const fromBase = await loadPolicyFromRef(root, baseRef);',
-    replace: '  if (false) {\n    const fromBase = await loadPolicyFromRef(root, baseRef);',
+    find: '  const fromBase = await loadPolicyFromRef(root, base.oid);',
+    replace: '  const fromBase = { found: false }; // mutated: skip base read',
     tests: ['test/unit/policy.test.mjs', 'test/e2e/ci-gate.test.mjs'],
   },
   {
@@ -461,7 +461,7 @@ export const MUTATIONS = [
     defect: 'a policy the base never carried can switch off --fail-on-unlanded — the same bypass '
       + 'as editing the policy, through the door of ADDING one',
     file: 'src/team/policy.mjs',
-    find: '  const carried = trusted ? [] : [...flagFailures];',
+    find: '  const carried = trusted === true ? [] : [...flagFailures];',
     replace: '  const carried = [];',
     tests: ['test/unit/policy.test.mjs'],
   },

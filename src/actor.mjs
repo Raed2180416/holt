@@ -51,6 +51,7 @@
  * ------------------------------------------------------------------------------------------
  */
 
+import os from 'node:os';
 import { getHost } from './integrate/hosts.mjs';
 
 /** The value recorded when holt does not know. A real value, never an empty string. */
@@ -96,17 +97,19 @@ export function parseAiAgent(raw) {
  * Resolve who is acting, from evidence only.
  *
  * @param {object}  o
- * @param {object}  [o.payload]  the host's own event object (hook stdin JSON, plugin hook arg)
- * @param {object}  [o.env]      process environment
- * @param {string}  [o.host]     the `--host` the integration declared it is (a HINT, never proof:
+ * @param {Record<string, any> | null}  [o.payload]  the host's own event object (hook stdin JSON, plugin hook arg)
+ * @param {Record<string, string|undefined> | null}  [o.env]      process environment
+ * @param {string | null}  [o.host]     the `--host` the integration declared it is (a HINT, never proof:
  *                               it is whatever was written into a config file and can be stale)
- * @param {object}  [o.mcpClient] `{name, version}` from an MCP initialize, when serving MCP
- * @param {string}  [o.via]      transport label when the caller knows it
- * @returns {{agent:string, agentVersion:string|null, session:string|null, invocation:string|null,
+ * @param {{name?:string, version?:string} | null}  [o.mcpClient] `{name, version}` from an MCP initialize, when serving MCP
+ * @param {string | null}  [o.via]      transport label when the caller knows it
+ * @returns {{user:string, host:string, agent:string, agentVersion:string|null, session:string|null, invocation:string|null,
  *            via:string, confidence:string, evidence:string[]}}
  */
 export function resolveActor({ payload = null, env = process.env, host = null, mcpClient = null, via = null } = {}) {
+  /** @type {Record<string, any>} */
   const p = (payload && typeof payload === 'object') ? payload : {};
+  /** @type {Record<string, string|undefined>} */
   const e = (env && typeof env === 'object') ? env : {};
   const evidence = [];
 
@@ -134,7 +137,9 @@ export function resolveActor({ payload = null, env = process.env, host = null, m
 
   /* ---- which agent ---------------------------------------------------------------- */
 
+  /** @type {string | null} */
   let agent = null;
+  /** @type {string | null} */
   let agentVersion = null;
 
   // 0. THE CHANNEL THAT CARRIED A REPORTED SESSION IS THE AUTHORITY ON WHOSE SESSION IT IS.
@@ -202,6 +207,8 @@ export function resolveActor({ payload = null, env = process.env, host = null, m
     : (agent || ambientSession ? 'inferred' : 'unknown');
 
   return {
+    user: UNKNOWN,
+    host: UNKNOWN,
     agent: agent ?? UNKNOWN,
     agentVersion: agentVersion ?? null,
     session,
@@ -243,7 +250,11 @@ export function actorLabel(actor) {
  */
 export function actorKey(actor) {
   if (!actor || typeof actor !== 'object') return null;
-  if (!actor.session) return null;
+  // UNKNOWN is the honest answer when no host identified itself, but it is NOT identity —
+  // correlating two 'unknown' sessions would fabricate "one agent did all of this" from
+  // events that carry no session at all. The journal normalises null → 'unknown' for
+  // durable storage; actorKey must treat that normalisation as the null it was.
+  if (!actor.session || actor.session === UNKNOWN) return null;
   const agent = firstString(actor.agent) ?? UNKNOWN;
   return `${agent}:${actor.session}`;
 }
@@ -259,6 +270,7 @@ export function actorKey(actor) {
  * Explicit and overridable, never magic: `setAmbientActor` is called exactly twice (the CLI
  * entry point and the MCP server), and `appendEvent` takes an explicit actor that wins.
  */
+/** @type {object | null} */
 let ambient = null;
 
 export function setAmbientActor(actor) {
