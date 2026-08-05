@@ -16,7 +16,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 test('Pages deployment pins its nested artifact action', async () => {
   const workflow = await fs.readFile(path.join(ROOT, '.github/workflows/pages.yml'), 'utf8');
   const action = await fs.readFile(path.join(ROOT, '.github/actions/upload-pages-artifact/action.yml'), 'utf8');
-  assert.match(workflow, /uses:\s+\.\/\.github\/actions\/upload-pages-artifact/);
+  assert.match(workflow, /uses:\s+Raed2180416\/holt\/\.github\/actions\/upload-pages-artifact@[0-9a-f]{40}/);
   assert.match(action, /uses:\s+actions\/upload-artifact@[0-9a-f]{40}\s+#\s+v4\.6\.2/);
   assert.doesNotMatch(action, /actions\/upload-artifact@v4(?:\s|$)/,
     'the nested artifact upload must remain pinned under repository policy');
