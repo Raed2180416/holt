@@ -85,7 +85,7 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       // runner's absolute path after sudo creates the private mount namespace. Bind that inode
       // to a stable path before starting Node; otherwise Node resolves a relative test path
       // against a cwd whose absolute name is not addressable in the root mount namespace.
-      'mount --make-rprivate / && mount --bind "$1" /etc && workspace="$2" && mount --bind /proc/self/cwd "$workspace" && shift 2 && exec "$1" "$2" "$3" "$4" "$workspace/$5"',
+      'mount --make-rprivate / && mount --bind "$1" /etc && workspace="$2" && marker="$8" && if [ -n "$marker" ]; then export NODE_TEST_CONTEXT="$marker"; fi && mount --bind /proc/self/cwd "$workspace" && shift 2 && exec "$1" "$2" "$3" "$4" "$workspace/$5"',
       'holt-system-policy-namespace',
       privateEtc,
       workspaceMount,
@@ -94,6 +94,7 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       '--test-concurrency=1',
       isolationMode === 'process' ? '--experimental-test-isolation=process' : '--experimental-test-isolation=none',
       relativeSource,
+      isolationMode === 'process' ? '' : 'child-holt-namespace',
     ];
     const runNamespace = (command, args, runEnv = env) => execute(command, args, {
       cwd: process.cwd(),
@@ -112,11 +113,9 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       // Node 22–26 (the runner reports EACCES for its process-isolation child). Keep that
       // fallback serialized and mark its deliberate child context explicitly; capable hosts
       // still exercise the real process-isolation path above.
-      const privilegedEnv = { ...env, NODE_TEST_CONTEXT: 'child-holt-namespace' };
       const privileged = await runNamespace(
         'sudo',
-        ['-n', 'env', 'NODE_TEST_CONTEXT=child-holt-namespace', 'unshare', '-m', ...namespaceArgs('none')],
-        privilegedEnv,
+        ['-n', 'unshare', '-m', ...namespaceArgs('none')],
       );
       if (privileged.code === 0 || !namespaceUnavailable(`${privileged.stdout}\n${privileged.stderr}`)) {
         result = privileged;
