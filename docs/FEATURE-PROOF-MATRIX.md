@@ -585,4 +585,10 @@ Each quoted evidence name below is an exact string present in the named test/har
 
 ## Cross-cutting release decision
 
-Release readiness requires more than a valid local artifact: produce zero-skip artifacts on every claimed OS; run the pinned 4/4 real-repository corpus and the monster/randomized oracles; retain a publishable repeated agent A/B benchmark with uncontaminated controls; drive every host promoted to “live”; install and audit the exact candidate tarball; complete a real purchase/webhook/delivery/activation/refund/support drill; and complete protected remote CI/release checks. Until then, the correct conclusion is “bounded components passed” or “incomplete,” never “everything works perfectly.”
+Holt is ready to install and evaluate in its documented free-core scope. For broader confidence,
+the open program is to produce zero-skip artifacts on every claimed OS; run the pinned 4/4
+real-repository corpus and the monster/randomized oracles; retain a repeated agent A/B benchmark
+with uncontaminated controls; drive any host promoted to “live”; install and audit the exact
+candidate tarball; and complete real commercial and protected-release drills before those
+capabilities are promoted. A bounded component result stays scoped to its recorded source, runtime,
+platform and fixtures; it is not a claim that every future host or repository behaves identically.

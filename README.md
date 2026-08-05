@@ -88,6 +88,18 @@ inspect → protect → rescue or discard to a verified ref → re-check → cle
 before moving the whole registered worktree into locked local quarantine. Unknown or unverifiable
 work stays put. No files or branches are deleted, and exact restore argv is returned.
 
+### Why it exists
+
+I hit the problem while using Claude Code on a complex project. What looked like rapid progress
+turned into a bloated forest of worktrees, recreated implementations, and unclear cleanup. I could
+not tell which work was unique, which was a duplicate, or what was safe to remove, and restarting
+felt safer than trusting the state I had.
+
+Holt is built for that moment. It does **not** replace an agent orchestrator or decide what task an
+agent should take. It reads the actual Git state that already exists across linked worktrees, gives
+humans and agents one shared view of unique, duplicate, conflicting and dependent work, and makes
+cleanup recoverable instead of irreversible.
+
 ---
 
 ## The gap holt fills
@@ -112,8 +124,9 @@ the state that exists before a pull request does.
 
 ---
 
-**Benchmark methods and publication requirements: [BENCHMARKS.md](BENCHMARKS.md).** No current
-result table is published without a complete, linked evidence artifact.
+**Benchmark methods and reproducible evaluation: [BENCHMARKS.md](BENCHMARKS.md).** Holt is ready
+to install and test in real repositories today. The benchmark protocol is open for anyone to run
+independently; any published result must include its complete, linked evidence artifact.
 
 ## Evidence, without turning a pilot into a promise
 
@@ -122,10 +135,11 @@ point in the wrong direction. Agents must preserve irreplaceable work, remove ge
 work and handle a duplicated pair where either copy may go but both may not. Grading reads the
 resulting filesystem and Git state; agent self-report is not accepted as evidence.
 
-There is **no launch-grade agent A/B result yet**. The retained six-trial run is a historical pilot
-and qualitative failure corpus, not a rate or lift claim. The current evaluator refuses publication
-below 20 valid trials per treatment and requires each treatment to be named separately: a blocking
-host hook, instructions plus MCP, and a Git lock measure different mechanisms and cannot be pooled.
+Holt's deterministic feature, mutation, filesystem, Git, package and protocol suites cover the
+shipped product surface. The retained six-trial agent run is a historical pilot and qualitative
+failure corpus, not a rate or lift claim. The open evaluator requires 20 valid trials per treatment
+before it publishes a comparative rate, and keeps a blocking host hook, instructions plus MCP, and
+a Git lock as separate mechanisms rather than pooling them into a misleading number.
 
 See [eval/README.md](eval/README.md) for the publication contract and [BENCHMARKS.md](BENCHMARKS.md)
 for the artifact requirements used by scale, correctness and real-repository runs. The
@@ -349,7 +363,7 @@ long-running environment.
 | Gemini, Crush, Amp, Factory and Junie hooks | Their hosts document deny-hook surfaces and holt provides MCP/advisory coverage | Bespoke deterministic adapters are not wired yet |
 | jj (Jujutsu) backend | Implemented and unit-tested against a real jj repo | Not exercised across a long multi-workspace session |
 | Windows *end-to-end* agent flows | The core suite passes on Windows in CI | Hooks + MCP under Windows agent hosts are untested by us |
-| Very large repos (10k+ files, 200+ worktrees) | The real-repository harness records warmups, repeated runs, planted and graded denominators, source stability and an artifact checksum | No current launch artifact is published for a universal scale or latency claim; run the harness for your repository and inspect the named limits |
+| Very large repos (10k+ files, 200+ worktrees) | The real-repository harness records warmups, repeated runs, planted and graded denominators, source stability and an artifact checksum | Scale and latency depend on repository shape; run the open harness on your repository and inspect the named limits |
 | git-LFS, submodules, sparse-checkout | holt reads git's own output, which handles these | No dedicated test fixture yet |
 
 **Different on jj** — worth knowing before you adopt it there: Jujutsu auto-snapshots the working

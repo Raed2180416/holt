@@ -9,9 +9,13 @@ produced it.
 
 ## Current public result status
 
-- There is **no launch-grade agent A/B result**. The retained six-trial run is a historical pilot
-  and qualitative failure corpus. Its rates and lift must not be used in the website, README,
-  release notes or sales material.
+Holt is available to install and independently evaluate. This repository publishes the protocol,
+fixtures and evidence requirements so users can reproduce the checks on their own repositories and
+agent hosts.
+
+- No aggregate agent A/B rate or lift is published yet. The retained six-trial run is a historical
+  pilot and qualitative failure corpus, so it is not used as a savings, adoption, or performance
+  number in the website, README, release notes, or sales material.
 - The 2026-08-05 Codex/Luna active-hook smoke is also **diagnostic, not comparative product
   evidence**. Its treated cell omitted the installed Holt CLI required by the hook's own
   remediation, and one trial per cell is below the 20-valid-trial publication floor. Its value is
@@ -20,10 +24,12 @@ produced it.
   answer different questions and may not be extrapolated into one another.
 - Host configuration and payload fixtures are contract evidence, not proof that a real host
   process refused a destructive command.
-- No current test count or mutation score is published. No complete current green release
-  artifact is checked in. A future release may add those figures only from a complete green test
-  run and a complete mutation run with no survivors.
-  Editing a count by hand is not measurement.
+- Release-specific test and mutation evidence belongs with the exact tagged artifact that produced
+  it. Figures are never copied forward by hand or used as a substitute for independently running
+  the protocol.
+
+No current test count or mutation score is published. The product is ready to try; release-specific
+figures remain tied to the exact artifact that produced them rather than becoming a stale headline.
 
 ## Publication rules
 

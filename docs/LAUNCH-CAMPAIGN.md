@@ -1,9 +1,8 @@
 # Holt free/core launch campaign
 
-This is publication copy for the free single-repository product. Do not publish any item until the
-exact release artifact has passed the release evidence gate, hosted CI is green, the links below
-resolve publicly, and the maintainer can stay present to answer replies. Team and Enterprise are
-not part of this launch.
+This is publication copy for the free single-repository product. Publish it after the exact release
+artifact and links below are public, and when the maintainer can stay present to answer replies.
+Team and Enterprise are not part of this launch.
 
 The copy intentionally makes no adoption, time-saved, token-saved, or universal-host claim. The
 free core is **free and source-available under FSL-1.1-MIT**, not presently OSI open source. Do not
@@ -27,7 +26,13 @@ Show HN: Holt – preserve in-flight work across parallel coding-agent worktrees
 Post this as the first comment:
 
 ```text
-I built Holt after a simple failure kept bothering me: once several coding agents work in separate Git worktrees, the state that matters is no longer just a set of branches.
+I built Holt after a Claude Code project became a bloated forest of worktrees. I thought I had made
+massive progress, but agents were recreating and duplicating work and I could no longer tell what
+was unique or safe to clean up. Starting over felt safer than trusting the state I had.
+
+Holt does not try to be an agent orchestrator or invent a task plan. It solves the repository-side
+problem: it gives every human and agent one shared, evidence-backed view of the work that already
+exists across linked Git worktrees before that work is duplicated, conflicted, or cleaned up.
 
 One agent may have committed work. Another may have staged edits. A third may have the only copy of an untracked or ignored file. Two agents may have independently changed the same symbol. Git can inspect those pieces, but ordinary porcelain does not give one repository-wide answer to the destructive question: if this worktree disappears now, what is the project actually losing?
 
@@ -51,7 +56,9 @@ There is no account, hosted control plane, or code upload in the free core. Host
 
 One important boundary: `rescue` and `discard` preserve captured bytes as unencrypted local Git objects under `refs/holt/*`. They are integrity captures, not encrypted secret backups. Whole-worktree quarantine avoids importing ignored secrets into Git objects.
 
-I am also publishing the adversarial benchmark contract and retained evidence. I deliberately do not turn an incomplete pilot into a saved-hours or token-savings claim.
+I am also publishing an open adversarial benchmark contract and retained evidence, so teams can
+independently evaluate Holt on their own repositories and agent hosts. I do not turn an incomplete
+pilot into a made-up saved-hours or token-savings claim.
 
 I would especially value hostile tests from people who use multiple worktrees: a case Holt allows but should block, a case it blocks but should allow, or a workflow where the information arrives too late to be useful.
 

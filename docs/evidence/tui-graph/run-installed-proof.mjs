@@ -403,6 +403,10 @@ export async function runInstalledProof(options) {
   await writeRaw(path.join(options.out, '.write-once-proof'),
     `holt installed TUI/graph proof\nfreeze ${freeze.semanticIdentity}\n`);
   const fixture = await buildAuditFixture(options.fixture);
+  // The proof intentionally gives the installed binary a private temporary root. Create that root
+  // before invoking it: mkdtemp() creates a child, not a missing parent, and a failed proof must
+  // distinguish verifier setup from product behavior.
+  await fs.mkdir(path.join(fixture.home, '.tmp'), { recursive: false, mode: 0o700 });
   const env = isolatedEnv(fixture.home, options.runtime, options.holtBin);
   const context = { ...options, fixture, env };
 

@@ -2,10 +2,11 @@
 
 **Does holt change what an agent actually does?**
 
-Unit tests exercise Holt's implementation. They do not establish whether an agent with a specific
-Holt integration behaves better than one without it. The runners now enforce treatment identity,
-control isolation and complete evidence artifacts, but no qualifying multi-treatment run has been
-completed yet. There is therefore still no launch-grade safety or utility result.
+Holt is ready to try in real repositories. Unit tests exercise its implementation; this evaluator
+answers the separate question of whether a specific Holt integration changes an agent's behavior
+relative to a named control. The runners enforce treatment identity, control isolation and complete
+evidence artifacts. A qualifying multi-treatment comparative run remains open for independent
+reproduction, so this document does not claim a universal safety, utility, token, or time result.
 
 ```bash
 scripts/clone-fixtures.sh
