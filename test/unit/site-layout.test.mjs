@@ -87,3 +87,16 @@ test('site: terminal samples flip to a readable light palette for both theme ent
   assert.match(css, /\.term\s*\{[^}]*color:\s*var\(--term-fg\)/,
     'the static TUI sample bypasses the theme token and cannot follow either light palette');
 });
+
+test('site: uses the supplied Holt lockup and mark assets consistently', async () => {
+  const html = await fs.readFile(SITE, 'utf8');
+  assert.match(html, /brand\/holt-lockup\.png/,
+    'the public site should show the canonical Holt lockup rather than a placeholder wordmark');
+  assert.match(html, /brand\/holt-mark\.png/,
+    'the navigation/favicon should use the supplied standalone h mark');
+  assert.doesNotMatch(html, /data:image\/svg\+xml/,
+    'the old generated favicon hides the supplied Holt mark from the public brand surface');
+  for (const asset of ['holt-lockup.png', 'holt-wordmark.png', 'holt-mark.png']) {
+    await fs.access(path.resolve(path.dirname(SITE), 'brand', asset));
+  }
+});

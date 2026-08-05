@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/brand/holt-lockup.png" alt="Holt — a Contrare Research project" width="620">
+
 # 🌳 holt
 
 ### Know what every agent changed. Coordinate it. Preserve it. Ship it.

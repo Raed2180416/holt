@@ -9,7 +9,8 @@
 <meta property="og:title" content="holt — in-flight work integrity for parallel coding agents">
 <meta property="og:description" content="Prove what local agent work is unique, redundant, conflicting or unverifiable before anyone deletes it.">
 <meta property="og:type" content="website">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='24' fill='%23e2a154'/%3E%3Ctext x='50' y='70' font-size='58' font-family='monospace' font-weight='700' text-anchor='middle' fill='%230a0b0d'%3Eh%3C/text%3E%3C/svg%3E">
+<meta property="og:image" content="brand/holt-lockup.png">
+<link rel="icon" type="image/png" href="brand/holt-mark.png">
 <style>
 /* ---------- reset ---------- */
 *, *::before, *::after { box-sizing: border-box; }
@@ -295,11 +296,24 @@ header.nav {
   color: var(--heading);
 }
 .brand-mark {
-  width: 24px; height: 24px;
-  border-radius: 6px;
-  background: linear-gradient(155deg, var(--accent-strong), var(--accent));
-  display: inline-flex; align-items: center; justify-content: center;
-  font-family: var(--mono); font-weight: 800; font-size: 13px; color: var(--on-accent);
+  width: 22px; height: 32px;
+  border-radius: 4px;
+  object-fit: contain;
+  flex: none;
+}
+.brand-lockup {
+  width: min(100%, 720px);
+  margin: 0 0 34px;
+  padding: 20px 24px;
+  border: 1px solid rgba(66, 91, 70, 0.32);
+  border-radius: var(--radius-lg);
+  background: #f8f1e8;
+  box-shadow: 0 24px 70px -35px rgba(0, 0, 0, 0.72);
+}
+.brand-lockup img {
+  width: min(100%, 620px);
+  height: auto;
+  margin: 0 auto;
 }
 .nav-links { display: flex; align-items: center; gap: 28px; }
 .nav-links a {
@@ -835,7 +849,7 @@ footer { padding: 44px 0 60px; }
 <header class="nav">
   <div class="nav-inner">
     <a class="brand" href="#top">
-      <span class="brand-mark">h</span>
+      <img class="brand-mark" src="brand/holt-mark.png" alt="" width="22" height="32">
       holt
     </a>
     <nav class="nav-links">
@@ -857,6 +871,9 @@ footer { padding: 44px 0 60px; }
 <section class="hero" id="top">
   <div class="wrap">
     <div class="hero-inner">
+      <div class="brand-lockup">
+        <img src="brand/holt-lockup.png" alt="Holt wordmark — a Contrare Research project" width="1079" height="392">
+      </div>
       <span class="kicker">local · git-native · cross-agent</span>
       <h1>Keep agents moving.<br><span class="accent-text">Stop redoing or losing their work.</span></h1>
       <p class="hero-pitch">
@@ -1644,7 +1661,7 @@ footer { padding: 44px 0 60px; }
 
 <footer>
   <div class="wrap footer-inner">
-    <span class="brand"><span class="brand-mark">h</span>holt</span>
+    <span class="brand"><img class="brand-mark" src="brand/holt-mark.png" alt="" width="22" height="32">holt</span>
     <span class="footer-links">
       <a href="https://github.com/Raed2180416/holt">GitHub</a> ·
       <a href="https://github.com/Raed2180416/holt/blob/main/BENCHMARKS.md">Benchmarks</a> ·

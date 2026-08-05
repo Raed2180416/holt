@@ -16,6 +16,11 @@ Canonical links:
 - Host capability matrix: https://github.com/Raed2180416/holt/blob/main/HOSTS.md
 - Product and research queries: research.contrare@outlook.com
 
+Brand assets: the supplied Holt lockup, wordmark and standalone `h` are in
+[`docs/brand/`](https://github.com/Raed2180416/holt/tree/main/docs/brand) and are mirrored by the
+website under `site/brand/`. Use the lockup or wordmark without added trademark/copyright markers;
+the attribution is **A Contrare Research Project**.
+
 ## Hacker News
 
 Submit the GitHub repository URL with this title:
