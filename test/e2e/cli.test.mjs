@@ -393,7 +393,10 @@ test('CLI: purge is dry-run first, then reclaims only a completed clean quaranti
   const planned = JSON.parse(preview.stdout);
   assert.equal(planned.dryRun, true);
   assert.equal(planned.removed, 0);
-  assert.equal(planned.wouldRemove[0].path, spent.quarantinePath);
+  // Git and JSON use native paths while the fixture inventory may carry Git's canonical display
+  // spelling (/private/var on macOS, forward slashes on Windows). Compare filesystem identity,
+  // not presentation spelling.
+  assert.ok(await samePathAsync(planned.wouldRemove[0].path, spent.quarantinePath));
   assert.ok(await fs.stat(spent.quarantinePath), 'preview must keep the checkout');
 
   const applied = await holt([
@@ -690,7 +693,7 @@ test('INSTALLER: --install never runs anything without explicit consent', async 
   // What it must NEVER do is claim to have installed anything.
   assert.ok(!/installing…[\s\S]*done —/.test(r.stdout),
     `must not run an installer without consent: ${r.stdout.slice(0, 300)}`);
-  assert.match(r.stdout, /no supported package manager|re-run with --yes|holt will run/,
+  assert.match(r.stdout, /no supported package manager|re-run with --yes|holt will run|fix\s+Install or upgrade Git/i,
     'and must explain what it would do or why it cannot');
 });
 

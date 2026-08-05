@@ -2118,22 +2118,19 @@ async function quarantineWorktree(cwd, candidate) {
   // atomic rollback guarantee.
   const physicallyMoved = quarantineKind === 'directory' && sourceKind === 'missing';
   if (moved.code !== 0 && !physicallyMoved) {
-    let restoredLock = true;
-    if (acquiredLock && sourceKind !== 'missing') {
-      const unlocked = await git(['worktree', 'unlock', candidate.path], { cwd, allowMutation: true })
-        .catch(() => ({ code: 1 }));
-      restoredLock = unlocked.code === 0;
-    }
-    if (restoredLock && quarantineKind === 'missing') {
-      await fs.unlink(markerPath).catch(() => {});
-    }
+    // A failed rename is not proof that the source is safe to touch. Windows can reject a
+    // directory move while a child descriptor is open, and unlocking here would turn that
+    // sharing violation into an unprotected late-writer race. Keep the lock and the transit
+    // marker as the durable conservative state; `holt rescue <id> --release` remains the
+    // explicit, verified route for releasing it after a capture. The marker also makes the
+    // interrupted transition visible instead of silently erasing the only evidence of it.
     if (quarantineKind === 'missing') await removeEmptyQuarantineRoot(q.root);
     return {
       ok: false,
-      retained: quarantineKind !== 'missing' || !restoredLock,
+      retained: true,
       quarantinePath: quarantineKind !== 'missing' ? q.path : null,
       why: (moved.stderr?.trim() || 'git worktree move failed')
-        + (restoredLock ? '' : '; the pre-move quarantine lock could not be rolled back'),
+        + '; the worktree remains locked and the quarantine transition is retained for inspection',
     };
   }
 

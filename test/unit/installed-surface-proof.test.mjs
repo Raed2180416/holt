@@ -82,13 +82,19 @@ test('installed proof: fixture identity includes sibling bytes, refs, index and 
     assert.ok(worktree.indexListing.sha256);
     assert.ok(worktree.status.sha256);
   }
-  const primaryBefore = before.worktrees.find((row) => row.path === fixture.repo);
-  const siblingBefore = before.worktrees.find((row) => row.path === fixture.worktrees['unique-work']);
+  // Git resolves macOS /var aliases to /private/var and may use a different display spelling on
+  // Windows. The manifest intentionally records the canonical filesystem path; resolve the
+  // fixture inputs before selecting rows so this proof tests identity rather than path syntax.
+  const [repoReal, siblingReal] = await Promise.all([
+    fs.realpath(fixture.repo), fs.realpath(fixture.worktrees['unique-work']),
+  ]);
+  const primaryBefore = before.worktrees.find((row) => row.path === repoReal);
+  const siblingBefore = before.worktrees.find((row) => row.path === siblingReal);
   await fs.writeFile(path.join(fixture.worktrees['unique-work'], 'src', 'sole-copy.js'),
     'export function SOLE_COPY_PROOF() { return "mutated sibling only"; }\n');
   const after = await fixtureManifest(fixture);
-  const primaryAfter = after.worktrees.find((row) => row.path === fixture.repo);
-  const siblingAfter = after.worktrees.find((row) => row.path === fixture.worktrees['unique-work']);
+  const primaryAfter = after.worktrees.find((row) => row.path === repoReal);
+  const siblingAfter = after.worktrees.find((row) => row.path === siblingReal);
   assert.equal(primaryAfter.files.identity, primaryBefore.files.identity,
     'positive control: primary working bytes did not change');
   assert.notEqual(siblingAfter.files.identity, siblingBefore.files.identity,
