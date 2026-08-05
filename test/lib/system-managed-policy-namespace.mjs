@@ -73,7 +73,7 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
     const relativeSource = markerIndex >= 0
       ? normalizedSource.slice(markerIndex + 1)
       : path.relative(process.cwd(), source).split(path.sep).join('/');
-    const namespaceArgs = [
+    const namespaceArgs = (isolationMode) => [
       'sh',
       '-c',
       // Make the private mount tree non-propagating before replacing /etc. The ordinary
@@ -85,29 +85,39 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       // runner's absolute path after sudo creates the private mount namespace. Bind that inode
       // to a stable path before starting Node; otherwise Node resolves a relative test path
       // against a cwd whose absolute name is not addressable in the root mount namespace.
-      'mount --make-rprivate / && mount --bind "$1" /etc && workspace="$2" && mount --bind /proc/self/cwd "$workspace" && shift 2 && exec "$1" "$2" "$3" "$workspace/$4"',
+      'mount --make-rprivate / && mount --bind "$1" /etc && workspace="$2" && mount --bind /proc/self/cwd "$workspace" && shift 2 && exec "$1" "$2" "$3" "$4" "$workspace/$5"',
       'holt-system-policy-namespace',
       privateEtc,
       workspaceMount,
       process.execPath,
       '--test',
       '--test-concurrency=1',
+      isolationMode === 'process' ? '--experimental-test-isolation=process' : '--experimental-test-isolation=none',
       relativeSource,
     ];
-    const runNamespace = (command, args) => execute(command, args, {
+    const runNamespace = (command, args, runEnv = env) => execute(command, args, {
       cwd: process.cwd(),
-      env,
+      env: runEnv,
       timeout: 120_000,
       maxBuffer: 8 * 1024 * 1024,
     });
-    let result = await runNamespace('unshare', ['-Urm', ...namespaceArgs]);
+    let result = await runNamespace('unshare', ['-Urm', ...namespaceArgs('process')]);
     // GitHub-hosted Linux runners currently reject unprivileged user namespaces even though
     // passwordless sudo is available. A root-owned mount namespace provides the same test
     // isolation without weakening the production fixed-/etc contract; it is attempted only
     // after the user-namespace path fails for a capability reason.
     const namespaceUnavailable = (output) => /(?:uid_map|user namespaces?|mount namespaces?|operation not permitted|permission denied|ENOENT)/iu.test(output);
     if (result.code !== 0 && namespaceUnavailable(`${result.stdout}\n${result.stderr}`)) {
-      const privileged = await runNamespace('sudo', ['-n', 'unshare', '-m', ...namespaceArgs]);
+      // The hosted root-mount fallback cannot spawn Node again from inside the namespace on
+      // Node 22–26 (the runner reports EACCES for its process-isolation child). Keep that
+      // fallback serialized and mark its deliberate child context explicitly; capable hosts
+      // still exercise the real process-isolation path above.
+      const privilegedEnv = { ...env, NODE_TEST_CONTEXT: 'child-holt-namespace' };
+      const privileged = await runNamespace(
+        'sudo',
+        ['-n', 'unshare', '-m', ...namespaceArgs('none')],
+        privilegedEnv,
+      );
       if (privileged.code === 0 || !namespaceUnavailable(`${privileged.stdout}\n${privileged.stderr}`)) {
         result = privileged;
       }
