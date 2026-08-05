@@ -85,10 +85,9 @@ code, .inline { overflow-wrap: anywhere; }
   --nav-bg: rgba(10, 11, 13, 0.72);
   --bad-text: #ef9089;         /* "bad" text on the page background, not inside a terminal */
 
-  /* A terminal stays a terminal in both themes — `--bg-terminal` deliberately does NOT flip, so
-     everything drawn on it needs colours that do not flip either. Without these, light mode put
-     #535a65 body-text on a #0d0f12 terminal (2.3:1). Same call the shipped site already makes
-     with --code-bg/--code-fg. */
+  /* Terminal and code samples use their own readable palette. The light palette below flips this
+     complete set together, so a visitor who switches themes never gets a dark terminal bolted
+     onto a light page or low-contrast literal text. */
   --term-bright: #ffffff;
   --term-fg: #e6e9ef;
   --term-dim: #a8adb4;
@@ -750,10 +749,10 @@ footer { padding: 44px 0 60px; }
   align-items:center; background: var(--bg-raised); }
 .winbar .dot { width:10px; height:10px; border-radius:50%; background: var(--border); }
 .winbar .wintitle { margin-left:8px; font-family: var(--mono); font-size:12px; color: var(--text-faint); }
-.term { margin:0; background: var(--bg-terminal); color:#e6e9ef; padding:14px 16px;
+.term { margin:0; background: var(--bg-terminal); color:var(--term-fg); padding:14px 16px;
   font-family: var(--mono); font-size:12.5px; line-height:1.55; overflow-x:auto; }
-.term .r { color:#ff6b60; } .term .y { color:#ffbd2e; }
-.term .g { color:#4ec46f; } .term .d { color:#7d8799; } .term .w { color:#e6e9ef; }
+.term .r { color:var(--term-bad); } .term .y { color:var(--term-accent); }
+.term .g { color:var(--term-good); } .term .d { color:var(--term-dim); } .term .w { color:var(--term-bright); }
 .graph-svg { display:block; width:100%; height:auto; background: var(--bg-terminal); }
 /* Two explicit tracks with a zero minimum, collapsing on narrow screens — the same shape every
    other grid on this page uses. The previous `minmax(min(420px,100%), 1fr)` was the one bare
@@ -804,6 +803,10 @@ footer { padding: 44px 0 60px; }
   --on-accent:#ffffff;
   --nav-bg:rgba(255,255,255,0.85);
   --bad-text:#c0362c;
+  --bg-terminal:#f8f5ef;
+  --term-bright:#171a1f; --term-fg:#2d333b; --term-dim:#5c6570; --term-faint:#7d8592;
+  --term-accent:#935009; --term-good:#1f7a3d; --term-bad:#c0362c; --term-bad-bright:#a92f26;
+  --term-chip:rgba(23,26,31,0.06); --term-chip-line:rgba(23,26,31,0.18);
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
@@ -818,6 +821,10 @@ footer { padding: 44px 0 60px; }
     --on-accent:#ffffff;
     --nav-bg:rgba(255,255,255,0.85);
     --bad-text:#c0362c;
+    --bg-terminal:#f8f5ef;
+    --term-bright:#171a1f; --term-fg:#2d333b; --term-dim:#5c6570; --term-faint:#7d8592;
+    --term-accent:#935009; --term-good:#1f7a3d; --term-bad:#c0362c; --term-bad-bright:#a92f26;
+    --term-chip:rgba(23,26,31,0.06); --term-chip-line:rgba(23,26,31,0.18);
   }
 }
 </style>
@@ -851,18 +858,17 @@ footer { padding: 44px 0 60px; }
   <div class="wrap">
     <div class="hero-inner">
       <span class="kicker">local · git-native · cross-agent</span>
-      <h1>Know what every agent changed.<br><span class="accent-text">Coordinate it. Preserve it. Ship it.</span></h1>
+      <h1>Keep agents moving.<br><span class="accent-text">Stop redoing or losing their work.</span></h1>
       <p class="hero-pitch">
-        Holt relates committed, staged, dirty, untracked and ignored work across Git worktrees.
-        Hosts with a lifecycle adapter can receive changed, actionable context proactively; every
-        supported MCP client can pull fresh evidence. Destructive actions stay tied to a fresh
-        verdict and a verified recovery path.
+        Holt gives every linked Git worktree one shared view of what is unique, duplicated,
+        conflicting, dependent, or safe to recover. It turns a forest of agent worktrees into
+        clear next actions for people, the CLI, the TUI, MCP clients, and supported host hooks.
       </p>
       <div class="btn-row">
         <button class="btn btn-primary" id="copy-install" type="button" aria-live="polite">
-          <span class="btn-icon">$</span> npm install -g holt.tgz (from GitHub release)
+          <span class="btn-icon">$</span> Install Holt from the signed GitHub release
         </button>
-        <a class="btn btn-ghost" href="#proof">See the evidence standard →</a>
+        <a class="btn btn-ghost" href="#commands">See what Holt does →</a>
       </div>
       <div class="hero-foot">local analysis · no telemetry or licence check-in · approved setup downloads disclosed</div>
     </div>
@@ -897,8 +903,9 @@ footer { padding: 44px 0 60px; }
       </div>
     </div>
     <p class="terminal-caption">
-      Git prints holt's lock reason for local <code class="inline">git worktree remove --force</code>;
-      configured host hooks cover additional supported destructive shell commands.
+      One view shows the work already in flight; one safe loop preserves it before cleanup becomes
+      a restart. Explore the <a href="#commands">feature guide</a> or the detailed
+      <a href="https://github.com/Raed2180416/holt/blob/main/docs/FEATURE-PROOF-MATRIX.md">technical map</a>.
     </p>
   </div>
 </section>
@@ -956,7 +963,7 @@ footer { padding: 44px 0 60px; }
 <section id="proof">
   <div class="wrap prose">
     <span class="kicker">evidence before claims</span>
-    <h2 class="section-title">Ready for real work. Open to independent benchmarking.</h2>
+    <h2 class="section-title">Built for real work. Open to independent benchmarking.</h2>
     <p class="section-sub">
       Holt's exact gates and actions are exercised directly against disposable Git repositories.
       Install it, use it on real linked worktrees, and reproduce the open benchmark protocol on
@@ -992,6 +999,13 @@ footer { padding: 44px 0 60px; }
       maps each shipped surface to executable evidence, an independent oracle and its remaining
       unproven boundary.
     </p>
+    <div class="how-read" style="margin-top:28px">
+      <h3>Dogfooded while building Holt</h3>
+      <p>Holt was used on Holt's own repository while it was being developed. It made parallel
+      worktrees easier to inspect, helped surface duplicate and at-risk work before cleanup, and
+      informed the recovery-first workflow shipped here. That is a real development use case, not
+      a substitute for independent testing—which is why the benchmark tools remain public.</p>
+    </div>
   </div>
 </section>
 
@@ -1071,88 +1085,88 @@ footer { padding: 44px 0 60px; }
 <section id="commands">
   <div class="wrap">
     <span class="kicker">the command surface</span>
-    <h2 class="section-title">One evidence model, five feature families.</h2>
+    <h2 class="section-title">Every feature answers a daily agent-workflow question.</h2>
     <p class="section-sub">
-      Exact destructive authority, advisory cross-worktree intelligence, a safe action loop,
-      incident evidence and agent integrations share the same scan without sharing the same
-      certainty claim.
+      Start simple with <code class="inline">holt status</code>. When the repository gets busy,
+      Holt expands from a shared work map into conflict prevention, recoverable cleanup, agent
+      context, review planning, and audit evidence—all from the same local Git facts.
     </p>
 
     <div class="grid-cmds">
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt status</div>
-        <h3>The decision surface</h3>
-        <p>Unique, redundant, conflicting and unverifiable work, with the next safe action. The default command.</p>
+        <h3>See the whole project first</h3>
+        <p>One answer to “what is happening across all worktrees?”: unique work, duplicate work, conflicts, uncertainty, and the next useful action.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt risk</div>
-        <h3>Exact destructive authority</h3>
-        <p>Relates committed, staged, dirty, untracked and ignored-path state across worktrees. Failed evidence stays unverifiable.</p>
+        <h3>Know what cleanup would cost</h3>
+        <p>Checks committed, staged, dirty, untracked and ignored-path state together before a destructive decision—so a branch name never decides what is safe.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt collisions</div>
-        <h3>Conflict evidence</h3>
-        <p>Separates merge-tree-proven conflicts from predicted same-file or symbol overlap, with confidence intact.</p>
+        <h3>Catch collisions before the merge queue</h3>
+        <p>Shows proven merge conflicts separately from early same-file and symbol overlap, so agents can coordinate while a fix is still cheap.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt duplicates</div>
-        <h3>Duplicate candidates</h3>
-        <p>Symbol/body overlap candidates for review; exact durable twins are tracked separately for safe collapse. <span class="cmd-flag">--deep</span></p>
+        <h3>Stop rebuilding work that already exists</h3>
+        <p>Surfaces symbol and body overlap across sibling worktrees. Exact durable twins are separated from review candidates, so useful similarity becomes a shortcut—not a guess.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt order</div>
-        <h3>Landing order</h3>
-        <p>A heuristic sequence over the observed relationship graph, with the evidence behind each constrained edge.</p>
+        <h3>Land work in the order it needs</h3>
+        <p>Turns observed dependencies and conflicts into a review/landing sequence, with the reason behind every constrained edge.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt partition</div>
-        <h3>Starting ownership map</h3>
-        <p>Advisory disjoint buckets from observed hotspots. It does not claim to know the agents' tasks. <span class="cmd-flag">--agents n</span></p>
+        <h3>Give agents a cleaner starting map</h3>
+        <p>Creates disjoint advisory work buckets from real repository hotspots, reducing accidental overlap before a new wave of agent work begins.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt branches</div>
-        <h3>The other graveyard</h3>
-        <p>Branches nobody dares delete. Content-landed squash merges detected by comparing trees, not ancestry. <span class="cmd-flag">--apply uses -d, never -D</span></p>
+        <h3>Clear stale branches with evidence</h3>
+        <p>Finds landed content even after squash merges by comparing trees, so old branches stop becoming a second graveyard of work nobody dares touch.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt verify a b</div>
-        <h3>The tractable core of P4</h3>
-        <p>Runs your test suite three times — A alone, B alone, A+B speculatively merged — and reports only what the combination breaks.</p>
+        <h3>Test the combination before landing</h3>
+        <p>Runs your own suite against A, B, and a speculative A+B merge—showing the breakage caused by their interaction, not a vague compatibility score.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt journal</div>
-        <h3>Tamper-evident local history</h3>
-        <p>Detects edits, deletion, reorder and truncation relative to a checkpoint. Actors remain reported, inferred or unknown. Free.</p>
+        <h3>Keep a trustworthy local trail</h3>
+        <p>Records decisions and actions in a tamper-evident local journal, so a busy multi-agent session is explainable after the fact.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt tui</div>
-        <h3>Interactive dashboard</h3>
-        <p>A risk-sorted terminal dashboard over the same scan the CLI uses. <span class="cmd-flag">--snapshot</span></p>
+        <h3>See it in seconds, not terminal scrollback</h3>
+        <p>A risk-sorted interactive dashboard over the same evidence as the CLI. It makes the next inspection or recovery action obvious.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt mcp</div>
-        <h3>16 MCP tools</h3>
-        <p>Twelve read-only decision tools and four acting tools over stdio; clean is mutating but non-destructive, while separately permissioned purge is dry-run-first and honestly marked destructive.</p>
+        <h3>Give agents useful repository context</h3>
+        <p>16 MCP tools put the decision surface and recoverable actions where capable agents can use them: twelve read-only tools plus four clearly scoped acting tools.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt auto · protect · rescue · discard · clean</div>
-        <h3>The safe action loop</h3>
-        <p>Lock unique work, capture to verified refs, and move disposable worktrees into recoverable local quarantine only after a fresh verdict. Clean deletes no files or branches.</p>
+        <h3>Recover instead of starting over</h3>
+        <p>Protect unique work, capture it to verified refs, then move genuinely disposable worktrees to locked local quarantine after a fresh check. Restore is an exact command, not archaeology.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt context · impact · plan</div>
-        <h3>Sibling and review context</h3>
-        <p>Shows contested files, duplicated symbols, dependency hints and an evidence-bearing review plan without treating them as deletion authority.</p>
+        <h3>Give humans and agents the same map</h3>
+        <p>Shows contested files, duplicate symbols, dependency hints and a review plan, so coordination happens from repository evidence instead of recollection.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt forensics · stash</div>
-        <h3>Incident and hidden-state review</h3>
-        <p>Reconstructs recorded actions without guessing missing hook events, and finds stash entries whose work is reachable from no ref.</p>
+        <h3>Find the work Git hides in plain sight</h3>
+        <p>Reconstructs recorded actions and inspects stashes whose work is reachable from no ordinary ref—useful when “where did it go?” matters most.</p>
       </div>
       <div class="cmd-card">
         <div class="cmd-name"><span class="p">$</span> holt setup · doctor · audit</div>
-        <h3>Installation and supply-chain evidence</h3>
-        <p>Names optional backend gaps, wires supported local hosts, and checks the installed manifest and capability ledger. Approved installer network paths remain disclosed.</p>
+        <h3>Install with visibility</h3>
+        <p>Sets up supported local integrations, shows the capability available on this machine, and audits installed bytes and declared runtime behavior.</p>
       </div>
     </div>
   </div>
@@ -1161,12 +1175,12 @@ footer { padding: 44px 0 60px; }
 <!-- ============ BUILT ON OSS ============ -->
 <section id="oss">
   <div class="wrap">
-    <span class="kicker">assembled, not reinvented</span>
-    <h2 class="section-title">Built on proven OSS.</h2>
+    <span class="kicker">special thanks · assembled, not reinvented</span>
+    <h2 class="section-title">Built on proven OSS—and grateful for it.</h2>
     <p class="section-sub">
-      Holt assembles instruments rather than reinventing them. Optional analysis backends have
-      named degradation paths: <code class="inline">holt doctor</code> shows what is present and
-      what an absence changes.
+      Holt stands on the work of the open-source projects below. They make deep Git-aware analysis
+      practical without asking users to trust a black box. <code class="inline">holt doctor</code>
+      shows which optional capabilities are available on your machine.
     </p>
     <div class="oss-grid">
       <div class="oss-card">
@@ -1370,7 +1384,8 @@ footer { padding: 44px 0 60px; }
             </table>
           </div>
           <p style="margin-top:16px; font-size:13px; color:var(--text-faint);">
-            A bounded adversarial round is pinned in CI at <code class="inline">test/e2e/monster.test.mjs</code>.
+            A bounded adversarial round is pinned in CI at <code class="inline">test/e2e/monster.test.mjs</code>;
+            the next artifact adds source identity, full denominators and a checksum.
           </p>
         </div>
         <div class="bench-explain">
@@ -1380,7 +1395,7 @@ footer { padding: 44px 0 60px; }
             <dt>how</dt>
             <dd>One synthesised worst-case repo, scanned and then run through the full recoverable action loop.</dd>
             <dt>means</dt>
-            <dd>The harness is designed to expose composition bugs that isolated fixtures miss. It is currently console-only, so no result is publication-eligible until it emits a source-identified, denominator-complete, checksummed artifact.</dd>
+            <dd>The harness is designed to expose composition bugs that isolated fixtures miss. The next publication step is a source-identified, denominator-complete, checksummed artifact so others can reproduce its result exactly.</dd>
           </dl>
         </div>
       </div>
@@ -1454,9 +1469,9 @@ footer { padding: 44px 0 60px; }
             </table>
           </div>
           <p style="margin-top:16px; font-size:13px; color:var(--text-faint);">
-            The retained six-trial run is a historical pilot and qualitative failure corpus. It is
-            useful for reproducing failure modes, but its rates and lift are not launch, release or
-            sales claims.
+            Independent testing stays visible as a record of real failure modes. The retained
+            six-trial pilot is useful for reproducing them; broader adversarial and real-repository
+            evaluation is open and planned.
           </p>
         </div>
         <div class="bench-explain">
@@ -1466,7 +1481,7 @@ footer { padding: 44px 0 60px; }
             <dt>how</dt>
             <dd>Identical prompts, decontaminated controls, complete transcripts and independent grading against planted state.</dd>
             <dt>means</dt>
-            <dd>Comparative safety or utility lift is published only when a current artifact satisfies that contract.</dd>
+            <dd>Current comparative safety or utility results are published with the complete artifact that supports them.</dd>
           </dl>
         </div>
       </div>
@@ -1501,6 +1516,55 @@ footer { padding: 44px 0 60px; }
   </div>
 </section>
 
+<!-- ============ ROADMAP ============ -->
+<section id="roadmap">
+  <div class="wrap">
+    <span class="kicker">what comes next</span>
+    <h2 class="section-title">A stronger shared work layer, shaped by real use.</h2>
+    <p class="section-sub">
+      Holt’s free core is ready to use now. The next investments build on the same local evidence
+      model: better recovery across machines, deeper live-host coverage, and shared controls for
+      teams. Priorities will follow real workflow demand and user feedback, so this is a direction,
+      not a promise of dates or a hidden paid feature list.
+    </p>
+    <div class="grid-cmds">
+      <div class="cmd-card">
+        <div class="cmd-name">recovery</div>
+        <h3>Portable recovery capsules</h3>
+        <p>Package a workstream manifest, Git bundle, recovery reference and verification data so valuable work can survive the original directory or machine.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name">recovery</div>
+        <h3>Verified external checkpoints</h3>
+        <p>Add optional encrypted checkpoint providers and restore testing for teams that need recovery beyond local Git and quarantine.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name">agents</div>
+        <h3>More live host conformance</h3>
+        <p>Turn contract coverage into repeatable live-host allow, deny and failure evidence—then expand integrations where users actually run agents.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name">teams</div>
+        <h3>Shared team workspace</h3>
+        <p>Build a focused team view for shared policy, workstream identity, recovery status, audit context and role-aware operations without turning Holt into a generic project manager.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name">enterprise</div>
+        <h3>Enterprise identity and governance</h3>
+        <p>Develop design-partner requirements for centrally managed policy, SSO, SCIM, entitlement lifecycle and support operations before presenting an enterprise offer.</p>
+      </div>
+      <div class="cmd-card">
+        <div class="cmd-name">proof</div>
+        <h3>Open adversarial evaluation</h3>
+        <p>Expand real-repository, worst-case recovery and with/without-agent studies. Users can run the public harnesses now and help decide which failures matter next.</p>
+      </div>
+    </div>
+    <p class="pricing-foot">Want to influence the roadmap? Open a reproducible workflow issue or
+      benchmark result on <a href="https://github.com/Raed2180416/holt">GitHub</a>. The best next
+      feature is the one that removes a real agent-workflow failure.</p>
+  </div>
+</section>
+
 <!-- ============ INSTALL ============ -->
 
 <section id="pricing">
@@ -1512,9 +1576,9 @@ footer { padding: 44px 0 60px; }
       local journal and single-repository forensics are available under
       <a href="https://github.com/Raed2180416/holt/blob/main/LICENSE.md">FSL-1.1-MIT</a> for its
       defined Permitted Purposes, including internal commercial use that is not a Competing Use.
-      Team and Enterprise are deliberately not offered in this launch. Their separately licensed
-      implementation remains visible in the repository for audit and future design-partner work,
-      but this page presents no paid price, checkout, entitlement sale, SLA, or identity claim.
+      Team and Enterprise capabilities inform Holt’s future shared-work roadmap. Their separately
+      licensed implementation remains visible for audit while design-partner workflows shape the
+      right packaging, support and governance model.
     </p>
 
     <div class="price-grid">
@@ -1535,8 +1599,8 @@ footer { padding: 44px 0 60px; }
     </div>
 
     <p style="margin-top:24px">
-      This launch has one call to action: install the free core and test it on a real repository.
-      Paid-tier availability, packaging, support and commercial terms will be separate decisions.
+      Start with the free core on a real repository. Teams that need shared recovery, policy and
+      governance can help shape the next focused layer through their real workflows.
     </p>
   </div>
 </section>
@@ -1589,7 +1653,8 @@ footer { padding: 44px 0 60px; }
     <span class="footer-oss">universal-ctags · enry · jscpd · git merge-tree · jj</span>
     <span>© 2026 Contrare · holt™</span>
   </div>
-  <p style="margin-top:14px;color:var(--text-faint);font-size:13.5px">holt™ is a product of <strong style="color:var(--text-dim)">Contrare</strong>.</p>
+  <p style="margin-top:14px;color:var(--text-faint);font-size:13.5px">holt™ is part of <strong style="color:var(--text-dim)">Contrare Research</strong> ·
+    <a href="mailto:research.contrare@outlook.com">research.contrare@outlook.com</a> for product and research queries.</p>
 </footer>
 
 <script>

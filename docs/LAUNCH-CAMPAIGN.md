@@ -14,6 +14,7 @@ Canonical links:
 - Source: https://github.com/Raed2180416/holt
 - Benchmark contract and evidence: https://github.com/Raed2180416/holt/blob/main/BENCHMARKS.md
 - Host capability matrix: https://github.com/Raed2180416/holt/blob/main/HOSTS.md
+- Product and research queries: research.contrare@outlook.com
 
 ## Hacker News
 
@@ -63,6 +64,8 @@ pilot into a made-up saved-hours or token-savings claim.
 I would especially value hostile tests from people who use multiple worktrees: a case Holt allows but should block, a case it blocks but should allow, or a workflow where the information arrives too late to be useful.
 
 Source and install: https://github.com/Raed2180416/holt
+
+Holt is part of Contrare Research. Product and research queries: research.contrare@outlook.com
 ```
 
 Do not ask anyone to upvote or comment. Be available in the thread for the rest of the day.
@@ -579,3 +582,9 @@ Benchmark contract: https://github.com/Raed2180416/holt/blob/main/BENCHMARKS.md
 7. Publish the Indie Hackers, Reddit, X and LinkedIn versions with their channel-specific copy.
 8. Publish the DEV article as a technical article, not a shortened advertisement.
 9. Post the MLOps/AAIF and MCP community messages only in explicitly appropriate channels.
+
+### Attribution footnote
+
+Add this short footnote where a channel supports it, or place it in the first reply when it does
+not: **Holt is part of Contrare Research. Product and research queries:
+research.contrare@outlook.com.**

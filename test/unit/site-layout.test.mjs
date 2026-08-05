@@ -66,3 +66,24 @@ test('site: declares a viewport meta, or none of the above matters', async () =>
     'without width=device-width a phone renders the page at ~980px and scales it down, which ' +
     'hides every layout defect above rather than fixing one of them');
 });
+
+test('site: terminal samples flip to a readable light palette for both theme entry paths', async () => {
+  const css = await fs.readFile(SITE, 'utf8');
+  // The page has two ways to arrive in light mode: an explicit toggle and a visitor's light
+  // system preference. Both must flip the terminal background AND its foreground; otherwise a
+  // terminal can look fine in one path and ship low-contrast text in the other.
+  const lightBlocks = [
+    /:root\[data-theme="light"\]\s*\{([\s\S]*?)\n\}/,
+    /@media \(prefers-color-scheme: light\)\s*\{\s*:root:not\(\[data-theme="dark"\]\)\s*\{([\s\S]*?)\n\s*\}\s*\}/,
+  ];
+  for (const block of lightBlocks) {
+    const match = css.match(block);
+    assert.ok(match, `missing a complete light-theme token block for ${block}`);
+    assert.match(match[1], /--bg-terminal:\s*#f8f5ef/,
+      'light mode leaves the rendered terminal on the dark background');
+    assert.match(match[1], /--term-fg:\s*#2d333b/,
+      'light mode leaves the rendered terminal foreground on its dark-theme colour');
+  }
+  assert.match(css, /\.term\s*\{[^}]*color:\s*var\(--term-fg\)/,
+    'the static TUI sample bypasses the theme token and cannot follow either light palette');
+});

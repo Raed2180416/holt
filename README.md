@@ -125,8 +125,8 @@ the state that exists before a pull request does.
 ---
 
 **Benchmark methods and reproducible evaluation: [BENCHMARKS.md](BENCHMARKS.md).** Holt is ready
-to install and test in real repositories today. The benchmark protocol is open for anyone to run
-independently; any published result must include its complete, linked evidence artifact.
+to install and use in real repositories today. The benchmark protocol is open for anyone to run
+independently; any published result includes its complete, linked evidence artifact.
 
 ## Evidence, without turning a pilot into a promise
 
@@ -303,7 +303,7 @@ runtime or enforcement verdict.
 
 ---
 
-## Built on proven OSS
+## Built on proven OSS — with thanks
 
 Holt assembles instruments rather than reinventing them:
 [universal-ctags](https://github.com/universal-ctags/ctags) for symbols, with parser probes and
@@ -317,6 +317,10 @@ authority.
 
 Optional analysis backends have named degradation paths: `holt doctor` shows what is present and
 what an absence changes.
+
+Thank you to the maintainers and contributors behind these projects. Holt deliberately builds on
+their proven primitives rather than asking teams to replace the tools and repositories they already
+trust.
 
 ---
 
@@ -627,14 +631,18 @@ Fleet scans repositories on your machine; the audit sink writes newline-delimite
 a file you control, which an existing log shipper may tail. holt does not send repository data or
 telemetry. The separately approved setup/install paths may download a pinned tool or invoke your
 package manager, as disclosed in [SUPPLY-CHAIN.md](SUPPLY-CHAIN.md).
-There is no hosted holt dashboard your code is sent to, no telemetry, and no
-license check-in — a Team key is an Ed25519-signed token you activate once
-(`holt license activate <key>`) or set as `HOLT_LICENSE` in CI, verified entirely offline. If a
-subscription lapses, paid features keep working for a 14-day grace period rather than breaking
-your pipeline, and the free features never stop. There is no kill switch, because a kill switch
-would require the tool to phone home.
+## What comes next
 
-[Pricing and details →](https://raed2180416.github.io/holt/#pricing)
+The free, single-repository core is the product you can use today. The next stage builds from the
+same evidence model: portable recovery capsules, optional encrypted external checkpoints with
+restore testing, deeper live-host conformance, and a focused shared workspace for teams. Enterprise
+identity, policy and lifecycle controls will be shaped with design partners before an enterprise
+offer is made. The public [roadmap](https://raed2180416.github.io/holt/#roadmap) is direction, not
+a calendar: real workflow failures and user feedback decide the order.
+
+Team capabilities use locally verified, signed entitlements; they do not require a hosted code
+upload, telemetry, or licence check-in. That future work will stay focused on shared workstream
+integrity rather than becoming a generic project-management dashboard.
 
 ---
 
@@ -651,6 +659,7 @@ Holt has an explicit two-part licence boundary:
   [commercial licence](src/team/LICENSE). They require the corresponding paid entitlement for work use, may
   not be redistributed and do not carry the FSL future-MIT grant.
 
-**holt™** is a product of **Contrare**.
+**holt™** is part of **Contrare Research**. For product and research queries, email
+[research.contrare@outlook.com](mailto:research.contrare@outlook.com).
 
 © 2026 Contrare
