@@ -44,7 +44,7 @@ jobs:
       # The upstream composite currently calls upload-artifact by tag. This repository requires
       # every action, including nested composite actions, to be pinned to a full commit, so the
       # checked-in wrapper keeps the Pages artifact path under the same supply-chain rule.
-      - uses: Raed2180416/holt/.github/actions/upload-pages-artifact@9cc0938fda28ddfaa2e08498ef5cc4ea1d73948b
+      - uses: Raed2180416/holt/.github/actions/upload-pages-artifact@9cc0938fda28ddfaa2e08498ef5cc4ea1d73948b # v3.0.1
         with:
           name: github-pages
           path: site
