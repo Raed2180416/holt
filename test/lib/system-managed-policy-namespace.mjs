@@ -62,8 +62,7 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
     delete env.NODE_TEST_CONTEXT;
     delete env.NODE_TEST_PIPE;
     const source = fileURLToPath(testFileUrl);
-    const runnerRoot = process.cwd();
-    const relativeSource = path.relative(runnerRoot, source).split(path.sep).join('/');
+    const relativeSource = path.relative(process.cwd(), source).split(path.sep).join('/');
     const namespaceArgs = [
       'sh',
       '-c',
@@ -71,10 +70,12 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       // user+mount namespace path already has an isolated root; the sudo fallback below needs
       // this explicit boundary because a root mount namespace may otherwise inherit shared
       // propagation from the runner.
-      'mount --make-rprivate / && mount --bind "$1" /etc && cd "$2" && shift 2 && exec "$@"',
+      // Keep the inherited working-directory inode. Some hosted runners expose the checkout
+      // through a mount that is reachable by the child only as its inherited cwd, not by the
+      // runner's absolute path after sudo creates the private mount namespace.
+      'mount --make-rprivate / && mount --bind "$1" /etc && shift && exec "$@"',
       'holt-system-policy-namespace',
       privateEtc,
-      runnerRoot,
       process.execPath,
       '--test',
       '--test-concurrency=1',
