@@ -1,0 +1,137 @@
+name: release artifact (fast signed)
+
+# Operator-selected fallback for a release when the optional adversarial corpus gate is being
+# deferred. It still builds from one immutable tag, signs the in-package manifest, verifies the
+# package bytes and publishes only a GitHub Release. The normal tag workflow remains the richer
+# evidence path for future releases.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable tag to publish (for example v0.3.1)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-fast-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: sign, verify and publish the exact tag
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: prove the requested tag and release state before checkout
+        env:
+          GH_TOKEN: ${{ secrets.HOLT_RELEASE_ADMIN_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test -n "${GH_TOKEN:-}"
+          test "$(gh api repos/$GITHUB_REPOSITORY/immutable-releases --jq '.enabled')" = true
+          set +e
+          gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/release.txt" 2>&1
+          rc=$?
+          set -e
+          code=$(awk 'NR == 1 { print $2 }' "$RUNNER_TEMP/release.txt")
+          test "$code" = 404 || { echo "release $TAG is not provably absent (HTTP ${code:-unknown}, gh=$rc)"; exit 1; }
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+
+      - name: bind checkout, tag and package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "$TAG^{commit}")"
+          VERSION=$(node -p "require('./package.json').version")
+          test "v$VERSION" = "$TAG"
+          test -f ".github/releases/$TAG.md"
+          node scripts/check-release-body.mjs --tag "$TAG" --body-file ".github/releases/$TAG.md"
+          node scripts/check-git-runtime.mjs --verify-inert-hooks
+
+      - name: install and run package integrity checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm audit --omit=dev --audit-level=moderate
+          npm run action:check
+          node scripts/gen-manifest.mjs --check
+          node bin/holt.mjs audit
+
+      - name: sign the exact in-package manifest
+        env:
+          HOLT_RELEASE_SIGNING_KEY: ${{ secrets.HOLT_RELEASE_SIGNING_KEY }}
+          EXPECTED_RELEASE_PUBLIC_KEY_B64: MCowBQYDK2VwAyEABB2PDDowEa2PYmjsYI94KCl2QPjan6xkgdPvze7h8ok=
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { createPrivateKey, createPublicKey, sign, verify } = require('node:crypto');
+          const pem = process.env.HOLT_RELEASE_SIGNING_KEY;
+          if (!pem) throw new Error('HOLT_RELEASE_SIGNING_KEY is required');
+          const privateKey = createPrivateKey(pem);
+          if (privateKey.asymmetricKeyType !== 'ed25519') throw new Error('release key must be Ed25519');
+          const publicKey = createPublicKey(privateKey);
+          const actual = publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
+          if (actual !== process.env.EXPECTED_RELEASE_PUBLIC_KEY_B64) throw new Error('release key does not match pinned public key');
+          const manifest = fs.readFileSync('MANIFEST.sha256');
+          const signature = sign(null, manifest, privateKey);
+          if (!verify(null, manifest, publicKey, signature)) throw new Error('signature verification failed');
+          fs.writeFileSync('MANIFEST.sha256.sig', `${signature.toString('base64')}\n`, { mode: 0o600 });
+          NODE
+
+      - name: build and verify signed package assets
+        id: assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node bin/holt.mjs audit --require-signature
+          NAME=$(npm pack --ignore-scripts --silent)
+          case "$NAME" in holt-[0-9]*.tgz) ;; *) echo "unexpected package '$NAME'"; exit 1;; esac
+          cp "$NAME" holt.tgz
+          SBOM_DIR=$(mktemp -d)
+          node scripts/gen-sbom.mjs --out "$SBOM_DIR"
+          cp "$SBOM_DIR/holt.cdx.json" holt.cdx.json
+          cp "$SBOM_DIR/holt.spdx.json" holt.spdx.json
+          sha256sum "$NAME" holt.tgz MANIFEST.sha256 MANIFEST.sha256.sig holt.cdx.json holt.spdx.json > SHA256SUMS
+          UNPACK=$(mktemp -d)
+          tar -xzf "$NAME" -C "$UNPACK"
+          node "$UNPACK/package/bin/holt.mjs" audit --require-signature
+          cmp "$NAME" holt.tgz
+          sha256sum -c SHA256SUMS
+          npm install --ignore-scripts --prefix "$RUNNER_TEMP/holt-install" "./$NAME"
+          node "$RUNNER_TEMP/holt-install/node_modules/holt/bin/holt.mjs" audit --require-signature
+
+      - name: create and publish the immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            "$(ls holt-[0-9]*.tgz)" holt.tgz SHA256SUMS MANIFEST.sha256 MANIFEST.sha256.sig \
+            holt.cdx.json holt.spdx.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "holt $(node -p "require('./package.json').version")" \
+            --notes-file ".github/releases/$TAG.md" \
+            --verify-tag
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets,url
