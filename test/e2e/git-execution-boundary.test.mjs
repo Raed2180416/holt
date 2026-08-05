@@ -269,6 +269,10 @@ test('GIT BOUNDARY: repository clean/process filters never execute during status
   const unknownWorktree = path.join(path.dirname(root), `${path.basename(root)}-filter-unknown`);
   t.after(() => fs.rm(unknownWorktree, { recursive: true, force: true }));
   await mustGit(['worktree', 'add', '-q', '-b', 'filter-unknown', unknownWorktree, 'main'], root);
+  // The fixture-creation command is deliberately raw Git and may run the repository's clean
+  // driver on some Git versions.  Start the rescue boundary with a fresh marker so this assertion
+  // measures only Holt-owned processes, not checkout work performed while building the fixture.
+  await fs.rm(marker, { force: true });
   const rescuedUnknown = await rescue(root, path.basename(unknownWorktree));
   assert.equal(rescuedUnknown.ok, true, JSON.stringify(rescuedUnknown));
   assert.equal(rescuedUnknown.nothingToRescue, undefined,
