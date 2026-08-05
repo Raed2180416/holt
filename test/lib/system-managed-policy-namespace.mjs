@@ -102,24 +102,15 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       timeout: 120_000,
       maxBuffer: 8 * 1024 * 1024,
     });
-    let result = await runNamespace('unshare', ['-Urm', ...namespaceArgs('process')]);
-    // GitHub-hosted Linux runners currently reject unprivileged user namespaces even though
-    // passwordless sudo is available. A root-owned mount namespace provides the same test
-    // isolation without weakening the production fixed-/etc contract; it is attempted only
-    // after the user-namespace path fails for a capability reason.
-    const namespaceUnavailable = (output) => /(?:uid_map|user namespaces?|mount namespaces?|operation not permitted|permission denied|EACCES|ENOENT)/iu.test(output);
+    // GitHub-hosted Linux runners allow passwordless sudo but reject unprivileged user
+    // namespaces. Try the single root-owned mount namespace first; this also avoids a failed
+    // user-namespace attempt changing the mount/user context in which sudo resolves the runner.
+    // Its child runner is serialized because these hosted mounts deny Node's process-isolation
+    // re-exec. Developers without sudo still get the stronger process-isolated user namespace.
+    const namespaceUnavailable = (output) => /(?:uid_map|user namespaces?|mount namespaces?|operation not permitted|permission denied|EACCES|ENOENT|sudo:)/iu.test(output);
+    let result = await runNamespace('sudo', ['-n', 'unshare', '-m', ...namespaceArgs('none')]);
     if (result.code !== 0 && namespaceUnavailable(`${result.stdout}\n${result.stderr}`)) {
-      // The hosted root-mount fallback cannot spawn Node again from inside the namespace on
-      // Node 22–26 (the runner reports EACCES for its process-isolation child). Keep that
-      // fallback serialized and mark its deliberate child context explicitly; capable hosts
-      // still exercise the real process-isolation path above.
-      const privileged = await runNamespace(
-        'sudo',
-        ['-n', 'unshare', '-m', ...namespaceArgs('none')],
-      );
-      if (privileged.code === 0 || !namespaceUnavailable(`${privileged.stdout}\n${privileged.stderr}`)) {
-        result = privileged;
-      }
+      result = await runNamespace('unshare', ['-Urm', ...namespaceArgs('process')]);
     }
     // GitHub-hosted runners and some hardened developer machines disable unprivileged user or
     // mount namespaces. That is a host capability, not a managed-policy product failure. Keep
