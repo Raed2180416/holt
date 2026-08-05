@@ -254,6 +254,13 @@ test('GIT BOUNDARY: repository clean/process filters never execute during status
   await mustGit(['config', 'filter.attacker.clean', `${gitShellArg(process.execPath)} ${gitShellArg(clean)}`], root);
   await mustGit(['config', 'filter.attacker.required', 'false'], root);
 
+  // Force Git to inspect the worktree entry after the driver is configured. The bytes remain
+  // exactly the committed `base\n`, but a same-byte rewrite advances the native mtime/size
+  // stat tuple that Git uses before deciding whether a clean filter needs to run. Git for Windows
+  // otherwise legitimately trusts the cached index stat and never invokes the driver, making the
+  // anti-vacuity premise depend on filesystem timestamp behaviour rather than the filter boundary.
+  await fs.writeFile(path.join(root, 'tracked.txt'), 'base\n');
+
   const ordinaryStatus = await rawGit(
     ['status', '--porcelain=v1', '--untracked-files=no'], root);
   assert.equal(ordinaryStatus.code, 0, ordinaryStatus.stderr);
