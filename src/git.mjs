@@ -460,6 +460,23 @@ function appendConfigPairs(env, pairs) {
   return env;
 }
 
+/**
+ * Git 2.54 on hosted runners has been observed to retain a repository filter when the same
+ * command-scope value arrives only through GIT_CONFIG_COUNT.  Keep the environment evidence (it
+ * is part of the process boundary), but also put the measured no-op at Git's highest-precedence
+ * command line layer.  These are generated from names returned by the inert config inventory;
+ * attacker-controlled command text is never copied into argv.
+ */
+function commandConfigArgs(programs) {
+  const args = [];
+  for (const prefix of programs.filterPrefixes) {
+    for (const suffix of ['clean', 'smudge', 'process', 'required']) {
+      args.push('-c', `${prefix}.${suffix}=${suffix === 'required' ? 'false' : ''}`);
+    }
+  }
+  return args;
+}
+
 function externalConversionPrograms(configOutput) {
   const filterPrefixes = new Set();
   const checkinFilterPrefixes = new Set();
@@ -589,7 +606,11 @@ async function buildGitCommandContext(argv, cwd, intentional, timeout = DEFAULT_
       [`${prefix}.required`, 'false'],
     );
   }
-  return { env: appendConfigPairs(env, overrides), programs };
+  return {
+    env: appendConfigPairs(env, overrides),
+    programs,
+    configArgs: commandConfigArgs(programs),
+  };
 }
 
 export async function buildGitCommandEnv(argv, cwd, intentional, timeout = DEFAULT_TIMEOUT_MS) {
@@ -622,6 +643,12 @@ export function hardenGitArgv(argv) {
   }
 
   return command;
+}
+
+function withCommandConfig(argv, configArgs = []) {
+  if (!configArgs.length) return argv;
+  const at = subcommandIndex(argv);
+  return [...argv.slice(0, at), ...configArgs, ...argv.slice(at)];
 }
 
 /** @type {Map<string, Promise<string>>} */
@@ -769,7 +796,7 @@ export async function git(argv, {
   const commandContext = await buildGitCommandContext(argv, cwd, env, timeout);
   const childEnv = commandContext.env;
   if (argv[subcommandIndex(argv)] !== 'version') await requireNoLazyFetch(childEnv);
-  const childArgv = hardenGitArgv(argv);
+  const childArgv = withCommandConfig(hardenGitArgv(argv), commandContext.configArgs);
 
   return new Promise((resolve, reject) => {
     execFile(
