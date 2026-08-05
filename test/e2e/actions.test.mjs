@@ -665,13 +665,16 @@ test('CLEAN RECOVERY: first-class inventory keeps the original identity and rest
     assert.equal(inventory.count, 1, JSON.stringify(inventory));
     assert.equal(inventory.quarantines[0].id, 'spent-friendly-name',
       'recovery identity must come from the original worktree, not a random quarantine basename');
-    assert.equal(inventory.quarantines[0].originalPath, wt);
+    // Git reports the canonical `/private/var/...` spelling on macOS, while the fixture path
+    // may retain the user-facing `/var/...` alias.  They name the same directory; compare path
+    // identity rather than platform-specific display strings.
+    assert.ok(await samePathAsync(inventory.quarantines[0].originalPath, wt));
     assert.equal(inventory.quarantines[0].head, originalHead);
 
     const restored = await restoreQuarantine(fx.root, 'spent-friendly-name');
     assert.equal(restored.ok, true, JSON.stringify(restored));
     assert.equal(restored.restored, true);
-    assert.equal(restored.originalPath, wt);
+    assert.ok(await samePathAsync(restored.originalPath, wt));
     assert.equal(restored.head, originalHead);
     assert.ok(await fs.stat(wt));
     await assert.rejects(() => fs.stat(cleaned.quarantines[0].quarantinePath));

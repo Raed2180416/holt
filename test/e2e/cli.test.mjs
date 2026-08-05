@@ -25,6 +25,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { newRepo } from '../fixtures.mjs';
+import { samePathAsync } from '../../src/paths.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -351,7 +352,9 @@ test('CLI: quarantines and restore provide an executable first-class recovery pa
   const inventory = JSON.parse(listed.stdout);
   const spent = inventory.quarantines.find((q) => q.id === 'spent');
   assert.ok(spent, `the original worktree id must remain discoverable: ${listed.stdout}`);
-  assert.equal(spent.originalPath, fx.wt('spent'));
+  // macOS may expose the temp directory as `/var/...` to the fixture and `/private/var/...`
+  // through Git.  Compare filesystem identity, not an OS-specific spelling.
+  assert.ok(await samePathAsync(spent.originalPath, fx.wt('spent')));
 
   const restored = await holt(['restore', spent.id, '--json', '--cwd', fx.root], fx.root);
   assert.equal(restored.code, 0, `${restored.stdout}${restored.stderr}`);
