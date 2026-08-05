@@ -9,8 +9,8 @@
 <meta property="og:title" content="holt — in-flight work integrity for parallel coding agents">
 <meta property="og:description" content="Prove what local agent work is unique, redundant, conflicting or unverifiable before anyone deletes it.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="brand/holt-lockup.png">
-<link rel="icon" type="image/png" href="brand/holt-mark.png">
+<meta property="og:image" content="brand/holt-wordmark.png">
+<link rel="icon" type="image/png" href="brand/holt-mark-transparent.png">
 <style>
 /* ---------- reset ---------- */
 *, *::before, *::after { box-sizing: border-box; }
@@ -85,6 +85,7 @@ code, .inline { overflow-wrap: anywhere; }
   --on-accent: #201203;        /* text on an accent-filled surface (button, badge, brand mark) */
   --nav-bg: rgba(10, 11, 13, 0.72);
   --bad-text: #ef9089;         /* "bad" text on the page background, not inside a terminal */
+  --brand-filter: brightness(1.75) saturate(0.82);
 
   /* Terminal and code samples use their own readable palette. The light palette below flips this
      complete set together, so a visitor who switches themes never gets a dark terminal bolted
@@ -300,20 +301,18 @@ header.nav {
   border-radius: 4px;
   object-fit: contain;
   flex: none;
+  filter: var(--brand-filter);
 }
 .brand-lockup {
   width: min(100%, 720px);
   margin: 0 0 34px;
-  padding: 20px 24px;
-  border: 1px solid rgba(66, 91, 70, 0.32);
-  border-radius: var(--radius-lg);
-  background: #f8f1e8;
-  box-shadow: 0 24px 70px -35px rgba(0, 0, 0, 0.72);
+  padding: 0;
 }
 .brand-lockup img {
-  width: min(100%, 620px);
+  width: min(100%, 560px);
   height: auto;
-  margin: 0 auto;
+  margin: 0;
+  filter: var(--brand-filter);
 }
 .nav-links { display: flex; align-items: center; gap: 28px; }
 .nav-links a {
@@ -817,6 +816,7 @@ footer { padding: 44px 0 60px; }
   --on-accent:#ffffff;
   --nav-bg:rgba(255,255,255,0.85);
   --bad-text:#c0362c;
+  --brand-filter:none;
   --bg-terminal:#f8f5ef;
   --term-bright:#171a1f; --term-fg:#2d333b; --term-dim:#5c6570; --term-faint:#7d8592;
   --term-accent:#935009; --term-good:#1f7a3d; --term-bad:#c0362c; --term-bad-bright:#a92f26;
@@ -835,6 +835,7 @@ footer { padding: 44px 0 60px; }
     --on-accent:#ffffff;
     --nav-bg:rgba(255,255,255,0.85);
     --bad-text:#c0362c;
+    --brand-filter:none;
     --bg-terminal:#f8f5ef;
     --term-bright:#171a1f; --term-fg:#2d333b; --term-dim:#5c6570; --term-faint:#7d8592;
     --term-accent:#935009; --term-good:#1f7a3d; --term-bad:#c0362c; --term-bad-bright:#a92f26;
@@ -849,7 +850,7 @@ footer { padding: 44px 0 60px; }
 <header class="nav">
   <div class="nav-inner">
     <a class="brand" href="#top">
-      <img class="brand-mark" src="brand/holt-mark.png" alt="" width="22" height="32">
+      <img class="brand-mark" src="brand/holt-mark-transparent.png" alt="" width="22" height="32">
       holt
     </a>
     <nav class="nav-links">
@@ -872,7 +873,7 @@ footer { padding: 44px 0 60px; }
   <div class="wrap">
     <div class="hero-inner">
       <div class="brand-lockup">
-        <img src="brand/holt-lockup.png" alt="Holt wordmark — a Contrare Research project" width="1079" height="392">
+        <img src="brand/holt-wordmark-transparent.png" alt="Holt wordmark" width="783" height="392">
       </div>
       <span class="kicker">local · git-native · cross-agent</span>
       <h1>Keep agents moving.<br><span class="accent-text">Stop redoing or losing their work.</span></h1>
@@ -1661,7 +1662,7 @@ footer { padding: 44px 0 60px; }
 
 <footer>
   <div class="wrap footer-inner">
-    <span class="brand"><img class="brand-mark" src="brand/holt-mark.png" alt="" width="22" height="32">holt</span>
+    <span class="brand"><img class="brand-mark" src="brand/holt-mark-transparent.png" alt="" width="22" height="32">holt</span>
     <span class="footer-links">
       <a href="https://github.com/Raed2180416/holt">GitHub</a> ·
       <a href="https://github.com/Raed2180416/holt/blob/main/BENCHMARKS.md">Benchmarks</a> ·

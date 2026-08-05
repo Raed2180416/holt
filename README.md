@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/brand/holt-lockup.png" alt="Holt — a Contrare Research project" width="620">
+<img src="docs/brand/holt-wordmark.png" alt="Holt — a Contrare Research project" width="560">
 
 # 🌳 holt
 
