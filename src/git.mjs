@@ -434,6 +434,11 @@ function commandMayConvert(argv) {
   if (sub === 'status' || sub === 'add' || sub === 'diff') return true;
   if (sub === 'diff-index') return !rest.includes('--cached');
   if (sub === 'hash-object') return !rest.includes('--no-filters');
+  // Git 2.54 can refresh index metadata while answering `ls-files -v`; that refresh may consult
+  // a repository clean/process driver even though the command only prints index flags. Keep the
+  // same explicit no-op overrides on every ls-files form Holt uses so the flag probe cannot start
+  // arbitrary repository code on a version-specific internal path.
+  if (sub === 'ls-files') return true;
   if (sub === 'merge-tree') return true;
   // `worktree list` is read-only at the Git API level, but newer Git releases refresh linked
   // worktree state while enumerating several worktrees.  That refresh can consult attributes and
