@@ -106,7 +106,7 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
     // passwordless sudo is available. A root-owned mount namespace provides the same test
     // isolation without weakening the production fixed-/etc contract; it is attempted only
     // after the user-namespace path fails for a capability reason.
-    const namespaceUnavailable = (output) => /(?:uid_map|user namespaces?|mount namespaces?|operation not permitted|permission denied|ENOENT)/iu.test(output);
+    const namespaceUnavailable = (output) => /(?:uid_map|user namespaces?|mount namespaces?|operation not permitted|permission denied|EACCES|ENOENT)/iu.test(output);
     if (result.code !== 0 && namespaceUnavailable(`${result.stdout}\n${result.stderr}`)) {
       // The hosted root-mount fallback cannot spawn Node again from inside the namespace on
       // Node 22–26 (the runner reports EACCES for its process-isolation child). Keep that
@@ -115,7 +115,7 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       const privilegedEnv = { ...env, NODE_TEST_CONTEXT: 'child-holt-namespace' };
       const privileged = await runNamespace(
         'sudo',
-        ['-n', 'unshare', '-m', ...namespaceArgs('none')],
+        ['-n', 'env', 'NODE_TEST_CONTEXT=child-holt-namespace', 'unshare', '-m', ...namespaceArgs('none')],
         privilegedEnv,
       );
       if (privileged.code === 0 || !namespaceUnavailable(`${privileged.stdout}\n${privileged.stderr}`)) {
