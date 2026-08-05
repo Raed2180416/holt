@@ -553,13 +553,38 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
   // from the real index tree, removes each at-risk selection, hashes filesystem leaves with
   // --no-filters, and writes explicit mode/object/path tuples through update-index --cacheinfo.
   const tmpIndex = scratchIndexPath(ws.path, 'rescue');
+  // `git write-tree` normally refreshes the repository's live index and can therefore contend on
+  // its shared `.lock` file when two agents rescue the same worktree at once. Snapshot the index
+  // file first: Git writes indexes by atomic rename, so this copy observes either the old or the
+  // new complete index, never a half-written buffer; every subsequent tree operation is against
+  // the per-invocation copy. This preserves staged additions/deletions without serialising agent
+  // hooks on a process-global lock.
+  const seedIndex = scratchIndexPath(ws.path, 'rescue-seed');
   // holt authors this capture; a repo with no configured identity must still be rescuable.
   const env = { GIT_INDEX_FILE: tmpIndex, ...(await authorEnv(ws.path)) };
   try {
     // The real index already carries staged additions, deletions, and both sides of renames. Its
     // tree is object-only evidence and needs no working-tree conversion. Starting from HEAD would
     // resurrect a staged rename's source unless Holt reimplemented the entire index delta.
-    const indexTreeR = await gitOk(['write-tree'], { cwd: ws.path, allowMutation: true });
+    const indexPathR = await gitOk(['rev-parse', '--git-path', 'index'], {
+      cwd: ws.path, allowMutation: true,
+    });
+    const namedIndex = indexPathR.stdout.trim();
+    const liveIndex = path.isAbsolute(namedIndex)
+      ? namedIndex : path.resolve(ws.path, namedIndex);
+    try {
+      await fs.copyFile(liveIndex, seedIndex);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      // A newly-created worktree can have no index yet. There are no staged entries to preserve,
+      // so an explicit HEAD seed is the exact empty-index equivalent.
+      await gitOk(['read-tree', 'HEAD'], {
+        cwd: ws.path, env: { ...env, GIT_INDEX_FILE: seedIndex }, allowMutation: true,
+      });
+    }
+    const indexTreeR = await gitOk(['write-tree'], {
+      cwd: ws.path, env: { ...env, GIT_INDEX_FILE: seedIndex }, allowMutation: true,
+    });
     await gitOk(['read-tree', indexTreeR.stdout.trim()], { cwd: ws.path, env, allowMutation: true });
 
     const selected = [...new Set(files.map((file) => file.replace(/\/+$/, '')).filter(Boolean))].sort();
@@ -739,6 +764,7 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     }, journalFailures);
   } finally {
     await fs.rm(tmpIndex, { force: true }).catch(() => {});
+    await fs.rm(seedIndex, { force: true }).catch(() => {});
   }
 }
 
@@ -924,8 +950,13 @@ async function openDirectoryAnchor(identity) {
   // Linux exposes an open directory descriptor as a traversable path. Keeping that descriptor
   // open turns subsequent mkdir/rename/restore calls into operations relative to the directory
   // inode we measured, even if an adversary renames the path and replaces it with a symlink.
-  const fdRoot = process.platform === 'linux' ? '/proc/self/fd'
-    : (process.platform === 'darwin' || process.platform === 'freebsd' ? '/dev/fd' : null);
+  // Linux's /proc/self/fd/<n> is a traversable directory anchor. macOS and the BSDs expose
+  // /dev/fd, but Node's pathname stat/open semantics do not make that pseudo-path reliably
+  // traversable across the hosted runners (the descriptor itself is still valid). Falling back
+  // to the identity-checked path on those platforms keeps the operation usable; the immediate
+  // identity check below remains the fail-closed boundary, and Linux retains the stronger
+  // descriptor-anchored rename where the kernel contract is available.
+  const fdRoot = process.platform === 'linux' ? '/proc/self/fd' : null;
   if (!fdRoot) return { handle: null, path: identity.path };
   const handle = await fs.open(identity.path, 'r');
   try {

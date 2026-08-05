@@ -39,19 +39,27 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/holt-empty-home" "$RUNNER_TEMP/holt-empty-xdg"
           : > "$RUNNER_TEMP/holt-empty-gitconfig"
           {
             echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/holt-empty-gitconfig"
             echo "GIT_CONFIG_SYSTEM=$RUNNER_TEMP/holt-empty-gitconfig"
+            echo "HOME=$RUNNER_TEMP/holt-empty-home"
+            echo "XDG_CONFIG_HOME=$RUNNER_TEMP/holt-empty-xdg"
           } >> "$GITHUB_ENV"
       - name: isolate fixture Git configuration (no runner-global filters)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $config = Join-Path $env:RUNNER_TEMP 'holt-empty-gitconfig'
+          $home = Join-Path $env:RUNNER_TEMP 'holt-empty-home'
+          $xdg = Join-Path $env:RUNNER_TEMP 'holt-empty-xdg'
+          New-Item -ItemType Directory -Force -Path $home, $xdg | Out-Null
           New-Item -ItemType File -Force -Path $config | Out-Null
           "GIT_CONFIG_GLOBAL=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "GIT_CONFIG_SYSTEM=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "XDG_CONFIG_HOME=$xdg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: assert the required Git runtime and inert hooks boundary
         run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - run: npm ci
@@ -171,9 +179,12 @@ jobs:
       - name: isolate fixture Git configuration
         shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/holt-empty-home" "$RUNNER_TEMP/holt-empty-xdg"
           : > "$RUNNER_TEMP/holt-empty-gitconfig"
           echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/holt-empty-gitconfig" >> "$GITHUB_ENV"
           echo "GIT_CONFIG_SYSTEM=$RUNNER_TEMP/holt-empty-gitconfig" >> "$GITHUB_ENV"
+          echo "HOME=$RUNNER_TEMP/holt-empty-home" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$RUNNER_TEMP/holt-empty-xdg" >> "$GITHUB_ENV"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: '1.26.5' }
 
@@ -219,6 +230,8 @@ jobs:
           opencode --version
 
       - run: npm ci
+      - name: install browser proof dependency (no browser download)
+        run: npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1
 
       - name: doctor
         run: node bin/holt.mjs doctor
@@ -331,19 +344,27 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          mkdir -p "$RUNNER_TEMP/holt-empty-home" "$RUNNER_TEMP/holt-empty-xdg"
           : > "$RUNNER_TEMP/holt-empty-gitconfig"
           {
             echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/holt-empty-gitconfig"
             echo "GIT_CONFIG_SYSTEM=$RUNNER_TEMP/holt-empty-gitconfig"
+            echo "HOME=$RUNNER_TEMP/holt-empty-home"
+            echo "XDG_CONFIG_HOME=$RUNNER_TEMP/holt-empty-xdg"
           } >> "$GITHUB_ENV"
       - name: isolate fixture Git configuration (no runner-global filters)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $config = Join-Path $env:RUNNER_TEMP 'holt-empty-gitconfig'
+          $home = Join-Path $env:RUNNER_TEMP 'holt-empty-home'
+          $xdg = Join-Path $env:RUNNER_TEMP 'holt-empty-xdg'
+          New-Item -ItemType Directory -Force -Path $home, $xdg | Out-Null
           New-Item -ItemType File -Force -Path $config | Out-Null
           "GIT_CONFIG_GLOBAL=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "GIT_CONFIG_SYSTEM=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "XDG_CONFIG_HOME=$xdg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: assert the required Git runtime and inert hooks boundary
         run: node scripts/check-git-runtime.mjs --verify-inert-hooks
@@ -372,6 +393,9 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - run: npm ci
+      - name: install browser proof dependency (no browser download)
+        shell: bash
+        run: npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1
       - name: what this platform actually has
         run: node bin/holt.mjs doctor
       - name: every portable test file (the pinned real-repo corpus has one required 4/4 owner)

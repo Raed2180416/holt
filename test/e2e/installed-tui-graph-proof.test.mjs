@@ -91,8 +91,34 @@ async function runHarness({ frozen, out, fixture, allowSynthetic = true }) {
   });
 }
 
+async function browserProofCapability() {
+  let playwright;
+  try {
+    playwright = await import('playwright');
+  } catch (error) {
+    return `Playwright package unavailable: ${error?.message ?? error}`;
+  }
+  const candidates = [
+    process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE,
+    '/usr/bin/chromium',
+    playwright.chromium?.executablePath?.(),
+  ].filter(Boolean);
+  for (const candidate of candidates) {
+    try {
+      const stat = await fs.stat(await fs.realpath(candidate));
+      if (stat.isFile()) return null;
+    } catch { /* the next platform-local candidate may exist */ }
+  }
+  return `no local Chromium executable found: ${candidates.join(', ')}`;
+}
+
 test('installed TUI/graph proof harness validates exact terminal/browser behavior but refuses synthetic publication',
   async (t) => {
+    const browserGap = await browserProofCapability();
+    if (browserGap) {
+      t.skip(`browser proof capability unavailable: ${browserGap}`);
+      return;
+    }
     const retainedRoot = process.env.HOLT_TUI_GRAPH_TEST_RETAIN;
     const base = retainedRoot
       ? path.resolve(retainedRoot)

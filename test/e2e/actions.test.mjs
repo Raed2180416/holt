@@ -619,7 +619,9 @@ test('CLEAN RESTORE: exact restore argv preserves a Holt lock that predated quar
     assert.equal(await lockReasonOf(fx.root, wt), reason,
       'recovery must preserve the exact protection reason that existed before quarantine');
     const restored = await discover(fx.root);
-    const active = restored.workstreams.find((w) => w.path === wt);
+    // Git reports the canonical `/private/var/...` spelling on macOS while mkdtemp returns
+    // `/var/...`; the worktree id is the repository-stable identity for this single fixture.
+    const active = restored.workstreams.find((w) => w.id === path.basename(wt));
     assert.equal(active?.quarantined, false,
       `the restored path must be active, not a terminal quarantine: ${JSON.stringify(active)}`);
   });

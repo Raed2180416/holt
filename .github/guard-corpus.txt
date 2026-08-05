@@ -25,11 +25,11 @@
 # FOUR distinct Windows path bugs have been found in this project. This is where a fifth shows up.
 #
 # Every file below is proven to pass with NO optional backends installed (no ctags, no enry, no
-# jscpd, no jj), because the job that runs this corpus is the degraded-core job. A file that needs
-# a backend belongs in the full-suite job instead.
+# jscpd, no jj), because the job that runs this corpus is the degraded-core job. Language-aware
+# collision/symbol detection belongs in the full-suite and portable jobs, where ctags and enry are
+# installed; the destructive-authority corpus below must exercise the genuinely degraded core.
 
 test/unit/safety.test.mjs
-test/e2e/detection.test.mjs
 test/e2e/cli.test.mjs
 test/e2e/actions.test.mjs
 test/e2e/fuzz-invariant.test.mjs

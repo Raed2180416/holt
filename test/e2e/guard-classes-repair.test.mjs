@@ -370,10 +370,14 @@ test('[B] the existence filter did not blind the instrument: a flagged file ON D
   await fs.writeFile(path.join(root, 'app', 'config', 'other.json'), '{"ALSO":1}\n');
   await run('git', ['add', '-A'], root);
   await run('git', ['commit', '-q', '-m', 'base', '--no-verify'], root);
-  // Flag the bulk (and take it off disk, as a sparse cone would) AND two files that stay.
+  // Flag the bulk (and take it off disk, as a sparse cone would) AND two files that stay. Git
+  // 2.55 refreshes a skip-worktree bit when an excluded file is deliberately written back, so
+  // use Git's assume-unchanged flag for the on-disk credentials case. That is the same hidden
+  // status surface Holt must resolve (and the scanner intentionally handles both uppercase S
+  // and lowercase h tags); the bulk remains the real sparse-checkout skip-worktree case.
   const bulk = (await run('git', ['ls-files', '--', 'vendor'], root)).stdout.split('\n').filter(Boolean);
   await gitPathBatched(['update-index', '--skip-worktree', '--'], bulk, { cwd: root, allowMutation: true });
-  await run('git', ['update-index', '--skip-worktree', 'app/config/local.json', 'app/config/other.json'], root);
+  await run('git', ['update-index', '--assume-unchanged', 'app/config/local.json', 'app/config/other.json'], root);
   await fs.rm(path.join(root, 'vendor'), { recursive: true, force: true });
   // The canonical credentials edit: content held by no commit, hidden from `git status`.
   await fs.writeFile(path.join(root, 'app', 'config', 'local.json'), '{"UNIQUE_SYMBOL_SKIPPED":true}\n');

@@ -387,12 +387,25 @@ test('RELEASE EVAL SANDBOX: exact mount plan hides controller/grader and the no-
   assert.equal(plan.argv.includes('--die-with-parent'), true);
   assert.equal(plan.argv.includes('--unshare-pid'), true);
   assert.equal(plan.argv.includes('timeout'), false);
-  const executed = await new Promise((resolve, reject) => {
-    execFile('/usr/bin/bwrap', plan.argv, { cwd }, (error, stdout, stderr) => {
-      if (error) reject(new Error(`bubblewrap visibility probe failed: ${stderr || error.message}`));
-      else resolve(JSON.parse(stdout));
+  let executed;
+  try {
+    executed = await new Promise((resolve, reject) => {
+      execFile('/usr/bin/bwrap', plan.argv, { cwd }, (error, stdout, stderr) => {
+        if (error) reject(new Error(`bubblewrap visibility probe failed: ${stderr || error.message}`));
+        else resolve(JSON.parse(stdout));
+      });
     });
-  });
+  } catch (error) {
+    // GitHub-hosted Linux runners ship bubblewrap but disable unprivileged user/mount namespaces.
+    // The product's mount plan is still checked above; without the kernel capability there is no
+    // truthful runtime visibility result to assert. Keep this explicit capability skip rather than
+    // treating a runner policy as an application failure (or weakening the mount assertions).
+    if (/uid map|permission denied|operation not permitted/i.test(String(error?.message ?? error))) {
+      t.skip(`bubblewrap namespace capability unavailable: ${error?.message ?? error}`);
+      return;
+    }
+    throw error;
+  }
   assert.deepEqual(executed, { secret: false, grader: false, fixture: true });
 });
 
