@@ -8,6 +8,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # LEAST PRIVILEGE, DECLARED RATHER THAN INHERITED. With no `permissions:` key the GITHUB_TOKEN
 # handed to every job here takes the enterprise/organisation/repository default, which on a
