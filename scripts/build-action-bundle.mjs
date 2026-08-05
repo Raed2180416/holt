@@ -58,7 +58,16 @@ async function thirdPartyNotices(inputs) {
       throw new Error(`bundled dependency ${identity} has no distributable licence/notice file`);
     }
     const texts = [];
-    for (const name of names) texts.push(`${name}\n\n${(await fs.readFile(path.join(directory, name), 'utf8')).trim()}`);
+    // npm packages may carry licence files with CRLF while Git checks the generated notice out
+    // as LF. Keep the committed generated artifact byte-stable across both environments instead
+    // of making a clean `npm ci` report a stale notice that only a local line ending happened to
+    // satisfy.
+    for (const name of names) {
+      const text = (await fs.readFile(path.join(directory, name), 'utf8'))
+        .replace(/\r\n/g, '\n')
+        .trim();
+      texts.push(`${name}\n\n${text}`);
+    }
     sections.push(`${'='.repeat(80)}\n${identity} — declared licence: ${manifest.license ?? 'see text'}\n${'='.repeat(80)}\n\n${texts.join('\n\n')}`);
   }
   return `Holt GitHub Action — third-party notices\n\n`

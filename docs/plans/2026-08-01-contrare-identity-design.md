@@ -345,8 +345,8 @@ All sites: `thisisraed@outlook.com`
 1. **Rebrand as Contrare Research project:**
    - Nav or hero subhead: "A Contrare Research project"
    - Footer: "Contrare Research · Holt"
-   - Remove `™` (we're not trademarking yet)
-2. **Remove ™ symbol:** The `™` is removed from the footer and README. Holt is not trademarked yet.
+   - Remove the trademark marker (we're not trademarking yet)
+2. **Remove trademark marker:** The marker is removed from the footer and README. Holt is not trademarked yet.
    - Holt protects the worktrees that build Holt
    - The development workflow story
 3. **Apply shared tokens:** Switch from system fonts to Space Grotesk + Inter + JetBrains Mono (self-hosted — see font self-hosting section below)
@@ -453,7 +453,7 @@ Holt's self-contained constraint means no external CDN. The three shared fonts a
 ### Holt site (`site/index.html`)
 - 🌳 tree emoji logo → lever + lock glyph
 - System fonts → Space Grotesk + Inter + JetBrains Mono (self-hosted)
-- "© 2026 Contrare · holt™" → "Contrare Research · Holt"
+- "Contrare · Holt" → "Contrare Research · Holt"
 - No dogfooding section → "Used extensively in its own development" section
 - No "Contrare Research project" framing → explicit framing in nav/hero
 - Contact (if any) → `thisisraed@outlook.com`

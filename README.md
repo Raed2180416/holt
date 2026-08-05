@@ -659,7 +659,5 @@ Holt has an explicit two-part licence boundary:
   [commercial licence](src/team/LICENSE). They require the corresponding paid entitlement for work use, may
   not be redistributed and do not carry the FSL future-MIT grant.
 
-**holt™** is part of **Contrare Research**. For product and research queries, email
+**Holt** is part of **Contrare Research**. For product and research queries, email
 [research.contrare@outlook.com](mailto:research.contrare@outlook.com).
-
-© 2026 Contrare
