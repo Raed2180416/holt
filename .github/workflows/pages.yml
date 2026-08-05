@@ -41,7 +41,13 @@ jobs:
           [ "$fail" = 0 ] && echo "self-contained: no external assets in any site/*.html"
           exit $fail
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5.0.0
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+      # The upstream composite currently calls upload-artifact by tag. This repository requires
+      # every action, including nested composite actions, to be pinned to a full commit, so the
+      # checked-in wrapper keeps the Pages artifact path under the same supply-chain rule.
+      - uses: ./.github/actions/upload-pages-artifact
+        with:
+          name: github-pages
+          path: site
         with:
           path: site
       - id: deploy
