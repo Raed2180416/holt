@@ -77,7 +77,7 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       // runner's absolute path after sudo creates the private mount namespace. Bind that inode
       // to a stable path before starting Node; otherwise Node resolves a relative test path
       // against a cwd whose absolute name is not addressable in the root mount namespace.
-      'mount --make-rprivate / && mount --bind "$1" /etc && workspace="$2" && mount --bind . "$workspace" && shift 2 && exec "$1" "$2" "$3" "$workspace/$4"',
+      'mount --make-rprivate / && mount --bind "$1" /etc && workspace="$2" && mount --bind /proc/self/cwd "$workspace" && shift 2 && exec "$1" "$2" "$3" "$workspace/$4"',
       'holt-system-policy-namespace',
       privateEtc,
       workspaceMount,
