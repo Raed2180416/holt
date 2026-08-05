@@ -200,7 +200,7 @@ jobs:
         # is capability-aware (it asks `ctags --list-languages` and reports what this build cannot
         # parse), so the older apt package produces an honest, passing run rather than a false one.
         run: |
-          sudo apt-get update && sudo apt-get install -y universal-ctags
+          sudo apt-get update && sudo apt-get install -y universal-ctags bubblewrap
           ctags --version | head -1
 
       - name: install enry (content-based language detection)
@@ -210,7 +210,13 @@ jobs:
 
       - name: install jj (Jujutsu backend)
         run: |
-          cargo install --locked jj-cli --version 0.43.0 --root "$HOME/.local" || echo "jj unavailable; its suite will skip and say so"
+          # The hosted image includes rustup but deliberately has no default toolchain. A
+          # feature-proof run that silently omits jj is not a complete backend run, so install
+          # the small stable toolchain explicitly and fail rather than publishing a green
+          # denominator with the Jujutsu surface absent.
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          cargo install --locked jj-cli --version 0.43.0 --root "$HOME/.local"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: install opencode (one of the 30 integration targets holt wires)

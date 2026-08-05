@@ -62,28 +62,44 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
     delete env.NODE_TEST_CONTEXT;
     delete env.NODE_TEST_PIPE;
     const source = fileURLToPath(testFileUrl);
-    const result = await execute('unshare', [
-      '-Urm',
+    const namespaceArgs = [
       'sh',
       '-c',
-      'mount --bind "$1" /etc && shift && exec "$@"',
+      // Make the private mount tree non-propagating before replacing /etc. The ordinary
+      // user+mount namespace path already has an isolated root; the sudo fallback below needs
+      // this explicit boundary because a root mount namespace may otherwise inherit shared
+      // propagation from the runner.
+      'mount --make-rprivate / && mount --bind "$1" /etc && shift && exec "$@"',
       'holt-system-policy-namespace',
       privateEtc,
       process.execPath,
       '--test',
       '--test-concurrency=1',
       source,
-    ], {
+    ];
+    const runNamespace = (command, args) => execute(command, args, {
       cwd: process.cwd(),
       env,
       timeout: 120_000,
       maxBuffer: 8 * 1024 * 1024,
     });
+    let result = await runNamespace('unshare', ['-Urm', ...namespaceArgs]);
+    // GitHub-hosted Linux runners currently reject unprivileged user namespaces even though
+    // passwordless sudo is available. A root-owned mount namespace provides the same test
+    // isolation without weakening the production fixed-/etc contract; it is attempted only
+    // after the user-namespace path fails for a capability reason.
+    const namespaceUnavailable = (output) => /(?:uid_map|user namespaces?|mount namespaces?|operation not permitted|permission denied|ENOENT)/iu.test(output);
+    if (result.code !== 0 && namespaceUnavailable(`${result.stdout}\n${result.stderr}`)) {
+      const privileged = await runNamespace('sudo', ['-n', 'unshare', '-m', ...namespaceArgs]);
+      if (privileged.code === 0 || !namespaceUnavailable(`${privileged.stdout}\n${privileged.stderr}`)) {
+        result = privileged;
+      }
+    }
     // GitHub-hosted runners and some hardened developer machines disable unprivileged user or
     // mount namespaces. That is a host capability, not a managed-policy product failure. Keep
     // the test authoritative where the real namespace exists, and record an explicit skip when
     // the kernel refuses the namespace before the inner suite can execute.
-    if (result.code !== 0 && /(?:uid_map|user namespaces?|mount namespaces?|operation not permitted|permission denied|ENOENT)/iu.test(result.stderr)) {
+    if (result.code !== 0 && namespaceUnavailable(`${result.stdout}\n${result.stderr}`)) {
       return t.skip(`Linux user/mount namespaces unavailable on this runner: ${result.stderr.trim()}`);
     }
     assert.equal(
