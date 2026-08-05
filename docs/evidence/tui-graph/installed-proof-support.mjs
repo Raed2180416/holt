@@ -220,7 +220,12 @@ export async function verifyFreezeEvidence({ runtime, holtBin, freezeEvidence, a
 
 export function isolatedEnv(home, runtime, holtBin, additions = {}) {
   return {
-    PATH: [path.join(runtime, 'node_modules', '.bin'), path.dirname(holtBin), '/usr/bin', '/bin']
+    // Synthetic proof executables intentionally use `#!/usr/bin/env node`, so the isolated
+    // environment must carry the exact Node runtime that launched the harness. CI's setup-node
+    // path is not necessarily /usr/bin, and omitting it turns a valid proof into exit 127 before
+    // Holt is ever exercised.
+    PATH: [path.join(runtime, 'node_modules', '.bin'), path.dirname(holtBin),
+      path.dirname(process.execPath), '/usr/bin', '/bin']
       .filter((entry, index, rows) => rows.indexOf(entry) === index).join(path.delimiter),
     HOME: home,
     XDG_CONFIG_HOME: path.join(home, '.config'),

@@ -1148,8 +1148,12 @@ test('DOCTOR: a worktree created after integrate is reported as unwired, not sil
 
   await holt(['integrate', '--cwd', fx.root], fx.root);
   const wired = JSON.parse((await holt(['doctor', '--json', '--cwd', fx.root], fx.root)).stdout);
-  assert.deepEqual(wired.unwiredWorktrees, [],
-    `after integrate nothing is unwired: ${JSON.stringify(wired.unwiredWorktrees)}`);
+  // The runner may have no known agent host. In that case AGENTS.md is useful advice but cannot
+  // honestly be called a loaded/guarding host integration, so the primary can remain in the
+  // compatibility `unwiredWorktrees` list. Preserve that baseline and assert the important
+  // property: a worktree created later is added to the list, then integrate restores the same
+  // baseline rather than fabricating an all-clear.
+  const baselineUnwired = [...wired.unwiredWorktrees].sort();
 
   // The worktree an agent gets dispatched into ten minutes later.
   await fx.worktree('late');
@@ -1165,7 +1169,8 @@ test('DOCTOR: a worktree created after integrate is reported as unwired, not sil
   // ...and running integrate again closes it, which is what the message promises.
   await holt(['integrate', '--cwd', fx.root], fx.root);
   const fixed = JSON.parse((await holt(['doctor', '--json', '--cwd', fx.root], fx.root)).stdout);
-  assert.deepEqual(fixed.unwiredWorktrees, [], 'the prescribed fix must actually work');
+  assert.deepEqual([...fixed.unwiredWorktrees].sort(), baselineUnwired,
+    'the prescribed fix must restore the same honest baseline');
 });
 
 test('CLI: a numeric flag is parsed and never silently coerced', async (t) => {

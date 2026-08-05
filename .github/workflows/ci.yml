@@ -35,6 +35,23 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: '22.23.2', package-manager-cache: false }
+      - name: isolate fixture Git configuration (no runner-global filters)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          : > "$RUNNER_TEMP/holt-empty-gitconfig"
+          {
+            echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/holt-empty-gitconfig"
+            echo "GIT_CONFIG_SYSTEM=$RUNNER_TEMP/holt-empty-gitconfig"
+          } >> "$GITHUB_ENV"
+      - name: isolate fixture Git configuration (no runner-global filters)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'holt-empty-gitconfig'
+          New-Item -ItemType File -Force -Path $config | Out-Null
+          "GIT_CONFIG_GLOBAL=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "GIT_CONFIG_SYSTEM=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: assert the required Git runtime and inert hooks boundary
         run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - run: npm ci
@@ -151,6 +168,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with: { node-version: '22.23.2', package-manager-cache: false }
+      - name: isolate fixture Git configuration
+        shell: bash
+        run: |
+          : > "$RUNNER_TEMP/holt-empty-gitconfig"
+          echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/holt-empty-gitconfig" >> "$GITHUB_ENV"
+          echo "GIT_CONFIG_SYSTEM=$RUNNER_TEMP/holt-empty-gitconfig" >> "$GITHUB_ENV"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with: { go-version: '1.26.5' }
 
@@ -304,12 +327,30 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      - name: isolate fixture Git configuration (no runner-global filters)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          : > "$RUNNER_TEMP/holt-empty-gitconfig"
+          {
+            echo "GIT_CONFIG_GLOBAL=$RUNNER_TEMP/holt-empty-gitconfig"
+            echo "GIT_CONFIG_SYSTEM=$RUNNER_TEMP/holt-empty-gitconfig"
+          } >> "$GITHUB_ENV"
+      - name: isolate fixture Git configuration (no runner-global filters)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $config = Join-Path $env:RUNNER_TEMP 'holt-empty-gitconfig'
+          New-Item -ItemType File -Force -Path $config | Out-Null
+          "GIT_CONFIG_GLOBAL=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "GIT_CONFIG_SYSTEM=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: assert the required Git runtime and inert hooks boundary
         run: node scripts/check-git-runtime.mjs --verify-inert-hooks
 
-      - name: install universal-ctags (linux)
+      - name: install universal-ctags and Linux proof utilities (linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y universal-ctags
+        run: sudo apt-get update && sudo apt-get install -y universal-ctags bubblewrap inotify-tools
       - name: install universal-ctags (macos)
         if: runner.os == 'macOS'
         run: brew install universal-ctags

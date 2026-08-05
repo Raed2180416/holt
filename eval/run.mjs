@@ -3518,6 +3518,24 @@ async function reserveEvidenceNamespace(out = OUT) {
 }
 
 async function main() {
+  if (!Number.isSafeInteger(TRIALS) || TRIALS < 0) {
+    throw new Error('--trials must be a non-negative integer');
+  }
+  // A zero-trial validity probe is deliberately a no-op. It must report that nothing was
+  // measured before resolving an optional provider executable; otherwise a missing `crush` (or a
+  // disconnected backend) masks the actual protocol result and makes this guard host-dependent.
+  // The preregistered Codex release cell is the exception: its static pre-spend contract must
+  // still reject malformed zero-trial invocations before any provider process is reachable.
+  if (TRIALS === 0) {
+    const reasons = preregisteredCodexPreSpendReasons();
+    if (reasons.length) {
+      throw new Error(
+        `Codex release cell refused before any agent/provider process:\n  - ${reasons.join('\n  - ')}`,
+      );
+    }
+    console.log('NO TRIALS RAN — nothing is measured and nothing is claimed.');
+    return;
+  }
   const spec = AGENTS[AGENT];
   if (!spec) throw new Error(`unknown agent '${AGENT}' (have: ${Object.keys(AGENTS).join(', ')})`);
   const namespaceReservation = await reserveEvidenceNamespace();

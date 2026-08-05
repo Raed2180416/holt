@@ -106,7 +106,10 @@ async function networkFindings(dir) {
   for (const file of await sourceFiles(dir)) {
     const raw = await fs.readFile(file, 'utf8');
     const code = codeOnly(raw);
-    const rel = path.relative(ROOT, file);
+    // Findings are evidence consumed by CI and humans, not native display strings. Keep the
+    // canonical POSIX spelling on Windows too; otherwise the same allowed TUF adapter becomes
+    // `src\\team\\managed-policy-tuf.mjs` and the cross-platform gate reports a false finding.
+    const rel = path.relative(ROOT, file).split(path.sep).join('/');
 
     for (const mod of importedModules(raw)) {
       if (NETWORK_MODULES.includes(mod)) findings.push(`${rel}: imports ${mod}`);
