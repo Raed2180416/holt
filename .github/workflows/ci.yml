@@ -52,14 +52,14 @@ jobs:
         shell: pwsh
         run: |
           $config = Join-Path $env:RUNNER_TEMP 'holt-empty-gitconfig'
-          $home = Join-Path $env:RUNNER_TEMP 'holt-empty-home'
-          $xdg = Join-Path $env:RUNNER_TEMP 'holt-empty-xdg'
-          New-Item -ItemType Directory -Force -Path $home, $xdg | Out-Null
+          $holtHome = Join-Path $env:RUNNER_TEMP 'holt-empty-home'
+          $holtXdg = Join-Path $env:RUNNER_TEMP 'holt-empty-xdg'
+          New-Item -ItemType Directory -Force -Path $holtHome, $holtXdg | Out-Null
           New-Item -ItemType File -Force -Path $config | Out-Null
           "GIT_CONFIG_GLOBAL=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "GIT_CONFIG_SYSTEM=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "XDG_CONFIG_HOME=$xdg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HOME=$holtHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "XDG_CONFIG_HOME=$holtXdg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: assert the required Git runtime and inert hooks boundary
         run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - run: npm ci
@@ -357,14 +357,14 @@ jobs:
         shell: pwsh
         run: |
           $config = Join-Path $env:RUNNER_TEMP 'holt-empty-gitconfig'
-          $home = Join-Path $env:RUNNER_TEMP 'holt-empty-home'
-          $xdg = Join-Path $env:RUNNER_TEMP 'holt-empty-xdg'
-          New-Item -ItemType Directory -Force -Path $home, $xdg | Out-Null
+          $holtHome = Join-Path $env:RUNNER_TEMP 'holt-empty-home'
+          $holtXdg = Join-Path $env:RUNNER_TEMP 'holt-empty-xdg'
+          New-Item -ItemType Directory -Force -Path $holtHome, $holtXdg | Out-Null
           New-Item -ItemType File -Force -Path $config | Out-Null
           "GIT_CONFIG_GLOBAL=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "GIT_CONFIG_SYSTEM=$config" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "XDG_CONFIG_HOME=$xdg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "HOME=$holtHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "XDG_CONFIG_HOME=$holtXdg" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: assert the required Git runtime and inert hooks boundary
         run: node scripts/check-git-runtime.mjs --verify-inert-hooks
