@@ -49,7 +49,9 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
   test(label, { skip: process.platform !== 'linux' && 'Linux user/mount namespaces are required' }, async (t) => {
     const fixture = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-system-policy-namespace-'));
     const privateEtc = path.join(fixture, 'etc');
+    const workspaceMount = path.join(fixture, 'workspace');
     await fs.mkdir(privateEtc, { mode: 0o700 });
+    await fs.mkdir(workspaceMount, { mode: 0o700 });
     t.after(async () => {
       await makeWritable(fixture).catch(() => {});
       await fs.rm(fixture, { recursive: true, force: true });
@@ -72,10 +74,13 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       // propagation from the runner.
       // Keep the inherited working-directory inode. Some hosted runners expose the checkout
       // through a mount that is reachable by the child only as its inherited cwd, not by the
-      // runner's absolute path after sudo creates the private mount namespace.
-      'mount --make-rprivate / && mount --bind "$1" /etc && shift && exec "$@"',
+      // runner's absolute path after sudo creates the private mount namespace. Bind that inode
+      // to a stable path before starting Node; otherwise Node resolves a relative test path
+      // against a cwd whose absolute name is not addressable in the root mount namespace.
+      'mount --make-rprivate / && mount --bind "$1" /etc && workspace="$2" && mount --bind . "$workspace" && shift 2 && exec "$1" "$2" "$3" "$workspace/$4"',
       'holt-system-policy-namespace',
       privateEtc,
+      workspaceMount,
       process.execPath,
       '--test',
       '--test-concurrency=1',
