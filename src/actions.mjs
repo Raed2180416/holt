@@ -29,7 +29,8 @@ import {
   disambiguate,
 } from './discover.mjs';
 import {
-  underOrEqualAsync, relativeWithinAsync, relativeLinkAwareAsync, canonicalPath, samePathSync,
+  underOrEqualAsync, relativeWithinAsync, relativeLinkAwareAsync, canonicalPath, samePathAsync,
+  samePathSync,
 } from './paths.mjs';
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
@@ -2499,9 +2500,15 @@ export async function restoreQuarantine(cwd, target, opts = {}) {
   const rows = cleanRecoveryRows(disc.workstreams, 'quarantined');
   const idMatch = new Map(rows.map((row) => [row.id, row])).get(target) ?? null;
   const resolvedTarget = path.isAbsolute(target) ? await canonicalPath(target) : null;
-  const pathMatches = rows.filter((row) => resolvedTarget
-    && (samePathSync(row.quarantinePath, resolvedTarget)
-      || (row.originalPath && samePathSync(row.originalPath, resolvedTarget))));
+  const pathMatches = [];
+  if (resolvedTarget) {
+    for (const row of rows) {
+      if (await samePathAsync(row.quarantinePath, resolvedTarget)
+          || (row.originalPath && await samePathAsync(row.originalPath, resolvedTarget))) {
+        pathMatches.push(row);
+      }
+    }
+  }
   const matches = idMatch
     ? [idMatch, ...pathMatches.filter((row) => row !== idMatch)]
     : pathMatches;
@@ -2527,12 +2534,14 @@ export async function restoreQuarantine(cwd, target, opts = {}) {
   if (!path.isAbsolute(marker.originalPath ?? '') || !path.isAbsolute(marker.actualPath ?? '')) {
     return { ok: false, failedCount: 1, id: row.id, error: 'quarantine marker paths are not absolute', note: 'nothing was moved or unlocked' };
   }
-  const [actualPath, originalPath] = await Promise.all([
+  const [actualPath, originalPath, rowQuarantinePath, rowOriginalPath] = await Promise.all([
     canonicalPath(marker.actualPath),
     canonicalPath(marker.originalPath),
+    canonicalPath(row.quarantinePath),
+    canonicalPath(row.originalPath),
   ]);
-  if (!samePathSync(actualPath, row.quarantinePath)
-      || !samePathSync(originalPath, row.originalPath)
+  if (!samePathSync(actualPath, rowQuarantinePath)
+      || !samePathSync(originalPath, rowOriginalPath)
       || marker.token !== row._token) {
     return { ok: false, failedCount: 1, id: row.id, error: 'quarantine marker changed after discovery', note: 'nothing was moved or unlocked' };
   }
@@ -2753,9 +2762,15 @@ export async function purgeQuarantine(cwd, target, {
   const rows = cleanRecoveryRows(disc.workstreams, 'quarantined');
   const idMatch = new Map(rows.map((row) => [row.id, row])).get(target) ?? null;
   const resolvedTarget = path.isAbsolute(target) ? await canonicalPath(target) : null;
-  const pathMatches = rows.filter((row) => resolvedTarget
-    && (samePathSync(row.quarantinePath, resolvedTarget)
-      || (row.originalPath && samePathSync(row.originalPath, resolvedTarget))));
+  const pathMatches = [];
+  if (resolvedTarget) {
+    for (const row of rows) {
+      if (await samePathAsync(row.quarantinePath, resolvedTarget)
+          || (row.originalPath && await samePathAsync(row.originalPath, resolvedTarget))) {
+        pathMatches.push(row);
+      }
+    }
+  }
   const matches = idMatch
     ? [idMatch, ...pathMatches.filter((row) => row !== idMatch)]
     : pathMatches;
@@ -2785,11 +2800,12 @@ export async function purgeQuarantine(cwd, target, {
   if (!path.isAbsolute(marker.originalPath ?? '') || !path.isAbsolute(marker.actualPath ?? '')) {
     return { ok: false, dryRun: !apply, failedCount: 1, id: row.id, error: 'quarantine marker paths are not absolute', note: 'nothing was unlocked or removed' };
   }
-  const [actualPath, originalPath] = await Promise.all([
+  const [actualPath, originalPath, rowQuarantinePath, rowOriginalPath] = await Promise.all([
     canonicalPath(marker.actualPath), canonicalPath(marker.originalPath),
+    canonicalPath(row.quarantinePath), canonicalPath(row.originalPath),
   ]);
-  if (!samePathSync(actualPath, row.quarantinePath)
-      || !samePathSync(originalPath, row.originalPath)
+  if (!samePathSync(actualPath, rowQuarantinePath)
+      || !samePathSync(originalPath, rowOriginalPath)
       || marker.token !== row._token) {
     return { ok: false, dryRun: !apply, failedCount: 1, id: row.id, error: 'quarantine marker changed after discovery', note: 'nothing was unlocked or removed' };
   }

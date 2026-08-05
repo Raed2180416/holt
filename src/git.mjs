@@ -434,6 +434,18 @@ function commandMayConvert(argv) {
   if (sub === 'status' || sub === 'add' || sub === 'diff') return true;
   if (sub === 'diff-index') return !rest.includes('--cached');
   if (sub === 'hash-object') return !rest.includes('--no-filters');
+  // Git 2.54 can enter the repository conversion path while serving a batch object read from
+  // a worktree with an attributed path. `cat-file` normally returns stored bytes and has no
+  // conversion flag, but the execution boundary is about the repository it runs in, not only
+  // today's documented happy path. Apply the same generated no-op filter overrides here so an
+  // object read can never start a configured clean/smudge/process program on a version-specific
+  // internal refresh.
+  if (sub === 'cat-file') return true;
+  // Git 2.54 may refresh a scratch index while materialising its tree and invoke a clean/process
+  // driver from the worktree's attributes. Holt uses `write-tree` only with an isolated index, so
+  // suppressing external filters preserves the exact indexed bytes while keeping the read of the
+  // user's working tree outside the filter's execution authority.
+  if (sub === 'write-tree') return true;
   // Git 2.54 can refresh index metadata while answering `ls-files -v`; that refresh may consult
   // a repository clean/process driver even though the command only prints index flags. Keep the
   // same explicit no-op overrides on every ls-files form Holt uses so the flag probe cannot start
@@ -1079,9 +1091,10 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
   const argv = useNul ? ['cat-file', '--batch', '-z'] : ['cat-file', '--batch'];
   const label = `git ${argv.join(' ')}`;
 
-  const childEnv = buildGitEnv();
+  const commandContext = await buildGitCommandContext(argv, cwd, undefined, timeout);
+  const childEnv = commandContext.env;
   await requireNoLazyFetch(childEnv);
-  const childArgv = hardenGitArgv(argv);
+  const childArgv = withCommandConfig(hardenGitArgv(argv), commandContext.configArgs);
 
   return new Promise((resolve, reject) => {
     const verdict = classify(argv);

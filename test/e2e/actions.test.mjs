@@ -48,6 +48,18 @@ function sh(cmd, args, cwd) {
 
 const inspect = async (root) => analyze(await scan(await discover(root), {}), {});
 
+const findWorktreeByPath = async (workstreams, target) => {
+  for (const workstream of workstreams) {
+    if (await samePathAsync(workstream.path, target)) return workstream;
+  }
+  return undefined;
+};
+
+const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const gitPorcelainPath = (value) => process.platform === 'win32'
+  ? String(value).replaceAll('\\', '/')
+  : String(value);
+
 /* ============================================== the mutation boundary ==== */
 
 test('BOUNDARY: mutating commands are UNREACHABLE without an explicit opt-in', () => {
@@ -530,7 +542,7 @@ test('CLEAN POST-VERIFY RACE: ignored bytes arriving after the final verdict mov
     await assert.rejects(() => fs.stat(wt), 'the old active path is vacated, not recursively erased');
 
     const discovered = await discover(fx.root);
-    const quarantined = discovered.workstreams.find((w) => w.path === q);
+    const quarantined = await findWorktreeByPath(discovered.workstreams, q);
     assert.equal(quarantined?.quarantined, true,
       `the stable private-admin marker must identify the moved recovery copy: ${JSON.stringify(quarantined)}`);
 
@@ -543,7 +555,7 @@ test('CLEAN POST-VERIFY RACE: ignored bytes arriving after the final verdict mov
     const protectedAgain = await protect(fx.root);
     assert.equal(protectedAgain.released, 0, JSON.stringify(protectedAgain));
     const listed = await fx.git(['worktree', 'list', '--porcelain']);
-    assert.match(listed, new RegExp(`worktree ${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*locked`),
+    assert.match(listed, new RegExp(`worktree ${escapeRegex(gitPorcelainPath(q))}[\\s\\S]*locked`),
       'the quarantine must remain registered and locked');
   });
 
@@ -588,7 +600,7 @@ test('CLEAN LOCK CONTINUITY: an existing Holt risk lock survives the move withou
     assert.equal(c.quarantined, 1, JSON.stringify(c));
     const q = c.quarantines[0].quarantinePath;
     const listed = await fx.git(['worktree', 'list', '--porcelain']);
-    assert.match(listed, new RegExp(`worktree ${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*locked ${reason}`),
+    assert.match(listed, new RegExp(`worktree ${escapeRegex(gitPorcelainPath(q))}[\\s\\S]*locked ${escapeRegex(reason)}`),
       'Git must carry the existing lock file/reason through worktree move -f -f unchanged');
   });
 
@@ -773,7 +785,7 @@ test('CLEAN PURGE: preview is inert; apply anchors exact HEAD and reclaims a cle
     assert.match(applied.recoveryRef, /^refs\/holt\/purge\//);
     await assert.rejects(() => fs.stat(q), 'purge must physically reclaim the checkout directory');
     const listed = await fx.git(['worktree', 'list', '--porcelain']);
-    assert.doesNotMatch(listed, new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    assert.doesNotMatch(listed, new RegExp(escapeRegex(gitPorcelainPath(q))),
       'the removed checkout must not remain registered');
     assert.equal((await fx.git(['rev-parse', `${applied.recoveryRef}^{commit}`])).trim(), head,
       'the exact pre-purge HEAD must remain reachable from the returned recovery ref');
