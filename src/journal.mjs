@@ -318,13 +318,19 @@ export async function withLock(lockPath, fn, { timeoutMs = 5_000, staleMs = 30_0
       // is still held open by another process (the common case here — the holder has not closed its
       // handle yet), the CreateFile sharing violation is mapped by libuv to EPERM (and occasionally
       // EACCES), NOT EEXIST. Treating that as a hard error made one of twelve concurrent appends
-      // fail on Windows-only CI, producing an 11-entry chain where twelve were expected. So: when
-      // we get EPERM/EACCES, treat it as contention ONLY if the file actually exists — a genuine
-      // permission problem on a path that cannot be created still throws.
+      // fail on Windows-only CI, producing an 11-entry chain where twelve were expected. A second
+      // Windows race is possible while the holder is closing: the file can disappear between the
+      // failed open and our stat, so a missing file after EPERM/EACCES is still a transient lock
+      // transition, not proof that the caller lacks permission. Retry within the existing deadline;
+      // a genuine permission failure is surfaced unchanged once that deadline expires.
       if (e.code !== 'EEXIST') {
         if (e.code === 'EPERM' || e.code === 'EACCES') {
           const exists = await fs.stat(lockPath).then(() => true, () => false);
-          if (!exists) throw e;
+          if (!exists) {
+            if (Date.now() > deadline) throw e;
+            await sleep(5 + Math.floor(Math.random() * 25));
+            continue;
+          }
         } else {
           throw e;
         }
