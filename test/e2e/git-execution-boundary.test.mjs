@@ -149,7 +149,11 @@ test('GIT BOUNDARY: environment is deny-by-default and argv hardening is explici
         assert.equal(env[key], undefined, `${key} program fallback crossed the boundary`);
         continue;
       }
-      assert.equal(env[key], undefined, `${key} ambient Git control crossed the boundary`);
+      if (key === 'GIT_CONFIG_NOSYSTEM') {
+        assert.equal(env[key], '1', 'system Git configuration must be disabled explicitly');
+      } else {
+        assert.equal(env[key], undefined, `${key} ambient Git control crossed the boundary`);
+      }
     }
     assert.equal(env.GIT_INDEX_FILE, '/intentional/index');
     assert.equal(env.GIT_WORK_TREE, '/intentional/tree');

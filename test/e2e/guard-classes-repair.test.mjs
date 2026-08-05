@@ -358,7 +358,7 @@ test('[B] a sparse checkout is classifiable and cheap — no E2BIG, no per-call 
   await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
-test('[B] the existence filter did not blind the instrument: a flagged file ON DISK is still found', async () => {
+test('[B] the existence filter did not blind the instrument: a flagged file ON DISK is still found', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-flag-'));
   await run('git', ['init', '-q', '-b', 'main', '.'], root);
   await run('git', ['config', 'user.email', 't@t'], root);
@@ -375,6 +375,14 @@ test('[B] the existence filter did not blind the instrument: a flagged file ON D
   // use Git's assume-unchanged flag for the on-disk credentials case. That is the same hidden
   // status surface Holt must resolve (and the scanner intentionally handles both uppercase S
   // and lowercase h tags); the bulk remains the real sparse-checkout skip-worktree case.
+  // Use Git's own sparse-checkout writer for the absent bulk. Merely planting S bits leaves the
+  // index flag visible to `status` on newer Git; the real sparse pattern is the ground truth.
+  const sparse = await run('git', ['sparse-checkout', 'set', '--no-cone', '/*', '!/vendor/'], root);
+  if (sparse.code !== 0) {
+    await fs.rm(root, { recursive: true, force: true });
+    t.skip(`this git cannot materialize a non-cone sparse checkout: ${sparse.stderr}`);
+    return;
+  }
   const bulk = (await run('git', ['ls-files', '--', 'vendor'], root)).stdout.split('\n').filter(Boolean);
   await gitPathBatched(['update-index', '--skip-worktree', '--'], bulk, { cwd: root, allowMutation: true });
   await run('git', ['update-index', '--assume-unchanged', 'app/config/local.json', 'app/config/other.json'], root);

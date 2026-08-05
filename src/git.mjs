@@ -286,6 +286,11 @@ const FORCED_GIT_ENV = Object.freeze({
   GIT_TERMINAL_PROMPT: '0',
   GIT_OPTIONAL_LOCKS: '0',
   GIT_PAGER: 'cat',
+  // System Git configuration is administrator-controlled process input. It may install an
+  // external checkout filter (Git LFS is present on hosted runners) even when HOME is isolated;
+  // Holt's repository-level filter inventory cannot prove bytes before that system layer is read.
+  // Keep the user's repository config visible, but make the system layer explicit and inert.
+  GIT_CONFIG_NOSYSTEM: '1',
   // Git 2.45 documents this as equivalent to --no-lazy-fetch. The capability probe below proves
   // the selected executable supports that contract before any repository command is spawned.
   GIT_NO_LAZY_FETCH: '1',
