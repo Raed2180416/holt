@@ -298,7 +298,8 @@ test('MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over 
   const restoredPayload = JSON.parse(restored.result.content[0].text);
   assert.equal(restoredPayload.ok, true, restored.result.content[0].text);
   assert.equal(restoredPayload.restored, true);
-  assert.equal(restoredPayload.originalPath, recoverable.originalPath);
+  assert.ok(await samePathAsync(restoredPayload.originalPath, recoverable.originalPath),
+    'restore must identify the same original path across Git/Node separator spellings');
 
   // The valuable workstream must have survived the applied clean.
   const check = await client.send('tools/call', {

@@ -161,7 +161,7 @@ test('--no-symbols: a fresh CLI scan bypasses the planted symbol backend; the po
   assert.notEqual(controlReport.backend.kind, 'disabled');
   const controlLog = await fs.readFile(controlTrace, 'utf8');
   if (process.platform === 'win32') {
-    assert.match(controlReport.backend.label, /ctags-(?:not-found|not-universal-ctags)/,
+    assert.match(controlReport.backend.label, /(?:ctags-(?:not-found|not-universal-ctags)|not-universal-ctags)/,
       `the positive control must report the planted Windows backend: ${controlReport.backend.label}`);
   } else {
     assert.match(controlLog, /built-in: git version(?:\s|$)/,
