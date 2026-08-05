@@ -62,6 +62,8 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
     delete env.NODE_TEST_CONTEXT;
     delete env.NODE_TEST_PIPE;
     const source = fileURLToPath(testFileUrl);
+    const runnerRoot = process.cwd();
+    const relativeSource = path.relative(runnerRoot, source).split(path.sep).join('/');
     const namespaceArgs = [
       'sh',
       '-c',
@@ -69,13 +71,14 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
       // user+mount namespace path already has an isolated root; the sudo fallback below needs
       // this explicit boundary because a root mount namespace may otherwise inherit shared
       // propagation from the runner.
-      'mount --make-rprivate / && mount --bind "$1" /etc && shift && exec "$@"',
+      'mount --make-rprivate / && mount --bind "$1" /etc && cd "$2" && shift 2 && exec "$@"',
       'holt-system-policy-namespace',
       privateEtc,
+      runnerRoot,
       process.execPath,
       '--test',
       '--test-concurrency=1',
-      source,
+      relativeSource,
     ];
     const runNamespace = (command, args) => execute(command, args, {
       cwd: process.cwd(),
