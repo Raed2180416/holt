@@ -266,11 +266,18 @@ async function git(args, cwd, env, { allowFailure = false, stdin = null } = {}) 
 }
 
 function isolatedEnv(home, runtime, holtBin) {
-  const pathEntries = [
-    path.join(runtime, 'node_modules', '.bin'),
-    path.dirname(holtBin),
-    '/usr/local/bin', '/usr/bin', '/bin',
-  ];
+  const hostPath = String(process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  const pathEntries = process.platform === 'win32'
+    ? [
+      path.join(runtime, 'node_modules', '.bin'),
+      path.dirname(holtBin),
+      ...hostPath,
+    ]
+    : [
+      path.join(runtime, 'node_modules', '.bin'),
+      path.dirname(holtBin),
+      '/usr/local/bin', '/usr/bin', '/bin',
+    ];
   const env = {
     PATH: [...new Set(pathEntries)].join(path.delimiter),
     HOME: home,

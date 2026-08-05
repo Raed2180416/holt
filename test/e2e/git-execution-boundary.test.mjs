@@ -218,7 +218,10 @@ test('GIT BOUNDARY: a lying fsmonitor cannot hide a tracked edit from Holt', asy
   await executableNode(hook,
     `const fs = require('node:fs');\nfs.appendFileSync(${JSON.stringify(marker)}, 'called\\n');\nprocess.stdout.write(Buffer.from('holt-token\\0'));`);
 
-  await mustGit(['config', 'core.fsmonitor', hook], root);
+  // Git for Windows invokes fsmonitor through its POSIX shell. Passing a bare `.cjs` path
+  // relies on the shell treating it as an executable (it does not); use the same explicit Node
+  // command that the real hook boundary accepts on every platform.
+  await mustGit(['config', 'core.fsmonitor', `${gitShellArg(process.execPath)} ${gitShellArg(hook)}`], root);
   await mustGit(['config', 'core.fsmonitorHookVersion', '2'], root);
   await mustGit(['status', '--porcelain=v1', '--untracked-files=no'], root);
   const seededCalls = (await fs.readFile(marker, 'utf8')).trim().split('\n').length;
@@ -556,12 +559,13 @@ test('GIT BOUNDARY: ambient config, external programs, trace, and redirection ca
 
   const externalMarker = path.join(root, 'external-diff-ran.log');
   const external = path.join(root, 'external-diff.cjs');
+  const externalCommand = gitShellArg(external);
   await executableNode(external,
     `require('node:fs').appendFileSync(${JSON.stringify(externalMarker)}, 'ran\\n');`);
 
   // Prove the program is executable and Git would run it absent Holt's controls.
   const rawExternal = await rawGit(['--no-pager', 'diff', '--ext-diff', '--', 'tracked.txt'], root, {
-    GIT_EXTERNAL_DIFF: external,
+    GIT_EXTERNAL_DIFF: externalCommand,
   });
   assert.equal(rawExternal.code, 0, rawExternal.stderr);
   assert.match(await fs.readFile(externalMarker, 'utf8'), /ran/,
@@ -578,8 +582,8 @@ test('GIT BOUNDARY: ambient config, external programs, trace, and redirection ca
     GIT_CONFIG_GLOBAL: poisonConfig,
     GIT_CONFIG_COUNT: '1',
     GIT_CONFIG_KEY_0: 'diff.external',
-    GIT_CONFIG_VALUE_0: external,
-    GIT_EXTERNAL_DIFF: external,
+    GIT_CONFIG_VALUE_0: externalCommand,
+    GIT_EXTERNAL_DIFF: externalCommand,
     GIT_TRACE: trace,
     GIT_TRACE2_EVENT: trace2,
     GIT_REDIRECT_STDOUT: redirected,

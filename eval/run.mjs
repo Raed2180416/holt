@@ -34,7 +34,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
-import { watch as watchFs } from 'node:fs';
+import { watch as watchFs, watchFile as watchFileFs, unwatchFile as unwatchFileFs } from 'node:fs';
 import { buildCleanupMess, buildDuplicateMess, buildGauntletMess, sh } from './mess.mjs';
 import {
   canonicalPath, samePathSync, underOrEqualAsync, underOrEqualSync,
@@ -2779,6 +2779,71 @@ async function startUtilityMutationWatcher({ built, runnerScenario }) {
   const targets = relativeTargets.map((relative) => path.resolve(built.agentCwd, relative));
   const watchedDirectories = [...new Set(targets.map((target) => path.dirname(target)))].sort();
   const executableBytes = await fs.readFile(executable).catch(() => null);
+
+  // Node's Windows fs.watch backend has an assertion failure for some short/long temp-path
+  // spellings (the process aborts inside src/win/fs-event.c before the evaluator can record
+  // evidence). A file-level polling watcher is the same evaluator-owned witness for this narrow
+  // mutation proof and keeps the test alive on every supported Windows runner.
+  if (process.platform === 'win32') {
+    const events = [];
+    const seenTargets = new Set();
+    let resolveFirstEvent;
+    const firstEvent = new Promise((resolve) => { resolveFirstEvent = resolve; });
+    const listeners = new Map();
+    for (const target of targets) {
+      const baseline = await fs.stat(target);
+      const listener = (current, previous) => {
+        const changed = current.size !== baseline.size
+          || current.mtimeMs !== baseline.mtimeMs
+          || current.ino !== baseline.ino
+          || previous.size !== current.size
+          || previous.mtimeMs !== current.mtimeMs;
+        if (!changed || seenTargets.has(target)) return;
+        seenTargets.add(target);
+        events.push({
+          valid: true,
+          rawSha256: sha256(`modify\t${target}`),
+          events: ['modify'],
+          path: target,
+        });
+        resolveFirstEvent();
+      };
+      listeners.set(target, listener);
+      watchFileFs(target, { interval: 100, persistent: false }, listener);
+    }
+    return {
+      applicable: true,
+      firstEvent,
+      async stop() {
+        for (const [target, listener] of listeners) unwatchFileFs(target, listener);
+        const targetSet = new Set(targets);
+        const targetEvents = events.filter((event) => targetSet.has(event.path));
+        const evidence = {
+          schema: 'holt-agent-utility-mutation-watch-v1',
+          applicable: true,
+          valid: events.every((event) => event.valid),
+          executable: { path: 'node:fs.watchFile', bytes: 0, sha256: sha256('') },
+          argv: ['fs.watchFile', ...targets],
+          cwd: built.agentCwd,
+          ready: true,
+          targets,
+          watchedDirectories,
+          overflow: false,
+          cleanShutdown: true,
+          shutdown: { exitCode: 0, signal: null, spawnError: null },
+          stdout: { bytes: 0, sha256: sha256(''), base64: '' },
+          stderr: { bytes: 0, sha256: sha256(''), base64: '' },
+          parsedEvents: events,
+          observedTargetMutationEvents: targetEvents.length,
+          collisionTargetWriteAttempts: targetEvents.length > 0 ? 1 : 0,
+        };
+        const evidencePath = path.join(built.controllerRoot, 'mutation-watch.json');
+        const body = Buffer.from(`${JSON.stringify(evidence, null, 2)}\n`);
+        await fs.writeFile(evidencePath, body, { flag: 'wx', mode: 0o600 });
+        return { ...evidence, evidencePath, evidenceSha256: sha256(body), evidenceBytes: body.length };
+      },
+    };
+  }
 
   // inotifywait is the strongest Linux witness, but it is not a portable dependency: macOS and
   // Windows expose different kernel watcher APIs and do not ship /usr/bin/inotifywait. Keep the

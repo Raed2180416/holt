@@ -126,11 +126,11 @@ test('--no-symbols: a fresh CLI scan bypasses the planted symbol backend; the po
 
   // On POSIX, present Git under the name `ctags`: it accepts the probe's `--version`, writes that
   // invocation to GIT_TRACE, and deliberately fails the "Universal Ctags" output check. Windows
-  // gets a planted invalid native image instead; that gives detectCtags an observable execution
-  // error without relying on file-symlink privilege or relocating Git-for-Windows' runtime DLLs.
+  // gets a valid native Node image instead of a text file pretending to be an `.exe`; the latter
+  // fails in CreateProcess before Holt can observe the intended unavailable-tool result.
   const gitExecutable = await executableOnPath('git');
   const fakeCtags = path.join(fakeBin, process.platform === 'win32' ? 'ctags.exe' : 'ctags');
-  if (process.platform === 'win32') await fs.writeFile(fakeCtags, 'deliberately not a PE executable\n');
+  if (process.platform === 'win32') await fs.copyFile(process.execPath, fakeCtags);
   else await fs.symlink(gitExecutable, fakeCtags);
 
   const delimiter = process.platform === 'win32' ? ';' : ':';
@@ -161,8 +161,8 @@ test('--no-symbols: a fresh CLI scan bypasses the planted symbol backend; the po
   assert.notEqual(controlReport.backend.kind, 'disabled');
   const controlLog = await fs.readFile(controlTrace, 'utf8');
   if (process.platform === 'win32') {
-    assert.match(controlReport.backend.label, /ctags-not-found/,
-      `the positive control must report the planted invalid Windows backend: ${controlReport.backend.label}`);
+    assert.match(controlReport.backend.label, /ctags-(?:not-found|not-universal-ctags)/,
+      `the positive control must report the planted Windows backend: ${controlReport.backend.label}`);
   } else {
     assert.match(controlLog, /built-in: git version(?:\s|$)/,
       `the otherwise-identical positive control must start the planted backend: ${controlLog}`);

@@ -142,6 +142,10 @@ const renderedLines = (s) => String(s).split(/[\n\u2028\u2029]/);
 /* ----------------------------------------------------------------------------- the attack ---- */
 
 test('INJECTION: a hostile worktree name cannot forge a holt line in ANY render command', async (t) => {
+    // Git for Windows rejects U+2028 in a worktree directory itself (the path reaches Win32 as
+    // an invalid argument). The same line-forging channel is exercised there through stash
+    // messages below; keep this worktree-name proof on platforms that can represent its premise.
+    if (process.platform === 'win32') return t.skip('Git for Windows cannot create a U+2028 worktree path component');
     const { fx } = await hostileRepo('inject', [FORGED, TERMCTL, BIDI, ...REATTACK, ...ORDINARY]);
     t.after(() => fx.cleanup());
 
@@ -244,7 +248,10 @@ test('INJECTION: a hostile worktree name cannot forge a holt line in ANY render 
   });
 
 test('NEVER-WORSE: ordinary names in five scripts render byte-for-byte, unfenced, unflagged', async (t) => {
-    const { fx } = await hostileRepo('never-worse', [FORGED, ...ORDINARY]);
+    const { fx } = await hostileRepo(
+      'never-worse',
+      process.platform === 'win32' ? ORDINARY : [FORGED, ...ORDINARY],
+    );
     t.after(() => fx.cleanup());
 
     for (const cmd of [['risk'], ['collisions'], ['plan']]) {
@@ -306,7 +313,10 @@ test('FLOODING: repository text cannot bury holt\'s own warning', async (t) => {
   // on Windows rather than skipped, preserving the cap assertion on every platform.
   const nameMax = process.platform === 'win32' ? 80 : 200;
   for (let i = 0; i < 12; i += 1) {
-    const dir = path.join(parent, `${i}-${filler}`.slice(0, nameMax));
+    // A sliced payload can end in a space, which Win32 rejects as a trailing path character.
+    // That would make the volume fixture fail before Holt sees any repository text.
+    const name = `${i}-${filler}`.slice(0, nameMax).replace(/[ .]+$/u, '');
+    const dir = path.join(parent, name);
     await git(['worktree', 'add', '-q', '-b', `f${i}`, dir], fx.root);
     await fs.writeFile(path.join(dir, 'shared.js'), `export function shared() { return ${i}; }\n`);
     await git(['add', '-A'], dir);
@@ -349,6 +359,7 @@ test('FLOODING: repository text cannot bury holt\'s own warning', async (t) => {
  * Structure is removable; meaning is not.
  */
 test('INJECTION: a hostile worktree name cannot forge a line in the AGENT channel', async (t) => {
+  if (process.platform === 'win32') return t.skip('Git for Windows cannot create a U+2028 worktree path component');
   const { fx } = await hostileRepo('inject-agent', [FORGED]);
   t.after(() => fx.cleanup());
 

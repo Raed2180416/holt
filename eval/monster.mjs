@@ -289,13 +289,17 @@ async function registeredAt(records, target) {
  * Hash the complete user-visible worktree, including ignored/untracked bytes, symlink targets,
  * empty directories, and permission modes. `.git` is the one exclusion: Git rewrites that
  * administrative pointer when moving a worktree, and HEAD/branch/index/status are measured
- * independently below.
+ * independently below. Windows does not expose POSIX permission bits as a stable filesystem
+ * authority (a Git move can legitimately change 0666/0644 presentation), so its manifest keeps
+ * only the executable-bit projection; byte/type/path identity remains exact on every host.
  */
 async function workingTreeManifest(root) {
   const leaves = [];
   const visit = async (absolute, relative) => {
     const stat = await fs.lstat(absolute);
-    const mode = stat.mode & 0o7777;
+    const mode = process.platform === 'win32'
+      ? (stat.mode & 0o111)
+      : (stat.mode & 0o7777);
     if (stat.isSymbolicLink()) {
       leaves.push({ relative, kind: 'symlink', mode, target: await fs.readlink(absolute) });
       return;
@@ -1029,7 +1033,7 @@ async function main() {
           || JSON.stringify(action.restoreArgv[1]) !== JSON.stringify(expectedUnlock)) {
         errors.push(`${record.id}: restore argv is not the exact move-then-unlock recipe`);
       }
-      if (!inventory || inventory.quarantinePath !== action.quarantinePath
+      if (!inventory || !(await samePathAsync(inventory.quarantinePath, action.quarantinePath))
           || inventory.head !== record.before.head || inventory.branch !== shortBranch
           || inventory.locked !== true) {
         errors.push(`${record.id}: recovery inventory does not exactly match the clean action`);
@@ -1087,7 +1091,7 @@ async function main() {
       && originalRegistration?.locked === record.registrationBefore.locked
       && originalRegistration?.lockReason === record.registrationBefore.lockReason;
     const complete = result.ok === true && result.restored === true
-      && result.originalPath === record.originalPath
+      && await samePathAsync(result.originalPath, record.originalPath)
       && !quarantinePresent && !quarantineRegistration
       && exact && authorityRestored;
     if (!complete) {
@@ -1212,7 +1216,7 @@ async function main() {
       const quarantineRegistration = await registeredAt(registry, record.cleanAction.quarantinePath);
       const complete = preview.ok === true && preview.dryRun === true && preview.removed === 0
         && preview.wouldRemove?.length === 1
-        && preview.wouldRemove[0].path === record.cleanAction.quarantinePath
+        && await samePathAsync(preview.wouldRemove[0].path, record.cleanAction.quarantinePath)
         && applied.ok === true && applied.purged === true && applied.removed === 1
         && applied.branchesRemoved === 0
         && !originalPresent && !quarantinePresent

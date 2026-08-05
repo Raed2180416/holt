@@ -19,6 +19,7 @@ import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { standardFixture } from '../fixtures.mjs';
 import { __test } from '../../src/mcp/server.mjs';
+import { samePathAsync } from '../../src/paths.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 const PACKAGE_VERSION = JSON.parse(await fs.readFile(path.join(path.dirname(BIN), '..', 'package.json'), 'utf8')).version;
@@ -278,7 +279,8 @@ test('MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over 
   const purgeDryPayload = JSON.parse(purgeDry.result.content[0].text);
   assert.equal(purgeDryPayload.dryRun, true);
   assert.equal(purgeDryPayload.removed, 0);
-  assert.equal(purgeDryPayload.wouldRemove[0].path, purgeable.quarantinePath);
+  assert.ok(await samePathAsync(purgeDryPayload.wouldRemove[0].path, purgeable.quarantinePath),
+    'purge preview must identify the same path even when Git and Node use different separators');
   const purged = await client.send('tools/call', {
     name: 'holt_purge', arguments: { repo: fx.root, id: purgeable.id, apply: true },
   });

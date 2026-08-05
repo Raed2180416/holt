@@ -351,7 +351,12 @@ async function runPinnedIntegrateCli(shim, repoRoot, home, host) {
     PATH: [shim.binDir, process.env.PATH ?? ''].filter(Boolean).join(path.delimiter),
   };
   const completed = await new Promise((resolve) => {
-    const child = execFile(shim.path, argv, { cwd: repoRoot, env, maxBuffer: 64 * 1024 * 1024 },
+    // The Windows shim keeps the public `.cmd` name for PATH-based agents, but its contents are
+    // JavaScript and Node's execFile cannot CreateProcess a script wrapper without a shell. Run
+    // the same bytes through the pinned Node executable directly; no shell is introduced.
+    const command = process.platform === 'win32' ? process.execPath : shim.path;
+    const commandArgs = process.platform === 'win32' ? [shim.path, ...argv] : argv;
+    const child = execFile(command, commandArgs, { cwd: repoRoot, env, maxBuffer: 64 * 1024 * 1024 },
       (error, stdout, stderr) => resolve({
         exitCode: error ? (typeof error.code === 'number' ? error.code : 1) : 0,
         signal: error?.signal ?? null,

@@ -223,7 +223,12 @@ process.stdin.on('data', (chunk) => {
 
   const { installPinnedHoltCliShim } = await import(pathToFileURL(PREP).href);
   const shim = await installPinnedHoltCliShim(path.join(root, 'home'), runtimeRoot);
-  const child = spawn(shim.path, ['mcp'], {
+  // The Windows test shim has a `.cmd` public name but contains JavaScript so it can be copied
+  // into an isolated fixture without native tooling. Spawn the pinned Node interpreter directly;
+  // this preserves the no-shell boundary while remaining executable on Windows.
+  const shimCommand = process.platform === 'win32' ? process.execPath : shim.path;
+  const shimArgs = process.platform === 'win32' ? [shim.path, 'mcp'] : ['mcp'];
+  const child = spawn(shimCommand, shimArgs, {
     cwd: root,
     env: process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
