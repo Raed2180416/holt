@@ -57,14 +57,14 @@ export const MAX_PATHS = 400;
  *   Newest first, exactly as `git stash list` orders them. EMPTY when there is no refs/stash —
  *   which is the overwhelmingly common case and costs one failed rev walk.
  */
-export async function stashEntries(cwd, { timeout = 10_000 } = {}) {
-  const r = await git(['log', '-g', '--format=%gd%x00%gs%x00%H', 'refs/stash'], { cwd, timeout })
+export async function stashEntries(cwd, { timeout = 10_000, runGit = git } = {}) {
+  const r = await runGit(['log', '-g', '--format=%gd%x00%gs%x00%H', 'refs/stash'], { cwd, timeout })
     .catch(() => null);
   if (!r || r.code !== 0) {
     // A failed reflog walk is empty evidence, not evidence of an empty stash. Prove the one benign
     // failure separately with show-ref's tri-state contract: 0 = present, 1 = absent, anything
     // else = the ref could not be inspected. A broken refs/stash must therefore fail closed too.
-    const probe = await git(['show-ref', '--verify', '--quiet', 'refs/stash'], { cwd, timeout })
+    const probe = await runGit(['show-ref', '--verify', '--quiet', 'refs/stash'], { cwd, timeout })
       .catch(() => null);
     if (probe?.code === 1) return [];
     const detail = r?.stderr?.trim() || probe?.stderr?.trim() || 'stash reflog probe failed';
@@ -171,7 +171,7 @@ function entryIdentity(entry) {
  * history walk complete for every path the stash changed. Merely appearing at a rename's source
  * is not authority for its destination: the path remains part of `entryIdentity` below.
  */
-async function entryContent(cwd, oid, { timeout }) {
+async function entryContent(cwd, oid, { timeout, runGit = git }) {
   const candidates = new Map(); // entryIdentity -> {operation, sha, path, mode, type, layer}
   const paths = new Set();
   let identitiesValid = true;
@@ -197,7 +197,7 @@ async function entryContent(cwd, oid, { timeout }) {
   const diffInto = async (from, to, layer) => {
     // Disable rename folding so a rename retains BOTH pieces of work: source-path deletion and
     // destination-path entry. A destination blob alone does not preserve the removal intent.
-    const r = await git(['diff', '--raw', '--no-renames', '--no-abbrev', '-z', from, to], { cwd, timeout })
+    const r = await runGit(['diff', '--raw', '--no-renames', '--no-abbrev', '-z', from, to], { cwd, timeout })
       .catch(() => null);
     if (!r || r.code !== 0) return false;
     for (const rec of parseRawZ(r.stdout)) {
@@ -220,7 +220,7 @@ async function entryContent(cwd, oid, { timeout }) {
 
   // Read the parent vector once. A stash must have both a base and index parent. Treating a
   // failed parent probe as "that parent does not exist" silently omits staged/untracked states.
-  const parentResult = await git(['rev-list', '--parents', '-n', '1', oid], { cwd, timeout })
+  const parentResult = await runGit(['rev-list', '--parents', '-n', '1', oid], { cwd, timeout })
     .catch(() => null);
   const parentFields = parentResult?.code === 0
     ? parentResult.stdout.trim().split(/\s+/).filter(Boolean)
@@ -238,7 +238,7 @@ async function entryContent(cwd, oid, { timeout }) {
   if (untrackedParent) {
     // The untracked commit has no meaningful base to diff against — every blob in it is a file
     // git had never tracked, so the whole tree is candidate content.
-    const r = await git(['ls-tree', '-r', '-z', '--full-tree', untrackedParent], { cwd, timeout })
+    const r = await runGit(['ls-tree', '-r', '-z', '--full-tree', untrackedParent], { cwd, timeout })
       .catch(() => null);
     if (!r || r.code !== 0) ok = false;
     else {
@@ -270,9 +270,9 @@ async function entryContent(cwd, oid, { timeout }) {
  * is deliberate: content captured by `holt rescue` or `holt discard` genuinely IS reachable, and
  * a guard that ignored its own escape hatch would refuse the cleanup it just made safe.
  */
-async function reachableTips(cwd, { timeout }) {
+async function reachableTips(cwd, { timeout, runGit = git }) {
   const tips = new Set();
-  const refs = await git(['for-each-ref', '--format=%(objectname) %(refname)'], { cwd, timeout })
+  const refs = await runGit(['for-each-ref', '--format=%(objectname) %(refname)'], { cwd, timeout })
     .catch(() => null);
   if (!refs || refs.code !== 0) return null;
   for (const line of refs.stdout.split('\n')) {
@@ -283,13 +283,13 @@ async function reachableTips(cwd, { timeout }) {
     if (name === 'refs/stash') continue;
     if (oid) tips.add(oid);
   }
-  const wts = await git(['worktree', 'list', '--porcelain'], { cwd, timeout }).catch(() => null);
+  const wts = await runGit(['worktree', 'list', '--porcelain'], { cwd, timeout }).catch(() => null);
   if (wts && wts.code === 0) {
     for (const line of wts.stdout.split('\n')) {
       if (line.startsWith('HEAD ')) tips.add(line.slice(5).trim());
     }
   }
-  const head = await git(['rev-parse', '--verify', '--quiet', 'HEAD'], { cwd, timeout }).catch(() => null);
+  const head = await runGit(['rev-parse', '--verify', '--quiet', 'HEAD'], { cwd, timeout }).catch(() => null);
   if (head && head.code === 0 && head.stdout.trim()) tips.add(head.stdout.trim());
   return [...tips].filter(Boolean);
 }
@@ -314,9 +314,9 @@ async function reachableTips(cwd, { timeout }) {
  * @returns {Promise<Set<string>|null>} reachable change identities, or null when the walk could not
  *   be completed — which is NOT the same as "nothing is reachable" and is never treated as such.
  */
-async function reachableEntries(cwd, paths, { timeout }) {
+async function reachableEntries(cwd, paths, { timeout, runGit = git }) {
   if (!paths.length) return new Set();
-  const tips = await reachableTips(cwd, { timeout });
+  const tips = await reachableTips(cwd, { timeout, runGit });
   if (!tips || !tips.length) return new Set(); // an unborn/ref-less repo reaches nothing
   if (paths.length > MAX_PATHS) return null;
   // THE TIP LIST IS UNBOUNDED AND THE ARGUMENT LIST IS NOT. `paths` is capped at MAX_PATHS just
@@ -328,7 +328,7 @@ async function reachableEntries(cwd, paths, { timeout }) {
   const groups = chunkByArgvBytes(tips, ARGV_BYTE_BUDGET, pathBytes + 64);
   const set = new Set();
   for (const group of groups) {
-    const r = await git([
+    const r = await runGit([
       'log', '--raw', '--root', '-m', '--full-history', '--no-renames', '--no-abbrev', '-z',
       '--format=', ...group, '--', ...paths,
     ],
@@ -378,11 +378,11 @@ async function reachableEntries(cwd, paths, { timeout }) {
  * read it while the checker insisted it did not exist; the guard depends on it to tell "nothing
  * at risk" apart from "nothing at risk among the ones I read", so it is part of the contract.
  */
-export async function stashState(cwd, { timeout = 10_000 } = {}) {
+export async function stashState(cwd, { timeout = 10_000, runGit = git } = {}) {
   const empty = { entries: [], atRisk: [], total: 0, checked: true, truncated: false };
   let entries;
   try {
-    entries = await stashEntries(cwd, { timeout });
+    entries = await stashEntries(cwd, { timeout, runGit });
   } catch {
     return { ...empty, checked: false };
   }
@@ -397,7 +397,7 @@ export async function stashState(cwd, { timeout = 10_000 } = {}) {
   for (const e of realEntries) {
     let content;
     try {
-      content = await entryContent(cwd, e.oid, { timeout });
+      content = await entryContent(cwd, e.oid, { timeout, runGit });
     } catch {
       content = { candidates: [], paths: [], ok: false };
     }
@@ -407,7 +407,7 @@ export async function stashState(cwd, { timeout = 10_000 } = {}) {
     /** @type {Set<string>|null} */
     let reachable = null;
     try {
-      reachable = await reachableEntries(cwd, content.paths, { timeout });
+      reachable = await reachableEntries(cwd, content.paths, { timeout, runGit });
     } catch {
       reachable = null;
     }

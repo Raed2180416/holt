@@ -17,9 +17,10 @@ import { scan } from '../../src/scan.mjs';
 import { safeToDelete } from '../../src/analyze.mjs';
 import { clean, discard } from '../../src/actions.mjs';
 import { assessCommand } from '../../src/agent.mjs';
+import { git } from '../../src/git.mjs';
 
-async function state(fx, { includePrimary = false } = {}) {
-  const scanned = await scan(await discover(fx.root), { includePrimary });
+async function state(fx, { includePrimary = false, gitRunner = git } = {}) {
+  const scanned = await scan(await discover(fx.root), { includePrimary, gitRunner });
   const safe = safeToDelete(scanned);
   const byId = (id) => safe.find((v) => v.id === id);
   const ws = (id) => scanned.workstreams.find((w) => w.id === id);
@@ -150,39 +151,12 @@ test('AUTHORITY: failure to enumerate a nonempty merged delta is unknown, never 
   // Interpose only the second committed-delta instrument. `merge-tree` still succeeds and proves
   // the head differs; the subsequent path enumerator fails. Returning [] from that failure is
   // observationally identical to a clean delta unless the failure state is carried explicitly.
-  const resolver = process.platform === 'win32' ? 'where' : 'which';
-  const realGit = execFileSync(resolver, ['git'], { encoding: 'utf8' }).split(/\r?\n/).find(Boolean);
-  assert.ok(realGit, 'premise: the real git executable must be resolvable before interposition');
-  const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-git-shim-'));
-  const shimScript = path.join(shimDir, 'git-wrapper.mjs');
-  await fs.writeFile(shimScript, `#!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
-const args = process.argv.slice(2);
-if (args[0] === 'diff' && args.includes('--name-status')) {
-  process.stderr.write('planted name-status failure\\n');
-  process.exit(73);
-}
-const r = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit', env: process.env });
-process.exit(r.status ?? 74);
-`);
-  if (process.platform === 'win32') {
-    await fs.writeFile(path.join(shimDir, 'git.cmd'),
-      `@echo off\r\n"${process.execPath}" "${shimScript}" %*\r\n`);
-  } else {
-    await fs.chmod(shimScript, 0o755);
-    await fs.symlink('git-wrapper.mjs', path.join(shimDir, 'git'));
-  }
-  t.after(() => fs.rm(shimDir, { recursive: true, force: true }));
-
-  const priorPath = process.env.PATH;
-  process.env.PATH = `${shimDir}${path.delimiter}${priorPath ?? ''}`;
-  let measured;
-  try {
-    measured = await state(fx);
-  } finally {
-    if (priorPath === undefined) delete process.env.PATH;
-    else process.env.PATH = priorPath;
-  }
+  const failingGit = async (args, options = {}) => (
+    args[0] === 'diff' && args.includes('--name-status')
+      ? { code: 73, stdout: '', stderr: 'planted name-status failure' }
+      : git(args, options)
+  );
+  const measured = await state(fx, { gitRunner: failingGit });
 
   const scanned = measured.ws('ahead');
   assert.equal(scanned.ok, false,
@@ -200,39 +174,12 @@ test('AUTHORITY: a failed discard HEAD probe is not reclassified as an unborn re
   const file = path.join(wt, 'src/base.js');
   await fs.writeFile(file, 'valuable tracked edit\n');
 
-  const resolver = process.platform === 'win32' ? 'where' : 'which';
-  const realGit = execFileSync(resolver, ['git'], { encoding: 'utf8' }).split(/\r?\n/).find(Boolean);
-  assert.ok(realGit);
-  const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-git-shim-head-'));
-  const shimScript = path.join(shimDir, 'git-wrapper.mjs');
-  await fs.writeFile(shimScript, `#!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
-const args = process.argv.slice(2);
-if (args[0] === 'rev-parse' && args.includes('HEAD^{commit}')) {
-  process.stderr.write('planted HEAD instrument failure\\n');
-  process.exit(73);
-}
-const r = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit', env: process.env });
-process.exit(r.status ?? 74);
-`);
-  if (process.platform === 'win32') {
-    await fs.writeFile(path.join(shimDir, 'git.cmd'),
-      `@echo off\r\n"${process.execPath}" "${shimScript}" %*\r\n`);
-  } else {
-    await fs.chmod(shimScript, 0o755);
-    await fs.symlink('git-wrapper.mjs', path.join(shimDir, 'git'));
-  }
-  t.after(() => fs.rm(shimDir, { recursive: true, force: true }));
-
-  const priorPath = process.env.PATH;
-  process.env.PATH = `${shimDir}${path.delimiter}${priorPath ?? ''}`;
-  let result;
-  try {
-    result = await discard(fx.root, [file]);
-  } finally {
-    if (priorPath === undefined) delete process.env.PATH;
-    else process.env.PATH = priorPath;
-  }
+  const failingGit = async (args, options = {}) => (
+    args[0] === 'rev-parse' && args.includes('HEAD^{commit}')
+      ? { code: 73, stdout: '', stderr: 'planted HEAD instrument failure' }
+      : git(args, options)
+  );
+  const result = await discard(fx.root, [file], { gitRunner: failingGit });
 
   assert.equal(result.ok, false, JSON.stringify(result));
   assert.match(result.error, /could not resolve worktree HEAD exactly.*planted HEAD instrument failure/);

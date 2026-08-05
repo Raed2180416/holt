@@ -24,7 +24,7 @@
  * is reachable from a ref holds nothing unique, and dropping it must go back to a silent allow.
  */
 
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -32,6 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { newRepo, standardFixture } from '../fixtures.mjs';
 import { assessCommand, cachedReport } from '../../src/agent.mjs';
+import { git } from '../../src/git.mjs';
 import { stashState, describeStash, MAX_ENTRIES } from '../../src/stash.mjs';
 import { renderRisk } from '../../src/render.mjs';
 
@@ -49,70 +50,24 @@ const gitIn = (args, cwd) => new Promise((res) => {
 });
 
 async function withGitSubcommandFailure(t, subcommand, run) {
-  const resolver = process.platform === 'win32' ? 'where' : 'which';
-  const realGit = execFileSync(resolver, ['git'], { encoding: 'utf8' })
-    .split(/\r?\n/).find(Boolean);
-  assert.ok(realGit, 'premise: real git must be resolvable before interposition');
-  const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-stash-git-shim-'));
-  const shimScript = path.join(shimDir, 'git-wrapper.mjs');
-  await fs.writeFile(shimScript, `#!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
-const args = process.argv.slice(2);
-if (args[0] === ${JSON.stringify(subcommand)}) {
-  process.stderr.write('planted ${subcommand} failure\\n');
-  process.exit(73);
-}
-const r = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit', env: process.env });
-process.exit(r.status ?? 74);
-`);
-  if (process.platform === 'win32') {
-    await fs.writeFile(path.join(shimDir, 'git.cmd'),
-      `@echo off\r\n"${process.execPath}" "${shimScript}" %*\r\n`);
-  } else {
-    await fs.chmod(shimScript, 0o755);
-    await fs.symlink('git-wrapper.mjs', path.join(shimDir, 'git'));
-  }
-  t.after(() => fs.rm(shimDir, { recursive: true, force: true }));
-
-  const prior = process.env.PATH;
-  process.env.PATH = `${shimDir}${path.delimiter}${prior ?? ''}`;
-  try { return await run(); } finally {
-    if (prior === undefined) delete process.env.PATH;
-    else process.env.PATH = prior;
-  }
+  const failingGit = async (args, options = {}) => {
+    if (args[0] === subcommand) {
+      return { code: 73, stdout: '', stderr: `planted ${subcommand} failure` };
+    }
+    return git(args, options);
+  };
+  return run(failingGit);
 }
 
 async function withGitCommandLog(t, run) {
-  const resolver = process.platform === 'win32' ? 'where' : 'which';
-  const realGit = execFileSync(resolver, ['git'], { encoding: 'utf8' })
-    .split(/\r?\n/).find(Boolean);
-  assert.ok(realGit, 'premise: real git must be resolvable before interposition');
-  const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-stash-git-log-'));
-  const logPath = path.join(shimDir, 'commands.jsonl');
-  const shimScript = path.join(shimDir, 'git-wrapper.mjs');
-  await fs.writeFile(shimScript, `#!/usr/bin/env node
-import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
-const args = process.argv.slice(2);
-fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + '\\n');
-const r = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit', env: process.env });
-process.exit(r.status ?? 74);
-`);
-  if (process.platform === 'win32') {
-    await fs.writeFile(path.join(shimDir, 'git.cmd'),
-      `@echo off\r\n"${process.execPath}" "${shimScript}" %*\r\n`);
-  } else {
-    await fs.chmod(shimScript, 0o755);
-    await fs.symlink('git-wrapper.mjs', path.join(shimDir, 'git'));
-  }
-  t.after(() => fs.rm(shimDir, { recursive: true, force: true }));
-
-  const prior = process.env.PATH;
-  process.env.PATH = `${shimDir}${path.delimiter}${prior ?? ''}`;
-  try { return await run(logPath); } finally {
-    if (prior === undefined) delete process.env.PATH;
-    else process.env.PATH = prior;
-  }
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-stash-git-log-'));
+  const logPath = path.join(root, 'commands.jsonl');
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const loggedGit = async (args, options = {}) => {
+    await fs.appendFile(logPath, `${JSON.stringify(args)}\n`);
+    return git(args, options);
+  };
+  return run(logPath, loggedGit);
 }
 
 /** The word that must appear in the stash and nowhere else. */
@@ -215,11 +170,11 @@ test('REFUTATION: a conflicted pop keeps the stash entry and both versions on di
 
 test('FAIL CLOSED: a stash reflog probe failure is unknown, never an empty all-clear', async (t) => {
   const fx = await sweptFixture(t);
-  await withGitSubcommandFailure(t, 'log', async () => {
-    const state = await stashState(fx.root);
+  await withGitSubcommandFailure(t, 'log', async (runGit) => {
+    const state = await stashState(fx.root, { runGit });
     assert.equal(state.checked, false, JSON.stringify(state));
     assert.equal(state.total, 0, 'the failed probe did not invent entries');
-    const verdict = await assessCommand('git stash drop', fx.root);
+    const verdict = await assessCommand('git stash drop', fx.root, { stashGit: runGit });
     assert.equal(verdict.decision, 'ask', JSON.stringify(verdict));
     assert.match(verdict.reason, /could not read.*stash|cannot say/i);
   });
@@ -227,12 +182,12 @@ test('FAIL CLOSED: a stash reflog probe failure is unknown, never an empty all-c
 
 test('FAIL CLOSED: an entry diff failure cannot turn an existing stash into a safe drop', async (t) => {
   const fx = await sweptFixture(t);
-  await withGitSubcommandFailure(t, 'diff', async () => {
-    const state = await stashState(fx.root);
+  await withGitSubcommandFailure(t, 'diff', async (runGit) => {
+    const state = await stashState(fx.root, { runGit });
     assert.equal(state.total, 1, JSON.stringify(state));
     assert.equal(state.checked, false, JSON.stringify(state));
     assert.equal(state.entries[0].checked, false, JSON.stringify(state.entries[0]));
-    const verdict = await assessCommand('git stash drop', fx.root);
+    const verdict = await assessCommand('git stash drop', fx.root, { stashGit: runGit });
     assert.equal(verdict.decision, 'ask', JSON.stringify(verdict));
     assert.match(verdict.reason, /could not complete|cannot say/i);
   });
@@ -751,10 +706,10 @@ test('EFFICIENCY: the hot path pays nothing, and a stash verb pays no full scan'
   await gitIn(['add', '-A'], fx.root);
   assert.equal((await gitIn(['stash', 'push', '-u'], fx.root)).code, 0, 'setup');
 
-  await withGitCommandLog(t, async (trace) => {
+  await withGitCommandLog(t, async (trace, runGit) => {
     const runWithTrace = async (cmd) => {
       await fs.rm(trace, { force: true });
-      await assessCommand(cmd, fx.root);
+      await assessCommand(cmd, fx.root, { stashGit: runGit });
       const log = await fs.readFile(trace, 'utf8').catch(() => '');
       await fs.rm(trace, { force: true });
       return log;

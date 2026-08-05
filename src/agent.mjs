@@ -5359,7 +5359,12 @@ export function guardAllowCover(command, patterns = []) {
  *
  * Agent-neutral by design. Adapters map:  allow/deny/ask -> whatever their host calls it.
  */
-export async function assessCommand(command, cwd = process.cwd(), { guardAllow = [] } = {}) {
+export async function assessCommand(command, cwd = process.cwd(), {
+  guardAllow = [],
+  // Internal deterministic-test seam. Production callers use the imported Git runner; tests can
+  // inject a failing/logging runner without mutating the process-wide PATH of concurrent hooks.
+  stashGit = git,
+} = {}) {
   const allowlistPattern = guardAllowCover(command, guardAllow).pattern;
   if (allowlistPattern) {
     return {
@@ -5386,7 +5391,7 @@ export async function assessCommand(command, cwd = process.cwd(), { guardAllow =
   // command is assessed by both and the STRONGEST verdict wins. Never the first one to answer:
   // the worktree layer returning 'allow' for a path that is not a worktree is exactly how
   // file-granular destruction went unwatched.
-  const wtVerdict = await assessWorktreeCommand(command, cwd, ctx);
+  const wtVerdict = await assessWorktreeCommand(command, cwd, ctx, stashGit);
   if (wtVerdict?.decision === 'deny') return wtVerdict;
 
   // A loop variable the command itself binds is not an unknown — see boundLoopVariables. The bound
@@ -5408,7 +5413,7 @@ export async function assessCommand(command, cwd = process.cwd(), { guardAllow =
   /** @type {Awaited<ReturnType<typeof assessCommand>>|null} */
   let loopAsk = null;
   for (const body of expandForLoops(command)) {
-    const v = await assessCommand(body, cwd);
+    const v = await assessCommand(body, cwd, { stashGit });
     if (v.decision === 'deny') return v;
     if (v.decision === 'ask' && !loopAsk) loopAsk = v;
   }
@@ -5417,7 +5422,7 @@ export async function assessCommand(command, cwd = process.cwd(), { guardAllow =
   // `guardAllow` is deliberately NOT passed down: the human approved the command they read, and the
   // outer call has already matched it against their patterns.
   for (const program of inlineShellPrograms(command)) {
-    const v = await assessCommand(program, cwd);
+    const v = await assessCommand(program, cwd, { stashGit });
     if (v.decision === 'deny') return v;
     if (v.decision === 'ask' && !loopAsk) loopAsk = v;
   }
@@ -5501,14 +5506,14 @@ function stashSelector(command) {
  * CONTENT is reachable from a real ref: apply an entry and commit it, and dropping the entry
  * loses nothing, so the guard steps back. See src/stash.mjs for the full argument.
  */
-async function assessStashEntries(command, dir, hit) {
+async function assessStashEntries(command, dir, hit, stashGit = git) {
   // `dir` is the directory the verb actually runs in: the caller has already folded in `cd` and
   // `git -C` (matchWorkingDirectory), so `cd ../other-wt && git stash drop` and
   // `git -C ../other-wt stash drop` both target the sibling worktree rather than whatever
   // directory Node happened to start in — and neither has `-C` applied to it twice.
   // `stashState` is documented never to throw; the catch is there so that promise remaining true
   // is not something this file has to trust, and so `null` stays a value the checks below handle.
-  const state = await stashState(dir).catch(() => null);
+  const state = await stashState(dir, { runGit: stashGit }).catch(() => null);
   // "holt could not look" is not "there is nothing there", and conflating them is the exact
   // silence this whole module exists to break.
   if (!state || (!state.checked && state.total === 0)) {
@@ -5680,8 +5685,8 @@ function describeSweep(sweep, id) {
 }
 
 /** What the stash is ALREADY holding, for a message about adding one more entry to it. */
-async function describeQueued(dir) {
-  const state = await stashState(dir).catch(() => null);
+async function describeQueued(dir, stashGit = git) {
+  const state = await stashState(dir, { runGit: stashGit }).catch(() => null);
   if (!state || !state.atRisk.length) return '';
   return `  …and the stash already holds ${state.atRisk.length} entr(y/ies) whose content no ref `
     + `holds:\n${describeStash(state)}\n`;
@@ -5695,7 +5700,7 @@ function strongestVerdict(verdicts) {
 /**
  * @returns {Promise<{decision:string, reason:string|null, kind:string|null, targets:Array, files?:Array, allowlisted?:boolean, allowlistPattern?:string, resolvedTargets?:any[]}|null>}
  */
-async function assessWorktreeCommand(command, cwd, ctx) {
+async function assessWorktreeCommand(command, cwd, ctx, stashGit = git) {
   const structure = resolveCommand(command);
   const callerCwd = cwd;
   const commandCwd = commandWorkingDirectory(command, callerCwd);
@@ -5726,7 +5731,7 @@ async function assessWorktreeCommand(command, cwd, ctx) {
       reason: `holt could not resolve the command safely: ${structure.unresolved.join('; ')}. Confirm manually before proceeding.`,
     };
   }
-  if (!structure.matches.length) return assessWorktreeMatch(command, cwd, ctx);
+  if (!structure.matches.length) return assessWorktreeMatch(command, cwd, ctx, null, false, stashGit);
   // EACH MATCH IN THE TREE IT ACTUALLY RUNS IN. The file layer has always threaded `cd` per
   // segment; this is that same fact at worktree granularity, and it is what makes `git -C
   // <subdir-of-a-worktree> reset --hard` resolve to the worktree that subdir is inside instead of
@@ -5735,7 +5740,7 @@ async function assessWorktreeCommand(command, cwd, ctx) {
   const reached = [];
   for (const hit of structure.matches) {
     const { dir, cUnresolved } = matchWorkingDirectory(command, callerCwd, hit.index ?? 0);
-    const v = await assessWorktreeMatch(command, dir ?? cwd, ctx, hit, cUnresolved);
+    const v = await assessWorktreeMatch(command, dir ?? cwd, ctx, hit, cUnresolved, stashGit);
     verdicts.push(v);
     // `assessWorktreeMatch` returns NULL when nothing matched — a null here threw a TypeError that
     // the fail-closed path then turned into a refusal, so `rm -rf dist build coverage` started
@@ -5864,7 +5869,9 @@ function jointlyLost(reached) {
 /**
  * @returns {Promise<{decision:string, reason:string|null, kind:string|null, targets:Array, files?:Array, resolvedTargets?:any[]}|null>}
  */
-async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnresolved = false) {
+async function assessWorktreeMatch(
+  command, cwd, ctx, suppliedHit = null, cUnresolved = false, stashGit = git,
+) {
   const hit = suppliedHit ?? classifyCommand(command);
   if (!hit) {
     // Nothing matched — but did holt actually get to READ the command? If the verb is supplied by
@@ -5875,7 +5882,7 @@ async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnres
     // destructive there is no ambiguity left to report, and softening deny to ask would make the
     // wrapper itself the bypass. Re-assess the inner string exactly as if it had been typed, so
     // the verdict carries the same per-file evidence.
-    if (blind?.innerCommand) return assessWorktreeCommand(blind.innerCommand, cwd, ctx);
+    if (blind?.innerCommand) return assessWorktreeCommand(blind.innerCommand, cwd, ctx, stashGit);
 
     // An inline program that removes something names its target in the same string, so holt
     // resolves it through the ordinary path and gives a real refusal that names the files:
@@ -5910,7 +5917,7 @@ async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnres
         // `perl -e "unlink('../feature/only-here.txt')"` names a FILE inside a worktree, which the
         // worktree layer cannot see by design — checking only that layer let it through.
         const viaWorktree = async (c) => {
-          const wt = await assessWorktreeCommand(c, cwd, ctx);
+          const wt = await assessWorktreeCommand(c, cwd, ctx, stashGit);
           if (wt && wt.decision !== 'allow') return wt;
           const targets = resolveFileTargets(c);
           return targets.length ? assessFileTargets(targets, cwd, ctx) : null;
@@ -6020,7 +6027,7 @@ async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnres
   // `cwd` IS ALREADY THE DIRECTORY THIS VERB RUNS IN — the caller folded in `cd` and `git -C`
   // (matchWorkingDirectory). Re-resolving `-C` inside these helpers applied it a SECOND time:
   // `git -C sub stash drop` from /repo asked /repo/sub/sub about its stash.
-  if (hit.stashScope === 'entries') return assessStashEntries(command, cwd, hit);
+  if (hit.stashScope === 'entries') return assessStashEntries(command, cwd, hit, stashGit);
 
   // Deliberately BEFORE the scan: a no-op stash must not pay for a full repository analysis in
   // the agent's critical path, and it must not be able to fail on one either. One `git status`.
@@ -6169,7 +6176,7 @@ async function assessWorktreeMatch(command, cwd, ctx, suppliedHit = null, cUnres
   // — but "your work is now in the stash, alongside four older entries holding content no ref
   // holds" is what stops a pile from being silently forgotten, and forgetting is how a stash
   // loses work without anybody typing `drop`. Paid for only on the path that already asks.
-  const queued = sweep ? await describeQueued(cwd) : '';
+  const queued = sweep ? await describeQueued(cwd, stashGit) : '';
 
   // A RULE THAT CAPPED ITS OWN VERDICT AT 'ask' NEVER ESCALATES TO 'deny', no matter how much is
   // at stake — the whole point of capping it here is that this action is recoverable (see the

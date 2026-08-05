@@ -1329,6 +1329,9 @@ export async function discard(cwd, paths, {
   stamp: stampOverride = null,
   onBeforeQuarantine = null,
   onAfterCapture = null,
+  // Internal deterministic-test seam. The normal action path keeps the default Git runner; tests
+  // can fail one identity probe without mutating PATH for concurrent work.
+  gitRunner = git,
   ...opts
 } = {}) {
   const list = (Array.isArray(paths) ? paths : [paths]).filter(Boolean);
@@ -1436,7 +1439,7 @@ export async function discard(cwd, paths, {
   }
 
   let head = null;
-  const headProbe = await git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { cwd: ws.path });
+  const headProbe = await gitRunner(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { cwd: ws.path });
   if (headProbe.code === 0 && headProbe.stdout.trim()) {
     head = headProbe.stdout.trim();
   } else {

@@ -62,9 +62,15 @@ const exists = (value) => fs.lstat(value).then(() => true, (error) => {
   throw error;
 });
 const inside = (parent, child) => {
-  const rel = path.relative(parent, child);
+  const rel = path.relative(foldCase(parent), foldCase(child));
   return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel));
 };
+// Git reports canonical paths on macOS (/private/var/...), while Node's temp helpers may return
+// the display alias (/var/...). Resolve both sides before containment arithmetic; comparing the
+// strings directly turns a worktree that is visibly inside the fixture into an apparent escape.
+const insideExisting = async (parent, child) => inside(
+  await canonicalPath(parent), await canonicalPath(child),
+);
 
 function requireExactSet(actual, expected, label) {
   const a = [...new Set(actual)].sort();
@@ -600,12 +606,16 @@ export async function fixtureManifest(fixture) {
   const commonRun = await git(['rev-parse', '--path-format=absolute', '--git-common-dir'], fixture.repo, fixture.env);
   const commonGitDir = commonRun.stdout.trim();
   const commonReal = await fs.realpath(commonGitDir);
-  if (!inside(fixture.root, commonReal)) throw new Error(`fixture common Git dir escaped scratch: ${commonReal}`);
+  if (!await insideExisting(fixture.root, commonReal)) {
+    throw new Error(`fixture common Git dir escaped scratch: ${commonReal}`);
+  }
   const refsRun = await git(['show-ref', '--head', '-d'], fixture.repo, fixture.env, { allowFailure: true });
   const worktrees = [];
   for (const record of records) {
     const real = await fs.realpath(record.path);
-    if (!inside(fixture.root, real)) throw new Error(`registered worktree escaped fixture root: ${real}`);
+    if (!await insideExisting(fixture.root, real)) {
+      throw new Error(`registered worktree escaped fixture root: ${real}`);
+    }
     const [status, indexListing, diff, diffCached, gitDirRun, head, branch] = await Promise.all([
       git(['status', '--porcelain=v2', '-z', '--untracked-files=all', '--ignored=matching'], real, fixture.env),
       git(['ls-files', '--stage', '-z'], real, fixture.env),

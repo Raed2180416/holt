@@ -106,13 +106,15 @@ async function pathUsable(p) {
 }
 
 /** COMMITTED delta: what does base lack from head? */
-export async function committedDelta(root, baseOid, headOid, { strictReadOnly, timeout }) {
+export async function committedDelta(root, baseOid, headOid, {
+  strictReadOnly, timeout, gitRunner = git,
+}) {
   if (!headOid || headOid === baseOid) {
     return { files: [], how: 'identical-to-base', conflicted: false, error: undefined };
   }
 
   if (strictReadOnly) {
-    const r = await git(['diff', '--name-only', '-z', `${baseOid}...${headOid}`], { cwd: root, timeout });
+    const r = await gitRunner(['diff', '--name-only', '-z', `${baseOid}...${headOid}`], { cwd: root, timeout });
     if (r.code !== 0) return { files: [], how: 'three-dot-failed', conflicted: false, error: r.stderr.trim() };
     return {
       files: splitNul(r.stdout),
@@ -125,7 +127,7 @@ export async function committedDelta(root, baseOid, headOid, { strictReadOnly, t
 
   let mt;
   try {
-    mt = await git(['merge-tree', '--write-tree', baseOid, headOid], { cwd: root, timeout });
+    mt = await gitRunner(['merge-tree', '--write-tree', baseOid, headOid], { cwd: root, timeout });
   } catch (error) {
     if (error instanceof GitRefused && error.unmeasured) {
       return {
@@ -158,7 +160,7 @@ export async function committedDelta(root, baseOid, headOid, { strictReadOnly, t
   // `--name-status -M` gives both sides of a rename, so the ORIGINAL path is recorded too. The
   // prefilter's job is "which pairs might conflict", where a false positive costs one merge-tree
   // run and a false negative costs a broken landing — so it should be generous, and now is.
-  const names = await git(['diff', '--name-status', '-M', '-z', baseOid, tree], { cwd: root, timeout });
+  const names = await gitRunner(['diff', '--name-status', '-M', '-z', baseOid, tree], { cwd: root, timeout });
   if (names.code !== 0) {
     return {
       files: [], how: 'merge-tree-names-failed', conflicted: mt.code === 1,
@@ -1332,7 +1334,9 @@ async function ignoredContent(wtPath, { timeout, activeDirs }) {
 
 /** Phase 1: file-level deltas for one workstream. */
 async function scanFiles(ws, ctx) {
-  const { root, base, strictReadOnly, timeout } = ctx;
+  const {
+    root, base, strictReadOnly, timeout, gitRunner = git,
+  } = ctx;
 
   const result = {
     ...ws,
@@ -1374,7 +1378,7 @@ async function scanFiles(ws, ctx) {
     result.generatedActive = [...activeDirs];
 
     const [committed, uncommitted, ignored] = await Promise.all([
-      committedDelta(root, base.oid, headOid, { strictReadOnly, timeout }),
+      committedDelta(root, base.oid, headOid, { strictReadOnly, timeout, gitRunner }),
       // jj snapshots the working copy into `@` automatically, so under jj there IS no separate
       // uncommitted layer — the thing git cannot relate across worktrees simply does not exist.
       // Asking git for status inside a jj workspace would fail (no .git) and, worse, a failure
@@ -1581,7 +1585,8 @@ async function scanFiles(ws, ctx) {
  *
  * @param {{root: string|null, vcs: string|null, workstreams: any[], jj: any, error: string|null, bare?: boolean}} disc  result of discover()
  * @param {{base?: string, strictReadOnly?: boolean, concurrency?: number, timeout?: number,
- *          symbols?: boolean, includePrimary?: boolean, symbolBackend?: string}} [opts]
+ *          symbols?: boolean, includePrimary?: boolean, symbolBackend?: string,
+ *          gitRunner?: Function}} [opts]
  */
 export async function scan(disc, opts = {}) {
   if (!disc.root) {
@@ -1611,6 +1616,7 @@ export async function scan(disc, opts = {}) {
     base,
     strictReadOnly: !!opts.strictReadOnly,
     timeout: resolvedTimeout,
+    gitRunner: opts.gitRunner ?? git,
   };
 
   // THE PRIMARY IS EXCLUDED ONLY WHEN THERE IS SOMETHING ELSE TO TALK ABOUT.

@@ -287,6 +287,10 @@ export const CAPABILITIES = {
       file: 'bin/holt.mjs', identifier: 'full', canRun: ['<the package manager command holt doctor --install prints and you confirm>'],
       why: '`holt doctor --install` builds a package-manager command (apt-get/dnf/pacman/brew/winget) from the detected manager and remaining backends, prints it, requires confirmation, then runs it with shell:true so `&&` works on Windows. It is the indirect network path disclosed in §7.8',
     },
+    {
+      file: 'src/git.mjs', identifier: 'executable', canRun: ['git'],
+      why: 'the production Git executable is fixed to `git`; an internal test-only runner seam may substitute a wrapper without changing the production default or argv allowlist',
+    },
   ],
 
   /**

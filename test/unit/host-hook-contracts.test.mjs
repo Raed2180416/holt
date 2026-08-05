@@ -172,7 +172,14 @@ test('project installers write loadable files and preserve a foreign Codex hook'
   assert.equal((await json('.agents', 'plugins', 'holt', 'plugin.json')).name, 'holt');
 
   const clineFile = path.join(dir, '.clinerules', 'hooks', 'PreToolUse');
-  assert.ok((await fs.stat(clineFile)).mode & 0o100, 'Cline discovers only executable POSIX hooks');
+  const clineStat = await fs.stat(clineFile);
+  if (process.platform !== 'win32') {
+    assert.ok(clineStat.mode & 0o100, 'Cline discovers only executable POSIX hooks');
+  } else {
+    // Cline's project hook contract is a POSIX executable. Windows preserves the file and its
+    // generated shebang, but its NTFS mode projection cannot report a POSIX execute bit.
+    assert.ok(clineStat.isFile());
+  }
 });
 
 test('Codex upgrades reconcile all three lifecycle subcommands without duplicating or taking user hooks',

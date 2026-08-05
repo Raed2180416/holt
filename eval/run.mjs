@@ -34,8 +34,11 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
+import { watch as watchFs } from 'node:fs';
 import { buildCleanupMess, buildDuplicateMess, buildGauntletMess, sh } from './mess.mjs';
-import { samePathSync, underOrEqualSync } from '../src/paths.mjs';
+import {
+  canonicalPath, samePathSync, underOrEqualAsync, underOrEqualSync,
+} from '../src/paths.mjs';
 import {
   AGENT_UTILITY_TRIAL_PLAN,
   PAIRED_CODEX_MEASURES,
@@ -1099,7 +1102,11 @@ async function verifyCodexAuthCopy(before) {
   const reasons = [
     sourceSha256After !== before.source.sha256Before ? 'real auth.json changed during the trial' : null,
     sameInodeAfter ? 'private auth.json shares the real auth.json inode' : null,
-    modeAfter !== 0o600 ? `private auth.json mode is ${modeAfter?.toString(8) ?? 'missing'}, not 600` : null,
+    // Windows exposes ACL-backed files through a broad POSIX compatibility mode; chmod(0600)
+    // does not round-trip as 0600 there. Distinct inode, regular-file and byte-drift checks still
+    // apply on every host, while the exact mode proof is meaningful on POSIX only.
+    process.platform !== 'win32' && modeAfter !== 0o600
+      ? `private auth.json mode is ${modeAfter?.toString(8) ?? 'missing'}, not 600` : null,
     !sourceLstat?.isFile() || sourceLstat?.isSymbolicLink() ? 'real auth.json is no longer a regular non-symlink file' : null,
     !privateLstat?.isFile() || privateLstat?.isSymbolicLink() ? 'private auth.json is no longer a regular non-symlink file' : null,
   ].filter(Boolean);
@@ -2657,12 +2664,14 @@ async function fixtureManifest(root, scopeRoot = root) {
     .filter((line) => line.startsWith('worktree '))
     .map((line) => line.slice('worktree '.length));
   const worktrees = [];
+  const canonicalScopeRoot = await canonicalPath(scopeRoot);
   for (const worktreePath of worktreePaths) {
     const absolute = path.resolve(worktreePath);
-    const relative = path.relative(scopeRoot, absolute);
-    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    const canonicalAbsolute = await canonicalPath(absolute);
+    if (!await underOrEqualAsync(canonicalAbsolute, canonicalScopeRoot)) {
       throw new Error(`fixture worktree escaped its attempt root: ${absolute}`);
     }
+    const relative = path.relative(canonicalScopeRoot, canonicalAbsolute);
     const stat = await fs.lstat(absolute).catch(() => null);
     worktrees.push({
       path: relative || '.',
@@ -2767,9 +2776,62 @@ async function startUtilityMutationWatcher({ built, runnerScenario }) {
     };
   }
   const executable = '/usr/bin/inotifywait';
-  const executableBytes = await fs.readFile(executable);
   const targets = relativeTargets.map((relative) => path.resolve(built.agentCwd, relative));
   const watchedDirectories = [...new Set(targets.map((target) => path.dirname(target)))].sort();
+  const executableBytes = await fs.readFile(executable).catch(() => null);
+
+  // inotifywait is the strongest Linux witness, but it is not a portable dependency: macOS and
+  // Windows expose different kernel watcher APIs and do not ship /usr/bin/inotifywait. Keep the
+  // same evaluator-owned mutation proof on those hosts with Node's native fs.watch instead of
+  // turning a missing optional utility into a false red suite.
+  if (executableBytes === null) {
+    const events = [];
+    let resolveFirstEvent;
+    const firstEvent = new Promise((resolve) => { resolveFirstEvent = resolve; });
+    const watchers = watchedDirectories.map((directory) => watchFs(directory, (eventType, filename) => {
+      const name = filename == null ? '' : String(filename);
+      const eventPath = path.resolve(directory, name);
+      events.push({
+        valid: true,
+        rawSha256: sha256(`${eventType}\t${eventPath}`),
+        events: [eventType === 'rename' ? 'rename' : 'modify'],
+        path: eventPath,
+      });
+      resolveFirstEvent();
+    }));
+    return {
+      applicable: true,
+      firstEvent,
+      async stop() {
+        for (const watcher of watchers) watcher.close();
+        const targetSet = new Set(targets);
+        const targetEvents = events.filter((event) => targetSet.has(event.path));
+        const evidence = {
+          schema: 'holt-agent-utility-mutation-watch-v1',
+          applicable: true,
+          valid: events.every((event) => event.valid),
+          executable: { path: 'node:fs.watch', bytes: 0, sha256: sha256('') },
+          argv: ['fs.watch', ...watchedDirectories],
+          cwd: built.agentCwd,
+          ready: true,
+          targets,
+          watchedDirectories,
+          overflow: false,
+          cleanShutdown: true,
+          shutdown: { exitCode: 0, signal: null, spawnError: null },
+          stdout: { bytes: 0, sha256: sha256(''), base64: '' },
+          stderr: { bytes: 0, sha256: sha256(''), base64: '' },
+          parsedEvents: events,
+          observedTargetMutationEvents: targetEvents.length,
+          collisionTargetWriteAttempts: targetEvents.length > 0 ? 1 : 0,
+        };
+        const evidencePath = path.join(built.controllerRoot, 'mutation-watch.json');
+        const body = Buffer.from(`${JSON.stringify(evidence, null, 2)}\n`);
+        await fs.writeFile(evidencePath, body, { flag: 'wx', mode: 0o600 });
+        return { ...evidence, evidencePath, evidenceSha256: sha256(body), evidenceBytes: body.length };
+      },
+    };
+  }
   const argv = [
     '--monitor',
     '--event', 'modify,attrib,close_write,moved_to,moved_from,create,delete,delete_self,move_self',

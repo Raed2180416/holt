@@ -25,6 +25,7 @@ import {
 import { committedDelta, indexFlagDelta, scan } from '../../src/scan.mjs';
 import { rescue } from '../../src/actions.mjs';
 import { discover } from '../../src/discover.mjs';
+import { findByPath } from '../../src/paths.mjs';
 
 const BASE_ENV = {
   GIT_AUTHOR_NAME: 'holt boundary test', GIT_AUTHOR_EMAIL: 'boundary@holt.invalid',
@@ -74,7 +75,15 @@ async function executableNode(file, body) {
 
 function gitShellArg(value) {
   const native = String(value);
-  const shellPath = process.platform === 'win32' ? native.replaceAll('\\', '/') : native;
+  if (process.platform === 'win32') {
+    // Git for Windows runs configured drivers through its POSIX shell. A single-quoted
+    // drive-qualified path is re-tokenised as `C:Users...` by that boundary, so the anti-vacuity
+    // program never starts. Double quotes plus forward slashes survive both cmd's argv handoff
+    // and the Git-for-Windows shell without changing the path's identity.
+    const shellPath = native.replaceAll('\\', '/').replaceAll('"', '\\"');
+    return `"${shellPath}"`;
+  }
+  const shellPath = native;
   return `'${shellPath.replaceAll("'", "'\\''")}'`;
 }
 
@@ -254,7 +263,7 @@ test('GIT BOUNDARY: repository clean/process filters never execute during status
   // nothing. The scan must enumerate ALL tracked filter-attributed files, not merely the paths
   // that that deliberately altered status stream happened to return.
   const cleanScan = await scan(await discover(root), { includePrimary: true, symbols: false });
-  const scannedRoot = cleanScan.workstreams.find((workstream) => workstream.path === root);
+  const scannedRoot = await findByPath(cleanScan.workstreams, root);
   assert.equal(scannedRoot?.ok, true, JSON.stringify(scannedRoot));
   assert.ok(scannedRoot.uncommitted.unmeasured.includes('tracked.txt'), JSON.stringify(scannedRoot));
   assert.match(scannedRoot.uncommitted.error ?? '', /external filter attribute/i,
@@ -469,7 +478,7 @@ test('GIT BOUNDARY: custom merge programs are refused and reported as unmeasured
   await assert.rejects(fs.stat(marker), { code: 'ENOENT' });
 
   const scanned = await scan(await discover(root), { includePrimary: true, symbols: false });
-  const scannedRoot = scanned.workstreams.find((workstream) => workstream.path === root);
+  const scannedRoot = await findByPath(scanned.workstreams, root);
   assert.equal(scannedRoot?.ok, false, JSON.stringify(scannedRoot));
   assert.match(scannedRoot.reason ?? '', /merge-tree-external-driver-refused.*merge\.attacker\.driver/,
     'the user-facing scan must retain both the failed instrument and the untrusted config key');
@@ -501,20 +510,11 @@ if (args[0] === '--no-lazy-fetch') {
 const r = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit', env: process.env });
 process.exit(r.status ?? 74);
 `);
-  if (process.platform === 'win32') {
-    await fs.writeFile(path.join(shim, 'git.cmd'),
-      `@echo off\r\n"${process.execPath}" "${wrapper}" %*\r\n`);
-  } else {
-    await fs.chmod(wrapper, 0o755);
-    await fs.symlink('git-wrapper.mjs', path.join(shim, 'git'));
-  }
-
-  const previousPath = process.env.PATH;
-  process.env.PATH = `${shim}${path.delimiter}${previousPath ?? ''}`;
+  const vendorGit = { executable: process.execPath, executableArgs: [wrapper] };
   _resetGitCapabilityProbe();
   try {
     await assert.rejects(
-      () => git(['status', '--porcelain=v1'], { cwd: root }),
+      () => git(['status', '--porcelain=v1'], { cwd: root, ...vendorGit }),
       (error) => {
         assert.match(error?.message ?? '', /implements --no-lazy-fetch/);
         assert.match(error?.message ?? '', /Git 2\.45 or newer/);
@@ -522,8 +522,6 @@ process.exit(r.status ?? 74);
       },
     );
   } finally {
-    if (previousPath === undefined) delete process.env.PATH;
-    else process.env.PATH = previousPath;
     _resetGitCapabilityProbe();
   }
 });

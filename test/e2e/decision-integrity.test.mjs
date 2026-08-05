@@ -83,12 +83,15 @@ async function faultInjectedHolt(t) {
 
   const agentPath = path.join(dir, 'src', 'agent.mjs');
   const source = await fs.readFile(agentPath, 'utf8');
-  const needle = 'export async function assessCommand(command, cwd = process.cwd(), { guardAllow = [] } = {}) {';
-  assert.ok(source.includes(needle),
+  const start = source.indexOf('export async function assessCommand(command, cwd = process.cwd(), {');
+  const endMarker = '} = {}) {\n';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end >= 0,
     'the fault-injection needle no longer matches assessCommand — this test is measuring nothing '
     + 'until it is updated, which is the one outcome it must never have');
-  await fs.writeFile(agentPath, source.replace(needle,
-    `${needle}\n  if (process.env.HOLT_FAULT_TEST) throw new Error('injected analyser fault');`));
+  const injection = "  if (process.env.HOLT_FAULT_TEST) throw new Error('injected analyser fault');\n";
+  const at = end + endMarker.length;
+  await fs.writeFile(agentPath, source.slice(0, at) + injection + source.slice(at));
   return path.join(dir, 'bin', 'holt.mjs');
 }
 

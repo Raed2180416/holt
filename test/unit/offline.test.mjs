@@ -67,7 +67,9 @@ async function scanForNetwork(dir) {
   for (const f of await sourceFiles(dir)) {
     const raw = await fs.readFile(f, 'utf8');
     const body = executable(raw);
-    const rel = path.relative(dir, f);
+    // Git, Node and the host filesystem may spell the same path with different separators.
+    // Evidence keys are deliberately POSIX-shaped so the denominator is identical on Windows.
+    const rel = path.relative(dir, f).split(path.sep).join('/');
     for (const line of raw.split('\n')) {
       const m = IMPORT_RE.exec(line);
       if (!m) continue;

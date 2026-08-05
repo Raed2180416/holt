@@ -435,7 +435,11 @@ function commandMayConvert(argv) {
   if (sub === 'diff-index') return !rest.includes('--cached');
   if (sub === 'hash-object') return !rest.includes('--no-filters');
   if (sub === 'merge-tree') return true;
-  if (sub === 'worktree') return rest.some((arg) => arg.split('=')[0] === 'add');
+  // `worktree list` is read-only at the Git API level, but newer Git releases refresh linked
+  // worktree state while enumerating several worktrees.  That refresh can consult attributes and
+  // reach a repository clean/process driver.  Treat the whole worktree family as conversion-
+  // capable so the same measured no-op overrides protect discovery as `worktree add` already is.
+  if (sub === 'worktree') return true;
   if (sub === 'read-tree') return commandMaterializesWorkingTree(argv);
   if (sub === 'update-index') {
     // These are the only object-only forms Holt uses. Presence of one safe-looking flag is not
@@ -530,9 +534,11 @@ function commandAuthorsConvertedContent(argv) {
   return sub === 'add' || sub === 'update-index';
 }
 
-async function effectiveExternalConversionPrograms(cwd, env, timeout) {
+async function effectiveExternalConversionPrograms(
+  cwd, env, timeout, executable = 'git', executableArgs = [],
+) {
   return new Promise((resolve, reject) => {
-    execFile('git', [
+    execFile(executable, [...executableArgs,
       'config', '--null', '--name-only', '--get-regexp', EXTERNAL_CONVERSION_CONFIG_RE,
     ], {
       cwd, timeout, maxBuffer: 8 * 1024 * 1024, env,
@@ -554,7 +560,9 @@ async function effectiveExternalConversionPrograms(cwd, env, timeout) {
   });
 }
 
-async function buildGitCommandContext(argv, cwd, intentional, timeout = DEFAULT_TIMEOUT_MS) {
+async function buildGitCommandContext(
+  argv, cwd, intentional, timeout = DEFAULT_TIMEOUT_MS, executable = 'git', executableArgs = [],
+) {
   const env = buildGitEnv(intentional);
   if (!commandMayConvert(argv)) {
     return {
@@ -566,7 +574,7 @@ async function buildGitCommandContext(argv, cwd, intentional, timeout = DEFAULT_
       },
     };
   }
-  const programs = await effectiveExternalConversionPrograms(cwd, env, timeout);
+  const programs = await effectiveExternalConversionPrograms(cwd, env, timeout, executable, executableArgs);
   if (commandAuthorsConvertedContent(argv) && programs.checkinFilterKeys.length > 0) {
     const named = programs.checkinFilterKeys.slice(0, 5).join(', ');
     const more = programs.checkinFilterKeys.length > 5
@@ -654,20 +662,20 @@ function withCommandConfig(argv, configArgs = []) {
 /** @type {Map<string, Promise<string>>} */
 const noLazyFetchProbes = new Map();
 
-function gitExecutableKey(env) {
+function gitExecutableKey(env, executable = 'git', executableArgs = []) {
   const value = (name) => {
     const found = Object.keys(env).find((key) => key.toUpperCase() === name);
     return found ? env[found] : '';
   };
-  return `${value('PATH')}\0${value('PATHEXT')}`;
+  return `${executable}\0${JSON.stringify(executableArgs)}\0${value('PATH')}\0${value('PATHEXT')}`;
 }
 
-async function requireNoLazyFetch(env) {
-  const key = gitExecutableKey(env);
+async function requireNoLazyFetch(env, executable = 'git', executableArgs = []) {
+  const key = gitExecutableKey(env, executable, executableArgs);
   let probe = noLazyFetchProbes.get(key);
   if (!probe) {
     probe = new Promise((resolve, reject) => {
-      execFile('git', ['version'], {
+      execFile(executable, [...executableArgs, 'version'], {
         timeout: 10_000, maxBuffer: 1024 * 1024, env,
       }, (err, stdout, stderr) => {
         if (err) {
@@ -685,7 +693,7 @@ async function requireNoLazyFetch(env) {
         // A vendor build can carry a modern-looking version while omitting a feature. Probe the
         // actual option once; real commands use the equivalent environment variable so their
         // subcommand remains argv[0] for wrappers and instrumentation.
-        execFile('git', ['--no-lazy-fetch', 'version'], {
+        execFile(executable, [...executableArgs, '--no-lazy-fetch', 'version'], {
           timeout: 10_000, maxBuffer: 1024 * 1024, env,
         }, (capabilityError, _capabilityStdout, capabilityStderr) => {
           if (capabilityError) {
@@ -776,10 +784,12 @@ export async function resolveTimeout(cwd, timeout) {
  *
  * @param {string[]} argv
  * @param {{ cwd?: string, timeout?: number, allowObjectWrite?: boolean,
- *           allowMutation?: boolean, env?: Record<string, string|undefined> }} [opts]
+ *           allowMutation?: boolean, env?: Record<string, string|undefined>,
+ *           executable?: string, executableArgs?: string[] }} [opts]
  */
 export async function git(argv, {
   cwd, timeout = DEFAULT_TIMEOUT_MS, allowObjectWrite = true, allowMutation = false, env,
+  executable = 'git', executableArgs = [],
 } = {}) {
   const verdict = classify(argv, { allowMutation });
   if (!verdict.allowed) {
@@ -793,14 +803,19 @@ export async function git(argv, {
     );
   }
 
-  const commandContext = await buildGitCommandContext(argv, cwd, env, timeout);
+  const commandContext = await buildGitCommandContext(
+    argv, cwd, env, timeout, executable, executableArgs,
+  );
   const childEnv = commandContext.env;
-  if (argv[subcommandIndex(argv)] !== 'version') await requireNoLazyFetch(childEnv);
-  const childArgv = withCommandConfig(hardenGitArgv(argv), commandContext.configArgs);
+  if (argv[subcommandIndex(argv)] !== 'version') {
+    await requireNoLazyFetch(childEnv, executable, executableArgs);
+  }
+  const childArgv = [...executableArgs,
+    ...withCommandConfig(hardenGitArgv(argv), commandContext.configArgs)];
 
   return new Promise((resolve, reject) => {
     execFile(
-      'git',
+      executable,
       childArgv,
       {
         cwd,
