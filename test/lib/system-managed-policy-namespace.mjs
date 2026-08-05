@@ -64,7 +64,15 @@ export function registerSystemManagedPolicyNamespace(testFileUrl, label) {
     delete env.NODE_TEST_CONTEXT;
     delete env.NODE_TEST_PIPE;
     const source = fileURLToPath(testFileUrl);
-    const relativeSource = path.relative(process.cwd(), source).split(path.sep).join('/');
+    // The outer test may itself be running from a temporary bind path, while process.cwd()
+    // still names the original checkout. Derive the stable repository-relative test path from
+    // the final `/test/` segment instead of joining two unrelated absolute path namespaces.
+    const normalizedSource = source.split(path.sep).join('/');
+    const testMarker = '/test/';
+    const markerIndex = normalizedSource.lastIndexOf(testMarker);
+    const relativeSource = markerIndex >= 0
+      ? normalizedSource.slice(markerIndex + 1)
+      : path.relative(process.cwd(), source).split(path.sep).join('/');
     const namespaceArgs = [
       'sh',
       '-c',
