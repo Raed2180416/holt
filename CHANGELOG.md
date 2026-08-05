@@ -15,8 +15,8 @@ below was reproduced before fixing and verified after.
 - A newline in a worktree name did the same, while `holt risk` named that worktree as holding work
   found nowhere else.
 - `rm -rf <repository root>` was allowed. `.git` is inside that path.
-- The hook stalled every tool call for as long as the host held stdin open — 27 s measured, now
-  0.1 s.
+- The hook stalled every tool call for as long as the host held stdin open. It now reads the
+  bounded host payload without waiting for an unrelated end-of-stream signal.
 
 **Integration ownership fixes**
 
@@ -37,11 +37,12 @@ below was reproduced before fixing and verified after.
 
 **Supply-chain and test integrity**
 
-- 43% of the codebase never reached the no-telemetry and path-comparison gates. The no-telemetry
-  guarantee survived the widened scan.
+- Substantial product code never reached the no-telemetry and path-comparison gates. The
+  no-telemetry guarantee survived the widened scan.
 - The static-analysis ratchet wrote a zero and passed when the checker could not run.
-- Both benchmark harnesses reported "correct" for runs that graded nothing. §1's 1000/1000 is
-  still 1000/1000, now genuinely graded.
+- Both benchmark harnesses reported "correct" for runs that graded nothing. They now refuse
+  missing denominators and ungraded rows; no replacement rate is published without its exact
+  retained artifact.
 
 
 ## 0.3.0

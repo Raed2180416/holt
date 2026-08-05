@@ -26,14 +26,15 @@ import { fileURLToPath } from 'node:url';
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { newRepo } from '../fixtures.mjs';
 import {
-  appendEvent, readJournal, readJournalRaw, verifyJournal, proveEntry, journalPaths, withLock, GENESIS,
+  appendEvent, readJournal, readJournalRaw, readVerifiedJournal, verifyJournal, proveEntry,
+  journalPaths, withLock, GENESIS, JOURNALLED_ACTIONS, HOLT_PUBLIC_NAMESPACE,
 } from '../../src/journal.mjs';
 import { protect, unprotect } from '../../src/actions.mjs';
 import { summarizeJournal } from '../../src/roi.mjs';
 import { parseCheckpoint, verifyNote, formatCheckpoint, merkleRoot, entryLeaf } from '../../src/attest.mjs';
 import { exportJournal } from '../../src/siem.mjs';
 import { sinkExport, EntitlementError } from '../../src/team/audit-sink.mjs';
-import { fleetAudit } from '../../src/team/fleet.mjs';
+import { fleetAudit, journalEvidenceState } from '../../src/team/fleet.mjs';
 
 const CLI = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
 
@@ -96,7 +97,63 @@ test('every entry is chained and attributed, and the whole log verifies', async 
   const cp = parseCheckpoint(await fs.readFile(checkpoint, 'utf8'));
   assert.equal(cp.size, 6);
   assert.equal(cp.root.toString('hex'), v.root);
-  assert.match(cp.origin, /^holt\.dev\/journal\//);
+  assert.ok(cp.origin.startsWith(`${HOLT_PUBLIC_NAMESPACE}/journal/`), cp.origin);
+});
+
+test('an existing checkpoint origin is inherited verbatim when the journal advances', async () => {
+  const fx = await repoWithJournal(1, 'legacy-origin');
+  const { checkpoint } = await journalPaths(fx.root);
+  const cp = parseCheckpoint(await fs.readFile(checkpoint, 'utf8'));
+  const historicalOrigin = `${['holt', 'dev'].join('.')}/journal/legacy-origin`;
+  await fs.writeFile(checkpoint, formatCheckpoint({
+    origin: historicalOrigin, size: cp.size, root: cp.root,
+  }), 'utf8');
+
+  const appended = await appendEvent(fx.root, { action: 'protect', id: 'second' });
+  assert.equal(appended.ok, true, appended.error);
+  const advanced = parseCheckpoint(await fs.readFile(checkpoint, 'utf8'));
+  assert.equal(advanced.origin, historicalOrigin,
+    'changing the default namespace must not rewrite or invalidate an existing journal identity');
+  assert.equal((await verifyJournal(fx.root)).ok, true);
+});
+
+test('journal action vocabulary distinguishes new quarantine from historical physical cleanup', async () => {
+  assert.ok(JOURNALLED_ACTIONS.includes('clean-quarantine'));
+  assert.ok(JOURNALLED_ACTIONS.includes('clean-restore'));
+  assert.ok(JOURNALLED_ACTIONS.includes('clean-purge'),
+    'current explicit physical reclamation must have a first-class audit action');
+  assert.ok(JOURNALLED_ACTIONS.includes('clean-remove'),
+    'older journal entries must remain readable with their original destructive meaning');
+
+  const fx = await newRepo('audit-clean-quarantine');
+  const restoreArgv = [
+    ['git', 'worktree', 'unlock', '/r/.holt-clean/spent'],
+    ['git', 'worktree', 'move', '/r/.holt-clean/spent', '/r/spent'],
+  ];
+  await appendEvent(fx.root, {
+    action: 'clean-quarantine', id: 'spent', path: '/r/spent',
+    quarantinePath: '/r/.holt-clean/spent', restoreArgv,
+  });
+  const snapshot = await readVerifiedJournal(fx.root);
+  assert.equal(snapshot.verification.ok, true);
+  assert.equal(snapshot.entries[0].action, 'clean-quarantine');
+  assert.deepEqual(snapshot.entries[0].restoreArgv, restoreArgv);
+});
+
+test('verified journal reader returns events from the exact snapshot it verified', async () => {
+  const fx = await repoWithJournal(1);
+  const snapshot = await readVerifiedJournal(fx.root);
+
+  // Move the live journal forward after the read. The returned verification and entries must
+  // remain one coherent historical snapshot rather than one old verdict paired with newer data.
+  await appendEvent(fx.root, { action: 'blocked', id: 'later', command: 'rm -rf later' });
+  const now = await verifyJournal(fx.root);
+
+  assert.equal(snapshot.verification.ok, true);
+  assert.equal(snapshot.verification.entries, 1);
+  assert.equal(snapshot.entries.length, 1);
+  assert.equal(snapshot.entries[0].seq, 0);
+  assert.equal(now.entries, 2, 'premise: the live journal advanced after the snapshot');
 });
 
 test('the journal lives under the COMMON git dir, so it survives worktree deletion', async () => {
@@ -727,6 +784,35 @@ test('PAID: fleet audit verifies every repo and NEVER folds a broken one into th
   // The failing repo is still listed, named, and sorted first — never hidden.
   assert.equal(f.repos[0].verified, false);
   assert.ok(f.actors.length > 0, 'the fleet view has no actor breakdown');
+});
+
+test('fleet audit evidence states distinguish absence, empty-valid, populated, and broken journals', async () => {
+  // Classification is deliberately a separate, total contract: a future verifier may support a
+  // checkpointed zero-entry journal, but it still is not event evidence and must not enter totals.
+  assert.equal(journalEvidenceState({ ok: true, code: 'empty', entries: 0 }), 'no-journal');
+  assert.equal(journalEvidenceState({ ok: true, code: 'ok', entries: 0 }), 'empty-valid');
+  assert.equal(journalEvidenceState({ ok: true, code: 'ok', entries: 1, legacy: 0 }), 'valid-populated');
+  assert.equal(journalEvidenceState({ ok: false, code: 'checkpoint-missing', entries: 1 }), 'tampered-or-unverifiable');
+  assert.equal(journalEvidenceState({ ok: false, code: 'empty', entries: 0 }), 'tampered-or-unverifiable',
+    'a contradictory verifier result must fail closed; a label must not outrank ok:false');
+
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-fleet-evidence-'));
+  const populated = await repoWithJournal(1, 'fa-populated');
+  const absent = await newRepo('fa-absent');
+  const broken = await repoWithJournal(1, 'fa-broken-evidence');
+  const { checkpoint } = await journalPaths(broken.root);
+  await fs.rm(checkpoint);
+  for (const fx of [populated, absent, broken]) {
+    await fs.cp(fx.root, path.join(rootDir, path.basename(path.dirname(fx.root))), { recursive: true });
+  }
+
+  const f = await fleetAudit([rootDir], PAID);
+  assert.equal(f.verifiedRepositories, 1, 'only a populated, fully verified chain is trusted evidence');
+  assert.equal(f.totals.events, 1);
+  assert.deepEqual(f.unverifiedRepositories.map((r) => r.journalState).sort(),
+    ['no-journal', 'tampered-or-unverifiable']);
+  assert.ok(f.repos.every((r) => r.verified || r.entries === 0),
+    'untrusted rows must not carry derived event totals that look confirmed');
 });
 
 test('the ROI summary counts releases without netting them against protections', async () => {

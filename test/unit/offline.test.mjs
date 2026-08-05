@@ -9,10 +9,10 @@
  * identifier from an endpoint has exactly two futures, and both are bad: it goes red on innocent
  * strings until somebody widens it into uselessness, or it gets quietly ignored.
  *
- * So the real property is asserted here, and it is a property about CAPABILITY: no file under
- * src/ may import or reference any API through which a packet could leave the machine. That is
- * what the promise actually means, it is checkable, and it runs on every platform in every job
- * rather than only on the paid-path runner.
+ * So the real property is asserted here, and it is a property about CAPABILITY: ordinary analysis,
+ * hooks, MCP and CI authority resolution may not reference an API through which a packet could
+ * leave the machine. The exact exception is the separately imported Enterprise TUF adapter,
+ * reached only by explicit `managed-policy sync` and declared in the supply-chain ledger.
  *
  * The URL grep in CI stays. A bare URL in src/ is still a smell worth a human look; it just is
  * not the thing that makes the promise true.
@@ -79,17 +79,20 @@ async function scanForNetwork(dir) {
     for (const g of NETWORK_GLOBALS) {
       if (new RegExp(`(?:^|[^\\w.$])${g}\\s*\\(`).test(body)) violations.push(`${rel}: calls ${g}()`);
     }
+    if (/\bglobalThis\s*(?:\.\s*|\?\.\s*)fetch\b/u.test(body)) {
+      violations.push(`${rel}: references globalThis.fetch`);
+    }
   }
   return violations;
 }
 
-test('NO src/ FILE CAN REACH THE NETWORK — no import, no require, no bare global', async () => {
+test('NO ORDINARY RUNTIME NETWORK — only the explicit managed-policy TUF adapter can reach it', async () => {
   const files = await sourceFiles(SRC);
   assert.ok(files.length > 15,
     `only ${files.length} source files were scanned — the walker is blind, and its silence would mean nothing`);
   const violations = await scanForNetwork(SRC);
-  assert.deepEqual(violations, [],
-    `src/ must make no network calls — the free tool promises zero telemetry:\n  ${violations.join('\n  ')}`);
+  assert.deepEqual(violations, ['team/managed-policy-tuf.mjs: references globalThis.fetch'],
+    `network capability escaped the one explicit TUF sync adapter:\n  ${violations.join('\n  ')}`);
 });
 
 test('PROVE THE INSTRUMENT: the same checker DOES fire on a file that reaches the network', async () => {

@@ -114,6 +114,8 @@ test('classifier: refuses mutating subverbs of otherwise-safe commands', () => {
     ['config', '--unset', 'user.name'],
     ['config', '--add', 'k', 'v'],
     ['hash-object', '-w', 'file'],
+    ['cat-file', '--filters', 'HEAD:file'],
+    ['cat-file', '--textconv', 'HEAD:file'],
   ];
   for (const argv of mustRefuse) {
     const v = classify(argv);

@@ -20,19 +20,33 @@ import { scan } from '../src/scan.mjs';
 import { analyze, contextDigest } from '../src/analyze.mjs';
 import { deepDuplicates, detectJscpd } from '../src/deep.mjs';
 import { detectCtags, detectEnry, languageCoverage } from '../src/symbols.mjs';
-import { classify } from '../src/git.mjs';
+import {
+  classify, git, listTrackedFiles, historyCompleteness,
+  NO_LAZY_FETCH_MIN_GIT, noLazyFetchSupported,
+} from '../src/git.mjs';
 import {
   renderSummary, renderRisk, renderCollisions, renderDuplicates,
   renderPlan, renderCollapse, renderHotspots, renderContext, renderImpact, renderOrder, renderPartition, renderBranches, paint,
 } from '../src/render.mjs';
 import { renderHtml } from '../src/graph-html.mjs';
 import { renderClusters } from '../src/ascii-graph.mjs';
-import { assessCommand, buildBrief, cachedReport, resolveCommand, resolveFileTargets } from '../src/agent.mjs';
+import {
+  assessCommand, assessExplicitFileOperations, buildBrief, cachedReport, resolveCommand,
+  resolveFileTargets,
+} from '../src/agent.mjs';
 import { impact, detectRipgrep } from '../src/impact.mjs';
 import {
   integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext, mcpTargets,
 } from '../src/integrate/adapters.mjs';
-import { protect, unprotect, rescue, rescues, clean, discard, auto } from '../src/actions.mjs';
+import { documentedNativeTool } from '../src/integrate/native-tools.mjs';
+import {
+  inspectActivationIntegrity, activationIntegrityLines,
+} from '../src/integrate/activation-integrity.mjs';
+import { providersReport } from '../src/integrate/provider-profiles.mjs';
+import {
+  protect, unprotect, rescue, rescues, clean, discard, auto, quarantines, restoreQuarantine,
+  purgeQuarantine,
+} from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
 import { landingOrder } from '../src/order.mjs';
@@ -43,13 +57,16 @@ import { exportJournal, SIEM_FORMATS } from '../src/siem.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
 import { resolveActor, setAmbientActor, actorLabel } from '../src/actor.mjs';
 import { forensics, renderForensics } from '../src/forensics.mjs';
-import { git, listTrackedFiles, historyCompleteness } from '../src/git.mjs';
 import { checkEntitlement, licenseStatus, activateLicense, deactivateLicense, LicenseError } from '../src/license.mjs';
 import { loadPolicy, loadPolicyFrom, loadGatePolicy, evaluatePolicy, gateVerdict, ciPolicyOutcome, policySourceOf } from '../src/team/policy.mjs';
 import { fleetScan, fleetAudit } from '../src/team/fleet.mjs';
 import { sinkExport } from '../src/team/audit-sink.mjs';
 import { loadConfig, ConfigError } from '../src/config.mjs';
 import { stashState, describeStash } from '../src/stash.mjs';
+
+// Exact current upstream release. Setup prints this byte-for-byte before asking and Go verifies
+// the module through its normal checksum machinery; there is no moving `@latest` executable.
+const ENRY_GO_INSTALL = 'github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6';
 
 // Commands where a config error must NEVER kill the process. The principle is universal:
 // config tunes HEURISTICS (family grouping, maintenance nagging) — it never changes the
@@ -61,7 +78,8 @@ import { stashState, describeStash } from '../src/stash.mjs';
 // If no (pure display commands like status, graph, brief), config errors fail loudly so
 // the user knows their config is broken.
 //
-// Falls back to defaults for: every command that PROTECTS, GATES, RESCUES, or REMOVES work.
+// Falls back to defaults for: every command that PROTECTS, GATES, RESCUES, QUARANTINES, or
+// REMOVES work.
 // Fails loudly for: pure display/reporting commands.
 const CONFIG_NON_FATAL = new Set([
   'hook',           // the guard itself — dying here leaves the agent unprotected
@@ -72,7 +90,10 @@ const CONFIG_NON_FATAL = new Set([
   'protect',        // places locks — dying here leaves work unprotected
   'unprotect',      // releases locks
   'auto',           // auto-protect
-  'clean',          // removes worktrees (re-verifies; defaults are MORE conservative, not less)
+  'clean',          // quarantines worktrees (re-verifies; defaults are MORE conservative, not less)
+  'quarantines',    // lists recoverable clean quarantines
+  'restore',        // restores one clean quarantine without overwriting its original path
+  'purge',          // reclaims a verified clean quarantine behind a dry-run/apply boundary
   'discard',        // discards paths
   'verify',         // verifies workstream pairs
   'rescued',        // lists rescues
@@ -80,52 +101,55 @@ const CONFIG_NON_FATAL = new Set([
 ]);
 
 const USAGE = `
-holt — know what your agents made, and don't lose any of it
+holt — in-flight work integrity for parallel coding agents
 
 USAGE
   holt [command] [options]
 
 COMMANDS
   status              what your workstreams produced and what to do about it  (default)
-  risk                unique work and what is provably safe to delete          (P0, P6)
-  collisions          workstream pairs that will fight                         (P1)
+  risk                unique, redundant and unverifiable work before deletion  (P0, P6)
+  collisions          proven conflicts + predicted file/symbol overlap         (P1)
   hotspots            files shared by multiple workstreams (aggregated, low-noise)
-  duplicates          pairs that built the same thing  [--deep]                (P3)
+  duplicates          symbol/body overlap candidates  [--deep]                 (P3)
   context <id>        what an agent in <id> needs to know about its siblings   (P2)
-  plan                drop / collapse / land-in-this-order                     (P5)
+  plan                advisory drop / collapse / landing review plan            (P5)
   impact              who DEPENDS on what another workstream changed  (not a conflict check)
-  order               landing order: parallel lanes + min-entanglement sequence
-  partition           pre-flight split for N agents  [--agents <n>]   (1–256, collision-free start map)
+  order               heuristic landing order over observed relationships
+  partition           advisory starting ownership map  [--agents <n>]   (1–256)
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
   journal             hash-chained audit trail of every protect / UNPROTECT / rescue /
-                      clean / branch-delete / blocked, with WHO did it
+                      clean / branch-delete / blocked; actor is reported, inferred or unknown
                       --verify        re-hash the chain; names the exact entry that broke
                       --prove <seq>   offline RFC 6962 inclusion proof for one entry
                       --export <fmt>  ocsf | ecs | cef | json | csv | intoto   (free)
-                      --summary       the ROI view — losses prevented, hours saved
+                      --summary       event-backed outcomes: refusals, rescues, quarantines and
+                                      historical physical cleanup
                       --sink <path>   CONTINUOUS cursor-tracked export into a SIEM  [team]
                       --fleet <dir>   verify + aggregate every repo's trail        [team]
-  forensics [<id>]    which agent destroyed what, and when: created / wrote / attempted /
-                      BLOCKED / survived, attributed to the agent session that did it
+  forensics [<id>]    recorded created / wrote / attempted / BLOCKED / survived events;
+                      attribution is reported, inferred or unknown
                       [--since <iso>] [--agent <id>]
                       --fleet <dir>...: correlate one agent session across every repo  [team]
   fleet <dir>...      every repository under <dir>: where work sits unlanded   [team]
-  license             activate | status | deactivate  (team/enterprise features)
-  ci                  team gate for CI: fail a merge that abandons work
+  license             activate | status | deactivate  (Team and Enterprise entitlements)
+  managed-policy      enroll | sync | status | recover  (Enterprise; explicit local policy authority)
+  ci                  single-repository CI gate: fail a merge that abandons work
                       [--fail-on-unlanded] [--max-age-days <n>] [--ignore <branch>]...
+                      reviewed .holt/policy.json rules require Team
                       (needs full refs: actions/checkout fetch-depth: 0)
   graph               the relationship graph  [--html <file>]
   stash               stash entries holding work no ref has  [--json]
-  gate <id>           exit non-zero if <id> holds unique work   (pre-delete hook)
+  gate <id>           exit 0 = disposable, 1 = holds work, 2 = unverifiable  (pre-delete hook)
   tui                 interactive risk-sorted dashboard  [--snapshot]
-  setup               ONE-COMMAND FIRST RUN: install backends, wire agents, show what is at risk
+  setup               first run: inspect/install backends, wire supported hosts, show risk
   doctor              environment and backend check  [--install [--yes]]
-  audit               supply-chain evidence for THIS installation: integrity against the signed
+  audit               supply-chain evidence for THIS installation: integrity against the shipped
                       manifest, and every capability it holds — what it reads, writes, executes
                       and sends. Offline, no repository needed, free on every tier.
-                      [--json] [--require-signature]   exits non-zero on any failure
+                      [--json] [--require-signature]   require a detached signature when requested
 
-ACTING  (these MUTATE the repo; everything above is read-only)
+ACTING  (these explicitly mutate local Git/repository state)
   auto                do everything that cannot lose data, and report what needs you
                       locks what is at risk, releases locks no longer justified, and hands
                       the destructive half over WITH the evidence — it never deletes
@@ -137,21 +161,33 @@ ACTING  (these MUTATE the repo; everything above is read-only)
   rescue <id>         capture unique work to a verifiable ref  [--release] [--dry-run]
                       exits non-zero if the capture cannot be verified
   rescued             list every rescue taken in this repo
-  clean               remove provably-disposable worktrees + branches  [--apply]
-  discard <path>...   delete something holt is guarding, capturing it first  [--dry-run]
-                      the escape hatch: content goes to refs/holt/discard/* and is VERIFIED
-                      before anything is removed, so the guard stays on and the loss does not
+  clean               re-check, then move disposable worktrees into locked local quarantine
+                      [--apply] — no files or branches are deleted; restore argv is returned
+  quarantines         list recoverable clean quarantines and interrupted transitions
+  restore <id>        restore one clean quarantine to its original unoccupied path;
+                      preserves a lock that existed before quarantine and never overwrites
+  purge <id>          permanently reclaim one completed clean quarantine  [--apply]
+                      dry-run by default; anchors exact HEAD, uses non-forced Git removal,
+                      retains the branch and reports exact recovery commands
+  discard <path>...   discard guarded content after a verified capture  [--dry-run]
+                      content goes to refs/holt/discard/* first; tracked edits restore to HEAD,
+                      while untracked content is removed only after capture verification
   verify <a> <b>      run YOUR test suite on A alone, B alone, and A+B merged; report
                       only what the COMBINATION breaks  [--run "<cmd>"]  (executes code)
 
 AGENT INTEGRATION
-  hosts               coverage matrix: every known agent host + the strength holt gives it
-  integrate           wire holt into every agent found here (AGENTS.md + MCP + hooks)
+  hosts               coverage matrix for known host surfaces and their actual integration grade
+  providers           provider adapter status: implemented vs framework-only, contract/live proof,
+                      install commands, scopes, and reactive vs proactive capabilities  [--json]
+  integrate           wire supported detected hosts here (AGENTS.md + MCP + hooks)
                       re-run any time — upgrade-safe: reconciles entries from any prior version
-                      in place and reports what it changed, rather than only adding  [--remove]
-  uninstall           the other half of integrate: remove every hook/MCP entry holt wrote here
+                      in place and reports what it changed, rather than only adding
+                      [--all-hosts] intentionally prepares every supported project client
+                      [--dry-run] previews without writing  [--global] uses supported user scope
+                      [--remove]
+  uninstall           the other half of integrate: remove the hook/MCP entries holt wrote here
                       (alias for integrate --remove) — run BEFORE removing the holt package, or
-                      every agent wired to it is left pointing at a binary that is gone
+                      configured hosts may be left pointing at a binary that is gone
   brief               plain-text sibling-workstream briefing for any agent
   mcp                 run as an MCP server over stdio
                       --print-config [--host <host>]: print the MCP server config as JSON (or
@@ -159,10 +195,12 @@ AGENT INTEGRATION
                       hosts: generic (default), claude, cursor, vscode, opencode, zed, codex,
                       crush, amp, kilo
   hook <event>        hook entry point; reads the host event as JSON on stdin
-                      events: pre-tool-use · session-start · user-prompt-submit · stop · session-end
-                      --host claude-code|cursor|devin|generic   --command <cmd>
+                      events: pre-tool-use · session-start · user-prompt-submit · pre-invocation · stop · session-end
+                      --host claude-code|opencode|cursor|codex|qwen-code|antigravity|copilot|cline|goose|devin-cli|cascade|generic
+                      --host also supports qwen-code for its documented shell/write/edit contract
+                      --command <cmd>
                       --autoprotect: session-start also locks at-risk workstreams first
-                      (holt integrate wires this — zero-touch protection at every session)
+                      (wired only for host surfaces whose session hook is implemented)
 
 OPTIONS
   --json              machine-readable output
@@ -190,6 +228,8 @@ OPTIONS
   --html <file>       graph: write an interactive HTML graph
   --global            integrate: ALSO add holt to user-level editor configs.
                       Default is project scope — nothing outside the repo is touched.
+  --all-hosts         integrate: prepare configs/hooks for every supported local client;
+                      default configures only hosts detected here or on this machine
   --remove            integrate: remove everything holt wrote here instead of installing it
                       (same as holt uninstall)
   --force             unprotect: also release a lock holt did not place
@@ -202,6 +242,13 @@ OPTIONS
   --debug             print stack traces on unexpected errors (default: message only)
   --quiet             suppress non-essential output (headers, tips)
   --plain             force human-readable output for action commands (default: JSON when piped)
+  --profile <name>    managed-policy profile (required)
+  --authority <kind>  managed-policy authority: user or system (required for every managed-policy command)
+  --store <path>      user managed-policy store only; system authority is fixed to /etc/holt/managed-policy
+  --bootstrap-root <file>  exact trusted TUF root.json bytes for managed-policy enrollment
+  --metadata-url <url> --targets-url <url>  TUF repositories for explicit managed-policy sync
+  --repository <label> --repository-root <path>  administrator label + persistent workspace binding for enrollment
+  --recovery-mode <complete|quarantine> --lock-token <token> --orphan <name>  explicit recovery inputs
 
 CONFIG (optional — see README.md#configuration)
   .holtrc.json        in the repository root: familyOverrides, guardAllow, maintenanceFloor, maintenanceRatio
@@ -227,7 +274,10 @@ QUICK START
   holt setup                     # first run: install backends, wire agents, show what's at risk
   holt status                    # see what your workstreams produced
   holt risk                      # find work that exists nowhere else
-  holt clean                     # see what's disposable (dry-run; add --apply to remove)
+  holt clean                     # preview recoverable quarantine; add --apply to move + lock
+  holt quarantines               # list every recoverable quarantine
+  holt restore <id>              # restore one without overwriting or weakening an older lock
+  holt purge <id>                # preview disk reclamation; add --apply after reviewing evidence
   holt gate <id>                 # pre-delete check: exit 0 = safe, 1 = holds unique work, 2 = unknown
   holt protect                   # lock at-risk worktrees so 'git worktree remove --force' refuses
 
@@ -272,7 +322,9 @@ function parseArgs(argv) {
     strictReadOnly: false, concurrency: 8, includePrimary: false,
     deep: false, html: null, help: false,
     host: 'generic', command: null, bin: 'holt', global: false,
-    dryRun: false, apply: false, release: false, force: false, reason: null,
+    profile: null, authority: null, store: null, bootstrapRoot: null, metadataUrl: null, targetsUrl: null,
+    repository: null, repositoryRoot: null, recoveryMode: null, lockToken: null, orphan: null,
+    allHosts: false, dryRun: false, apply: false, release: false, force: false, reason: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -282,6 +334,7 @@ function parseArgs(argv) {
       case '--strict-read-only': opts.strictReadOnly = true; break;
       case '--include-primary': opts.includePrimary = true; break;
       case '--global': opts.global = true; break;
+      case '--all-hosts': opts.allHosts = true; break;
       case '--deep': opts.deep = true; break;
       case '--collapse': opts.collapse = true; break;
       case '--dry-run': opts.dryRun = true; break;
@@ -349,6 +402,17 @@ function parseArgs(argv) {
       case '--debug': opts.debug = true; break;
       case '--quiet': opts.quiet = true; break;
       case '--plain': opts.plain = true; break;
+      case '--profile': opts.profile = argv[++i]; break;
+      case '--authority': opts.authority = argv[++i]; break;
+      case '--store': opts.store = argv[++i]; break;
+      case '--bootstrap-root': opts.bootstrapRoot = argv[++i]; break;
+      case '--metadata-url': opts.metadataUrl = argv[++i]; break;
+      case '--targets-url': opts.targetsUrl = argv[++i]; break;
+      case '--repository': opts.repository = argv[++i]; break;
+      case '--repository-root': opts.repositoryRoot = argv[++i]; break;
+      case '--recovery-mode': opts.recoveryMode = argv[++i]; break;
+      case '--lock-token': opts.lockToken = argv[++i]; break;
+      case '--orphan': opts.orphan = argv[++i]; break;
       case '--require-signature': opts.requireSignature = true; break;
       default:
         if (a.startsWith('--')) throw new Error(`unknown option: ${a}\n  Run 'holt --help' for valid options.`);
@@ -445,6 +509,38 @@ function inlineFlagFailures(audit, ignore, opts) {
   return failures;
 }
 
+/** Enterprise managed-policy surface. The module (and, critically, its TUF adapter) is loaded
+ * only for this explicit command, never while a free command is starting up. */
+async function cmdManagedPolicy(opts) {
+  const action = opts._[1] ?? null;
+  try {
+    const { managedPolicyCommand } = await import('../src/team/managed-policy-cli.mjs');
+    /** @type {any} */
+    const result = await managedPolicyCommand(action, opts);
+    if (opts.json || !process.stdout.isTTY) return emitJson(result);
+    out(paint('bold', `holt managed-policy ${action}`));
+    out(`  ${result.authority ?? ''}`);
+    if (result.profile) out(`  profile ${result.profile}`);
+    if (result.rootFingerprint) out(`  root ${result.rootFingerprint}`);
+    if (result.generation) out(`  generation ${result.generation}`);
+    if (result.freshness?.earliestExpiry) out(`  earliest expiry ${result.freshness.earliestExpiry}`);
+    if (result.recovery?.state) out(`  recovery ${result.recovery.state}`);
+    return;
+  } catch (error) {
+    const payload = {
+      ok: false,
+      code: error?.code ?? 'MANAGED_POLICY_INTERNAL',
+      reason: error?.message ?? String(error),
+      entitlement: error?.entitlement ?? null,
+      recovery: error?.recovery ?? null,
+    };
+    const exit = payload.code === 'MANAGED_POLICY_UNLICENSED' ? 3 : 2;
+    if (opts.json || !process.stdout.isTTY) { emitJson(payload); process.exit(exit); }
+    process.stderr.write(paint('red', `holt managed-policy: ${payload.reason}\n`));
+    process.exit(exit);
+  }
+}
+
 /**
  * Render an action result. JSON for scripts/agents (default), human-readable prose when a
  * human is at a terminal. The prose mode is critical: `clean`, `protect`, `auto` — the commands
@@ -464,33 +560,50 @@ function cmdAction(result, opts = {}) {
   //
   // Set here rather than at each call site because every action command routes through this one
   // renderer, and a rule enforced in six places is a rule enforced in five.
-  if (typeof result?.failed === 'number' && result.failed > 0) process.exitCode = 1;
+  const failedCount = Math.max(
+    typeof result?.failedCount === 'number' ? result.failedCount : 0,
+    typeof result?.failed === 'number' ? result.failed : 0,
+    Array.isArray(result?.failures) ? result.failures.length : 0,
+    Array.isArray(result?.failed) ? result.failed.length : 0,
+  );
+  if (failedCount > 0) process.exitCode = 1;
   const wantJson = opts.json || (!process.stdout.isTTY && !opts.plain);
   if (wantJson) { emitJson(result); return result; }
   // Human-readable summary for action commands
   const lines = [];
   if (result.dryRun) lines.push(paint('yellow', 'DRY RUN — nothing was changed. Re-run with --apply to execute.\n'));
   const did = result.did || {};
-  const actions = result.actions || result.wouldRemove || [];
+  const actions = result.actions || result.wouldQuarantine || result.wouldRemove || [];
   if (actions.length) {
     const isProtect = actions.some((a) => a.action?.includes('lock') || a.action?.includes('protect'));
-    const isClean = actions.some((a) => a.action === 'removed' || (!a.action && result.dryRun && !isProtect));
+    const isQuarantine = actions.some((a) => a.action === 'quarantined')
+      || (result.dryRun && Array.isArray(result.wouldQuarantine));
+    const isRemove = actions.some((a) => a.action === 'removed')
+      || actions.some((a) => a.action === 'purged')
+      || (result.dryRun && Array.isArray(result.wouldRemove));
     const label = result.dryRun
-      ? (isProtect ? 'would protect' : isClean ? 'would remove' : 'would act on')
-      : 'action(s)';
+      ? (isProtect ? 'would protect' : isQuarantine ? 'would quarantine' : isRemove ? 'would remove' : 'would act on')
+      : (isQuarantine ? 'worktree(s) quarantined' : isRemove ? 'worktree(s) purged' : 'action(s)');
     lines.push(paint('bold', `${actions.length} ${label}:`));
     for (const a of actions) {
-      const action = a.action || (result.dryRun ? 'remove' : 'done');
-      const icon = action === 'removed' || action === 'remove' ? '✗'
+      const action = a.action || (result.dryRun && isQuarantine ? 'quarantine' : result.dryRun ? 'remove' : 'done');
+      const icon = action === 'removed' || action === 'remove' || action === 'purged' ? '✗'
+        : action === 'quarantined' || action === 'quarantine' ? '↪'
         : action.includes('lock') || action.includes('protect') ? '🔒'
         : action === 'skipped' || action === 'already-locked' ? '○'
         : '•';
-      const color = action === 'removed' || action === 'remove' ? 'red'
+      const color = action === 'removed' || action === 'remove' || action === 'purged' ? 'red'
+        : action === 'quarantined' || action === 'quarantine' ? 'green'
         : action.includes('lock') || action.includes('protect') ? 'yellow'
         : action === 'skipped' || action === 'already-locked' ? 'grey'
         : 'green';
       const reason = a.why || a.reason;
       lines.push(`  ${paint(color, icon)} ${a.id || a.path || '?'}${reason ? paint('grey', ` — ${reason.slice(0, 120)}`) : ''}`);
+      if (typeof a.restore === 'string' && a.restore) {
+        lines.push(`      ${paint('grey', 'restore with:')} ${a.restore}`);
+      } else if (Array.isArray(a.restoreArgv) && a.restoreArgv.length) {
+        lines.push(`      ${paint('grey', 'restore argv:')} ${JSON.stringify(a.restoreArgv)}`);
+      }
     }
   }
   for (const [k, v] of Object.entries(did)) {
@@ -568,6 +681,50 @@ async function cmdAudit(opts) {
 }
 
 async function cmdDoctor(opts) {
+  const requiredGit = `>=${NO_LAZY_FETCH_MIN_GIT.major}.${NO_LAZY_FETCH_MIN_GIT.minor}.0`;
+  const versionProbe = await git(['version'], { cwd: opts.cwd, timeout: 10_000 })
+    .catch((error) => ({ code: -1, stdout: '', stderr: error?.message ?? String(error) }));
+  const gitVersion = versionProbe.code === 0 ? String(versionProbe.stdout).trim() : null;
+  const versionSupported = versionProbe.code === 0 && noLazyFetchSupported(gitVersion);
+  const capabilityProbe = versionSupported
+    ? await git(['--no-lazy-fetch', 'version'], { cwd: opts.cwd, timeout: 10_000 })
+      .catch((error) => ({ code: -1, stderr: error?.message ?? String(error) }))
+    : null;
+  const gitRuntime = {
+    version: gitVersion,
+    required: requiredGit,
+    supported: versionSupported && capabilityProbe?.code === 0,
+    noLazyFetch: versionSupported && capabilityProbe?.code === 0,
+    reason: versionProbe.code !== 0
+      ? `Git could not be executed: ${String(versionProbe.stderr ?? '').trim() || 'not found on PATH'}`
+      : !versionSupported
+        ? `Holt requires Git ${requiredGit}; ${gitVersion || 'the selected Git version could not be parsed'}`
+        : capabilityProbe?.code !== 0
+          ? `Git reports a qualifying version but rejected --no-lazy-fetch: ${String(capabilityProbe?.stderr ?? '').trim() || 'capability unavailable'}`
+          : null,
+  };
+
+  // Doctor is the recovery surface for a broken prerequisite. Do not call discover() and then
+  // die with the same low-level exception as every ordinary command: state the exact runtime
+  // contract in both human and JSON output, and point at the vendor-neutral Git download page.
+  if (!gitRuntime.supported) {
+    const blocked = {
+      ok: false,
+      node: process.version,
+      git: gitRuntime,
+      fix: 'Install or upgrade Git from https://git-scm.com/downloads, then re-run `holt doctor`.',
+    };
+    process.exitCode = 2;
+    if (opts.json) return emitJson(blocked);
+    out(paint('bold', 'holt doctor'));
+    out('');
+    out(`  node              ${blocked.node}`);
+    out(`  git               ${paint('red', gitRuntime.version ?? 'not executable')}`);
+    out(`  required          ${paint('red', `Git ${requiredGit} with --no-lazy-fetch`)}`);
+    out(paint('grey', `  fix               ${blocked.fix}`));
+    return;
+  }
+
   const [ctags, jscpd, enry] = await Promise.all([detectCtags(), detectJscpd(), detectEnry()]);
   const disc = await discover(opts.cwd, opts);
 
@@ -581,8 +738,14 @@ async function cmdDoctor(opts) {
     ['checkout', ['checkout', '--', '.']],
   ].map(([label, argv]) => ({ label, ...classify(argv) }));
 
+  const activationIntegrity = await inspectActivationIntegrity(disc.workstreams, {
+    currentRoot: disc.root,
+  });
+
   const info = {
+    ok: true,
     node: process.version,
+    git: gitRuntime,
     repo: disc.root ?? null,
     bare: !!disc.bare,
     vcs: disc.vcs,
@@ -594,25 +757,12 @@ async function cmdDoctor(opts) {
       : `extension mapping only (${enry.reason}) — ambiguous extensions (.fs .m .h .pl) may resolve to the wrong language`,
     deepDuplicates: jscpd.available ? `jscpd ${jscpd.version}` : `unavailable (${jscpd.reason})`,
     safetyContract: probes,
-    // WHICH WORKTREES ARE ACTUALLY WIRED, because "integrate ran once" is not the same fact.
-    //
-    // Every host reads its project config relative to where it runs, and `git worktree add`
-    // copies no untracked files — so a worktree created AFTER integrate has no hooks, and an
-    // agent dispatched into it runs unprotected while the repository looks integrated. integrate
-    // now wires every worktree that exists when it runs; this is what makes the ones created
-    // afterwards visible instead of silently unguarded.
-    unwiredWorktrees: await (async () => {
-      const rows = [];
-      for (const w of disc.workstreams ?? []) {
-        if (!w.path) continue;
-        // eslint-disable-next-line no-await-in-loop -- one stat per worktree, bounded by the repo
-        const wired = await fs.stat(path.join(w.path, '.claude', 'settings.json')).then(() => true).catch(() => false);
-        // eslint-disable-next-line no-await-in-loop
-        const mcp = await fs.stat(path.join(w.path, '.mcp.json')).then(() => true).catch(() => false);
-        if (!wired && !mcp) rows.push(w.id);
-      }
-      return rows;
-    })(),
+    // Compatibility field retained for callers of older doctor JSON. Its meaning is now derived
+    // from host-specific command inspection, not the old `.claude/settings.json OR .mcp.json`
+    // existence shortcut. See activationIntegrity.compatibility for the exact claim boundary.
+    unwiredWorktrees: activationIntegrity.unwiredWorktrees,
+    partiallyWiredWorktrees: activationIntegrity.partiallyWiredWorktrees,
+    activationIntegrity,
   };
 
   if (opts.json) return emitJson(info);
@@ -620,15 +770,12 @@ async function cmdDoctor(opts) {
   out(paint('bold', 'holt doctor'));
   out('');
   out(`  node              ${info.node}`);
+  out(`  git               ${info.git.version}  (required ${info.git.required}; --no-lazy-fetch verified)`);
   out(`  repository        ${info.repo ?? paint('red', info.bare ? 'bare repository (no working tree) — holt needs a checkout' : 'not a git repository')}`);
   out(`  workstreams       ${info.workstreams}  (${info.workstreams - 1} linked + 1 primary)`);
-  if (info.unwiredWorktrees.length) {
-    out(`  ${paint('yellow', 'unwired')}           ${info.unwiredWorktrees.length} worktree(s) have no holt config — an agent working there is `
-      + 'NOT guarded');
-    out(paint('grey', `                    ${info.unwiredWorktrees.slice(0, 5).join(', ')}`
-      + `${info.unwiredWorktrees.length > 5 ? ` … +${info.unwiredWorktrees.length - 5}` : ''}`));
-    out(paint('grey', '                    fix: `holt integrate`  (it wires every worktree that exists when it runs)'));
-  }
+  out('');
+  for (const line of activationIntegrityLines(info.activationIntegrity)) out(line);
+  out('');
   out(`  jj backend        ${info.jj}`);
   out(`  symbol backend    ${ctags.available ? paint('green', info.symbolBackend) : paint('yellow', info.symbolBackend)}`);
   // Never claim language coverage the INSTALLED toolchain cannot deliver: distro ctags packages
@@ -675,7 +822,7 @@ async function cmdDoctor(opts) {
       const names = missing.map((m) => pkgs[m][mgr]).filter(Boolean);
       if (names.length) out(`    ${(mgr + '        ').slice(0, 8)}  ${fmt(names)}`);
     }
-    if (missing.includes('enry')) out(paint('grey', '    enry elsewhere: go install github.com/go-enry/enry@latest (only needed for ambiguous extensions like .fs/.m/.pl)'));
+    if (missing.includes('enry')) out(paint('grey', `    enry elsewhere: go install ${ENRY_GO_INSTALL} (only needed for ambiguous extensions like .fs/.m/.pl)`));
     out('');
     if (!opts.install) {
       out(paint('grey', '    or let holt do it:  ') + paint('bold', 'holt doctor --install') + paint('grey', '   (asks before running anything)'));
@@ -759,7 +906,7 @@ async function runInstall(missing, pkgs, opts) {
   const unavailable = remaining.filter((m) => !pkgs[m][mgr]);
   if (!names.length) {
     out(paint('yellow', `  ${mgr} has no package for: ${unavailable.join(', ')}`));
-    if (unavailable.includes('enry')) out(paint('grey', '  enry: go install github.com/go-enry/enry@latest'));
+    if (unavailable.includes('enry')) out(paint('grey', `  enry: go install ${ENRY_GO_INSTALL}`));
     return;
   }
 
@@ -1049,7 +1196,15 @@ function emitHookVerdict(verdict, opts, { command, cwd } = {}) {
   // failure in reporting — a formatter, a JSON cycle, a journal write — may change the answer or
   // escape and land back in the CLI's exit(1). This function is the choke point; a choke point
   // that can itself throw past the exit is not one.
-  const code = verdict.decision === 'allow' ? 0 : 2;
+  // Cline is the one current host whose deterministic refusal is a SUCCESSFUL hook response:
+  // `{cancel:true}` on stdout with exit 0. A non-zero exit is a hook failure there, not its
+  // documented block protocol. Every other supported host uses exit 2 as an independent refusal
+  // channel in addition to its JSON body.
+  // Antigravity's documented allow response grants authority rather than preserving its native
+  // permission decision.  The adapter does not wire PreToolUse, but a manual invocation must not
+  // accidentally auto-approve: format it as ask and use the blocking/error channel as well.
+  const antigravityNeutralUnknown = opts.host === 'antigravity' && verdict.decision === 'allow';
+  const code = (verdict.decision === 'allow' && !antigravityNeutralUnknown) || opts.host === 'cline' ? 0 : 2;
   try {
     const body = formatVerdict(verdict, { host: opts.host, eventName: 'PreToolUse' });
     // `systemMessage` is a universal top-level hook field — "A warning message shown to the user".
@@ -1081,6 +1236,29 @@ function emitHookVerdict(verdict, opts, { command, cwd } = {}) {
 function isPreToolUseInvocation(argv = process.argv) {
   const args = argv.slice(2).filter((a) => !a.startsWith('-'));
   return args[0] === 'hook' && (args[1] ?? 'pre-tool-use') === 'pre-tool-use';
+}
+
+// Comparing a documented Claude Edit's old_string with the whole current file is what separates
+// an ordinary incremental edit (stay out of the way) from a full-file replacement (show fresh
+// Holt evidence). Size is checked before reading, and a very large exact-size candidate asks
+// instead of putting an unbounded file read in every tool call's critical path.
+const NATIVE_EDIT_COMPARE_MAX = 4 * 1024 * 1024;
+async function documentedEditWholeFile(toolInput, cwd) {
+  if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)
+    || typeof toolInput.file_path !== 'string' || typeof toolInput.old_string !== 'string'
+    || toolInput.old_string.length === 0) return false;
+  let stat;
+  const file = path.resolve(cwd, toolInput.file_path);
+  try { stat = await fs.stat(file); } catch { return false; }
+  if (!stat.isFile()) return false;
+  const expectedBytes = Buffer.byteLength(toolInput.old_string, 'utf8');
+  if (expectedBytes !== stat.size) return false;
+  if (stat.size > NATIVE_EDIT_COMPARE_MAX) return 'unknown';
+  try {
+    return await fs.readFile(file, 'utf8') === toolInput.old_string;
+  } catch {
+    return 'unknown';
+  }
 }
 
 /**
@@ -1134,7 +1312,12 @@ async function cmdHook(opts) {
   const actor = resolveActor({ payload, host: opts.host, via: 'hook' });
   setAmbientActor(actor);
 
-  const cwd = String(payload.cwd || opts.cwd || process.cwd());
+  const oneWorkspace = Array.isArray(payload.workspacePaths) && payload.workspacePaths.length === 1
+    && typeof payload.workspacePaths[0] === 'string'
+    ? payload.workspacePaths[0]
+    : null;
+  const cwd = String(payload.cwd || payload.working_dir || payload.tool_info?.cwd
+    || oneWorkspace || opts.cwd || process.cwd());
 
   if (event === 'pre-tool-use') {
     if (payloadError) {
@@ -1142,11 +1325,12 @@ async function cmdHook(opts) {
         decision: 'ask',
         reason: `holt could not parse the hook payload (${payloadError.message}). Confirm the command manually before proceeding.`,
       };
-      out(JSON.stringify(formatVerdict(verdict, { host: opts.host, eventName: 'PreToolUse' })));
-      process.stderr.write(`${verdict.reason}\n`);
-      process.exit(2);
+      emitHookVerdict(verdict, opts, { cwd });
     }
-    const toolName = payload.tool_name ?? payload.toolName;
+    const toolName = payload.tool_name
+      ?? payload.toolName
+      ?? payload.preToolUse?.toolName
+      ?? payload.tool_call?.name;
     // EVERY HOST'S PAYLOAD SHAPE, because reading only one of them makes the hook inert on the
     // others while still reporting a decision.
     //
@@ -1160,34 +1344,95 @@ async function cmdHook(opts) {
     const command = opts.command
       ?? payload.tool_input?.command       // Claude Code
       ?? payload.toolInput?.command        // camelCase variants
+      ?? payload.toolArgs?.command         // Copilot camelCase PreToolUse
       ?? payload.command                   // Cursor beforeShellExecution, and the generic shape
+      ?? payload.preToolUse?.parameters?.command // Cline executable hook
+      ?? payload.tool_call?.input?.command // Cline's alternate tool-call envelope
+      ?? payload.tool_info?.command_line   // Cascade pre_run_command
       ?? payload.input?.command
       ?? payload.arguments?.command;
     hookCommandInFlight = command;
     hookCwdInFlight = cwd;
 
-    // Only shell-ish tools can destroy a worktree. Anything else is allowed without a scan,
-    // which keeps the hook off the critical path for the overwhelming majority of tool calls.
-    const shellish = !toolName || /^(Bash|Shell|Terminal|run_command|execute)$/i.test(toolName);
-    if (!shellish || !command) {
-      if (opts.host !== 'claude-code') {
-        out(JSON.stringify(formatVerdict({ decision: 'allow', reason: null }, { host: opts.host })));
-      }
-      return;
-    }
-
-    // THE ANALYSIS IS ALLOWED TO FAIL. IT IS NOT ALLOWED TO FAIL SILENTLY INTO "PROCEED".
-    // Anything thrown here used to leave through main().catch and exit 1, which the host reads as
-    // a non-blocking error and runs the command. See internalErrorVerdict.
+    // Shell commands remain the broad guard. Three structured file-tool contracts are also precise
+    // enough to assess without guessing: Codex apply_patch, Claude Write/Edit, and Qwen Code
+    // write_file/edit. Arbitrary local
+    // functions and MCP arguments stay outside this branch because both hosts explicitly make
+    // those schemas tool-specific; a field that happens to be called `path` is not destructive
+    // authority over a local repository.
+    const shellish = !toolName
+      || /^(Bash|Shell|Terminal|run_command|run_commands|run_shell_command|execute|execute_command|exec|developer__shell)$/i.test(toolName);
     let verdict;
-    try {
-      verdict = await assessCommand(command, cwd, { guardAllow: opts.guardAllow });
-    } catch (error) {
-      verdict = internalErrorVerdict(command, error, { failOpen: process.env.HOLT_HOOK_FAIL_OPEN === '1' });
+    let operationText = command;
+    if (shellish) {
+      // A recognised shell event with no command is schema drift or a malformed envelope, not an
+      // empty command we proved safe. Silently allowing here turns a present hook into an inert one
+      // the moment a host renames its payload field.
+      if (!command) {
+        emitHookVerdict({
+          decision: 'ask',
+          reason: `holt received a ${toolName ?? 'shell'} pre-tool event with no command field. `
+            + 'The host payload could not be verified; confirm the command manually before proceeding.',
+        }, opts, { cwd });
+      }
+      // THE ANALYSIS IS ALLOWED TO FAIL. IT IS NOT ALLOWED TO FAIL SILENTLY INTO "PROCEED".
+      try {
+        verdict = await assessCommand(command, cwd, { guardAllow: opts.guardAllow });
+      } catch (error) {
+        verdict = internalErrorVerdict(command, error, { failOpen: process.env.HOLT_HOOK_FAIL_OPEN === '1' });
+      }
+    } else {
+      const exactToolInput = payload.tool_input;
+      const exactEdit = (opts.host === 'claude-code' && toolName === 'Edit')
+        || (opts.host === 'qwen-code' && toolName === 'edit');
+      const editWholeFile = exactEdit
+        ? await documentedEditWholeFile(exactToolInput, cwd)
+        : false;
+      const native = documentedNativeTool({
+        host: opts.host,
+        toolName,
+        toolInput: exactToolInput,
+        editWholeFile,
+      });
+      if (!native.handled) {
+        if (opts.host !== 'claude-code') {
+          out(JSON.stringify(formatVerdict({ decision: 'allow', reason: null }, { host: opts.host })));
+        }
+        return;
+      }
+      operationText = native.operations.length
+        ? `${toolName}: ${native.operations.map((op) => `${op.role} ${op.path}`).join(', ')}`
+        : String(toolName ?? 'structured file tool');
+      hookCommandInFlight = operationText;
+      if (native.issue) {
+        verdict = {
+          decision: 'ask',
+          kind: `${toolName ?? 'structured tool'} payload`,
+          targets: [],
+          files: [],
+          reason: `holt could not verify this structured file operation: ${native.issue} `
+            + 'Confirm the exact target and operation before proceeding.',
+        };
+      } else if (native.operations.length === 0) {
+        // Codex Add/Update and a Claude Edit that preserves untouched file content are ordinary
+        // edits. Silence is the feature here: they do not pay for a repository scan or prompt.
+        if (opts.host !== 'claude-code') {
+          out(JSON.stringify(formatVerdict({ decision: 'allow', reason: null }, { host: opts.host })));
+        }
+        return;
+      } else {
+        try {
+          verdict = await assessExplicitFileOperations(native.operations, cwd);
+        } catch (error) {
+          verdict = internalErrorVerdict(operationText, error, {
+            failOpen: process.env.HOLT_HOOK_FAIL_OPEN === '1',
+          });
+        }
+      }
     }
     if (verdict.allowlisted) {
       await appendEvent(cwd, {
-        action: 'allowlisted', source: 'guardAllow', command: String(command).slice(0, 200),
+        action: 'allowlisted', source: 'guardAllow', command: String(operationText).slice(0, 200),
         pattern: verdict.allowlistPattern ?? null,
       }, { actor }).catch(() => {});
     }
@@ -1197,11 +1442,11 @@ async function cmdHook(opts) {
     // happen, and the refusal path already journals its own prevented loss. Best-effort and
     // last — like every other write here, logging must never delay or alter the hook.
     if (verdict.decision === 'allow') {
-      const wiring = holtWiringTouched(command, cwd);
+      const wiring = shellish ? holtWiringTouched(command, cwd) : [];
       if (wiring.length) {
         await appendEvent(cwd, {
           action: 'holt-wiring-touched',
-          command: String(command).slice(0, 200),
+          command: String(operationText).slice(0, 200),
           paths: wiring.slice(0, 8),
           note: 'a command holt ALLOWED reaches holt\'s own installation. Allowed on purpose — '
             + 'reconfiguring or removing holt is legitimate and must not require fighting it — '
@@ -1215,7 +1460,8 @@ async function cmdHook(opts) {
     // THE REFUSAL USED TO END BY TEACHING THE READER HOW TO SWITCH THE GUARD OFF: "add a matching
     // guardAllow pattern to .holtrc.json". Every reader of a PreToolUse refusal is an AGENT — that
     // is the channel's whole purpose — and `.holtrc.json` is an ordinary in-repo file that the
-    // unguarded Write and Edit tools can author. So the deny message closed its own loop: refuse,
+    // incremental Edit and ordinary file tools can still author. So the deny message closed its
+    // own loop: refuse,
     // hand over the recipe, get overruled by the party that was just refused. An agent does not
     // invent `.holtrc.json` on its own; it was told.
     //
@@ -1240,7 +1486,7 @@ async function cmdHook(opts) {
     if (verdict.decision === 'deny' || verdict.decision === 'ask') {
       await appendEvent(cwd, {
         action: verdict.decision === 'deny' ? 'blocked' : 'unverified',
-        command: String(command).slice(0, 200),
+        command: String(operationText).slice(0, 200),
         reason: renderedVerdict.reason ?? null,
         kind: verdict.kind ?? null,
         targets: Array.isArray(verdict.targets) ? verdict.targets : [],
@@ -1254,7 +1500,7 @@ async function cmdHook(opts) {
     // same situation — `failure_mode_allow_header_add` — is that a decision reached by bypass is
     // stamped. `systemMessage` is the host's own user-visible field for exactly this.
     if (verdict.allowlisted && !verdict.systemMessage) {
-      verdict.systemMessage = `holt did not check "${String(command).slice(0, 120)}" — a guardAllow `
+      verdict.systemMessage = `holt did not check "${String(operationText).slice(0, 120)}" — a guardAllow `
         + `entry in .holtrc.json (${verdict.allowlistPattern}) approves it. If you did not put that `
         + 'entry there, treat it as a change to your safety configuration.';
       renderedVerdict.systemMessage = verdict.systemMessage;
@@ -1266,23 +1512,24 @@ async function cmdHook(opts) {
     // Code documents exit 1 as a NON-BLOCKING error whose stdout JSON is not parsed; exit 2 as
     // blocking, read from STDERR; and exit 0 as the case where the JSON decision is honoured.
     // The guard worked in practice only because this client does read the JSON — the most
-    // important refusal in the product was resting on undocumented behaviour, on the one host
-    // the README calls its reference integration and marks verified live.
+    // important refusal in the product was resting on undocumented behaviour. Real-host refusal
+    // is no longer claimed from contract/schema tests alone.
     //
     // So a denial now carries the verdict in every channel a host might read: the JSON above,
     // the reason on stderr, and exit 2. That is fail-CLOSED under all three documented readings
     // rather than correct under one of them. `ask` shares exit 2 deliberately — a host that
     // cannot express "ask" must stop, not proceed, when holt could not verify what a command does.
-    emitHookVerdict(renderedVerdict, opts, { command, cwd });
+    emitHookVerdict(renderedVerdict, opts, { command: operationText, cwd });
   }
 
-  if (event === 'session-start' || event === 'user-prompt-submit') {
+  if (event === 'session-start' || event === 'user-prompt-submit' || event === 'pre-invocation') {
     // Zero-touch protection: with --autoprotect (what `holt integrate` wires), every session
     // start locks the workstreams that hold work found nowhere else BEFORE the agent's first
     // tool call. Best-effort by design — a protection failure must not break session startup,
     // but it is stated in the brief, never swallowed.
     let protectLine = '';
-    if (event === 'session-start' && opts.autoprotect) {
+    const firstAntigravityInvocation = event === 'pre-invocation' && payload.invocationNum === 0;
+    if ((event === 'session-start' || firstAntigravityInvocation) && opts.autoprotect) {
       try {
         const p = await protect(cwd, {});
         if (p.protected > 0) protectLine = `holt auto-protect: locked ${p.protected} workstream(s) holding unique work.\n`;
@@ -1296,47 +1543,65 @@ async function cmdHook(opts) {
     // it burns context on every prompt of a long session. So the per-prompt brief speaks only
     // when what it would say has CHANGED (with a periodic refresh so a compacted session is not
     // left permanently unaware). SessionStart always speaks: a new session has seen nothing.
-    const brief = await buildBrief(cwd, {
-      onlyIfChanged: event === 'user-prompt-submit',
-      familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
-    });
+    let brief;
+    try {
+      brief = await buildBrief(cwd, {
+        onlyIfChanged: event === 'user-prompt-submit'
+          || (event === 'pre-invocation' && !firstAntigravityInvocation),
+        familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
+      });
+    } catch {
+      // Lifecycle context is useful only while it stays out of the user's way.  A scan failure
+      // must not abort the host's model invocation; Antigravity still receives valid empty JSON.
+      if (event === 'pre-invocation') out('{}');
+      return;
+    }
 
     // `'' + null` is the string "null", and this line used to hand exactly that to the agent as
     // its workstream briefing whenever there was nothing to report.
     const text = [protectLine.trimEnd(), brief].filter(Boolean).join('\n');
-    if (!text) return; // nothing to say: say nothing, rather than an empty context block
+    if (!text) {
+      if (event === 'pre-invocation') out('{}');
+      return; // nothing to say: say nothing, rather than an empty context block
+    }
 
-    const eventName = event === 'session-start' ? 'SessionStart' : 'UserPromptSubmit';
+    const eventName = event === 'session-start'
+      ? 'SessionStart'
+      : event === 'pre-invocation'
+        ? 'PreInvocation'
+        : 'UserPromptSubmit';
     out(JSON.stringify(formatContext(text, { host: opts.host, eventName })));
     return;
   }
 
-  // STOP: fires when the agent finishes responding. This closes the "biggest cadence hole" —
-  // the moment an agent creates something irreplaceable and then stops, with no warning that
-  // the worktree holds the only copy.
+  // CURSOR STOP: `followup_message` is a NEW PROMPT, not passive post-response context. It is
+  // therefore useful only with hard bounds. Emit at most once for the original completed loop,
+  // and only when the actionable sibling brief changed. Cursor's follow-up increments loop_count;
+  // refusing loop_count >= 1 makes a Holt warning incapable of perpetuating itself. Aborted/error
+  // turns, malformed payloads and unchanged state return the documented empty response.
   //
-  // DESIGN: ADVISORY, NOT BLOCKING. A blocking stop hook fires after every turn in a long
-  // session, forcing the agent to respond to holt instead of just stopping — that disrupts
-  // the workflow and teaches the agent to skip holt's output. Instead, the stop hook injects
-  // context (like session-start) ONLY when the brief CHANGED during the response. If the
-  // agent just created something irreplaceable, that's a change worth mentioning. If nothing
-  // changed, holt stays silent — the agent already saw the brief at session start and on
-  // prompt submit, and repeating it on every stop is noise.
-  //
-  // MULTI-PROVIDER: this works with any host that supports a stop/post-response event.
-  // The context is injected via formatContext(), which handles each host's schema.
+  // Claude deliberately does not wire Stop. Its current Stop hook accepts additionalContext, but
+  // the documented behavior continues the conversation so Claude can act on it, under the same
+  // loop protections as decision:"block". A manual/stale invocation stays silent rather than
+  // relabeling a forced continuation as passive context.
   if (event === 'stop') {
-    try {
-      const brief = await buildBrief(cwd, {
-        onlyIfChanged: true,
-        familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
-      });
-      if (brief) {
-        out(JSON.stringify(formatContext(brief, { host: opts.host, eventName: 'Stop' })));
+    if (opts.host !== 'cursor') return;
+
+    let response = {};
+    if (payload.status === 'completed'
+      && Number.isInteger(payload.loop_count)
+      && payload.loop_count === 0) {
+      try {
+        const brief = await buildBrief(cwd, {
+          onlyIfChanged: true,
+          familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
+        });
+        if (brief) response = formatContext(brief, { host: 'cursor', eventName: 'Stop' });
+      } catch {
+        // Best-effort — a scan failure must not continue or disrupt the agent loop.
       }
-    } catch {
-      // Best-effort — a scan failure must not disrupt the agent's stop.
     }
+    out(JSON.stringify(response));
     return;
   }
 
@@ -1434,7 +1699,7 @@ async function cmdBrief(opts) {
  */
 async function cmdSetup(opts) {
   const { detectCtags, detectEnry, resetToolchainProbes } = await import('../src/symbols.mjs');
-  const { portableTarget, holtBinDir } = await import('../src/toolchain.mjs');
+  const { portableTarget, holtBinDir, ensureOnPath } = await import('../src/toolchain.mjs');
   const { installPortableCtags } = await import('./install-ctags.mjs');
 
   out('');
@@ -1493,15 +1758,28 @@ async function cmdSetup(opts) {
       execFile('go', ['version'], { timeout: 5000 }, (err, stdout) => resolve(!err && stdout.trim()));
     });
     if (goProbe) {
-      out(paint('grey', '         Go detected — holt can install enry with `go install github.com/go-enry/enry@latest`'));
+      out(paint('grey', `         Go detected — holt can build enry v2.9.6 into its private bin directory with \`go install ${ENRY_GO_INSTALL}\``));
       const goInstall = opts.yes || await confirm('     install it now?');
       if (goInstall) {
+        const privateBin = holtBinDir();
+        await fs.mkdir(privateBin, { recursive: true, mode: 0o700 });
         const r = await new Promise((resolve) => {
-          execFile('go', ['install', 'github.com/go-enry/enry@latest'], { timeout: 120_000 },
+          execFile('go', ['install', ENRY_GO_INSTALL], {
+            timeout: 120_000,
+            env: { ...process.env, GOBIN: privateBin },
+          },
             (err, stdout, stderr) => resolve({ ok: !err, stderr: String(stderr || '') }));
         });
         if (r.ok) {
-          out(`     ${paint('green', 'ok')}  installed enry via go install`);
+          resetToolchainProbes();
+          await ensureOnPath({ force: true });
+          const verified = await detectEnry();
+          const binary = path.join(privateBin, process.platform === 'win32' ? 'enry.exe' : 'enry');
+          if (verified.available) {
+            out(`     ${paint('green', 'ok')}  installed and verified enry v2.9.6 at ${binary}`);
+          } else {
+            out(`     ${paint('red', 'no')}  go install returned success, but ${binary} did not run; no successful install is claimed`);
+          }
         } else {
           out(`     ${paint('red', 'no')}  go install failed: ${r.stderr.trim().slice(0, 200)}`);
           out(paint('grey', '         holt still works — ambiguous extensions use extension mapping only.'));
@@ -1510,7 +1788,7 @@ async function cmdSetup(opts) {
     } else if (process.platform === 'darwin') {
       out(paint('grey', '         install with: brew install enry'));
     } else {
-      out(paint('grey', '         install with: go install github.com/go-enry/enry@latest (requires Go)'));
+      out(paint('grey', `         install with: go install ${ENRY_GO_INSTALL} (requires Go)`));
     }
   }
   out('');
@@ -1526,7 +1804,7 @@ async function cmdSetup(opts) {
   const detectedIds = hosts ? hosts.all : [];
   out(detectedIds.length
     ? paint('grey', `     detected: ${detectedIds.join(', ')}`)
-    : paint('grey', '     no agent host detected here — AGENTS.md is still written, every agent reads it'));
+    : paint('grey', '     no known agent host detected here — AGENTS.md is still written for hosts that read it'));
   const doIntegrate = opts.yes || await confirm('     write agent config into this repository?');
   if (doIntegrate) {
     await cmdIntegrate({ ...opts, quiet: false });
@@ -1674,20 +1952,50 @@ async function cmdIntegrate(opts) {
   if (opts.dryRun) {
     const detected = await detectHosts(disc.root, os.homedir());
     const present = detected.all ?? detected;
-    const planned = [
+    const enabled = (host) => opts.allHosts || present.includes(host);
+    const plannedRaw = [
       { adapter: 'agents-md', file: path.join(disc.root, 'AGENTS.md') },
-      ...mcpTargets(disc.root, os.homedir(), { scope }).map((t) => ({ adapter: `mcp/${t.host}`, file: t.file, scope: t.scope })),
-      ...(present.includes('claude-code') ? [{ adapter: 'claude-code', file: path.join(disc.root, '.claude', 'settings.json') }] : []),
-      ...(present.includes('cursor') ? [{ adapter: 'cursor', file: path.join(disc.root, '.cursor', 'hooks.json') }] : []),
-      ...(present.includes('opencode') ? [{ adapter: 'opencode', file: path.join(disc.root, '.opencode', 'plugins', 'holt.js') }] : []),
+      ...mcpTargets(disc.root, os.homedir(), {
+        scope, hosts: opts.allHosts ? null : present,
+      }).map((t) => ({ adapter: `mcp/${t.host}`, file: t.file, scope: t.scope })),
+      ...(enabled('claude-code') ? [{ adapter: 'claude-code', file: path.join(disc.root, '.claude', 'settings.json') }] : []),
+      ...(enabled('cursor') ? [{ adapter: 'cursor', file: path.join(disc.root, '.cursor', 'hooks.json') }] : []),
+      ...(enabled('opencode') ? [{ adapter: 'opencode', file: path.join(disc.root, '.opencode', 'plugins', 'holt.js') }] : []),
+      ...(enabled('codex') ? [{ adapter: 'codex', file: path.join(disc.root, '.codex', 'hooks.json') }] : []),
+      ...(enabled('qwen-code') ? [{ adapter: 'qwen-code', file: path.join(disc.root, '.qwen', 'settings.json') }] : []),
+      ...(enabled('antigravity')
+        ? [{ adapter: 'antigravity-context', file: path.join(disc.root, '.agents', 'hooks.json') }]
+        : []),
+      ...(enabled('copilot') ? [{ adapter: 'copilot', file: path.join(disc.root, '.github', 'hooks', 'holt.json') }] : []),
+      ...(enabled('goose') ? [
+        { adapter: 'goose', file: path.join(disc.root, '.agents', 'plugins', 'holt', 'plugin.json') },
+        { adapter: 'goose', file: path.join(disc.root, '.agents', 'plugins', 'holt', 'hooks', 'hooks.json') },
+      ] : []),
+      ...(enabled('cline') || enabled('cline-cli')
+        ? [{ adapter: 'cline', file: path.join(disc.root, '.clinerules', 'hooks', 'PreToolUse') }] : []),
+      ...(enabled('devin-cli') ? [{ adapter: 'devin-cli', file: path.join(disc.root, '.devin', 'hooks.v1.json') }] : []),
+      ...(enabled('cascade') ? [{ adapter: 'cascade', file: path.join(disc.root, '.windsurf', 'hooks.json') }] : []),
       { adapter: 'git-hooks', file: path.join(disc.root, '.git', 'hooks', 'pre-commit') },
     ];
+    // Qwen (and future composite clients) intentionally keep MCP and hooks in one settings file.
+    // A dry-run is a FILE plan, so report that file once with both adapters instead of claiming
+    // two creations for one path.
+    const plannedByFile = new Map();
+    for (const target of plannedRaw) {
+      const prior = plannedByFile.get(target.file);
+      plannedByFile.set(target.file, prior
+        ? { ...prior, adapter: `${prior.adapter} + ${target.adapter}` }
+        : target);
+    }
+    const planned = [...plannedByFile.values()];
     const rows = [];
     for (const p of planned) {
       const exists = await fs.stat(p.file).then(() => true).catch(() => false);
       rows.push({ ...p, exists, action: exists ? 'edit in place (holt\'s entries only)' : 'create' });
     }
-    if (opts.json) return emitJson({ dryRun: true, scope, detected, planned: rows });
+    if (opts.json) return emitJson({
+      dryRun: true, allHosts: opts.allHosts, scope, detected, planned: rows,
+    });
 
     out(paint('bold', 'holt integrate') + paint('grey', `  (${scope} scope) `) + paint('yellow', 'DRY RUN — nothing was written'));
     out('');
@@ -1707,7 +2015,9 @@ async function cmdIntegrate(opts) {
     return;
   }
 
-  const { detected, results } = await integrate(disc.root, { bin: opts.bin, scope });
+  const { detected, configuredHosts, results } = await integrate(disc.root, {
+    bin: opts.bin, scope, allHosts: opts.allHosts,
+  });
 
   // WIRE THE WORKTREES THE AGENTS ACTUALLY RUN IN.
   //
@@ -1728,19 +2038,27 @@ async function cmdIntegrate(opts) {
   for (const w of linked) {
     try {
       // eslint-disable-next-line no-await-in-loop -- each worktree writes its own files
-      const r = await integrate(w.path, { bin: opts.bin, scope: 'project' });
+      const r = await integrate(w.path, {
+        bin: opts.bin, scope: 'project', allHosts: opts.allHosts,
+      });
       worktreeResults.push({ worktree: w.id, results: r.results });
     } catch (e) {
       worktreeResults.push({ worktree: w.id, error: e.message });
     }
   }
 
-  if (opts.json) return emitJson({ detected, scope, results, worktrees: worktreeResults });
+  if (opts.json) return emitJson({
+    detected, configuredHosts, allHosts: opts.allHosts, scope, results,
+    worktrees: worktreeResults,
+  });
 
   out(paint('bold', 'holt integrate') + paint('grey', `  (${scope} scope)`));
   out('');
   out(`  in this repo     ${detected.project.length ? detected.project.join(', ') : paint('grey', 'none')}`);
   out(`  on this machine  ${detected.user.length ? detected.user.join(', ') : paint('grey', 'none')}`);
+  if (opts.allHosts) {
+    out(`  config mode      ${paint('yellow', 'all supported local clients (explicit --all-hosts)')}`);
+  }
   out('');
   for (const r of results) {
     const skipped = /skipped/.test(r.action);
@@ -1757,12 +2075,72 @@ async function cmdIntegrate(opts) {
     for (const f of failed) out(paint('yellow', `  ! ${f.worktree}: ${f.error}`));
     out('');
   }
-  out(paint('grey', '  AGENTS.md and MCP reach every agent that reads them; hooks add enforcement where supported.'));
+  out(paint('grey', '  AGENTS.md and MCP are advisory surfaces; configured blocking hooks add enforcement where supported.'));
   if (!opts.global) {
     out(paint('grey', '  Project scope only — nothing outside this repository was modified. Use --global to also'));
     out(paint('grey', '  add holt to your user-level editor configs (existing files only, never created).'));
   }
   out('');
+}
+
+/** Read-only adapter inventory: implementation and proof are separate axes by design. */
+function cmdProviders(opts) {
+  const report = providersReport();
+  if (opts.json) return emitJson(report);
+
+  out(paint('bold', 'holt — provider adapters') + paint('grey',
+    `  ${report.counts.implementedAdapters} implemented · ${report.counts.frameworkOnlyProfiles} framework-only profile(s) · ${report.counts.liveVerifiedProfiles} live-verified`));
+  out(paint('grey', '  contract-verified = applicable config/payload behavior passed Holt tests; it is not a live host run'));
+  out('');
+
+  const channelNames = { rules: 'rules', mcp: 'MCP', lifecycle: 'lifecycle', preTool: 'pre-tool' };
+  const channelMode = (name) => {
+    if (name === 'mcp') return 'reactive model-pull';
+    if (name === 'lifecycle') return 'proactive host-push';
+    if (name === 'preTool') return 'host-push pre-execution';
+    return 'host discovery';
+  };
+  const renderCapabilities = (provider) => {
+    for (const [name, capability] of Object.entries(provider.capabilities)) {
+      const scopes = capability.installedScopes.length ? capability.installedScopes.join('+') : 'not installed';
+      out(`      ${(channelNames[name] + '          ').slice(0, 12)} ${capability.state} · ${channelMode(name)} · ${scopes}`);
+    }
+  };
+
+  const implemented = new Map();
+  for (const provider of report.providers.filter((row) => row.implementation === 'implemented')) {
+    const rows = implemented.get(provider.hostId) ?? [];
+    rows.push(provider);
+    implemented.set(provider.hostId, rows);
+  }
+  for (const rows of implemented.values()) {
+    const provider = rows[0];
+    const surfaces = rows.map((row) => `${row.name} ${row.version}`).join(' · ');
+    out(`  ${paint('green', '●')} ${paint('bold', surfaces)}`);
+    out(`      ${paint('green', 'IMPLEMENTED')} · ${paint('cyan', provider.verification.toUpperCase())} · ${paint('yellow', 'NOT LIVE-VERIFIED')}`);
+    renderCapabilities(provider);
+    out(`      install      ${provider.install.detectedProject}  ${paint('grey', '(when detected)')}`);
+    out(`                   ${provider.install.explicitProject}  ${paint('grey', '(explicit project/template setup)')}`);
+    out(`      user MCP     ${provider.install.detectedUser}  ${paint('grey', '(existing user config only)')}`);
+    out(`                   ${provider.install.explicitUser}  ${paint('grey', '(explicit)')}`);
+    for (const prerequisite of provider.install.prerequisites) out(`      ${paint('grey', `requires     ${prerequisite}`)}`);
+    out(`      ${paint('grey', `remaining    ${provider.remainingRequiredProof.length} required conformance proof step(s); use --json for exact ids`)}`);
+    out('');
+  }
+
+  for (const provider of report.providers.filter((row) => row.implementation === 'framework-only')) {
+    out(`  ${paint('grey', '○')} ${paint('bold', `${provider.name} ${provider.version}`)} ${paint('grey', `[${provider.surface}]`)}`);
+    out(`      ${paint('grey', 'FRAMEWORK ONLY')} · UNVERIFIED · NOT LIVE-VERIFIED`);
+    renderCapabilities(provider);
+    out(`      install      ${paint('grey', 'none — profile + conformance plan only')}`);
+    out(`      ${paint('grey', `remaining    ${provider.remainingRequiredProof.length} required proof step(s); use --json for exact ids`)}`);
+    out('');
+  }
+
+  out(paint('grey', '  MCP is reactive even when installed. Lifecycle hooks push context proactively; pre-tool hooks are proactive gates.'));
+  out(paint('grey', '  `holt integrate` is project-scoped; --global additionally merges existing user MCP config.'));
+  out('');
+  return report;
 }
 
 async function main() {
@@ -1848,6 +2226,7 @@ async function main() {
   if (cmd === 'doctor') return cmdDoctor(opts);
   if (cmd === 'audit') return cmdAudit(opts);
   if (cmd === 'hook') return cmdHook(opts);
+  if (cmd === 'managed-policy') return cmdManagedPolicy(opts);
   if (cmd === 'tui') {
     return runTui(opts.cwd, {
       snapshot: opts.snapshot, columns: opts.columns, rows: opts.rowsOpt,
@@ -1923,11 +2302,11 @@ async function main() {
     out(paint('bold', 'holt license'));
     if (!st.licensed) {
       out(`\n  ${paint('yellow', 'no active license')}  ${paint('grey', st.reason ?? '')}`);
-      out(paint('grey', '  holt free is fully functional — a license unlocks team/enterprise features only.'));
+      out(paint('grey', '  holt free is fully functional — a license unlocks paid Team or Enterprise features.'));
     } else {
       out(`\n  tier      ${paint('green', st.tier)}${st.org ? paint('grey', `  (${st.org})`) : ''}`);
       out(`  expires   ${(st.expires ?? '').slice(0, 10)}  ${paint((st.daysLeft ?? 0) <= 14 ? 'yellow' : 'grey', `${st.daysLeft ?? 0} day(s) left`)}${st.inGrace ? paint('red', '  IN GRACE PERIOD') : ''}`);
-      if (st.seats) out(`  seats     ${st.seats}`);
+      if (st.seats) out(`  licensed repositories  ${st.seats}`);
       out(`  source    ${paint('grey', st.source ?? '')}`);
     }
     out('\n  FEATURES');
@@ -1968,6 +2347,20 @@ async function main() {
     // failure (unknown bucket) is NEVER a green result when policy is on.
     const ciRoot = (await discover(opts.cwd, opts)).root;
     if (!ciRoot) { process.stderr.write(paint('red', 'holt ci: not a git repository\n')); process.exit(2); }
+    // Take the system identity snapshot before audit reads the checkout. It is revalidated after
+    // the audit and once more at the verdict boundary below; a path swap is never a green CI run.
+    /** @type {any} */
+    let managedPrepared;
+    try {
+      /** @type {any} */
+      const managedApi = await import('../src/team/managed-policy-cli.mjs');
+      managedPrepared = await managedApi.prepareSystemManagedPolicyForCi({ repositoryRoot: ciRoot });
+    } catch (error) {
+      const payload = { ok: false, mode: 'managed-policy', code: error?.code ?? 'MANAGED_POLICY_INTERNAL', reason: error?.message ?? String(error) };
+      if (opts.json) { emitJson(payload); process.exit(2); }
+      process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`));
+      process.exit(2);
+    }
 
     // PRECONDITION: holt can only say "nothing was abandoned" if it can SEE the history. A shallow
     // or grafted checkout — actions/checkout's default fetch-depth of 1 — produces an empty audit
@@ -2041,6 +2434,27 @@ async function main() {
       process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`) + paint('grey', `  ${hist.fix ?? ''}\n`));
       process.exit(2);
     }
+    // A system-managed policy is discovered only from the fixed machine store. This is entirely
+    // offline: `sync` is the only path that can load the TUF transport. An absent store/profile
+    // is deliberately a no-op so the free inline gate retains its existing behaviour.
+    /** @type {any} */
+    let managedSystem;
+    try {
+      /** @type {any} */
+      const managedApi = await import('../src/team/managed-policy-cli.mjs');
+      await managedApi.revalidatePreparedSystemManagedPolicyForCi(managedPrepared);
+      managedSystem = await managedApi.resolvePreparedSystemManagedPolicyForCi(managedPrepared);
+    } catch (error) {
+      const payload = {
+        ok: false, mode: 'managed-policy', code: error?.code ?? 'MANAGED_POLICY_INTERNAL',
+        reason: error?.message ?? String(error), entitlement: error?.entitlement ?? null,
+        recovery: error?.recovery ?? null,
+      };
+      const exit = payload.code === 'MANAGED_POLICY_UNLICENSED' ? 3 : 2;
+      if (opts.json) { emitJson(payload); process.exit(exit); }
+      process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`));
+      process.exit(exit);
+    }
     let loaded;
     try {
       loaded = await loadGatePolicy(ciRoot, {
@@ -2051,6 +2465,73 @@ async function main() {
       if (opts.json) { emitJson({ ok: false, code: e.code, reason: e.message }); process.exit(2); }
       process.stderr.write(paint('red', `holt ci: ${e.message}\n`));
       process.exit(2);
+    }
+    if (managedSystem.claimed) {
+      // The candidate may offer an additional policy, but may never replace the system or base
+      // layers. A malformed candidate is named and ignored here: making its own config invalid
+      // cannot turn a central failure into an unavailable gate.
+      /** @type {any} */
+      let candidate = { found: false };
+      /** @type {any} */
+      let candidateError = null;
+      try { candidate = await loadPolicy(ciRoot); } catch (error) { candidateError = { code: error?.code ?? 'POLICY_PARSE', reason: error?.message ?? String(error) }; }
+      /** @type {any[]} */
+      const basePolicies = loaded.found && loaded.trusted ? [{ id: 'reviewed', policy: loaded.policy }] : [];
+      /** @type {any[]} */
+      const candidatePolicies = [];
+      if (loaded.found && !loaded.trusted) candidatePolicies.push({ id: 'worktree', policy: loaded.policy });
+      else if (candidate.found) candidatePolicies.push({ id: 'worktree', policy: candidate.policy });
+      /** @type {any} */
+      let managedResult;
+      try {
+        /** @type {any} */
+        const managedApi = await import('../src/team/managed-policy-cli.mjs');
+        const { report } = await buildReport(opts);
+        managedResult = managedApi.evaluateSystemManagedPolicyForCi({
+          resolved: managedSystem, audit, report, basePolicies, candidatePolicies,
+          inlineFailures: failures, ignore: [...ignore],
+        });
+      } catch (error) {
+        const payload = { ok: false, mode: 'managed-policy', code: error?.code ?? 'MANAGED_POLICY_INTERNAL', reason: error?.message ?? String(error) };
+        if (opts.json) { emitJson(payload); process.exit(2); }
+        process.stderr.write(paint('red', `holt ci: ${payload.reason}\n`));
+        process.exit(2);
+      }
+      const payload = {
+        ok: managedResult.ok,
+        mode: 'managed-policy',
+        managed: managedResult.system,
+        managedDetails: managedResult.managed,
+        policySource: policySourceOf(loaded),
+        candidatePolicy: candidateError ?? (candidate.found ? { path: candidate.path, supplied: true } : { supplied: false }),
+        rulesEvaluated: managedResult.rulesEvaluated,
+        disabledRules: managedResult.disabledRules,
+        violations: managedResult.violations,
+        exempted: managedResult.exempted,
+        errors: managedResult.errors,
+        warnings: managedResult.warnings,
+        additiveOrder: managedResult.additiveOrder,
+        note: 'system authority is additive and candidate config, base policy, and inline ignore cannot suppress it; sync is never automatic',
+      };
+      try {
+        /** @type {any} */
+        const managedApi = await import('../src/team/managed-policy-cli.mjs');
+        await managedApi.revalidateResolvedSystemManagedPolicyForCi(managedSystem);
+      } catch (error) {
+        const rejected = { ok: false, mode: 'managed-policy', code: error?.code ?? 'MANAGED_POLICY_INTERNAL', reason: error?.message ?? String(error) };
+        if (opts.json) { emitJson(rejected); process.exit(2); }
+        process.stderr.write(paint('red', `holt ci: ${rejected.reason}\n`));
+        process.exit(2);
+      }
+      if (opts.json) { emitJson(payload); process.exit(payload.ok ? 0 : 1); }
+      out(paint('bold', `holt ci — managed policy ${managedResult.managed.profile}`)
+        + paint('grey', `  system authority · generation ${managedResult.system.generation}`));
+      out(paint('grey', `  root ${managedResult.system.rootFingerprint} · earliest expiry ${managedResult.system.freshness.earliestExpiry}`));
+      for (const violation of managedResult.violations) {
+        out(`  ${paint(violation.severity === 'error' ? 'red' : 'yellow', violation.severity.toUpperCase())} ${paint('bold', violation.rule)}  ${violation.message}`);
+      }
+      out(payload.ok ? paint('green', '\n  PASS — system policy satisfied\n') : paint('red', `\n  FAIL — ${payload.errors} error(s)\n`));
+      process.exit(payload.ok ? 0 : 1);
     }
     if (loaded.found) {
       const ent = checkEntitlement('policy-file');
@@ -2210,7 +2691,8 @@ async function main() {
       out(`    ${paint('bold', String(b.attemptsHoltCouldNotVerify).padStart(4))}  attempt(s) holt could NOT verify — the host decided (not counted as prevented)`);
       out(`    ${paint('bold', String(b.workstreamsRescued).padStart(4))}  workstream(s) rescued to a verifiable ref`);
       out(`    ${paint('bold', String(b.workstreamsProtected).padStart(4))}  workstream(s) protected (holding work found nowhere else)`);
-      out(`    ${paint('bold', String(b.worktreesReclaimed).padStart(4))}  disposable worktree(s) reclaimed`);
+      out(`    ${paint('bold', String(b.worktreesQuarantined).padStart(4))}  worktree(s) moved into recoverable quarantine`);
+      out(`    ${paint('bold', String(b.worktreesReclaimed).padStart(4))}  historical worktree removal event(s)`);
       out(`    ${paint('bold', String(b.branchesDeleted).padStart(4))}  landed branch(es) cleaned up`);
       out(`    ${paint(b.protectionsReleased ? 'yellow' : 'grey', String(b.protectionsReleased).padStart(4))}  protection(s) RELEASED (work made destroyable again — recorded with who released them)`);
       out(`\n  ${paint('grey', `${s.events} events since ${s.since ? s.since.slice(0,10) : '—'}`)}`);
@@ -2253,7 +2735,7 @@ async function main() {
       const mark = e.action === 'unprotect' ? paint('yellow', e.action) : paint('bold', e.action);
       out(`  ${paint('grey', e.at)}  ${mark}  ${what}${who}`);
     }
-    out(paint('grey', '\n  `holt forensics <workstream>` reconstructs one workstream\'s full timeline, attributed.'));
+    out(paint('grey', '\n  `holt forensics <workstream>` reconstructs recorded events; attribution is reported, inferred or unknown.'));
     out(`\n  ${paint('grey', "integrity: holt journal --verify")}`);
     return;
   }
@@ -2277,7 +2759,7 @@ async function main() {
       if (opts.json) return emitJson(f);
       out(paint('bold', `holt forensics — fleet: ${f.repositories} repositories, ${f.totals.sessions} identified agent session(s)`));
       out(paint('grey', `  ${f.roots.join(' ')}`));
-      out(`\n  ${paint('bold', 'TOTALS')}  ${f.totals.events} events · ${paint(f.totals.blocked ? 'red' : 'grey', `${f.totals.blocked} refused`)} · ${f.totals.destroyed} removed · ${f.totals.crossRepoSessions} session(s) spanning >1 repo · ${f.totals.unattributedEvents} unattributed`);
+      out(`\n  ${paint('bold', 'TOTALS')}  ${f.totals.events} events · ${paint(f.totals.blocked ? 'red' : 'grey', `${f.totals.blocked} refused`)} · ${f.totals.quarantined} quarantined · ${f.totals.destroyed} historically removed · ${f.totals.crossRepoSessions} session(s) spanning >1 repo · ${f.totals.unattributedEvents} unattributed`);
       if (f.refusedThenDestroyed.length) {
         out(`\n  ${paint('red', 'REFUSED IN ONE PLACE, DESTRUCTIVE IN ANOTHER')}`);
         for (const r of f.refusedThenDestroyed.slice(0, 10)) {
@@ -2289,7 +2771,7 @@ async function main() {
       out(`\n  ${paint('bold', 'SESSIONS')}`);
       for (const s of f.sessions.slice(0, 20)) {
         out(`    ${paint('bold', s.agent)}${s.agentVersion ? paint('grey', ` ${s.agentVersion}`) : ''} ${paint('grey', String(s.session).slice(0, 16))}  ${s.repoCount} repo(s)`);
-        out(paint('grey', `      ${s.events} events · ${s.blocked} refused · ${s.couldNotVerify} unverified · ${s.destroyed} removed  [${s.repos.map((p) => p.name).slice(0, 6).join(', ')}]`));
+          out(paint('grey', `      ${s.events} events · ${s.blocked} refused · ${s.couldNotVerify} unverified · ${s.quarantined} quarantined · ${s.destroyed} historically removed  [${s.repos.map((p) => p.name).slice(0, 6).join(', ')}]`));
       }
       if (f.failures.length) {
         out(`\n  ${paint('red', 'COULD NOT READ')} ${paint('grey', '(not clean — unknown)')}`);
@@ -2333,6 +2815,29 @@ async function main() {
     return void cmdAction(await unprotect(opts.cwd, { id: opts._[1] ?? null, ...opts }), opts);
   }
   if (cmd === 'rescued') return void cmdAction(await rescues(opts.cwd));
+  if (cmd === 'quarantines') return void cmdAction(await quarantines(opts.cwd, opts), opts);
+  if (cmd === 'restore') {
+    const target = opts._[1];
+    if (!target) {
+      process.stderr.write(paint('red', 'holt restore: needs a quarantine id\n'));
+      process.exit(2);
+    }
+    const r = await restoreQuarantine(opts.cwd, target, opts);
+    cmdAction(r, opts);
+    if (!r.ok) process.exit(1);
+    return;
+  }
+  if (cmd === 'purge') {
+    const target = opts._[1];
+    if (!target) {
+      process.stderr.write(paint('red', 'holt purge: needs a quarantine id\n'));
+      process.exit(2);
+    }
+    const r = await purgeQuarantine(opts.cwd, target, opts);
+    cmdAction(r, opts);
+    if (!r.ok) process.exit(1);
+    return;
+  }
   if (cmd === 'discard') {
     const targets = opts._.slice(1);
     if (!targets.length) {
@@ -2390,6 +2895,7 @@ async function main() {
     out(`\n  ${paint('grey', rep.cloudCaveat)}\n`);
     return;
   }
+  if (cmd === 'providers') return cmdProviders(opts);
   if (cmd === 'setup') return cmdSetup(opts);
   if (cmd === 'integrate') return cmdIntegrate(opts);
   // The other half of `integrate`. An alias for `integrate --remove`, not a separate code path,
@@ -2501,8 +3007,9 @@ async function main() {
       // them, and the work is gone.
       //
       // `clean --apply` is different in exactly the way that matters: it re-verifies each worktree
-      // against a fresh scan immediately before removing it, so the set drains to one survivor by
-      // construction. So the split is not a fudge — it is which consumer looks again.
+      // against a fresh scan immediately before moving it into recoverable quarantine, so the
+      // active set drains to one survivor by construction. So the split is not a fudge — it is
+      // which consumer looks again.
       //
       // gate therefore refuses a redundant worktree and says why, naming the siblings, so the
       // human can pick which one goes instead of the tool guessing.
@@ -2513,8 +3020,8 @@ async function main() {
         for (const r of verdict.reasons) out(paint('grey', `    ${r}`));
       } else if (redundantOnly) {
         out(paint('yellow', `? ${id}: DUPLICATE — the same work is also in ${verdict.redundantWith.join(', ')}`));
-        out(paint('grey', '    Any ONE of them may go, but not all. `holt clean --apply` removes'));
-        out(paint('grey', '    the extras safely (it re-checks before each removal); this gate will'));
+        out(paint('grey', '    Any ONE may leave the active set, but not all. `holt clean --apply`'));
+        out(paint('grey', '    quarantines extras safely (it re-checks before each move); this gate will'));
         out(paint('grey', '    not authorise a delete it cannot re-verify.'));
       } else if (verdict.safe) {
         out(paint('green', `✓ ${id}: disposable — ${verdict.reasons[0]}`));

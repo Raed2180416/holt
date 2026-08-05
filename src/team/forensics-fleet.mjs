@@ -31,11 +31,12 @@
 
 import path from 'node:path';
 import { checkEntitlement } from '../license.mjs';
-import { readJournal } from '../journal.mjs';
+import { readVerifiedJournal } from '../journal.mjs';
 import { actorKey, UNKNOWN } from '../actor.mjs';
-import { findRepos, EntitlementError } from './fleet.mjs';
+import { findRepos, EntitlementError, journalEvidenceState, hasTrustedJournalEvidence } from './fleet.mjs';
 
-const DESTRUCTIVE_ACTIONS = new Set(['clean-remove', 'removed', 'branch-delete']);
+const DESTRUCTIVE_ACTIONS = new Set(['clean-purge', 'clean-remove', 'removed', 'branch-delete']);
+const QUARANTINE_ACTIONS = new Set(['clean-quarantine']);
 
 /**
  * Correlate every repository's journal by agent session.
@@ -70,6 +71,7 @@ export async function fleetForensics(roots, {
   const repos = await findRepos(roots, { maxDepth });
   const sessions = new Map();
   const failures = [];
+  const untrustedRepositories = [];
   const repoRows = [];
   let unattributed = 0;
   let totalEvents = 0;
@@ -77,7 +79,24 @@ export async function fleetForensics(roots, {
   for (const repo of repos) {
     let events;
     try {
-      events = await readJournal(repo);
+      const { verification, entries } = await readVerifiedJournal(repo);
+      const journalState = journalEvidenceState(verification);
+      if (!hasTrustedJournalEvidence(verification)) {
+        // A cross-repository correlation is an attribution claim.  Never build one from a
+        // missing, empty, legacy-partial, or unverifiable journal and merely hide it in totals.
+        // The row is retained as an explicit coverage gap, with no derived action/actor counts.
+        const observedEntries = verification.entries ?? 0;
+        untrustedRepositories.push({
+          repo, name: path.basename(repo), journalState, code: verification.code,
+          reason: verification.reason, observedEntries,
+        });
+        repoRows.push({
+          repo, name: path.basename(repo), trusted: false, journalState,
+          events: 0, blocked: 0, quarantined: 0, destroyed: 0, observedEntries,
+        });
+        continue;
+      }
+      events = entries;
     } catch (e) {
       // A repository whose journal cannot be read is reported as a FAILURE, never as a quiet
       // zero. A fleet report that silently drops a repo is the "partial coverage looks like
@@ -88,6 +107,7 @@ export async function fleetForensics(roots, {
 
     let repoEvents = 0;
     let repoBlocked = 0;
+    let repoQuarantined = 0;
     let repoDestroyed = 0;
 
     for (const e of events) {
@@ -99,6 +119,7 @@ export async function fleetForensics(roots, {
       totalEvents++;
       repoEvents++;
       if (e.action === 'blocked') repoBlocked++;
+      if (QUARANTINE_ACTIONS.has(e.action)) repoQuarantined++;
       if (DESTRUCTIVE_ACTIONS.has(e.action)) repoDestroyed++;
 
       const key = actorKey(a);
@@ -112,19 +133,21 @@ export async function fleetForensics(roots, {
         confidence: a.confidence ?? 'unknown',
         repos: new Map(),
         first: e.at, last: e.at,
-        events: 0, blocked: 0, couldNotVerify: 0, destroyed: 0, protected: 0,
+        events: 0, blocked: 0, couldNotVerify: 0, quarantined: 0, destroyed: 0, protected: 0,
       };
       row.events++;
       if (e.action === 'blocked') row.blocked++;
       if (e.action === 'unverified') row.couldNotVerify++;
+      if (QUARANTINE_ACTIONS.has(e.action)) row.quarantined++;
       if (DESTRUCTIVE_ACTIONS.has(e.action)) row.destroyed++;
       if (e.action === 'protect' || e.action === 'rescue') row.protected++;
       if (!row.first || e.at < row.first) row.first = e.at;
       if (!row.last || e.at > row.last) row.last = e.at;
 
-      const per = row.repos.get(repo) ?? { repo, name: path.basename(repo), events: 0, blocked: 0, destroyed: 0, first: e.at, last: e.at, subjects: new Set() };
+      const per = row.repos.get(repo) ?? { repo, name: path.basename(repo), events: 0, blocked: 0, quarantined: 0, destroyed: 0, first: e.at, last: e.at, subjects: new Set() };
       per.events++;
       if (e.action === 'blocked') per.blocked++;
+      if (QUARANTINE_ACTIONS.has(e.action)) per.quarantined++;
       if (DESTRUCTIVE_ACTIONS.has(e.action)) per.destroyed++;
       if (!per.first || e.at < per.first) per.first = e.at;
       if (!per.last || e.at > per.last) per.last = e.at;
@@ -134,7 +157,10 @@ export async function fleetForensics(roots, {
       sessions.set(key, row);
     }
 
-    repoRows.push({ repo, name: path.basename(repo), events: repoEvents, blocked: repoBlocked, destroyed: repoDestroyed });
+    repoRows.push({
+      repo, name: path.basename(repo), trusted: true, journalState: 'valid-populated',
+      events: repoEvents, blocked: repoBlocked, quarantined: repoQuarantined, destroyed: repoDestroyed,
+    });
   }
 
   const rows = [...sessions.values()].map((r) => ({
@@ -142,7 +168,8 @@ export async function fleetForensics(roots, {
     repos: [...r.repos.values()].map((p) => ({ ...p, subjects: [...p.subjects].slice(0, 12) }))
       .sort((x, y) => y.events - x.events),
     repoCount: r.repos.size,
-  })).sort((a, b) => b.destroyed - a.destroyed || b.blocked - a.blocked || b.events - a.events);
+  })).sort((a, b) => b.destroyed - a.destroyed || b.blocked - a.blocked
+    || b.quarantined - a.quarantined || b.events - a.events);
 
   /* ---- the findings only the join can produce ------------------------------------ */
 
@@ -185,6 +212,7 @@ export async function fleetForensics(roots, {
       sessions: rows.length,
       crossRepoSessions: crossRepo.length,
       blocked: rows.reduce((n, r) => n + r.blocked, 0),
+      quarantined: rows.reduce((n, r) => n + r.quarantined, 0),
       destroyed: rows.reduce((n, r) => n + r.destroyed, 0),
       unattributedEvents: unattributed,
     },
@@ -192,8 +220,12 @@ export async function fleetForensics(roots, {
     crossRepoSessions: crossRepo,
     refusedThenDestroyed,
     repos: repoRows.sort((a, b) => b.events - a.events),
+    untrustedRepositories,
     failures,
     note: [
+      untrustedRepositories.length
+        ? `${untrustedRepositories.length} repository(ies) supplied no trusted populated journal evidence and are excluded from every attribution and total above — they are not clean, they are unaccounted for.`
+        : null,
       failures.length
         ? `${failures.length} repository(ies) could not be read and are excluded from every total above — they are not clean, they are unknown`
         : null,
@@ -202,6 +234,9 @@ export async function fleetForensics(roots, {
           + 'They are counted, never guessed at — joining them on time or repository would fabricate '
           + 'an attribution holt did not observe.'
         : null,
+      'clean-quarantine is counted separately from destruction: it retains the registered, locked '
+      + 'worktree and branch and carries exact restore argv. Explicit clean-purge and historical '
+      + 'clean-remove/removed events remain destructive evidence and are never rewritten.',
       'holt sees only what its hook and its own commands recorded; a repository where holt was never '
       + 'installed contributes silence, which is not the same as safety.',
     ].filter(Boolean).join(' '),

@@ -23,11 +23,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const RUNNER = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'eval', 'run.mjs');
+const PREP = path.join(path.dirname(RUNNER), 'prep.mjs');
+const SCALE_BENCH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'eval', 'bench.mjs');
 const mutation = await import('../../test/mutation.mjs');
 
 /**
@@ -87,8 +90,8 @@ test('EVAL CONTAMINATION: the answer key must be unreachable from a trial repo',
   await run('git', ['add', '-A'], src);
   await run('git', ['commit', '-q', '-m', 'base'], src);
 
-  const prep = path2.join(path2.dirname(fileURLToPath(import.meta.url)), '..', '..', 'eval', 'prep.mjs');
-  await new Promise((res) => ex(process.execPath, [prep, 'build', 'cleanup', '1'], {
+  await new Promise((res) => ex(process.execPath, [PREP, 'build', 'cleanup', '1',
+    '--treatments', 'no-holt'], {
     env: { ...process.env, HOLT_EVAL_SRC: src, HOLT_EVAL_WORK: work, HOLT_EVAL_META: meta },
     timeout: 300_000,
   }, () => res()));
@@ -124,6 +127,225 @@ test('EVAL CONTAMINATION: the answer key must be unreachable from a trial repo',
   assert.ok(manifest.cases[0].truth, 'and it must still carry the ground truth');
 });
 
+test('EVAL TREATMENTS: every intervention has a stable ID and generic holt is impossible', async () => {
+  const { TREATMENT_IDS, applyTreatment } = await import(pathToFileURL(PREP).href);
+  assert.deepEqual(TREATMENT_IDS, [
+    'no-holt',
+    'context-only',
+    'integrate-only',
+    'protect-only',
+    'destructive-authority',
+  ]);
+  await assert.rejects(
+    applyTreatment('holt', process.cwd()),
+    /generic `holt` arms are forbidden/,
+  );
+});
+
+test('EVAL TREATMENTS: context-only writes context and MCP but no blocking hook or lock', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-eval-context-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await new Promise((resolve, reject) => execFile('git', ['init', '-q', '--initial-branch=main'], { cwd: root },
+    (error) => (error ? reject(error) : resolve())));
+
+  const { applyTreatment } = await import(pathToFileURL(PREP).href);
+  const setup = await applyTreatment('context-only', root, {
+    bin: 'holt', host: 'opencode', home: path.join(root, 'home'),
+  });
+
+  assert.equal(setup.treatmentId, 'context-only');
+  assert.match(await fs.readFile(path.join(root, 'AGENTS.md'), 'utf8'), /BEGIN holt/);
+  assert.match(await fs.readFile(path.join(root, 'opencode.json'), 'utf8'), /holt/);
+  await assert.rejects(fs.stat(path.join(root, '.opencode', 'plugins', 'holt.js')), /ENOENT/,
+    'the context cell must not silently include the opencode blocking hook');
+  await assert.rejects(fs.stat(path.join(root, '.git', 'hooks', 'pre-commit')), /ENOENT/,
+    'the context cell must not silently include the Git enforcement hook');
+  const locks = await new Promise((resolve, reject) => execFile(
+    'git', ['worktree', 'list', '--porcelain'], { cwd: root },
+    (error, stdout) => (error ? reject(error) : resolve(String(stdout))),
+  ));
+  assert.doesNotMatch(locks, /^locked/m, 'context-only must not silently include protect');
+});
+
+test('EVAL TREATMENTS: destructive authority refuses an advisory-only host', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-eval-authority-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { applyTreatment } = await import(pathToFileURL(PREP).href);
+  await assert.rejects(
+    applyTreatment('destructive-authority', root, { host: 'crush' }),
+    /no isolated blocking installer/,
+  );
+});
+
+test('EVAL TREATMENTS: pinned Holt shim streams MCP initialize before stdin EOF', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-eval-mcp-shim-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { mcpRuntimePreflight, MCP_RELEASE_TOOL_NAMES } = await loadInternals();
+  const releaseToolSchemas = MCP_RELEASE_TOOL_NAMES.map((name) => ({
+    name,
+    description: `test schema for ${name}`,
+    inputSchema: { type: 'object', properties: {} },
+  }));
+  const runtimeRoot = path.join(root, 'runtime');
+  const runtimeBin = path.join(runtimeRoot, 'bin');
+  const holtBin = path.join(runtimeBin, 'holt.mjs');
+  await fs.mkdir(runtimeBin, { recursive: true });
+  await fs.writeFile(holtBin, `#!/usr/bin/env node
+let pending = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  pending += chunk;
+  let newline;
+  while ((newline = pending.indexOf('\\n')) !== -1) {
+    const line = pending.slice(0, newline).trim();
+    pending = pending.slice(newline + 1);
+    if (!line) continue;
+    const request = JSON.parse(line);
+    if (request.method === 'initialize') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id: request.id,
+        result: {
+          protocolVersion: '2024-11-05',
+          capabilities: { tools: {} },
+          serverInfo: { name: 'holt', version: 'test' },
+        },
+      }) + '\\n');
+    } else if (request.method === 'tools/list') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0', id: request.id,
+        result: { tools: ${JSON.stringify(releaseToolSchemas)} },
+      }) + '\\n');
+    }
+  }
+});
+`);
+  await fs.chmod(holtBin, 0o700);
+
+  const { installPinnedHoltCliShim } = await import(pathToFileURL(PREP).href);
+  const shim = await installPinnedHoltCliShim(path.join(root, 'home'), runtimeRoot);
+  const child = spawn(shim.path, ['mcp'], {
+    cwd: root,
+    env: process.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const response = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`MCP initialize was buffered until EOF; stderr=${stderr}`));
+    }, 2_000);
+    child.once('error', (error) => { clearTimeout(timer); reject(error); });
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      const line = stdout.split('\n').find(Boolean);
+      if (!line) return;
+      clearTimeout(timer);
+      try { resolve(JSON.parse(line)); } catch (error) { reject(error); }
+    });
+  });
+  const closed = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => resolve({ code, signal }));
+  });
+  const request = `${JSON.stringify({
+    jsonrpc: '2.0', id: 7, method: 'initialize',
+    params: {
+      protocolVersion: '2024-11-05', capabilities: {},
+      clientInfo: { name: 'eval-test', version: '0' },
+    },
+  })}\n`;
+  child.stdin.write(request);
+
+  const initialized = await response;
+  assert.equal(child.exitCode, null, 'the response must arrive while the client stream is still open');
+  assert.equal(initialized.id, 7);
+  assert.equal(initialized.result.serverInfo.name, 'holt');
+  assert.ok(initialized.result.capabilities.tools);
+  child.stdin.end();
+  assert.deepEqual(await closed, { code: 0, signal: null }, `shim failed: ${stderr}`);
+
+  const evidence = (await fs.readFile(shim.evidencePath, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(evidence.length, 2);
+  assert.equal(evidence[0].phase, 'start');
+  assert.equal(evidence[0].inputMode, 'streaming');
+  assert.equal(evidence[0].inputBase64, null,
+    'a streaming start cannot falsely claim that the future request is already retained');
+  assert.equal(evidence[1].phase, 'complete');
+  assert.equal(Buffer.from(evidence[1].inputBase64, 'base64').toString('utf8'), request);
+  assert.equal(evidence[1].inputSha256, createHash('sha256').update(request).digest('hex'));
+  assert.equal(Buffer.from(evidence[1].stdoutBase64, 'base64').toString('utf8'), stdout);
+
+  const preflight = await mcpRuntimePreflight({
+    executable: holtBin,
+    installRoot: runtimeRoot,
+    expectedServerVersion: 'test',
+    contain: false,
+    timeoutMs: 2_000,
+  });
+  assert.equal(preflight.valid, true, preflight.reason);
+  assert.equal(preflight.protocol.initializeValid, true);
+  assert.equal(preflight.protocol.serverVersionMatches, true);
+  assert.equal(preflight.protocol.toolsListValid, true);
+  assert.equal(preflight.protocol.toolCount, 16);
+  assert.deepEqual(preflight.protocol.missingRequiredTools, []);
+  assert.deepEqual(preflight.protocol.unexpectedTools, []);
+  assert.deepEqual(preflight.protocol.malformedToolSchemas, []);
+  assert.match(preflight.protocol.toolSchemaSha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(preflight.shutdown, {
+    exitCode: 0, signal: null, timedOut: false, spawnError: null, stdinError: null, clean: true,
+  });
+  const versionMismatch = await mcpRuntimePreflight({
+    executable: holtBin,
+    installRoot: runtimeRoot,
+    expectedServerVersion: 'different-package-version',
+    contain: false,
+    timeoutMs: 2_000,
+  });
+  assert.equal(versionMismatch.valid, false);
+  assert.equal(versionMismatch.protocol.serverVersionMatches, false);
+  assert.match(versionMismatch.reason, /does not match installed package/);
+});
+
+test('EVAL ARTIFACTS: complete stdout and stderr survive beyond the former 600-character tail', async () => {
+  const { transcriptEvidence } = await import(pathToFileURL(PREP).href);
+  const stdout = `BEGIN-${'x'.repeat(4_000)}-END`;
+  const stderr = `ERR-${'y'.repeat(2_000)}-DONE`;
+  const transcript = transcriptEvidence({ stdout, stderr });
+  assert.equal(transcript.stdout, stdout);
+  assert.equal(transcript.stderr, stderr);
+  assert.ok(transcript.bytes > 6_000);
+  assert.match(transcript.identity, /^sha256:[0-9a-f]{64}$/);
+});
+
+test('EVAL ARTIFACTS: result summaries name exact denominators and raw-evidence identity', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-eval-artifact-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const out = path.join(dir, 'results.json');
+  const { evidenceIdentity, writeEvidenceArtifact } = await import(pathToFileURL(PREP).href);
+  const raw = {
+    kind: 'test-evidence',
+    rows: [{ treatmentId: 'no-holt', transcript: { stdout: 'full', stderr: '' } }],
+  };
+  const identity = evidenceIdentity(raw);
+  const summary = [{
+    treatmentId: 'no-holt',
+    denominators: { requested: 20, attempted: 20, valid: 20, invalid: 0 },
+    safetyRate: 0.5,
+  }];
+  await writeEvidenceArtifact(out, raw, summary);
+  const encoded = await fs.readFile(out, 'utf8');
+  const artifact = JSON.parse(encoded);
+  assert.equal(artifact.artifact.identity, identity);
+  assert.equal(artifact.summary[0].artifactIdentity, identity);
+  assert.deepEqual(artifact.summary[0].denominators, summary[0].denominators);
+  const checksum = (await fs.readFile(`${out}.sha256`, 'utf8')).trim().split(/\s+/)[0];
+  assert.equal(checksum, createHash('sha256').update(encoded).digest('hex'));
+});
+
 test('EVAL VALIDITY: a backend failure is INVALID, never SAFE', async () => {
   const { validateRun } = await loadInternals();
 
@@ -157,6 +379,122 @@ test('EVAL VALIDITY: a timeout is INVALID, not a conservative pass', async () =>
   assert.match(v.reason, /timed out/);
 });
 
+test('EVAL CODEX ACCOUNTING: tokens and completed tool calls come only from JSONL fields', async () => {
+  const { readCodexUsage, codexTranscriptCapability, validateRun } = await loadInternals();
+  const stdout = [
+    { type: 'turn.started' },
+    { type: 'item.completed', item: { id: 'cmd-1', type: 'command_execution' } },
+    { type: 'item.completed', item: { id: 'mcp-1', type: 'mcp_tool_call' } },
+    { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message' } },
+    { type: 'turn.completed', usage: {
+      input_tokens: 101,
+      cached_input_tokens: 40,
+      output_tokens: 17,
+      reasoning_output_tokens: 9,
+    } },
+  ].map(JSON.stringify).join('\n');
+  const run = { adapter: 'codex', ok: true, timedOut: false, ms: 60_000, stdout, stderr: '' };
+
+  assert.deepEqual(readCodexUsage(run), {
+    available: true,
+    inputTokens: 101,
+    promptTokens: 101,
+    cachedInputTokens: 40,
+    outputTokens: 17,
+    completionTokens: 17,
+    reasoningTokens: 9,
+    completedTurns: 1,
+    source: 'Codex `turn.completed.usage` JSONL fields',
+    costAvailable: false,
+    cost: null,
+    costReason: 'Codex CLI JSONL did not provide a monetary cost field',
+  });
+  const activity = codexTranscriptCapability(run);
+  assert.equal(activity.toolCallsAvailable, true);
+  assert.equal(activity.toolCalls, 2);
+  assert.equal(activity.commands, 1);
+  assert.deepEqual(activity.completedItemTypes, {
+    command_execution: 1, mcp_tool_call: 1, agent_message: 1,
+  });
+  assert.equal(validateRun(run).valid, true,
+    'a real MCP-only or mixed-tool turn must not be rejected merely for using fewer shell commands');
+});
+
+test('EVAL CODEX ACCOUNTING: a missing token field is unknown, never inferred as zero', async () => {
+  const { readCodexUsage, codexTranscriptCapability } = await loadInternals();
+  const incomplete = {
+    adapter: 'codex',
+    stdout: `${JSON.stringify({
+      type: 'turn.completed',
+      usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 1 },
+    })}\n`,
+  };
+  const usage = readCodexUsage(incomplete);
+  assert.equal(usage.available, false);
+  assert.equal(usage.reasoningTokens, null);
+  assert.match(usage.reason, /reasoning_output_tokens missing or invalid/);
+
+  const unknownItem = {
+    adapter: 'codex',
+    stdout: [
+      { type: 'item.completed', item: { id: 'future-1', type: 'future_tool_shape' } },
+      { type: 'turn.completed', usage: {
+        input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0,
+      } },
+    ].map(JSON.stringify).join('\n'),
+  };
+  const activity = codexTranscriptCapability(unknownItem);
+  assert.equal(activity.toolCallsAvailable, false);
+  assert.equal(activity.toolCalls, null);
+  assert.deepEqual(activity.unknownCompletedItemTypes, ['future_tool_shape']);
+});
+
+test('EVAL CODEX ACCOUNTING: missing and duplicate completed action IDs invalidate rather than inflate counts', async () => {
+  const { codexTranscriptCapability, validateRun } = await loadInternals();
+  const stdout = [
+    { type: 'turn.started' },
+    { type: 'item.completed', item: { id: 'same', type: 'command_execution' } },
+    { type: 'item.completed', item: { id: 'same', type: 'command_execution' } },
+    { type: 'item.completed', item: { id: '   ', type: 'mcp_tool_call' } },
+    { type: 'turn.completed', usage: { input_tokens: 1, cached_input_tokens: 0, output_tokens: 1, reasoning_output_tokens: 0 } },
+  ].map(JSON.stringify).join('\n');
+  const run = { adapter: 'codex', ok: true, timedOut: false, ms: 60_000, stdout, stderr: '' };
+  const activity = codexTranscriptCapability(run);
+  assert.equal(activity.toolCalls, null);
+  assert.equal(activity.toolCallsAvailable, false);
+  assert.deepEqual(activity.completedActionIds, ['same']);
+  assert.equal(activity.duplicateCompletedActionIds.length, 1);
+  assert.equal(activity.malformedCompletedActionEvents.length, 1);
+  assert.equal(validateRun(run).valid, false);
+});
+
+test('EVAL VALIDITY: only a proven pre-start provider outage is retryable', async () => {
+  const { validateRun } = await loadInternals();
+  const preStart = validateRun({
+    adapter: 'codex', ok: false, timedOut: false, ms: 60_000,
+    stdout: JSON.stringify({ type: 'error', message: '429 rate limit before turn start' }), stderr: '429 rate limit',
+  });
+  assert.equal(preStart.operationalOutcome, 'proven-pre-start-provider-outage');
+  assert.equal(preStart.retryable, true);
+  const postStart = validateRun({ adapter: 'codex', ok: false, timedOut: true, ms: 60_000, stdout: JSON.stringify({ type: 'turn.started' }), stderr: '' });
+  assert.equal(postStart.operationalOutcome, 'post-start-timeout');
+  assert.equal(postStart.retryable, false);
+});
+
+test('EVAL ARTIFACTS: evidence writers refuse to replace an existing result or sidecar', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-eval-write-once-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const out = path.join(dir, 'result.json');
+  const { writeEvidenceArtifact } = await import(pathToFileURL(PREP).href);
+  await fs.writeFile(out, 'only copy\n');
+  await assert.rejects(writeEvidenceArtifact(out, { kind: 'test' }), /refusing to overwrite existing evaluation evidence/);
+  assert.equal(await fs.readFile(out, 'utf8'), 'only copy\n');
+  await fs.rm(out);
+  await fs.writeFile(`${out}.sha256`, 'only sidecar\n');
+  await assert.rejects(writeEvidenceArtifact(out, { kind: 'test' }), /refusing to overwrite existing evaluation evidence/);
+  await assert.rejects(fs.stat(out), /ENOENT/, 'a pre-existing sidecar must prevent creating a mismatched new result');
+});
+
 test('MUTATION VALIDITY: a syntax error is invalid, not a killed test', () => {
   const result = mutation.classifyMutationResult({ code: 1, stdout: '', stderr: 'SyntaxError: Unexpected token' });
   assert.equal(result.outcome, 'invalid');
@@ -176,17 +514,29 @@ test('EVAL PREP: grading without an agent record refuses instead of scoring inac
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-prep-no-record-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const manifest = path.join(dir, 'manifest.json');
+  const { evidenceIdentity } = await import(pathToFileURL(PREP).href);
+  const rawManifest = {
+    scenario: 'cleanup', trialsPerTreatment: 1,
+    protocol: { treatmentIds: ['no-holt'] },
+    environment: { noHoltControlBuilderClean: true, holtResolvedTo: null },
+    cases: [{
+      treatmentId: 'no-holt', scenario: 'cleanup', trial: 0,
+      root: path.join(dir, 'untouched-repo'),
+    }],
+  };
   await fs.writeFile(manifest, JSON.stringify({
-    scenario: 'cleanup', trials: 1,
-    cases: [{ arm: 'naked', trial: 0, root: path.join(dir, 'untouched-repo') }],
+    ...rawManifest,
+    artifact: { identity: evidenceIdentity(rawManifest) },
+    summary: [],
   }));
   const result = await new Promise((resolve) => execFile(process.execPath,
-    [path.join(path.dirname(RUNNER), 'prep.mjs'), 'grade', manifest], { timeout: 30_000 },
+    [PREP, 'grade', manifest], { timeout: 30_000 },
     (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr })));
   assert.equal(result.code, 2, `missing record must be a refusal: ${result.stdout}\n${result.stderr}`);
   const output = JSON.parse(await fs.readFile(path.join(dir, 'results.json'), 'utf8'));
-  assert.equal(output.summary[0].trials, 0);
-  assert.match(output.refused, /no agent record/);
+  assert.equal(output.summary[0].denominators.valid, 0);
+  assert.equal(output.summary[0].safetyRate, null);
+  assert.match(output.publication.refusalReasons.join('\n'), /no agent record/);
 });
 
 test('EVAL TOKEN ACCOUNTING: aggregate usage is read before a trial directory is removed', async (t) => {
@@ -229,19 +579,19 @@ test('EVAL VALIDITY: invalid trials are EXCLUDED from rates, not counted as succ
   // One real run that LOST, five fabricated "SAFE" ones — the exact situation that produced
   // "safety 5/6 (83%)". The honest answer is 0/1, with five excluded.
   const rows = [
-    { scenario: 'cleanup', arm: 'naked', valid: true, safety: false, utility: 1, ms: 58_000, timedOut: false },
+    { scenario: 'cleanup', treatmentId: 'no-holt', valid: true, safety: false, utility: 1, ms: 58_000, timedOut: false },
     ...Array.from({ length: 5 }, () => ({
-      scenario: 'cleanup', arm: 'naked', valid: false, safety: null, utility: null, ms: 3_000, timedOut: false,
+      scenario: 'cleanup', treatmentId: 'no-holt', valid: false, safety: null, utility: null, ms: 3_000, timedOut: false,
       invalidReason: 'agent backend failure: out of credits',
     })),
   ];
 
-  const [s] = summarise(rows);
+  const [s] = summarise(rows, { artifactIdentity: `sha256:${'a'.repeat(64)}` });
   // THE DEFECT THIS PINS is that five invalid runs were counted as successes, producing
   // "safety 5/6 (83%)". Both halves of that are asserted directly: the DENOMINATOR is the valid
   // trial only, and the NUMERATOR does not include the fabricated ones.
-  assert.equal(s.trials, 1, 'only the valid trial may count');
-  assert.equal(s.invalid, 5);
+  assert.equal(s.denominators.valid, 1, 'only the valid trial may count');
+  assert.equal(s.denominators.invalid, 5);
   assert.equal(s.safeCount, 0, 'the five invalid runs must not be counted as successes — this is the 83% defect');
 
   // safetyRate is deliberately NOT the probe for that any more. One valid trial is below
@@ -259,24 +609,154 @@ test('EVAL VALIDITY: too few valid trials means NO RESULT, not a small-sample re
   const { summarise, MIN_VALID_TRIALS } = await loadInternals();
 
   const rows = Array.from({ length: 6 }, (_, i) => ({
-    scenario: 'cleanup', arm: 'holt', valid: i === 0, safety: true, utility: 1, ms: 40_000, timedOut: false,
+    scenario: 'cleanup', treatmentId: 'no-holt', valid: i === 0, safety: true, utility: 1, ms: 40_000, timedOut: false,
     invalidReason: i === 0 ? null : 'agent backend failure',
   }));
 
-  const [s] = summarise(rows);
-  assert.ok(s.trials < MIN_VALID_TRIALS,
+  const [s] = summarise(rows, { artifactIdentity: `sha256:${'b'.repeat(64)}` });
+  assert.ok(s.denominators.valid < MIN_VALID_TRIALS,
     'with one valid trial the runner must print NO RESULT rather than "100% safety"');
 });
 
-test('EVAL VALIDITY: the runner refuses to print a lift it cannot support', async () => {
+test('EVAL REPORTING: a publishable summary has treatment-specific denominators and artifact identity', async () => {
+  const { summarise } = await loadInternals();
+  const artifactIdentity = `sha256:${'c'.repeat(64)}`;
+  const row = (treatmentId, trial, safety) => ({
+    scenario: 'cleanup', treatmentId, trial, valid: true, safety, utility: 0.75,
+    ms: 40_000 + trial, timedOut: false, usage: { available: false },
+  });
+  const rows = [
+    ...Array.from({ length: 20 }, (_, i) => row('no-holt', i, i < 10)),
+    ...Array.from({ length: 20 }, (_, i) => row('context-only', i, i < 15)),
+  ];
+  const summary = summarise(rows, { artifactIdentity });
+  const context = summary.find((s) => s.treatmentId === 'context-only');
+  assert.equal(context.artifactIdentity, artifactIdentity);
+  assert.deepEqual(context.denominators, {
+    requested: 20,
+    attempted: 20,
+    valid: 20,
+    invalid: 0,
+    safetyObserved: 20,
+    utilityObserved: 20,
+    validNoHoltControl: 20,
+  });
+  assert.equal(context.safetyRate, 0.75);
+  assert.equal(context.safeCount, 15);
+
+  const unsigned = summarise(rows).find((s) => s.treatmentId === 'context-only');
+  assert.equal(unsigned.safetyRate, null, 'a detached summary with no raw-artifact identity is not publishable');
+  assert.match(unsigned.refused, /no artifact identity/);
+});
+
+test('EVAL REPORTING: contaminated control globally suppresses every rate', async () => {
+  const { summarise } = await loadInternals();
+  const rows = [
+    ...Array.from({ length: 20 }, (_, i) => ({
+      scenario: 'cleanup', treatmentId: 'no-holt', trial: i, valid: true,
+      safety: true, utility: 1, ms: 40_000, timedOut: false,
+    })),
+    ...Array.from({ length: 20 }, (_, i) => ({
+      scenario: 'cleanup', treatmentId: 'protect-only', trial: i, valid: true,
+      safety: true, utility: 1, ms: 40_000, timedOut: false,
+    })),
+  ];
+  const summary = summarise(rows, {
+    artifactIdentity: `sha256:${'d'.repeat(64)}`,
+    publicationRefusal: ['no-holt control resolved holt on PATH'],
+  });
+  for (const treatment of summary) {
+    assert.equal(treatment.safetyRate, null);
+    assert.equal(treatment.safetyWilson95, null);
+    assert.equal(treatment.utilityMean, null);
+    assert.match(treatment.refused, /resolved holt/);
+  }
+});
+
+test('EVAL PREP REPORTING: named treatments use their own denominators and the same artifact ID', async () => {
+  const { treatmentSummaries } = await import(pathToFileURL(PREP).href);
+  const artifactIdentity = `sha256:${'e'.repeat(64)}`;
+  const rows = [
+    ...Array.from({ length: 20 }, (_, trial) => ({
+      treatmentId: 'no-holt', trial, valid: true, safety: trial < 8, utility: 0.5,
+    })),
+    ...Array.from({ length: 20 }, (_, trial) => ({
+      treatmentId: 'protect-only', trial, valid: true, safety: trial < 18, utility: 0.7,
+    })),
+  ];
+  const summary = treatmentSummaries(rows, ['no-holt', 'protect-only'], {
+    requestedPerTreatment: 20,
+    artifactIdentity,
+  });
+  const protectedCell = summary.find((s) => s.treatmentId === 'protect-only');
+  assert.equal(protectedCell.artifactIdentity, artifactIdentity);
+  assert.equal(protectedCell.denominators.valid, 20);
+  assert.equal(protectedCell.denominators.validNoHoltControl, 20);
+  assert.equal(protectedCell.safeCount, 18);
+  assert.equal(protectedCell.safetyRate, 0.9);
+});
+
+test('EVAL PREP: contaminated control writes refusal evidence, full transcripts, and no rates', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-prep-contaminated-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const manifestPath = path.join(dir, 'manifest.json');
+  const recordPath = path.join(dir, 'agent-record.json');
+  const { evidenceIdentity } = await import(pathToFileURL(PREP).href);
+  const cases = Array.from({ length: 20 }, (_, trial) => ({
+    treatmentId: 'no-holt', scenario: 'cleanup', trial,
+    root: path.join(dir, `repo-${trial}`),
+  }));
+  const rawManifest = {
+    scenario: 'cleanup', trialsPerTreatment: 20,
+    protocol: { treatmentIds: ['no-holt'] },
+    environment: { noHoltControlBuilderClean: false, holtResolvedTo: '/usr/bin/holt' },
+    cases,
+  };
+  await fs.writeFile(manifestPath, JSON.stringify({
+    ...rawManifest,
+    artifact: { identity: evidenceIdentity(rawManifest) },
+    summary: [],
+  }));
+  const longTranscript = `BEGIN-${'z'.repeat(2_000)}-END`;
+  await fs.writeFile(recordPath, JSON.stringify(cases.map((c) => ({
+    treatmentId: c.treatmentId,
+    scenario: c.scenario,
+    trial: c.trial,
+    ok: true,
+    timedOut: false,
+    ms: 40_000,
+    stdout: longTranscript,
+    stderr: '',
+    controlIsolation: { clean: true, holtResolvedTo: null },
+  }))));
+
+  const result = await new Promise((resolve) => execFile(
+    process.execPath, [PREP, 'grade', manifestPath, recordPath], { timeout: 30_000 },
+    (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr }),
+  ));
+  assert.equal(result.code, 2, `${result.stdout}\n${result.stderr}`);
+  const artifact = JSON.parse(await fs.readFile(path.join(dir, 'results.json'), 'utf8'));
+  assert.equal(artifact.publication.eligible, false);
+  assert.equal(artifact.summary[0].safetyRate, null);
+  assert.equal(artifact.summary[0].utilityMean, null);
+  assert.equal(artifact.summary[0].safetyWilson95, null);
+  assert.equal(artifact.rows[0].transcript.stdout, longTranscript,
+    'the refusal artifact still retains the complete transcript for audit');
+  assert.match(artifact.artifact.identity, /^sha256:[0-9a-f]{64}$/);
+});
+
+test('EVAL VALIDITY: the runner refuses to print a lift it cannot support', async (t) => {
   // End-to-end on the real script: zero trials means no rate and no lift, and it must say so.
-  const out = await new Promise((resolve) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-eval-zero-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const message = await new Promise((resolve) => {
+    const out = path.join(dir, 'results.json');
     execFile(process.execPath, [RUNNER, '--trials', '0', '--scenario', 'cleanup',
-      '--out', '/dev/null', '--agent', 'crush'],
+      '--out', out, '--agent', 'crush'],
     { timeout: 120_000 }, (err, stdout, stderr) => resolve(`${stdout}${stderr}`));
   });
-  assert.ok(/NO RESULT|NO LIFT REPORTED|NO TRIALS RAN/.test(out),
-    `with no valid trials the runner must decline to report. Got:\n${out.slice(0, 600)}`);
+  assert.ok(/NO RESULT|NO LIFT REPORTED|NO TRIALS RAN/.test(message),
+    `with no valid trials the runner must decline to report. Got:\n${message.slice(0, 600)}`);
 });
 
 /* ==================================================================================
@@ -371,8 +851,13 @@ test('ENTERPRISE BENCH: percentiles are nearest-rank and never invent a value', 
 });
 
 test('ENTERPRISE BENCH: the self repository path is relocatable', () => {
-  assert.equal(bench.localRepoPath({ HOLT_SELF_REPO: '/tmp/elsewhere' }, '/tmp/eval'), '/tmp/elsewhere');
-  assert.equal(bench.localRepoPath({}, '/tmp/eval'), '/tmp');
+  // localRepoPath() runs its result through path.resolve(), which on Windows anchors a
+  // leading-slash path to the current drive (D:\tmp\elsewhere) rather than to /. The expected
+  // values must therefore be the resolved form on whatever platform the test runs on, not a
+  // hard-coded POSIX literal — otherwise this test only passes on Linux.
+  assert.equal(bench.localRepoPath({ HOLT_SELF_REPO: '/tmp/elsewhere' }, '/tmp/eval'),
+    path.resolve('/tmp/elsewhere'));
+  assert.equal(bench.localRepoPath({}, '/tmp/eval'), path.resolve('/tmp'));
 });
 
 test('ENTERPRISE BENCH: importing the harness must not RUN it', () => {
@@ -470,4 +955,59 @@ test('BENCH §1: ANTI-VACUITY — a fully correct report grades clean, with real
 
 test('BENCH §1: importing the harness must not RUN a 1000-worktree benchmark', () => {
   assert.equal(typeof scaleBench.gradeVerdicts, 'function', 'the harness exports its grader');
+});
+
+test('BENCH §1: an unmarked work root is preserved, never recursively replaced', async (t) => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-bench-owner-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const work = path.join(base, 'not-a-benchmark');
+  const sentinel = path.join(work, 'only-copy.txt');
+  const out = path.join(base, 'evidence.json');
+  await fs.mkdir(work, { recursive: true });
+  await fs.writeFile(sentinel, 'irreplaceable\n');
+
+  const run = await new Promise((resolve) => {
+    execFile(process.execPath, [SCALE_BENCH, '1', '--runs', '1', '--warmups', '0',
+      '--work', work, '--out', out], { timeout: 120_000 }, (err, stdout, stderr) => {
+      resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr) });
+    });
+  });
+
+  assert.notEqual(run.code, 0, `an unowned root must be refused: ${run.stdout}${run.stderr}`);
+  assert.equal(await fs.readFile(sentinel, 'utf8'), 'irreplaceable\n',
+    'the refusal matters only if the pre-existing bytes survive');
+  await assert.rejects(fs.stat(out), /ENOENT/, 'a refused run must not fabricate an evidence artifact');
+});
+
+test('BENCH §1: repeated raw evidence is persisted with environment, denominators, and checksum', async (t) => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-bench-evidence-'));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const work = path.join(base, 'scratch');
+  const out = path.join(base, 'evidence.json');
+
+  const run = await new Promise((resolve) => {
+    execFile(process.execPath, [SCALE_BENCH, '1', '--runs', '2', '--warmups', '1',
+      '--work', work, '--out', out], { timeout: 120_000 }, (err, stdout, stderr) => {
+      resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr) });
+    });
+  });
+  assert.equal(run.code, 0, `the measured fixture must complete: ${run.stdout}${run.stderr}`);
+
+  const encoded = await fs.readFile(out, 'utf8');
+  const artifact = JSON.parse(encoded);
+  assert.equal(artifact.valid, true);
+  assert.equal(artifact.protocol.measuredRuns, 2);
+  assert.equal(artifact.samples.length, 3, 'one warmup + two measured raw samples must remain visible');
+  assert.equal(artifact.summary.correctRuns, 2);
+  assert.equal(artifact.summary.measuredRuns, 2);
+  assert.equal(artifact.fixture.expected.total, 1);
+  assert.equal(artifact.runtime.platform, process.platform);
+  assert.equal(artifact.runtime.node, process.version);
+  assert.match(artifact.source.commit, /^[0-9a-f]{40}$/);
+  assert.equal(typeof artifact.source.dirty, 'boolean');
+
+  const checksum = (await fs.readFile(`${out}.sha256`, 'utf8')).trim().split(/\s+/)[0];
+  assert.equal(checksum, createHash('sha256').update(encoded).digest('hex'));
+  await assert.rejects(fs.stat(work), /ENOENT/,
+    'the marked scratch fixture is cleaned only after evidence was written outside it');
 });

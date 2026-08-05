@@ -13,9 +13,9 @@
  *   risky            unique work that was never committed                     -> at risk
  *   spent            nothing at all                                           -> disposable
  *
- * Ground truth is planted, so every assertion is exact. Repos are cloned by scripts/clone-fixtures.sh
- * (or by hand); when they are absent the tests SKIP rather than silently passing — a suite that
- * quietly reports success on zero repositories would be the exact defect holt exists to catch.
+ * Ground truth is planted, so every assertion is exact. Repos are cloned by scripts/clone-fixtures.sh.
+ * The corpus is an all-or-nothing gate: every repository must exist at its pinned commit and every
+ * scenario must complete. Missing or moving fixtures fail rather than degrading to a smaller test.
  */
 
 import { test } from 'node:test';
@@ -39,6 +39,7 @@ const REAL_ROOT = process.env.HOLT_REAL_REPOS
 const REPOS = [
   {
     dir: 'py-click', lang: 'Python', ext: 'py', hot: 'setup.cfg',
+    commit: '00e592cea702e0b2caa0dee42489fdb1c22cd845',
     dup: (n) => `def ${n}(items):\n    out = []\n    for it in items:\n        out.append(it * 2)\n    return out\n`,
     consumes: (n) => `def holt_consumer(xs):\n    return ${n}(xs)\n`,
     uniq: (n) => `def ${n}():\n    return "only here"\n`,
@@ -46,6 +47,7 @@ const REPOS = [
   },
   {
     dir: 'go-gin', lang: 'Go', ext: 'go', hot: 'go.mod',
+    commit: '34dac209ffb6ef85cc78c5d217bbb7ad001d68fd',
     dup: (n) => `package holttest\n\nfunc ${n}(items []int) []int {\n\tout := []int{}\n\tfor _, it := range items {\n\t\tout = append(out, it*2)\n\t}\n\treturn out\n}\n`,
     consumes: (n) => `package holttest\n\nfunc holtConsumer(xs []int) []int {\n\treturn ${n}(xs)\n}\n`,
     uniq: (n) => `package holttest\n\nfunc ${n}() string {\n\treturn "only here"\n}\n`,
@@ -53,6 +55,7 @@ const REPOS = [
   },
   {
     dir: 'rs-ripgrep', lang: 'Rust', ext: 'rs', hot: 'Cargo.toml',
+    commit: '435f59fc4b43af3ab32f34d53fa34978f393fe52',
     dup: (n) => `pub fn ${n}(items: &[i32]) -> Vec<i32> {\n    let mut out = Vec::new();\n    for it in items {\n        out.push(it * 2);\n    }\n    out\n}\n`,
     consumes: (n) => `pub fn holt_consumer(xs: &[i32]) -> Vec<i32> {\n    ${n}(xs)\n}\n`,
     uniq: (n) => `pub fn ${n}() -> &'static str {\n    "only here"\n}\n`,
@@ -60,6 +63,7 @@ const REPOS = [
   },
   {
     dir: 'js-express', lang: 'JavaScript', ext: 'js', hot: 'package.json',
+    commit: 'a3714473feb3d2908add734d340e7755fd85e0a3',
     dup: (n) => `export function ${n}(items) {\n  const out = [];\n  for (const it of items) {\n    out.push(it * 2);\n  }\n  return out;\n}\n`,
     consumes: (n) => `export function holtConsumer(xs) {\n  return ${n}(xs);\n}\n`,
     uniq: (n) => `export function ${n}() {\n  return 'only here';\n}\n`,
@@ -84,6 +88,41 @@ function sh(cmd, args, cwd) {
 async function exists(p) {
   try { await fs.stat(p); return true; } catch { return false; }
 }
+
+/** Prove this scenario is running against the declared corpus object, not a moving branch. */
+async function verifyPinnedFixture(repo, root) {
+  assert.equal(await exists(root), true,
+    `${repo.dir}: required real-repository fixture is missing under ${REAL_ROOT}; ` +
+    'run scripts/clone-fixtures.sh before the real-repo gate');
+
+  const top = await sh('git', ['rev-parse', '--show-toplevel'], root);
+  assert.equal(top.code, 0,
+    `${repo.dir}: fixture is not a readable Git worktree: ${top.stderr.trim()}`);
+  const [fixtureRoot, gitRoot] = await Promise.all([
+    fs.realpath(root),
+    fs.realpath(top.stdout.trim()),
+  ]);
+  assert.equal(gitRoot, fixtureRoot,
+    `${repo.dir}: fixture path is not its Git root (resolved ${gitRoot})`);
+
+  const head = await sh('git', ['rev-parse', '--verify', 'HEAD^{commit}'], root);
+  assert.equal(head.code, 0,
+    `${repo.dir}: fixture is not a readable Git worktree: ${head.stderr.trim()}`);
+  assert.equal(head.stdout.trim(), repo.commit,
+    `${repo.dir}: fixture HEAD drifted; expected ${repo.commit}, got ${head.stdout.trim() || '<none>'}. ` +
+    'Re-run scripts/clone-fixtures.sh to restore the pinned corpus.');
+
+  const status = await sh('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], root);
+  assert.equal(status.code, 0,
+    `${repo.dir}: fixture working-tree state could not be read: ${status.stderr.trim()}`);
+  assert.equal(status.stdout, '',
+    `${repo.dir}: fixture has local changes; re-run scripts/clone-fixtures.sh with a clean cache`);
+  return head.stdout.trim();
+}
+
+// Filled only after a repository's complete planted scenario passes. The final test asserts the
+// exact set, so deleting one per-repo test or returning early cannot turn a partial corpus green.
+const exercised = new Map();
 
 /** Build the six-workstream scenario inside a clone. Returns the ground truth. */
 async function plantScenario(repo, root) {
@@ -191,9 +230,7 @@ async function plantScenario(repo, root) {
 for (const repo of REPOS) {
   test(`REAL REPO (${repo.lang}): holt finds every planted defect in ${repo.dir}`, async (t) => {
     const root = path.join(REAL_ROOT, repo.dir);
-    if (!(await exists(root))) {
-      return t.skip(`${repo.dir} not cloned — run scripts/clone-fixtures.sh (SKIPPED, not passed)`);
-    }
+    const verifiedHead = await verifyPinnedFixture(repo, root);
 
     const { wtRoot, truth } = await plantScenario(repo, root);
     t.after(async () => {
@@ -208,8 +245,12 @@ for (const repo of REPOS) {
       await sh('git', ['worktree', 'prune'], root);
     });
 
-    const disc = await discover(root);
-    const scanned = await scan(disc, {});
+    // Keep the comparison base pinned too. A fresh shallow clone still has origin/HEAD pointing
+    // at today's upstream tip even after HEAD is detached at the fixture commit; allowing normal
+    // base inference here therefore made the warmed cache and a fresh clone produce different
+    // answers from the same checked-out bytes. This corpus measures holt against this exact tree.
+    const disc = await discover(root, { base: repo.commit });
+    const scanned = await scan(disc, { base: repo.commit });
     const report = await analyze(scanned, {});
 
     const ids = report.unique.map((u) => u.id);
@@ -274,18 +315,16 @@ for (const repo of REPOS) {
     const bogus = report.collisions.find((c) =>
       (c.a === 'spent' || c.b === 'spent') && c.severity !== 'low');
     assert.equal(bogus, undefined, `${repo.dir}: an untouched worktree cannot collide with anything`);
+
+    exercised.set(repo.dir, verifiedHead);
   });
 }
 
-test('REAL REPOS: at least one repository was actually exercised', async (t) => {
-  const present = [];
-  for (const r of REPOS) {
-    if (await exists(path.join(REAL_ROOT, r.dir))) present.push(r.dir);
-  }
-  // Presence-before-silence: if every repo is missing, the suite above skipped everything and
-  // proved nothing. Say so loudly rather than reporting a clean run.
-  if (present.length === 0) {
-    return t.skip(`no real repositories present under ${REAL_ROOT} — the real-repo suite proved NOTHING this run`);
-  }
-  assert.ok(present.length >= 1);
+test('REAL REPOS: the exact pinned four-repository corpus was exercised', () => {
+  assert.equal(REPOS.length, 4, 'the declared real-repository corpus must contain exactly four fixtures');
+  assert.deepEqual(
+    [...exercised.entries()].sort(([a], [b]) => a.localeCompare(b)),
+    REPOS.map((repo) => [repo.dir, repo.commit]).sort(([a], [b]) => a.localeCompare(b)),
+    'the gate must complete all four pinned scenarios; a partial corpus proves nothing',
+  );
 });

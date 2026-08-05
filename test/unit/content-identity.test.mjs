@@ -15,7 +15,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  normalizeForIdentity, contentFingerprint, fingerprintKey, symlinkKey, pathContentKey,
+  normalizeForIdentity, contentFingerprint, fingerprintKey, similarityFingerprintKey,
+  symlinkKey, pathContentKey,
 } from '../../src/content-identity.mjs';
 
 const buf = (s) => Buffer.from(s, 'utf8');
@@ -38,7 +39,7 @@ async function link(t, target, at) {
   }
 }
 
-test('IDENTITY: 4-space and tab indent of the same code normalise to the same text', () => {
+test('SIMILARITY: 4-space and tab indent normalise alike but retain distinct authority keys', () => {
   const spaces = buf(
     'class PyThing_dup:\n'
     + '    def py_method_dup(self):\n'
@@ -54,7 +55,16 @@ test('IDENTITY: 4-space and tab indent of the same code normalise to the same te
     + 'def py_free_dup(): pass\n',
   );
   assert.equal(normalizeForIdentity(spaces), normalizeForIdentity(tabs));
-  assert.equal(fingerprintKey(contentFingerprint(spaces)), fingerprintKey(contentFingerprint(tabs)));
+  assert.equal(
+    similarityFingerprintKey(contentFingerprint(spaces)),
+    similarityFingerprintKey(contentFingerprint(tabs)),
+    'normalised identity remains available for advisory duplicate review',
+  );
+  assert.notEqual(
+    fingerprintKey(contentFingerprint(spaces)),
+    fingerprintKey(contentFingerprint(tabs)),
+    'different bytes must never share a deletion-authority key',
+  );
 });
 
 test('IDENTITY: CRLF, a BOM, and trailing whitespace do not change identity', () => {
@@ -111,12 +121,24 @@ test('BINARY: two DIFFERENT binaries must not collide via the raw fallback', () 
   assert.notEqual(fingerprintKey(a), fingerprintKey(b));
 });
 
-test('KEY NAMESPACING: a raw digest can never collide with a normalised digest string', () => {
-  // Not a cryptographic claim -- a structural one: the two families use different prefixes, so
-  // even a contrived matching hex string cannot cross the raw/normalised boundary.
+test('AUTHORITY KEY: a normalised digest can never override the raw digest', () => {
   const fp = { raw: 'deadbeef', normalized: null };
   const fp2 = { raw: 'unused', normalized: 'deadbeef' };
-  assert.notEqual(fingerprintKey(fp), fingerprintKey(fp2));
+  assert.equal(fingerprintKey(fp), 'r:deadbeef');
+  assert.equal(fingerprintKey(fp2), 'r:unused');
+  assert.equal(similarityFingerprintKey(fp2), 'n:deadbeef');
+});
+
+test('AUTHORITY KEY: significant whitespace and invalid UTF-8 never collapse', () => {
+  const pairs = [
+    [buf('key: |\n  hello\n    world\n'), buf('key: |\n  hello\n      world\n')],
+    [buf('all:\n\t@printf "a"\n'), buf('all:\n\t  @printf "a"\n')],
+    [buf('line with hard break  \nnext\n'), buf('line with hard break\nnext\n')],
+    [Buffer.from([0x80, 0x0a]), Buffer.from([0x81, 0x0a])],
+  ];
+  for (const [a, b] of pairs) {
+    assert.notEqual(fingerprintKey(contentFingerprint(a)), fingerprintKey(contentFingerprint(b)));
+  }
 });
 
 test('SIZE CAP: an oversized buffer yields no fingerprint at all, not a false match', () => {

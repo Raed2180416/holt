@@ -30,12 +30,33 @@ import { generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { underOrEqualAsync } from '../../src/paths.mjs';
 import {
   audit, auditCapabilities, verifyIntegrity, buildManifest, treeDigest, shippedFiles,
-  fileCapabilities, importedBuiltins, spawnTargets, envReads, stripComments, strippedIsSafe,
+  fileCapabilities, importedBuiltins, spawnTargets, envReads, computedEnvReadIdentifiers,
+  stripComments, executableCode, strippedIsSafe,
   CAPABILITIES, MODULE_LEDGER, MANIFEST_FILE, MANIFEST_SIG_FILE, RELEASE_PUBLIC_KEYS_B64,
 } from '../../src/supply-chain.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CLI = path.join(ROOT, 'bin', 'holt.mjs');
+
+/** Invoke npm's JavaScript entry point with this exact Node runtime when it is discoverable.
+ * On Windows `npm` is a .cmd wrapper and execFile cannot launch it directly (spawn EINVAL); using
+ * the CLI avoids a shell and preserves argv boundaries. Direct `node --test` runs may not inherit
+ * npm_execpath, so the two standard Node installation layouts are checked before the .cmd fallback.
+ */
+function npmInvocation(args) {
+  const candidates = [
+    process.env.npm_execpath,
+    path.resolve(path.dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.join(path.dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ].filter(Boolean);
+  const cli = candidates.find((candidate) => fs.existsSync(candidate));
+  if (cli) return { command: process.execPath, args: [cli, ...args], shell: false };
+  return {
+    command: process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    args,
+    shell: process.platform === 'win32',
+  };
+}
 
 /* ─────────────────────────────────────────────────────────────── the sandbox ──── */
 
@@ -80,6 +101,9 @@ test('POSITIVE CONTROL: the detectors find what is known to be present', () => {
   const installer = fs.readFileSync(path.join(ROOT, 'bin/install-ctags.mjs'), 'utf8');
   assert.ok(fileCapabilities(installer).has('network'),
     'bin/install-ctags.mjs really does call fetch() — a detector that cannot see this one proves nothing anywhere else');
+  const managedTuf = fs.readFileSync(path.join(ROOT, 'src/team/managed-policy-tuf.mjs'), 'utf8');
+  assert.ok(fileCapabilities(managedTuf).has('network'),
+    'the detector must see globalThis.fetch even when it is passed as a bounded adapter default');
 
   const gitmod = fs.readFileSync(path.join(ROOT, 'src/git.mjs'), 'utf8');
   assert.ok(importedBuiltins(gitmod).has('child_process'), 'src/git.mjs imports node:child_process');
@@ -117,10 +141,40 @@ test('prose about a network primitive is not a finding (the false positive that 
   assert.equal(fileCapabilities('await fetch(url);').has('network'), true);
 });
 
-test('a network primitive inside a STRING is still a finding', () => {
-  // Strings get evaluated, written to disk and executed. Treating them as inert is how a
-  // generated-code path smuggles capability past a source scan.
-  assert.equal(fileCapabilities('const payload = "await fetch(evil)";').has('network'), true);
+test('inert strings and regexes are not network capabilities, but executable template expressions are', () => {
+  assert.equal(fileCapabilities('const payload = "await fetch(evil)";').has('network'), false,
+    'a diagnostic string does not execute itself; treating it as a call creates exemption-training noise');
+  assert.equal(fileCapabilities('const pattern = /fetch\\s*\\(/;').has('network'), false);
+  assert.equal(fileCapabilities('const message = `fetch(evil)`;').has('network'), false);
+  assert.equal(fileCapabilities('const result = `${fetch(url)}`;').has('network'), true,
+    'a template expression is executable code and must remain visible');
+  assert.match(executableCode('const result = `${fetch(url)}`;'), /fetch\(url\)/);
+  assert.equal(fileCapabilities('const transport = globalThis.fetch;').has('network'), true,
+    'taking a reference to the global network primitive is a capability even before the call');
+});
+
+test('process target detection distinguishes child_process exec from RegExp.exec methods', () => {
+  const src = "import { execFile } from 'node:child_process';\n/p/.exec(key);\nexecFile(bin, []);\n";
+  assert.deepEqual([...spawnTargets(src)], ['<dynamic:bin>']);
+});
+
+test('environment detection follows process.env aliases but ignores constructed child env objects', () => {
+  assert.deepEqual([...envReads('function f({ env = process.env } = {}) { return env.HOLT_LICENSE; }')],
+    ['HOLT_LICENSE']);
+  assert.deepEqual([...envReads('const env = {}; env.GIT_CONFIG_COUNT = "1"; return env.GIT_CONFIG_COUNT;')],
+    [], 'an object prepared for a child is not an ambient environment read');
+});
+
+test('computed environment reads are inventoried by identifier, not hidden behind one wildcard', () => {
+  assert.deepEqual([...computedEnvReadIdentifiers(
+    'const a = process.env[canonical]; const b = process.env[underscored];',
+  )].sort(), ['canonical', 'underscored']);
+  assert.deepEqual([...computedEnvReadIdentifiers('const x = process.env.KNOWN;')], []);
+  assert.deepEqual([...computedEnvReadIdentifiers(
+    'const ambient = process.env; const inherited = ambient; const x = inherited[chosenName];',
+  )], ['chosenName'], 'an alias must not turn a second computed read invisible');
+  assert.deepEqual([...computedEnvReadIdentifiers('const x = process.env[prefix + suffix];')],
+    ['<expression:prefix + suffix>'], 'an expression the ledger cannot name must fail as its own site');
 });
 
 /* ══════════════════════════════════════════ 1. THE REAL PACKAGE IS CLEAN ════════ */
@@ -136,12 +190,12 @@ test('the shipped package passes its own audit', async () => {
   } finally { await cleanup(dir); }
 });
 
-test('network capability is confined to exactly one file, and it is the installer', async () => {
+test('network capability is confined to explicit ctags setup and managed-policy sync', async () => {
   const dir = await sandbox();
   try {
     const net = check(audit({ root: dir }), 'capabilities').detail.network;
-    assert.deepEqual(net, ['bin/install-ctags.mjs'],
-      'if this list ever grows, the "no network" claim on the README has changed and someone must say so');
+    assert.deepEqual(net, ['bin/install-ctags.mjs', 'src/team/managed-policy-tuf.mjs'],
+      'if this list ever grows, the exact egress disclosure must change in the same commit');
   } finally { await cleanup(dir); }
 });
 
@@ -246,7 +300,8 @@ test('RED: a COMPUTED environment read is reported rather than silently ignored'
     reseal(dir);
     const env = check(audit({ root: dir }), 'environment');
     assert.equal(env.ok, false);
-    assert.ok(env.detail.undeclared.includes('<computed>'), JSON.stringify(env.detail.undeclared));
+    assert.ok(env.detail.undeclaredDynamic.includes('src/index.mjs:n'),
+      JSON.stringify(env.detail.undeclaredDynamic));
   } finally { await cleanup(dir); }
 });
 
@@ -512,7 +567,7 @@ test('MANIFEST.sha256 is shipped — an integrity file left out of the tarball c
   assert.ok(shippedFiles(ROOT).includes(MANIFEST_FILE));
 });
 
-test('THE REAL TARBALL SELF-VERIFIES — the manifest must describe what npm actually packs', async (t) => {
+test('THE REAL TARBALL SELF-VERIFIES — the manifest must describe what npm actually packs', async () => {
   // The one test that reproduces the customer's first minute. Everything else in this file
   // reasons about the repository; npm decides what SHIPS, and the two disagreed on the very
   // first real run: the manifest listed CHANGELOG.md, which modern npm does not always-pack and
@@ -521,18 +576,35 @@ test('THE REAL TARBALL SELF-VERIFIES — the manifest must describe what npm act
   const base = process.env.HOLT_TMPDIR || os.tmpdir();
   const dir = await fsp.mkdtemp(path.join(base, 'holt-pack-'));
   try {
-    const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     // --ignore-scripts so prepack does NOT regenerate the manifest: the point is to verify the
     // manifest already committed, exactly as a consumer receives it.
-    const packed = await new Promise((resolve) => {
-      execFile(npmBin, ['pack', '--silent', '--ignore-scripts', '--pack-destination', dir],
-        { cwd: ROOT, timeout: 180_000, maxBuffer: 16 * 1024 * 1024 },
-        (err, stdout) => resolve(err ? null : String(stdout).trim().split('\n').pop()));
+    // The old callback returned null for EVERY error and then t.skip()'d, so the Windows
+    // `spawn EINVAL` that disabled this exact gate was reported as a green suite. A packaging
+    // instrument that cannot run is a release failure, with its stderr retained as evidence.
+    const invocation = npmInvocation(['pack', '--silent', '--ignore-scripts', '--pack-destination', dir]);
+    const packed = await new Promise((resolve, reject) => {
+      execFile(invocation.command, invocation.args,
+        {
+          cwd: ROOT, timeout: 180_000, maxBuffer: 16 * 1024 * 1024,
+          shell: invocation.shell,
+        },
+        (err, stdout, stderr) => {
+          if (err) {
+            reject(new Error(`npm pack could not produce the artifact under test: ${stderr || err.message}`));
+            return;
+          }
+          const name = String(stdout).trim().split(/\r?\n/).filter(Boolean).pop();
+          if (!name) {
+            reject(new Error('npm pack exited zero but returned no tarball name'));
+            return;
+          }
+          resolve(name);
+        });
     });
-    if (!packed) return t.skip('npm pack unavailable in this environment');
 
     await new Promise((resolve, reject) => {
-      execFile('tar', ['-xzf', path.join(dir, packed), '-C', dir], { timeout: 120_000 },
+      execFile('tar', ['-xzf', path.join(dir, packed), '-C', dir],
+        { timeout: 120_000 },
         (err) => (err ? reject(err) : resolve()));
     });
 
@@ -572,27 +644,75 @@ test('SUPPLY-CHAIN.md lists every external binary holt can execute', () => {
   assert.deepEqual(missing, [], 'every binary must appear in the published list');
 });
 
-test('SUPPLY-CHAIN.md names every network destination, and claims no more than one', () => {
-  for (const e of CAPABILITIES.network.egress) {
-    const host = new URL(e.destination.replace(/<[^>]*>/g, 'x')).host;
-    assert.ok(SUPPLY_DOC.includes(host), `destination ${host} is not disclosed in SUPPLY-CHAIN.md`);
+test('FILESYSTEM CLAIM: every shipped acting write class is disclosed in audit JSON and docs', () => {
+  const claims = JSON.stringify(CAPABILITIES.filesystem).toLowerCase();
+  const doc = SUPPLY_DOC.toLowerCase();
+  // Each source probe is a positive control: the behavior must still exist or this test would be
+  // satisfied by stale prose about a feature that was removed. Each matching claim then prevents
+  // the inverse failure—shipped mutating behavior disappearing from the machine-readable audit.
+  const contracts = [
+    { file: 'src/actions.mjs', source: /refs\/holt\/discard/, claim: 'refs/holt/discard' },
+    { file: 'src/actions.mjs', source: /worktree', 'move'/, claim: 'registered worktree paths' },
+    { file: 'src/actions.mjs', source: /restoreHeadSelection/, claim: 'explicit working-tree paths' },
+    { file: 'src/actions.mjs', source: /\['worktree', 'lock'/, claim: 'private worktree admin state' },
+    { file: 'src/team/audit-sink.mjs', source: /\.checkpoint/, claim: 'sink path' },
+    { file: 'src/integrate/receipt.mjs', source: /install-receipt\.json/, claim: 'integration receipts' },
+    { file: 'src/integrate/adapters.mjs', source: /scope === 'user'/, claim: 'existing user host-config' },
+    { file: 'src/agent.mjs', source: /holt-cache-/, claim: 'scan/hook caches' },
+  ];
+  for (const c of contracts) {
+    const source = fs.readFileSync(path.join(ROOT, c.file), 'utf8');
+    assert.match(source, c.source, `${c.file} positive control no longer reaches the named write`);
+    assert.ok(claims.includes(c.claim), `holt audit omits shipped write class '${c.claim}' from ${c.file}`);
+    assert.ok(doc.includes(c.claim), `SUPPLY-CHAIN.md omits shipped write class '${c.claim}' from ${c.file}`);
   }
-  assert.equal(CAPABILITIES.network.egress.length, 1,
-    'SUPPLY-CHAIN.md and the questionnaire both say "one destination" — if that changes, both must change');
-  assert.match(QUESTIONNAIRE, /One outbound request exists in the entire package/);
+  for (const phrase of ['working-tree files', 'git object database', 'local branches/refs']) {
+    assert.ok(claims.includes(phrase), `holt audit omits '${phrase}'`);
+  }
 });
 
-test('the INDIRECT network path is disclosed in both documents, not only in the code', () => {
+test('FILESYSTEM CLAIM: --global user config reads are not hidden behind a repo-only sentence', () => {
+  const reads = CAPABILITIES.filesystem.reads.toLowerCase();
+  assert.match(reads, /integrate --global/);
+  assert.match(reads, /user host-config/);
+  assert.doesNotMatch(reads, /nothing outside the repository/);
+  assert.match(SUPPLY_DOC, /supported existing user host-config files/i);
+});
+
+test('SUPPLY-CHAIN.md names every fixed or administrator-supplied network destination class', () => {
+  for (const e of CAPABILITIES.network.egress) {
+    if (/^https?:/u.test(e.destination)) {
+      const host = new URL(e.destination.replace(/<[^>]*>/g, 'x')).host;
+      assert.ok(SUPPLY_DOC.includes(host), `destination ${host} is not disclosed in SUPPLY-CHAIN.md`);
+    } else {
+      assert.match(e.destination, /administrator-supplied/u);
+      assert.match(SUPPLY_DOC, /administrator-supplied[^\n]*(?:TUF|metadata|target)/iu);
+    }
+  }
+  assert.equal(CAPABILITIES.network.egress.length, 2,
+    'the two explicit egress implementations must both stay visible');
+  assert.match(QUESTIONNAIRE, /two in-process network paths/i);
+});
+
+test('both INDIRECT network paths are exact and disclosed in both documents, not only in the code', () => {
   // The gap this whole exercise found in its own first draft: `sh -c "sudo apt-get install …"`
   // reaches the network through a child process, so no in-process detector sees it, and a
   // capability ledger that only watches sockets would have reported a clean "one destination"
   // while the tool could run a privileged installer. Both documents must say so, and the
   // machine-readable output must carry it beside `sends` rather than somewhere a reader has to
   // go looking.
-  assert.ok(CAPABILITIES.network.indirect.length >= 1, 'the indirect path must be declared');
+  assert.equal(CAPABILITIES.network.indirect.length, 2,
+    'package-manager and exact-versioned Go install must remain separately declared');
+  const enry = CAPABILITIES.network.indirect.find((entry) => /go install/u.test(entry.via));
+  assert.ok(enry, 'the Go installer must not disappear behind the package-manager declaration');
+  assert.equal(enry.via, 'go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6');
+  assert.match(enry.effect, /download|network/iu);
+  assert.match(enry.effect, /write|destination|bin/iu);
+  assert.match(enry.avoidable, /decline|avoid/iu);
   for (const doc of [SUPPLY_DOC, QUESTIONNAIRE]) {
     assert.match(doc, /package manager/i, 'the package-manager install path must be disclosed');
     assert.match(doc, /sudo/, 'the privilege escalation must be named, not implied');
+    assert.ok(doc.includes(enry.via), 'the exact Enry package and version must be disclosed');
   }
   assert.ok(CAPABILITIES.privilege.escalates.length === 1,
     'exactly one privilege path exists; if that changes, both documents must change with it');
@@ -601,18 +721,28 @@ test('the INDIRECT network path is disclosed in both documents, not only in the 
 test('holt audit --json surfaces the indirect path beside what it sends', async () => {
   const r = await runCli(['audit', '--json'], os.tmpdir());
   const rep = JSON.parse(r.stdout);
-  assert.ok(Array.isArray(rep.statement.indirectNetwork) && rep.statement.indirectNetwork.length >= 1,
-    'a reviewer parsing the JSON must see the subprocess-mediated network path without reading prose');
-  assert.match(rep.statement.indirectNetwork[0].effect, /sudo/);
+  assert.ok(Array.isArray(rep.statement.indirectNetwork),
+    'a reviewer parsing the JSON must see subprocess-mediated network paths without reading prose');
+  assert.equal(rep.statement.indirectNetwork.length, 2);
+  assert.ok(rep.statement.indirectNetwork.some((entry) => /sudo/u.test(entry.effect)));
+  const enry = rep.statement.indirectNetwork.find((entry) => /go install/u.test(entry.via));
+  assert.equal(enry?.via, 'go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6');
+  assert.match(enry?.effect ?? '', /download|network/iu);
   assert.ok(rep.statement.privilege?.never);
 });
 
-test('the questionnaire\'s "zero required runtime dependencies" claim is true', () => {
+test('the questionnaire names the exact required and optional runtime dependency boundary', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-  assert.deepEqual(pkg.dependencies ?? {}, {},
-    'the questionnaire and SUPPLY-CHAIN.md both state zero required runtime dependencies');
-  assert.ok(QUESTIONNAIRE.includes('Zero required'));
-  assert.ok(SUPPLY_DOC.includes('required runtime dependencies: 0'));
+  assert.deepEqual(pkg.dependencies, {
+    '@modelcontextprotocol/sdk': '1.30.0',
+    'jsonc-parser': '3.3.1',
+    'tuf-js': '6.0.0',
+  });
+  assert.deepEqual(pkg.optionalDependencies, { jscpd: '5.0.14' });
+  for (const [name, version] of Object.entries({ ...pkg.dependencies, ...pkg.optionalDependencies })) {
+    assert.ok(QUESTIONNAIRE.includes(`${name}@${version}`), `${name}@${version} missing from questionnaire`);
+    assert.ok(SUPPLY_DOC.includes(`${name}@${version}`), `${name}@${version} missing from supply-chain document`);
+  }
 });
 
 test('the questionnaire claims no postinstall script, and there is none', () => {

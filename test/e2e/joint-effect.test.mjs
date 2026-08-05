@@ -36,11 +36,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { standardFixture } from '../fixtures.mjs';
+import { backdateWorktreeCreation, newRepo } from '../fixtures.mjs';
 import { assessCommand } from '../../src/agent.mjs';
 
 /** Repo-relative, forward-slash. Native separators become escape sequences in generated commands. */
 const rel = (from, to) => path.relative(from, to).split(path.sep).join('/');
+
+/**
+ * Build two independently-created worktrees with an exact durable Git identity twin.
+ *
+ * Equal-looking source at different paths is useful duplicate-work evidence, but it is not
+ * deletion authority: deleting either path can erase the only copy of that path. The destructive
+ * joint-effect premise therefore uses the strict identity Holt is allowed to rely on — the same
+ * path, mode, blob and resulting tree — while keeping the worktrees in separate dispatch families.
+ */
+async function exactTwinFixture({ withEmpty = false } = {}) {
+  const fx = await newRepo('joint-exact-twins');
+  const body = 'export function EXACT_DURABLE_TWIN() { return 42; }\n';
+
+  await fx.worktree('exact-a');
+  await fx.write('src/shared.js', body, fx.wt('exact-a'));
+  await fx.commit('implement exact shared work', fx.wt('exact-a'));
+  await backdateWorktreeCreation(fx.wt('exact-a'), 90 * 60 * 1000);
+
+  await fx.worktree('exact-b');
+  await fx.write('src/shared.js', body, fx.wt('exact-b'));
+  await fx.commit('implement exact shared work', fx.wt('exact-b'));
+
+  if (withEmpty) await fx.worktree('empty');
+  return fx;
+}
 
 // This was marked `todo` while the defect was open, and the flag came off when the fix landed —
 // which was always the plan: the moment the guard reasons about a command's targets jointly, this
@@ -54,11 +79,11 @@ const rel = (from, to) => path.relative(from, to).split(path.sep).join('/');
 // sibling named in its `redundantWith`. No new analysis: `redundantWith` is already published by
 // `holt risk --json`, printed by the TUI, and re-verified by `holt clean`.
 test('JOINT EFFECT: one command may not destroy every copy of content that exists nowhere else', async (t) => {
-  const { fx } = await standardFixture();
+  const fx = await exactTwinFixture();
   t.after(() => fx.cleanup());
 
-  const a = rel(fx.root, fx.wt('alpha-1'));
-  const b = rel(fx.root, fx.wt('beta-1'));
+  const a = rel(fx.root, fx.wt('exact-a'));
+  const b = rel(fx.root, fx.wt('exact-b'));
 
   // ANTI-VACUITY FIRST. If these two are not actually a recognised duplicate pair, every assertion
   // below passes for the wrong reason — which is exactly what happened to an earlier version of
@@ -88,7 +113,7 @@ test('JOINT EFFECT: one command may not destroy every copy of content that exist
     // worktree root, and the entire worktree layer stood aside — so the joint-effect check never
     // ran at all. Invisible until here, because whenever the content IS unique the file layer
     // refuses the same command and nobody notices which layer answered.
-    [`rm -rf ${a.replace(/[^/]+$/, '')}*-1`, 'one glob matching both'],
+    [`rm -rf ${a.replace(/[^/]+$/, '')}exact-*`, 'one glob matching both'],
   ]) {
     const v = await assessCommand(cmd, fx.root);
     assert.notEqual(v.decision, 'allow',
@@ -97,10 +122,10 @@ test('JOINT EFFECT: one command may not destroy every copy of content that exist
 });
 
 test('JOINT EFFECT: NEVER-WORSE — ordinary multi-target commands stay allowed', async (t) => {
-  const { fx } = await standardFixture();
+  const fx = await exactTwinFixture({ withEmpty: true });
   t.after(() => fx.cleanup());
 
-  const a = rel(fx.root, fx.wt('alpha-1'));
+  const a = rel(fx.root, fx.wt('exact-a'));
   const empty = rel(fx.root, fx.wt('empty'));
 
   // The fix must not become "refuse anything with more than one operand". Multi-target commands are
@@ -128,18 +153,18 @@ test('JOINT EFFECT: NEVER-WORSE — ordinary multi-target commands stay allowed'
 });
 
 test('JOINT EFFECT: sequential deletion is already correct and must stay correct', async (t) => {
-  const { fx } = await standardFixture();
+  const fx = await exactTwinFixture();
   t.after(() => fx.cleanup());
 
-  const a = fx.wt('alpha-1');
-  const b = rel(fx.root, fx.wt('beta-1'));
+  const a = fx.wt('exact-a');
+  const b = rel(fx.root, fx.wt('exact-b'));
 
   // The half holt already gets right, pinned so a fix for the joint case cannot regress it: once
   // the first copy is genuinely gone from disk, the second is the only copy and must be refused.
   const before = await assessCommand(`rm -rf ${b}`, fx.root);
   assert.equal(before.decision, 'allow', `while its twin exists, one copy is disposable: ${before.reason}`);
 
-  await (await import('node:fs/promises')).rm(a, { recursive: true, force: true });
+  await fx.git(['worktree', 'remove', '--force', a]);
 
   const after = await assessCommand(`rm -rf ${b}`, fx.root);
   assert.notEqual(after.decision, 'allow',

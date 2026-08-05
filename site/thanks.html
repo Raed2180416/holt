@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a0b0d">
 <title>Thank you — holt</title>
 <style>
-  :root { --bg:#0a0b0d; --raised:#121417; --border:#262a30; --text:#eae7e1; --dim:#a8adb4; --accent:#e2a154; --good:#7fb88f; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  :root { color-scheme:dark; --bg:#0a0b0d; --raised:#121417; --border:#262a30; --text:#eae7e1; --dim:#a8adb4; --accent:#e2a154; --good:#7fb88f; --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   * { box-sizing:border-box; } body { margin:0; background:var(--bg); color:var(--text); font-family:var(--sans); line-height:1.6; min-height:100vh; display:grid; place-items:center; padding:24px; }
   body::before { content:""; position:fixed; inset:0; z-index:-1; background:radial-gradient(700px 420px at 50% -10%, rgba(226,161,84,0.12), transparent 60%); }
   .card { max-width:620px; background:var(--raised); border:1px solid var(--border); border-radius:18px; padding:44px 40px; }
@@ -16,13 +17,13 @@
   pre { background:#0d0f12; border:1px solid var(--border); border-radius:10px; padding:14px 16px; overflow-x:auto; color:var(--text); font-size:13.5px; }
   .step { margin:22px 0; }
   .step b { color:var(--text); }
-  a { color:var(--accent); }
+  a { color:var(--accent); } a:hover { color:#f0b56e; } a:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
   .foot { margin-top:26px; font-size:13.5px; color:#6b7178; }
 </style>
 </head>
 <body>
-  <div class="card">
-    <div class="check">✓</div>
+  <main class="card">
+    <div class="check" aria-hidden="true">✓</div>
     <h1>You're in. Thank you for supporting holt.</h1>
     <p>Your license is on its way to the email you used at checkout. It usually lands within a
        minute. Here's what to do with it.</p>
@@ -44,8 +45,8 @@
        token somewhere safe; it's a bearer credential.</p>
     <p class="foot">
       Didn't get the email? <a href="https://raed2180416.github.io/holt/#pricing">Resend it</a>,
-      check spam, or write to <a href="https://github.com/Raed2180416/holt/issues/new">open an issue</a>.
+      check spam, or <a href="https://github.com/Raed2180416/holt/issues/new">open an issue</a>.
     </p>
-  </div>
+  </main>
 </body>
 </html>

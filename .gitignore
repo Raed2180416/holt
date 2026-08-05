@@ -5,6 +5,7 @@ holt-graph.html
 coverage/
 *.tgz
 .stryker-tmp/
+__pycache__/
 
 # Operational — must never be committed
 .env
@@ -31,6 +32,18 @@ LAUNCH-RUNBOOK.md
 # Private session handoff — names unmerged branches, buyer verdicts and pricing decisions.
 # Mirrored to ~/.holt-work/. Must not be published.
 HANDOFF.md
+
+# Local agent/session artefacts are diagnostic inputs, never repository source.  The
+# corresponding integration fixtures and public configuration live under src/, test/,
+# and docs/ instead.
+.agents/
+.codex/
+.playwright-mcp/
+.playwright-skill/
+
+# This is an explicitly orphaned partial evaluator checkpoint.  It is retained locally
+# for diagnosis but must never be merged into a release denominator (see the preregistration).
+eval/results.json.checkpoint.jsonl
 
 # the type-check ceiling is tracked, node_modules is not
 

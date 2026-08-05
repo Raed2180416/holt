@@ -424,8 +424,14 @@ const CTAGS_EXCLUDES = [
  * (Swift, Scala, Dart, Groovy, Solidity, Zig, Nim, Crystal, F#, Prolog, Dockerfile, GraphQL)
  * flow through the SAME pipeline as the 164 it does. See src/optlib/holt.ctags.
  */
-const OPTLIB = path.join(path.dirname(fileURLToPath(import.meta.url)), 'optlib', 'holt.ctags');
-const COMPAT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'optlib', 'compat');
+// Resolve assets through the package root, not through this module's output directory. The
+// published GitHub Action is one generated ESM bundle under dist/, while a normal npm install
+// executes this source file under src/. In both layouts ../package.json identifies the package
+// root, so the exact same reviewed optlib bytes are used instead of silently looking for a
+// nonexistent dist/optlib directory and degrading symbol evidence only in CI.
+const PACKAGE_ROOT = path.dirname(fileURLToPath(new URL('../package.json', import.meta.url)));
+const OPTLIB = path.join(PACKAGE_ROOT, 'src', 'optlib', 'holt.ctags');
+const COMPAT_DIR = path.join(PACKAGE_ROOT, 'src', 'optlib', 'compat');
 
 /**
  * Compat packs for gaps THIS toolchain has — decided by measurement, never by version number.
@@ -624,19 +630,25 @@ const LINGUIST_TO_CTAGS = new Map(Object.entries({
 /** @type {Promise<{available: boolean, version?: string, reason?: string}>|null} */
 let _enryProbe = null;
 
+/** Normalise upstream's source-built version placeholders into an honest diagnostic. */
+export function normalizeEnryVersionOutput(output) {
+  const raw = String(output ?? '').trim().split('\n')[0] ?? '';
+  return /^(?:not-set|undefined)?$/iu.test(raw) ? '(unversioned build)' : raw;
+}
+
 /** Detect enry (the Go port of GitHub Linguist) once per process. */
 export async function detectEnry() {
   if (_enryProbe) return _enryProbe;
+  await ensureOnPath();
   _enryProbe = new Promise((resolve) => {
     execFile('enry', ['-version'], { timeout: 5000 }, (err, stdout, stderr) => {
       const out = `${stdout ?? ''}${stderr ?? ''}`;
       // enry -version prints the version and exits 0; some builds exit non-zero on -version
       // but still print, so presence of output is the real signal.
       if (err && !out.trim()) return resolve({ available: false, reason: 'enry-not-found' });
-      // Release builds print a version; `go install`-built binaries print "not-set". Either way
-      // the binary works — do not surface a build artefact as if it were the version.
-      const raw = out.trim().split('\n')[0] ?? '';
-      const version = /not-set|^\s*$/.test(raw) ? '(unversioned build)' : raw;
+      // Release builds print a version; source-built variants print "not-set" or "undefined".
+      // Either way the binary works — do not surface a build artefact as if it were a version.
+      const version = normalizeEnryVersionOutput(out);
       resolve({ available: true, version });
     });
   });

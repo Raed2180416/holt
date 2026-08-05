@@ -5,11 +5,14 @@ source-available under the following terms:
 
 - You may read, audit, and modify these files for internal evaluation and security review.
 - Running them in the course of your work requires a valid holt Team or Enterprise license
-  (see https://holt.dev/pricing).
+  (see [current plan details](https://raed2180416.github.io/holt/#pricing)).
 - You may not redistribute them, and you may not remove or circumvent the entitlement check.
 
 Everything outside `src/team/` — the entire holt CLI, MCP server, TUI, scanner, safety
-mechanisms and analysis engine — remains free under FSL-1.1-MIT, including for commercial
-production use, and converts to MIT two years after each release.
+mechanisms and analysis engine — is licensed under
+[FSL-1.1-MIT](../../LICENSE.md) for its defined Permitted Purposes, including internal commercial
+use that is not a Competing Use. Each covered release converts to MIT on its own second
+anniversary.
 
-Questions: licensing@holt.dev
+Questions: open a licensing request in the project owner's
+[GitHub issue tracker](https://github.com/Raed2180416/holt/issues/new?labels=team-plan&title=Licensing+question).

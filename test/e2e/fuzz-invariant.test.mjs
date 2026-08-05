@@ -104,7 +104,7 @@ const MOVES = [
   },
   async function generatedJunk(fx, wt, r) {
     await fx.write(`node_modules/pkg${Math.floor(r() * 100)}/index.js`, 'module.exports = 1;\n', wt);
-    return 'none'; // generated paths are excluded by design — junk must NOT make a tree risky
+    return 'none'; // oracle label only: Holt may conservatively retain generated-looking bytes
   },
   async function nothing() {
     return 'none';

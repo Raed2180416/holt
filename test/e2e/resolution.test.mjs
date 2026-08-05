@@ -305,6 +305,28 @@ test('KNOWN VARS: a same-command literal assignment is resolved and then JUDGED'
   assert.equal(v.decision, 'deny', `an assigned literal resolves to the worktree it names: ${v.reason}`);
 });
 
+test('KNOWN VARS: later assignments may compose an earlier proven literal', async (t) => {
+  const fx = await resolutionFixture();
+  t.after(() => fx.cleanup());
+  const holds = fx.wt('holds');
+  const parent = path.dirname(holds);
+  const leaf = path.basename(holds);
+
+  const command = 'WT_ROOT=' + parent + '; TARGET="$WT_ROOT/' + leaf
+    + '"; git worktree remove "$TARGET"';
+  const resolved = resolveCommand(command);
+  assert.deepEqual(resolved.unresolved, [],
+    'a left-to-right literal assignment chain is fully readable: ' + JSON.stringify(resolved));
+  const v = await assessCommand(command, fx.root);
+  assert.equal(v.decision, 'deny',
+    'the composed target must be judged against the worktree it actually names: ' + v.reason);
+  assert.match(v.reason, /RESOLUTION_ONLY_SYMBOL|holds/);
+
+  const unknown = resolveCommand('ROOT=$NOT_KNOWN; TARGET="$ROOT/holds"; git worktree remove "$TARGET"');
+  assert.ok(unknown.unresolved.some((u) => /NOT_KNOWN|ROOT|TARGET/.test(u)),
+    'composition must substitute only values already proven literal, never unknown input');
+});
+
 /* ------------------------------------------------------- a bounded glob is not an unknown ---- */
 
 test('BOUNDED GLOB: `$BUILD_DIR/*` stays on the never-worse ALLOW path', async (t) => {

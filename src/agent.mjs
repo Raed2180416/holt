@@ -31,10 +31,13 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   underOrEqualAsync, canonicalPath, foldCase, CASE_INSENSITIVE_FS,
-  samePathSync, underOrEqualSync, relativeWithinAsync, findByPath,
+  samePathSync, underOrEqualSync, relativeWithinAsync, relativeLinkAwareAsync, findByPath,
 } from './paths.mjs';
 import { discover, repoAbsenceError, parseWorktreePorcelain } from './discover.mjs';
-import { scan, atRiskFiles, atRiskFromStatus, generatedEvidence, looksGenerated, indexFlagDelta } from './scan.mjs';
+import {
+  scan, atRiskFiles, atRiskFromStatus, generatedEvidence, looksGenerated, indexFlagDelta,
+  omitEmptyIgnoredDirectories,
+} from './scan.mjs';
 import { readReceipt, ownershipOf } from './integrate/receipt.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
 import { scratchDir } from './symbols.mjs';
@@ -435,7 +438,23 @@ export function wordPattern(raw) {
     if (c === '"') {
       let j = i + 1;
       for (; j < s.length && s[j] !== '"'; j++) {
-        if (s[j] === '\\') { out += escapeGlob(s[j + 1] ?? ''); j++; continue; }
+        if (s[j] === '\\') {
+          // A BACKSLASH IS AN ESCAPE IN A POSIX DOUBLE-QUOTED STRING AND A PATH SEPARATOR ON WINDOWS.
+          // The bare branch above already consults `backslashEscapes` so `C:\Users\x` keeps its
+          // separators; this branch did not, so `"C:\Users\x\valuable"` had every backslash dropped
+          // and read as `C:Usersxvaluable` — a path that matches no worktree, so a destructive
+          // command against a double-quoted Windows path sailed through the guard. MEASURED on the
+          // `git worktree remove "<wt>"` disguise. The same discrimination keeps POSIX exact: off
+          // win32, or before a space/quote, the backslash still escapes as it always did.
+          const next = s[j + 1] ?? '';
+          if (!backslashEscapes(next, unescapeGlob(out), out !== '', { doubleQuoted: true })) {
+            out += escapeGlob(s[j]);
+            continue;
+          }
+          out += escapeGlob(next === '' ? '' : next);
+          j++;
+          continue;
+        }
         // `$`, `${…}`, `$(…)` and backticks still expand inside double quotes — they are left as
         // written so expandShellTarget sees exactly what it sees today.
         out += (s[j] === '$' || s[j] === '`') ? s[j] : escapeGlob(s[j]);
@@ -509,7 +528,7 @@ function pathspecNarrowsWorktree(command) {
       if (GIT_VALUE_OPTS.has(w[i])) i += 2; else i++;
     }
     const verb = w[i];
-    if (verb !== 'checkout' && verb !== 'restore') continue;
+    if (verb !== 'checkout' && verb !== 'restore' && verb !== 'clean') continue;
     sawGitPathspecVerb = true;
     const rest = w.slice(i + 1);
     const walk = walkGitArgs(verb, rest);
@@ -693,6 +712,7 @@ const DESTRUCTIVE = [
     re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}clean\\s+(?:(?!--\\s)[^\\s;|&]+\\s+){0,12}?-[a-zA-Z]*[fd][a-zA-Z]*\\b`),
     kind: 'git clean -fd (deletes untracked files)',
     cwdTarget: true,
+    unless: pathspecNarrowsWorktree,
   },
   // A TREEISH IS ALLOWED TO SIT BETWEEN THE VERB AND THE PATHSPEC, and the old pattern demanded
   // they be adjacent — so `git checkout other -- .`, `git checkout HEAD -- .` and
@@ -752,25 +772,10 @@ const DESTRUCTIVE = [
   // worktree's disposability. See assessStashCommand: `drop`/`clear` destroy STASH ENTRIES, so
   // the only thing that can make them dangerous is an entry existing.
   //
-  // `list`, `show` and `apply` are reads and stay out entirely.
+  // `list`, `show` and `apply` are reads. `pop` applies first and removes the stash entry only
+  // after a successful application; on conflict Git keeps the entry. In both outcomes the bytes
+  // remain present, so `pop` is recovery rather than a destructive-entry command and stays out.
   { re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+(?:drop|clear)\\b`), kind: 'git stash drop/clear (destroys stashed work)', stashScope: 'entries' },
-
-  // POP IS THE RECOVERY ACTION, AND A FLAT DENY ON IT WAS THE OVER-REFUSAL THAT MADE TONIGHT'S
-  // INCIDENT WORSE: an agent that had just had eleven siblings' work swept into the stash by a
-  // bare `git stash` was then BLOCKED from putting any of it back with `pop`. Its actual risk is
-  // narrow — a pop that hits a conflict can drop the entry with the content left unapplied — and
-  // `apply` does everything `pop` does except that one unsafe last step. So the honest verdict is
-  // `ask`, evidence-gated on the SAME thing `drop` is (the entry being popped may belong to any
-  // worktree sharing this repository's one `refs/stash`, so the stash is read repo-wide, not per
-  // worktree), never hardened into a refusal that blocks the only way back.
-  {
-    re: new RegExp(`\\bgit\\s+${GIT_GLOBALS}stash\\s+pop\\b`),
-    kind: 'git stash pop (drops the entry even if applying fails)',
-    stashScope: 'entries',
-    verdict: 'ask',
-    recovery: '`git stash apply` does everything `pop` does except drop the entry afterward — '
-      + 'the same content back, without the one step that can lose it on a conflict.',
-  },
 
   // BARE `stash` / `stash push` / `stash save` WITH NO PATHSPEC SWEEP THE WHOLE WORKTREE, AND
   // THIS IS THE COMMAND THAT ACTUALLY CAUSED TONIGHT'S INCIDENT: run in a working tree several
@@ -863,18 +868,32 @@ const DESTRUCTIVE = [
  * backslash is a literal SEPARATOR when the token is already drive-qualified (`C:\Users\x`), when
  * the token opens a UNC path (`\\host\share`), or on win32 before an ordinary path character.
  *
+ * The one exception on win32 is the glob brackets `[` and `]`. They are LEGAL in Windows filenames
+ * (unlike `*` and `?`, which are illegal and stay separators), so `app/\[id\].tsx` is a real bash
+ * escape of a real file — and treating the backslash as a separator doubled it in the pattern
+ * (`\\[`), which `isGlobPattern` read as "escaped backslash + unescaped metacharacter" and turned
+ * a literal path into a glob that matched nothing. A bracket after a backslash is never a path
+ * component on either platform, so the escape reading is safe on both.
+ *
  * @param {string} next     the byte after the backslash
  * @param {string} word     the token accumulated so far
  * @param {boolean} hasWord whether a token is open at all
  */
-function backslashEscapes(next, word, hasWord) {
+function backslashEscapes(next, word, hasWord, { doubleQuoted = false } = {}) {
+  // POSIX double quotes are unlike a bare token: backslash is special only before $, backtick,
+  // double quote, backslash, or newline. Bash passes "odd\q.txt" with the slash intact; dropping
+  // it here makes holt inspect a different path and can silently allow the real file's removal.
+  if (process.platform !== 'win32' && doubleQuoted) return /[$`"\\\n]/.test(next);
   // STARTS with a drive letter, not EQUALS one: after the first separator the token is `C:\Users`,
   // and an equality test would make only the first backslash literal and eat the rest.
   const driveQualified = /^[A-Za-z]:/.test(word);
   // A UNC path opens with two backslashes. After the FIRST is taken literally the token holds a
   // single backslash, so the continuation test is "this token began with one".
   const uncStart = (!hasWord && next === '\\') || word.startsWith('\\');
-  const winSeparator = process.platform === 'win32' && next !== '' && !/[\s'"]/.test(next);
+  // `[` and `]` are glob metacharacters that are legal in Windows filenames; a backslash before
+  // them is a bash escape, not a separator. `*` and `?` are illegal in Windows filenames, so they
+  // stay separators (cmd/PowerShell wildcards). Spaces and quotes are escapes in both worlds.
+  const winSeparator = process.platform === 'win32' && next !== '' && !/[\s'"[\]]/.test(next);
   return !(driveQualified || uncStart || winSeparator);
 }
 
@@ -1667,10 +1686,30 @@ for (const rule of DESTRUCTIVE) rule.layers ??= declaredLayers(rule);
 
 function literalAssignments(command) {
   const values = new Map();
+  // A backslash is an escape in a POSIX shell and a PATH SEPARATOR on Windows. Rejecting it
+  // unconditionally — the old `/[\\$`]/` — meant a literal Windows path assigned in the same
+  // command (`X=C:\a\holt\wt\holds; cd "$X"; rm -rf src`) was dropped as if it were a shell
+  // substitution. The `cd` then stayed "unresolved", so the destroyer behind it was judged
+  // against the wrong tree: a DENY softened to an ASK — the exact bypass the OVER-REFUSAL
+  // NEVER-WORSE test pins. On Windows the tokenizer keeps backslashes as literal separators
+  // (see `backslashEscapes`), so they are part of a deterministic value, not an escape; only
+  // `$` and backtick are substitution sigils there. POSIX keeps the backslash rejection: there
+  // a surviving backslash is a literal produced by `\\`, and leaving it would let `X=\\$Y`
+  // through as a value whose `$` the tokenizer's escape handling may have already unescaped.
+  const opaque = process.platform === 'win32' ? /[$`]/ : /[\\$`]/;
   for (const segment of lexSegments(command)) {
     for (const word of segment.words) {
       const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(word);
-      if (m && !/[\\$`]/.test(m[2])) values.set(m[1], m[2]);
+      if (!m) continue;
+      // Assignments are evaluated left-to-right by the shell. A later literal may therefore be
+      // composed from one Holt has already read, such as wt_root="$repo_root-worktrees".
+      // Substitute only variables already proven literal; any unknown expansion remains opaque
+      // and is never promoted to authority.
+      const expanded = m[2].replace(
+        /(?<!\\)\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g,
+        (whole, name) => values.has(name) ? values.get(name) : whole,
+      );
+      if (!opaque.test(expanded)) values.set(m[1], expanded);
     }
   }
   return values;
@@ -2520,11 +2559,11 @@ function newProbeCtx(cwd) {
           // memoises), so the copy costs nothing that shows up in a measurement.
           /** @type {Map<string,'uncommitted'|'untracked'|'gitignored'|'unknown'>} */
           const map = new Map(atRiskFromStatus(r.stdout, activeDirs));
-          // NEVER-WORSE: the flagged paths go through the identical looksGenerated() filter the
-          // status paths do. A skip-worktree'd file under node_modules/ is still build output,
-          // and `rm -rf node_modules` must not start being refused because of one flag.
+          const ignored = [...map].filter(([, layer]) => layer === 'gitignored').map(([p]) => p);
+          const nonEmptyIgnored = new Set(await omitEmptyIgnoredDirectories(root, ignored));
+          for (const p of ignored) if (!nonEmptyIgnored.has(p)) map.delete(p);
           for (const p of flags.atRisk) {
-            if (!looksGenerated(p, activeDirs) && !map.has(p)) map.set(p, 'uncommitted');
+            if (!map.has(p)) map.set(p, 'uncommitted');
           }
 
           // …AND HOLT'S OWN UNTOUCHED OUTPUT COMES BACK OUT, exactly as it does in the scan.
@@ -2548,7 +2587,7 @@ function newProbeCtx(cwd) {
             }
           } catch { /* could not look -> subtract nothing -> protect everything */ }
           for (const p of flags.unknown) {
-            if (!looksGenerated(p, activeDirs) && !map.has(p)) map.set(p, 'unknown');
+            if (!map.has(p)) map.set(p, 'unknown');
           }
           return map;
         })());
@@ -2621,14 +2660,12 @@ async function targetIsWorktree(target, cwd, ctx) {
  *
  *     resolve the verb to its target paths -> intersect with the at-risk file set -> deny.
  *
- * NEVER-WORSE IS THE DESIGN CONSTRAINT, NOT A CAVEAT. A guard that denies `rm -rf node_modules`,
- * `rm build/out.js` or `> app.log` is uninstalled the same day, so nothing here decides safety by
- * inspecting a name. The intersection is with scan.mjs's `atRiskFiles()` — status(uncommitted +
- * untracked + gitignored) MINUS looksGenerated() — and that set already excludes node_modules/,
- * dist/, build/, target/, coverage/, .cache/, tmp/, logs/, *.log, lockfiles and OS droppings.
- * COMMITTED files are excluded by construction too: git still holds the content, so `rm` of one
- * is recoverable and stays allowed. An ordinary delete finds an empty intersection and the
- * developer never learns the rule exists.
+ * NEVER-WORSE IS THE DESIGN CONSTRAINT, NOT A CAVEAT. Names like `node_modules` and `app.log`
+ * cannot prove that exact bytes are reproducible: hand patches and incident logs are real work.
+ * They therefore remain visible, but an all-generated-looking hit asks for confirmation instead
+ * of issuing a confident deny. COMMITTED files are excluded by construction: Git still holds the
+ * exact entry, so removing the working copy is recoverable. A target that does not exist cannot
+ * lose prior bytes and also stays on the silent path.
  */
 
 /**
@@ -3180,7 +3217,21 @@ export function lexSegments(command, depth = 0, offset = 0) {
     if (ch === '"') {
       let j = i + 1;
       while (j < command.length && command[j] !== '"') {
-        if (command[j] === '\\') { add(command[j + 1] ?? '', true); j += 2; continue; }
+        if (command[j] === '\\') {
+          // The same Windows-separator carve-out the bare branch above applies: inside double
+          // quotes a backslash is still a path separator on win32 / before a drive-qualified or
+          // UNC token, so `"C:\Users\x"` must not collapse to `C:Usersx`. Without this, a
+          // double-quoted Windows destination (`mv secret.js "C:\Users\x\stolen.js"`) parsed as a
+          // relative path and the move-out read as an in-place rename — the unquoted form of the
+          // hole the comment at the bare branch was written for.
+          const next = command[j + 1] ?? '';
+          if (!backslashEscapes(next, buf, has, { doubleQuoted: true })) {
+            add(command[j], true);
+            j++;
+            continue;
+          }
+          add(next, true); j += 2; continue;
+        }
 
         // A COMMAND SUBSTITUTION IS STILL A COMMAND INSIDE DOUBLE QUOTES. The branch below this
         // block already lexes `$(…)` and `` `…` `` as commands in their own right — but only when
@@ -4042,6 +4093,34 @@ export function resolveFileTargets(command) {
         }
         continue;
       }
+      if (verb === 'clean') {
+        let cleanMode = 'untracked';
+        for (let k = 0; k < rest.length && rest[k] !== '--'; k++) {
+          const token = rest[k];
+          if (token === '--exclude' || token === '-e') { k++; continue; }
+          if (token.startsWith('--exclude=')) continue;
+          if (!/^-[A-Za-z]+$/.test(token)) continue;
+          const letters = token.slice(1);
+          for (let j = 0; j < letters.length; j++) {
+            if (letters[j] === 'e') { if (j === letters.length - 1) k++; break; }
+            if (letters[j] === 'X') cleanMode = 'ignored';
+            if (letters[j] === 'x') cleanMode = 'all';
+          }
+        }
+        const reaches = cleanMode === 'ignored' ? ['gitignored']
+          : cleanMode === 'all' ? ['untracked', 'gitignored'] : ['untracked'];
+        for (const t of gitPathspecTargets('clean', rest, restP)) {
+          out.push({
+            ...t,
+            role: 'delete',
+            kind: 'git clean pathspec (deletes matching working-tree files)',
+            baseDir: gitBase,
+            live: liveWords.has(t.raw),
+            reaches,
+          });
+        }
+        continue;
+      }
       // THE PATHSPEC THAT DOES NOT NEED A `--`. `git checkout -- notes.md` was denied and
       // `git checkout notes.md` allowed, on the same dirty file, in the same tree — measured
       // through the hook — because the rule keyed on the separator token rather than on what the
@@ -4694,7 +4773,10 @@ function destroys(item, dirty) {
   for (let i = parts.length; i > 0; i--) {
     if (matchesPath(matcher, parts.slice(0, i).join('/'))) return true;
   }
-  if (dirty.endsWith('/') && matcher.literal !== null && `${matcher.literal}/`.startsWith(dirty)) return true;
+  // `git status --ignored=matching` may collapse the entire ignored subtree to `dist/`. A glob
+  // such as `dist/*` has no `matcher.literal`, but its literal spelling still proves that it
+  // reaches inside that collapsed subtree; dropping it would silently allow the wipe.
+  if (dirty.endsWith('/') && matcher.lit != null && `${matcher.lit}/`.startsWith(dirty)) return true;
   return false;
 }
 
@@ -4809,11 +4891,27 @@ async function assessFileTargets(targets, cwd, ctx) {
     // command runs in — gitglossary(7). Resolved against the worktree that contains the base,
     // which is the only reading that is right for `git -C sub restore :/` as well.
     if (t.fromRepoRoot) base = deepestRoot(roots, await canonicalPath(base)) ?? base;
-    const abs = await canonicalPath(path.resolve(base, unescapeGlob(globFreePrefix(raw))));
+    const spelled = path.resolve(base, unescapeGlob(globFreePrefix(raw)));
+    // A destructive literal names the final directory entry, not whatever a symlink there points
+    // at. Canonicalise its parent (so /var vs /private/var and symlinked ancestors still work) and
+    // append the basename verbatim. Following the final component made `rm active` inspect
+    // `target.txt`; a skip-worktree/assume-unchanged change from regular file to symlink was in the
+    // dirty map as `active` but matched nothing, so the guard allowed its deletion.
+    const abs = isGlobPattern(raw)
+      ? await canonicalPath(spelled)
+      : path.join(await canonicalPath(path.dirname(spelled)), path.basename(spelled));
     // A pathspec that names nothing is not a pathspec. One lstat, and only for the verbs whose
     // grammar says so — see needsExistingPath. A GLOB is exempt: its glob-free prefix existing is
     // not the same question, and a glob that matches nothing is the nullglob case, not an error.
     if (t.needsExistingPath && !isGlobPattern(raw) && !(await pathExists(abs))) continue;
+    // A literal destination that does not exist has no previous bytes to destroy. This matters
+    // especially for ignored directories: Git collapses `dist/` to one status entry, and without
+    // this existence check `dd of=dist/new.bin` was reported as overwriting the whole directory.
+    // Globs are exempt because their prefix can exist while the pattern selects existing children;
+    // Git pathspecs are exempt because they can intentionally address absent tracked paths.
+    if (!t.pathspec && !isGlobPattern(raw)
+      && ['delete', 'truncate', 'overwrite'].includes(t.role)
+      && !(await pathExists(abs))) continue;
     const root = deepestRoot(roots, abs);
     if (!root) {
       // Not INSIDE a worktree — but it may CONTAIN one. A directory-destroying target that is an
@@ -4872,7 +4970,9 @@ async function assessFileTargets(targets, cwd, ctx) {
     // canonicalPath, root from deepestRoot over canonical roots). The guard cannot see that from
     // one line, and "it happens to be safe at this call site" is exactly the reasoning that let
     // the /var-vs-/private/var class survive three separate fixes. One helper, no exceptions.
-    const relPrefix = await relativeWithinAsync(root, abs);
+    const relPrefix = isGlobPattern(raw)
+      ? await relativeWithinAsync(root, abs)
+      : await relativeLinkAwareAsync(root, abs);
 
     // THE SUFFIX IS SLICED BY THE PREFIX'S REAL LENGTH, NOT BY ITS SUBSTITUTE'S.
     //
@@ -4965,6 +5065,34 @@ async function assessFileTargets(targets, cwd, ctx) {
       files: [],
       reason: 'holt could not read the working-tree state, so it cannot tell whether this command '
         + 'destroys the only copy of a file. Confirm manually before proceeding.',
+    };
+  }
+
+  // Generated-looking is a provenance HINT, never deletion evidence. When every reached path
+  // has a manifest-backed build-output name (or a conventional machine-output filename), ask
+  // instead of issuing a confident deny; this keeps ordinary cleanup usable without recreating
+  // the old false ALLOW that lost hand-patched dependencies, lockfiles and logs. Mixed targets
+  // still take the normal denying path because at least one plainly authored file is at stake.
+  const activeByRoot = new Map();
+  const likelyGenerated = [];
+  for (const h of hits) {
+    if (!activeByRoot.has(h.root)) {
+      activeByRoot.set(h.root, await generatedEvidence(h.root).catch(() => new Set()));
+    }
+    likelyGenerated.push(looksGenerated(h.file, activeByRoot.get(h.root)));
+  }
+  if (likelyGenerated.length > 0 && likelyGenerated.every(Boolean)) {
+    const shown = [...new Set(hits.map((h) => h.file))].sort().slice(0, 5);
+    return {
+      decision: 'ask',
+      kind: hits[0].kind,
+      targets: [...new Set(hits.map((h) => path.basename(h.root)))],
+      files: hits.map((h) => h.file),
+      reason: `holt found ${hits.length} changed file(s) under paths that look like generated output, `
+        + 'but a name or manifest cannot prove these exact bytes are reproducible:\n'
+        + `${shown.map((f) => `  • ${f}`).join('\n')}\n`
+        + 'Confirm the rebuild is safe, or use `holt discard <path>` to capture the bytes to a '
+        + 'verified ref before removing them.',
     };
   }
 
@@ -5074,6 +5202,85 @@ async function assessFileTargets(targets, cwd, ctx) {
       + ' — that captures the content to a verified ref FIRST, then removes it, so this is'
       + ' recoverable and recorded rather than gone.',
   };
+}
+
+/**
+ * Assess exact file operations supplied by a structured host tool.
+ *
+ * Shell parsing is deliberately not involved: the host has already separated the path from its
+ * operation, so treating `*`, `[id]`, whitespace, or a newline as shell syntax would make the
+ * structured path less precise than the payload it came from. Each path is escaped into the same
+ * literal-pattern representation the command assessor uses, then routed through the identical
+ * live worktree list, status probe, ignored-file evidence, and durable-copy scan.
+ *
+ * Full-file writes are calibrated as `ask` when unique current bytes are at stake. Writing is the
+ * normal way an agent edits code, and a blanket denial would make the hook unusable; the useful
+ * intervention is to show the exact at-risk path and let the host/user approve the replacement.
+ * Exact deletion remains a deny. Ordinary incremental edits never call this function.
+ *
+ * @param {Array<{path:string, role:'delete'|'overwrite'|'move-src', kind:string,
+ *   promptOnRisk?:boolean, dest?:string}>} operations
+ * @param {string} cwd
+ * @returns {Promise<{decision:string, reason:string|null, kind:string|null, targets:Array,
+ *   files?:Array, resolvedTargets?:any[]}>}
+ */
+export async function assessExplicitFileOperations(operations, cwd = process.cwd()) {
+  if (!Array.isArray(operations) || operations.length === 0) {
+    return { decision: 'allow', reason: null, kind: null, targets: [], files: [] };
+  }
+
+  const ctx = newProbeCtx(cwd);
+  const verdicts = [];
+  for (const operation of operations) {
+    if (!operation || typeof operation.path !== 'string' || operation.path.length === 0
+      || operation.path.includes('\0') || operation.path.includes('\n') || operation.path.includes('\r')) {
+      verdicts.push({
+        decision: 'ask',
+        reason: `holt could not resolve the exact target for ${operation?.kind ?? 'a structured file operation'}. `
+          + 'Confirm the path before proceeding.',
+        kind: operation?.kind ?? 'structured file operation',
+        targets: [],
+        files: [],
+      });
+      continue;
+    }
+
+    const raw = escapeGlob(operation.path);
+    const target = {
+      raw,
+      pattern: raw,
+      role: operation.role,
+      kind: operation.kind,
+      needsExistingPath: operation.role === 'delete' || operation.role === 'move-src',
+      ...(operation.dest ? {
+        dest: escapeGlob(operation.dest),
+        destPattern: escapeGlob(operation.dest),
+      } : {}),
+    };
+    let verdict = await assessFileTargets([target], cwd, ctx);
+    if (!verdict) {
+      verdicts.push({ decision: 'allow', reason: null, kind: operation.kind, targets: [], files: [] });
+      continue;
+    }
+
+    if (operation.promptOnRisk && verdict.decision === 'deny') {
+      const evidence = String(verdict.reason ?? '')
+        .replace(/^holt blocked this:/, 'holt found this full-file replacement would be destructive:');
+      verdict = {
+        ...verdict,
+        decision: 'ask',
+        kind: operation.kind,
+        reason: `${evidence}\nApprove only if this full-file replacement is intended. `
+          + 'Otherwise use the `holt discard` command named above to capture the current bytes '
+          + 'to a verified ref before replacing them.',
+      };
+    }
+    verdicts.push(verdict);
+  }
+
+  const rank = { deny: 3, ask: 2, allow: 1 };
+  return verdicts.sort((a, b) => (rank[b.decision] ?? 0) - (rank[a.decision] ?? 0))[0]
+    ?? { decision: 'allow', reason: null, kind: null, targets: [], files: [] };
 }
 
 /* --------------------------------------------------------- neutral verdicts ---- */
@@ -5262,9 +5469,8 @@ export async function assessCommand(command, cwd = process.cwd(), { guardAllow =
  * `clear` takes no selector — it always means every entry — so callers must not consult this
  * for it.
  *
- * @returns {string|undefined} the selector, or `undefined` when an operand IS present and holt
- *   cannot resolve it — never conflated with "no operand", because the safe answer differs:
- *   an unreadable selector must weigh every entry, an absent one weighs exactly stash@{0}.
+ * @returns {string} the raw selector, with a bare numeric index canonicalised. Non-numeric
+ *   reflog selectors (for example stash@{now}) are resolved by Git in assessStashEntries.
  */
 function stashSelector(command) {
   const tokens = stashArgs(command);
@@ -5275,7 +5481,7 @@ function stashSelector(command) {
     if (t.startsWith('-')) continue;
     // git accepts both spellings for the same entry: `stash@{2}` and a bare `2`.
     const m = /^(?:(?:refs\/)?stash@\{(\d+)\}|(\d+))$/.exec(t);
-    return m ? `stash@{${m[1] ?? m[2]}}` : undefined;
+    return m ? `stash@{${m[1] ?? m[2]}}` : t;
   }
   return 'stash@{0}';
 }
@@ -5333,19 +5539,49 @@ async function assessStashEntries(command, dir, hit) {
   let reachesUnscanned = state.truncated;
   if (stashArgs(command)[0] !== 'clear') {
     const selector = stashSelector(command);
-    // `undefined` is an operand holt could not resolve — NOT an absent one. The safe answers
-    // differ, and collapsing them loses one of the two: an unreadable selector must weigh every
-    // entry (holt does not know which is going), an absent one weighs exactly stash@{0}.
-    if (selector !== undefined) {
-      const one = state.entries.find((e) => e.selector === selector);
-      // A selector that names an entry holt READ is fully accounted for, cap or no cap — this is
-      // what keeps a bare `git stash drop` (which means stash@{0}) cheap and allowed.
-      if (one) { scoped = [one]; reachesUnscanned = false; }
-      // A selector holt could not match means "not there" ONLY when holt saw the whole stash.
-      // The walk is capped (MAX_ENTRIES), and beyond the cap an unmatched selector means "not
-      // looked at" — so there, every entry is weighed rather than none.
-      else if (!state.truncated) { scoped = []; reachesUnscanned = false; }
+    let one = state.entries.find((e) => e.selector === selector);
+    if (!one && selector !== 'stash@{0}') {
+      // Git accepts reflog date expressions such as stash@{now}. Resolve the argv as a revision;
+      // never reimplement reflog grammar or interpolate it into a shell. A selector Git cannot
+      // resolve is unknown, not authority to deny based on an unrelated entry.
+      const resolved = await git(['rev-parse', '--verify', '--end-of-options', `${selector}^{commit}`],
+        { cwd: dir }).catch(() => null);
+      if (!resolved || resolved.code !== 0 || !resolved.stdout.trim()) {
+        return {
+          decision: 'ask', kind: hit.kind, targets: [],
+          reason: `holt could not resolve stash selector '${selector}', so it cannot determine `
+            + `which entry ${hit.kind} would destroy. Run \`git stash list\` and confirm manually.`,
+        };
+      }
+      const oid = resolved.stdout.trim().split(/\s+/)[0];
+      one = state.entries.find((e) => e.oid === oid);
     }
+    // A selector that names an entry holt READ is fully accounted for, cap or no cap — this is
+    // what keeps a bare `git stash drop` (which means stash@{0}) cheap and allowed.
+    if (one) { scoped = [one]; reachesUnscanned = false; }
+    // A valid selector absent from the scanned list is proven irrelevant only when the full stash
+    // was scanned. Past the cap it may name an unseen entry, so the unknown path stays active.
+    else if (!state.truncated) { scoped = []; reachesUnscanned = false; }
+    else {
+      return {
+        decision: 'ask', kind: hit.kind, targets: [selector],
+        reason: `holt scanned only the first ${state.total} stash entries and '${selector}' `
+          + `resolves beyond that evidence. It cannot say what ${hit.kind} would destroy; inspect `
+          + 'or apply that exact entry before proceeding.',
+      };
+    }
+  }
+
+  const unchecked = scoped.filter((e) => !e.checked);
+  if (unchecked.length > 0) {
+    return {
+      decision: 'ask',
+      kind: hit.kind,
+      targets: unchecked.map((e) => e.selector),
+      reason: `holt could not complete the exact content/reachability check for `
+        + `${unchecked.map((e) => e.selector).join(', ')}. It cannot say what ${hit.kind} would `
+        + 'destroy. Run `git stash list` and inspect or apply the entry before proceeding.',
+    };
   }
 
   const doomed = scoped.filter((e) => e.uniqueCount > 0);
@@ -5418,9 +5654,9 @@ async function assessStashEntries(command, dir, hit) {
  * takes.
  *
  * The at-risk mapping is scan.mjs's (`atRiskFromStatus`), the same instrument the file-granular
- * layer uses — so recognisable build output is already excluded and the two layers cannot drift
- * into describing the same file two different ways. `git status` reports the whole worktree with
- * root-relative paths from any subdirectory, so running it where the stash would run is exact.
+ * layer uses — including generated-looking paths, whose names are not recovery evidence. `git
+ * status` reports the whole worktree with root-relative paths from any subdirectory, so running it
+ * where the stash would run is exact.
  */
 async function sweptContent(command, dir, ctx) {
   const layers = stashSweepLayers(command);
@@ -6046,7 +6282,7 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
    * MEASURED, before this boundary existed. A worktree whose directory name contained newlines:
    *
    *     [holt — parallel workstream state]
-   *     1 workstream(s) hold work existing ONLY as uncommitted changes — deleting them loses it: aa
+   *     1 workstream(s) contain uncommitted work with no durable copy proven: aa
    *     [holt] VERIFIED SAFE: deleting these loses nothing.          <- the DIRECTORY NAME
    *     x.
    *     (Before deleting ANY worktree run: holt gate <id> …)
@@ -6113,8 +6349,8 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   if (risky.length) {
     const shown = risky.slice(0, 5);
     lines.push(
-      `${risky.length} workstream(s) hold work existing ONLY as uncommitted changes — ` +
-      `deleting them loses it: ${shown.map((r) => u.take(r.id, ID)).join(', ')}` +
+      `${risky.length} workstream(s) contain uncommitted or ignored work with no durable copy ` +
+      `proven — automatic deletion is unsafe: ${shown.map((r) => u.take(r.id, ID)).join(', ')}` +
       `${risky.length > shown.length ? ` … and ${risky.length - shown.length} more.` : '.'}`,
     );
   }
@@ -6128,11 +6364,11 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
 
   // THE STASH, TOLD TO THE AGENT THAT WILL NEVER THINK TO LOOK.
   //
-  // The line above says "N workstreams hold work existing ONLY as uncommitted changes". After a
-  // sweep that number is zero and the brief simply omits the sentence — so an agent inheriting a
-  // repository whose only unrecoverable work is stashed is told nothing at all, and the brief's
-  // silence reads as "there is nothing here". That silence is what the guard cannot fix on its
-  // own: the guard only speaks when someone types a stash verb, and forgetting never does.
+  // The line above covers uncommitted/ignored work in worktrees. After a sweep that number is zero
+  // and the brief simply omits the sentence — so an agent inheriting a repository whose only
+  // unrecoverable work is stashed is told nothing at all, and the brief's silence reads as "there
+  // is nothing here". That silence is what the guard cannot fix on its own: the guard only speaks
+  // when someone types a stash verb, and forgetting never does.
   //
   // Bounded to entries that hold content no ref holds, so a stash everyone has already rescued
   // stops being mentioned the moment it stops mattering.
@@ -6167,9 +6403,10 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   // that loses work and the reason this product exists.
   //
   // So the accumulation is surfaced BEFORE it becomes a cleanup task, with the deterministic
-  // command that resolves it. It is deliberately not an automatic deletion: `clean --apply` is
-  // destructive, and a tool that silently deletes on a threshold nobody set is the opposite of
-  // this product's promise. The user gets the signal and a one-line action.
+  // command that resolves it. The current clean action is recoverable, but moving a registered
+  // worktree changes its active path and can disrupt an in-flight tool. A maintenance threshold
+  // is not authority to do even that silently. The user or agent gets the signal and a one-line
+  // explicit action; no files or branches are deleted.
   //
   // The threshold is a RATIO plus a floor, not a raw count. Ten disposable worktrees out of ten
   // is a repository that needs sweeping; ten out of two hundred is a busy Tuesday. The floor stops
@@ -6183,8 +6420,9 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   if (disposable >= floor && disposable / Math.max(1, total) >= ratio) {
     lines.push(
       `MAINTENANCE: ${disposable} of ${total} workstream(s) are provably disposable — they hold ` +
-      'nothing base lacks. `holt clean --apply` removes exactly those and nothing else, ' +
-      're-verifying each one immediately before it goes.',
+      'nothing base lacks. `holt clean --apply` re-verifies each one, then moves the whole ' +
+      'registered worktree into locked local quarantine. No files or branches are deleted, and ' +
+      'the result includes exact restore argv.',
     );
   }
 
@@ -6212,14 +6450,24 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
     + '1 holds unique work, 2 unknown — or call the holt_check_workstream tool if you have holt '
     + 'over MCP.)';
 
-  if (!opts.onlyIfChanged || !root) return text;
-
   // Suppression is keyed on the BRIEF TEXT, not on the repository fingerprint. The fingerprint
   // moves on every file save; the brief moves only when something a reader would act on moves.
   // Keying on the fingerprint would have suppressed almost nothing, which is the bug wearing the
   // fix's clothes.
   const digest = createHash('sha256').update(text).digest('hex').slice(0, 32);
+  if (!root) return text;
   const statePath = briefStatePath(root);
+  // SessionStart and Antigravity invocation 0 deliberately speak even if another process emitted
+  // the same text recently, but they still have to record WHAT was said.  Without this write, the
+  // immediately-following UserPromptSubmit/PreInvocation call sees no prior digest and injects
+  // the byte-identical paragraph again.  That one-turn duplicate is still noise and still spends
+  // model context; "always speak now" is not "pretend nothing was said".
+  if (!opts.onlyIfChanged) {
+    await fs.writeFile(statePath, JSON.stringify({
+      version: 1, digest, suppressed: 0,
+    }), 'utf8').catch(() => { /* an unwritable state file must never break a hook */ });
+    return text;
+  }
   /** @type {{digest?:string, suppressed?:number}|null} */
   let prev = null;
   try { prev = JSON.parse(await fs.readFile(statePath, 'utf8')); } catch { /* first time */ }

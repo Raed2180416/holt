@@ -23,9 +23,11 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import { HOSTS, getHost } from '../../src/integrate/hosts.mjs';
 import { mcpTargets } from '../../src/integrate/adapters.mjs';
+import { __test as mcpTest } from '../../src/mcp/server.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const README_PATH = path.join(ROOT, 'README.md');
+const SITE_PATH = path.join(ROOT, 'site', 'index.html');
 
 // mcpTargets is pure — it only joins paths to describe what WOULD be written, never touches the
 // filesystem — so a nonexistent tmpdir path is enough; matches the pattern host-manifest.test.mjs
@@ -33,6 +35,21 @@ const README_PATH = path.join(ROOT, 'README.md');
 const mcpRows = () => mcpTargets(path.join(os.tmpdir(), 'holt-readme-sync-repo'), path.join(os.tmpdir(), 'holt-readme-sync-home'), { scope: 'all' });
 
 const readReadme = () => fs.readFile(README_PATH, 'utf8');
+
+test('public MCP tool-count claims are derived from the executable schema', async () => {
+  const [readme, site] = await Promise.all([
+    readReadme(),
+    fs.readFile(SITE_PATH, 'utf8'),
+  ]);
+  const count = mcpTest.TOOLS.length;
+  assert.ok(count > 0, 'MCP schema unexpectedly has no tools');
+  assert.ok(readme.includes(`**MCP** — ${count} tools`),
+    `README integration claim is stale: executable MCP schema has ${count} tools`);
+  assert.ok(readme.includes(`initialize → ${count} tools →`),
+    `README protocol evidence is stale: executable MCP schema has ${count} tools`);
+  assert.ok(site.includes(`${count} decision-oriented tools`),
+    `site MCP claim is stale: executable MCP schema has ${count} tools`);
+});
 
 function host(id) {
   const h = getHost(id);
@@ -48,46 +65,37 @@ function writesMcpConfigFor(rows, h) {
   });
 }
 
-test('README: "~20 agent hosts" stays a reasonable approximation of the manifest size', async () => {
+test('README: "nearly 30" stays a reasonable approximation of the split product surfaces', async () => {
   const text = await readReadme();
-  assert.match(text, /~20 agent hosts/, 'the sentence this test protects has moved or been reworded — update the test');
-  // Loose bounds on purpose: "~20" tolerates the roster growing or shrinking a bit without a doc
-  // change, but a manifest that has drifted to e.g. 40 or 8 hosts makes "~20" actively misleading.
-  assert.ok(HOSTS.length >= 15 && HOSTS.length <= 30,
-    `HOSTS has ${HOSTS.length} entries — README's "~20 agent hosts" is no longer a fair approximation; update README.md`);
+  assert.match(text, /nearly 30 distinct agent product surfaces/,
+    'the sentence this test protects has moved or been reworded — update the test');
+  assert.ok(HOSTS.length >= 24 && HOSTS.length <= 34,
+    `HOSTS has ${HOSTS.length} entries — README's "nearly 30" is no longer a fair approximation; update README.md`);
 });
 
-test('README: hosts named as verified-live deterministic blocking really are', async () => {
+test('README: no config/source smoke is claimed as a real-host enforcement run', async () => {
   const text = await readReadme();
-  assert.match(text, /Claude Code and OpenCode are \*verified live\*/,
-    'the verified-live blocking sentence has moved or been reworded — update the test');
-  for (const id of ['claude-code', 'opencode']) {
-    const h = host(id);
-    assert.equal(h.strength, 'block', `README claims ${id} is a verified-live blocking host, but its strength is '${h.strength}'`);
-    assert.equal(h.verifiedLive, true, `README claims ${id} is verified-live, but verifiedLive is not true`);
+  assert.match(text, /none is currently claimed as a real-host enforcement run/i);
+  assert.deepEqual(HOSTS.filter((h) => h.verifiedLive === true), []);
+});
+
+test('README: implemented local hook list agrees with the manifest', async () => {
+  const text = await readReadme();
+  assert.match(text, /Claude Code, OpenCode, Cursor, Codex local clients, Qwen Code, Copilot CLI, Cline IDE, Goose, Devin CLI and Devin Desktop Cascade/);
+  for (const id of ['claude-code', 'opencode', 'cursor', 'codex', 'qwen-code', 'copilot', 'cline', 'goose', 'devin-cli', 'cascade']) {
+    assert.equal(host(id).strength, 'block', `${id} is named as implemented but the manifest disagrees`);
   }
 });
 
-test('README: Cursor is named as docs-verified-but-not-live, matching the manifest', async () => {
+test('README: hook-capable unwired list remains MCP plus advisory', async () => {
   const text = await readReadme();
-  assert.match(text, /\*\*Cursor\*\* now also blocks.*written from documentation rather than driven live/s,
-    'the Cursor docs-verified sentence has moved or been reworded — update the test');
-  const h = host('cursor');
-  assert.equal(h.strength, 'block', 'README claims Cursor blocks; manifest disagrees');
-  assert.equal(h.verifiedLive, false,
-    'README claims Cursor\'s adapter is "written from documentation rather than driven live" — '
-    + 'the manifest now says verifiedLive:true, so Cursor has been promoted and README is stale');
-});
-
-test('README: hosts named as "support a deny hook, MCP + advisory now" are not already verified-live blockers', async () => {
-  const text = await readReadme();
-  assert.match(text, /Codex, Gemini, Cline, Copilot, Crush, Amp, Factory and Junie \*support\* a deny hook/,
-    'the deny-hook-planned sentence has moved or been reworded — update the test');
-  const ids = ['codex', 'gemini-cli', 'cline', 'copilot', 'crush', 'amp', 'factory', 'junie'];
+  assert.match(text, /Gemini, Crush, Amp, Factory and Junie still receive MCP \+ advisory/,
+    'the unwired deny-hook sentence has moved or been reworded — update the test');
+  const ids = ['gemini-cli', 'crush', 'amp', 'factory', 'junie'];
   for (const id of ids) {
     const h = host(id);
     assert.equal(h.strength, 'mcp',
-      `README lists ${id} among "MCP + advisory now" hosts that merely support a deny hook — but `
+      `README lists ${id} among "MCP + advisory" hosts whose hook is not wired — but `
       + `the manifest already has it at strength '${h.strength}'; this host has been promoted and `
       + `README's coverage summary must be updated`);
     assert.equal(h.blockCapable, true,
@@ -97,9 +105,9 @@ test('README: hosts named as "support a deny hook, MCP + advisory now" are not a
 
 test('README: cloud/ephemeral examples are actually cloud hosts in the manifest', async () => {
   const text = await readReadme();
-  assert.match(text, /Google Jules, Replit Agent, Devin cloud/,
+  assert.match(text, /Codex cloud, Copilot cloud, Cursor cloud, Google Jules, Replit Agent/,
     'the cloud-caveat example list has moved or been reworded — update the test');
-  for (const id of ['jules', 'replit']) {
+  for (const id of ['codex-cloud', 'copilot-cloud', 'cursor-cloud', 'jules', 'replit']) {
     const h = host(id);
     assert.equal(h.env, 'cloud', `README cites ${id} as a cloud/ephemeral example, but its env is '${h.env}'`);
   }
@@ -107,11 +115,11 @@ test('README: cloud/ephemeral examples are actually cloud hosts in the manifest'
 
 test('README "Verified end to end": the MCP-config host list still gets a real MCP config written', async () => {
   const text = await readReadme();
-  assert.match(text, /Crush, Cursor, Gemini CLI, VS Code, Copilot CLI MCP config/,
+  assert.match(text, /Current MCP\/hook files for Cursor, Codex, Qwen Code, Copilot, Cline, Goose, Continue, Devin CLI, Cascade, Crush, Gemini CLI and VS Code/,
     'the verified MCP-config table row has moved or been reworded — update the test');
   const rows = mcpRows();
   assert.ok(rows.length > 0, 'mcpTargets returned nothing — this test cannot verify anything, fix the fixture call');
-  for (const id of ['crush', 'cursor', 'gemini-cli', 'vscode', 'copilot']) {
+  for (const id of ['crush', 'cursor', 'gemini-cli', 'qwen-code', 'vscode', 'copilot', 'codex', 'continue', 'devin-cli', 'cascade']) {
     const h = host(id);
     assert.equal(h.mcp, true, `README claims ${id}'s MCP config is verified-written, but the manifest says mcp:${h.mcp}`);
     assert.ok(writesMcpConfigFor(rows, h),
@@ -121,9 +129,9 @@ test('README "Verified end to end": the MCP-config host list still gets a real M
 
 test('README "should work, unverified": the listed hosts are MCP-capable but not verified-live blockers', async () => {
   const text = await readReadme();
-  assert.match(text, /Codex, Cline, Amp, Factory, Junie, Amazon Q Developer CLI/,
+  assert.match(text, /Gemini, Crush, Amp, Factory and Junie hooks/,
     'the "should work, unverified" table row has moved or been reworded — update the test');
-  for (const id of ['codex', 'cline', 'amp', 'factory', 'junie', 'amazon-q']) {
+  for (const id of ['gemini-cli', 'crush', 'amp', 'factory', 'junie']) {
     const h = host(id);
     assert.equal(h.mcp, true,
       `README claims ${id} "reads AGENTS.md and/or speaks MCP" — the manifest says mcp:${h.mcp}`);
@@ -137,7 +145,8 @@ test('README "should work, unverified": the listed hosts are MCP-capable but not
 test('README: every host id this file checks against actually exists in the manifest (anti-vacuity)', () => {
   const ids = [
     'claude-code', 'opencode', 'cursor', 'codex', 'gemini-cli', 'cline', 'copilot', 'crush', 'amp',
-    'factory', 'junie', 'jules', 'replit', 'vscode', 'amazon-q',
+    'factory', 'junie', 'jules', 'replit', 'vscode', 'amazon-q', 'goose', 'devin-cli', 'cascade',
+    'codex-cloud', 'copilot-cloud', 'cursor-cloud', 'continue',
   ];
   assert.ok(HOSTS.length >= 10, 'sanity: the manifest looks empty');
   for (const id of ids) assert.ok(getHost(id), `fixture id '${id}' is not in HOSTS — this test would be checking nothing`);

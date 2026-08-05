@@ -30,7 +30,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { catFileBatch, batchNulInputSupported, _resetBatchNulProbe, GitRefused } from '../../src/git.mjs';
+import {
+  catFileBatch, batchNulInputSupported, _resetBatchNulProbe, GitFailed, GitRefused,
+} from '../../src/git.mjs';
 import { resolveBackend, symbolsOnDisk, symbolsAtBase, diffSymbols } from '../../src/symbols.mjs';
 import { newRepo } from '../fixtures.mjs';
 
@@ -199,7 +201,7 @@ test('batchNulInputSupported: the 2.38 gate, on the version strings real gits ac
   ]) assert.equal(batchNulInputSupported(line), false, JSON.stringify(line));
 });
 
-test('catFileBatch: a git too old for `--batch -z` REFUSES a newline-bearing spec instead of corrupting it', async (t) => {
+test('catFileBatch: Git <2.45 refuses ALL object reads because it cannot disable lazy fetching', async (t) => {
   const built = await repoWithNewlineNamedFile('nlbatch4');
   if (!built) {
     assert.equal(process.platform, 'win32', 'a newline-named file must be creatable off Windows');
@@ -210,9 +212,9 @@ test('catFileBatch: a git too old for `--batch -z` REFUSES a newline-bearing spe
   if (process.platform === 'win32') return; // no `#!` shim; the newline path is unreachable there anyway
 
   // A REAL old git is not installable in CI, so stand one up: a shim first on PATH that reports
-  // 2.37.1 (just below the 2.38 gate) and delegates everything else to the genuine binary. This
-  // exercises the actual probe (`git version` -> batchNulInputSupported) rather than reaching
-  // past it.
+  // 2.44.4 (the last release before --no-lazy-fetch) and delegates everything else to the genuine
+  // binary. Git 2.44 DOES support NUL batch framing, so the refusal below can only be the network
+  // boundary — not the older newline-path gate.
   const realGit = await new Promise((res, rej) => execFile(
     process.platform === 'win32' ? 'where' : 'which', ['git'],
     (e, out) => (e ? rej(e) : res(String(out).split('\n')[0].trim())),
@@ -221,7 +223,7 @@ test('catFileBatch: a git too old for `--batch -z` REFUSES a newline-bearing spe
   await fs.mkdir(shimDir, { recursive: true });
   await fs.writeFile(
     path.join(shimDir, 'git'),
-    `#!/bin/sh\nif [ "$1" = "version" ]; then echo "git version 2.37.1"; exit 0; fi\nexec ${JSON.stringify(realGit)} "$@"\n`,
+    `#!/bin/sh\nif [ "$1" = "version" ]; then echo "git version 2.44.4"; exit 0; fi\nexec ${JSON.stringify(realGit)} "$@"\n`,
     { mode: 0o755 },
   );
 
@@ -229,31 +231,22 @@ test('catFileBatch: a git too old for `--batch -z` REFUSES a newline-bearing spe
   process.env.PATH = `${shimDir}${path.delimiter}${savedPath}`;
   _resetBatchNulProbe();
   try {
-    // The ordinary case is untouched by the fallback: no newline, so it still reads correctly.
-    const plain = [];
-    await catFileBatch([`${head}:f1.js`, `${head}:f5.js`], { cwd: fx.root }, (_s, c) => plain.push(c.toString('utf8')));
-    assert.deepEqual(plain, [
-      'export function F1_ONLY() { return 1; }\n',
-      'export function F5_BASELINE() { return 5; }\n',
-    ], 'an old git must still read ordinary specs correctly');
-
-    // The newline case fails LOUDLY. Silence here — a resolved promise with shifted records — is
-    // the exact data loss this whole file exists to prevent.
-    const seen = [];
-    await assert.rejects(
-      () => catFileBatch(
-        [`${head}:f1.js`, `${head}:${WEIRD}`, `${head}:f5.js`],
-        { cwd: fx.root },
-        (_s, c, i) => seen.push(i),
-      ),
-      (err) => {
-        assert.ok(err instanceof GitRefused, `expected GitRefused, got ${err?.constructor?.name}`);
-        assert.match(err.message, /contains a newline/);
-        assert.match(err.message, /2\.38/);
-        return true;
-      },
-    );
-    assert.deepEqual(seen, [], 'a refused batch must deliver NO records, not a partial shifted set');
+    for (const specs of [
+      [`${head}:f1.js`, `${head}:f5.js`],
+      [`${head}:f1.js`, `${head}:${WEIRD}`, `${head}:f5.js`],
+    ]) {
+      const seen = [];
+      await assert.rejects(
+        () => catFileBatch(specs, { cwd: fx.root }, (_s, _c, i) => seen.push(i)),
+        (err) => {
+          assert.ok(err instanceof GitFailed, `expected GitFailed, got ${err?.constructor?.name}`);
+          assert.match(err.message, /Git 2\.45 or newer/);
+          assert.match(err.message, /lazy fetch/i);
+          return true;
+        },
+      );
+      assert.deepEqual(seen, [], 'a refused batch must deliver NO records, not partial evidence');
+    }
   } finally {
     process.env.PATH = savedPath;
     _resetBatchNulProbe();

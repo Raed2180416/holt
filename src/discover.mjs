@@ -15,7 +15,7 @@ import { discoverJjWorkspaces as _discoverJj } from './jj.mjs';
 import { resolveBase } from './scan.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { canonicalPath, foldCase } from './paths.mjs';
+import { canonicalPath, foldCase, samePathSync } from './paths.mjs';
 import { screenOverrides, declinedMessage } from './saferegex.mjs';
 
 /**
@@ -56,6 +56,68 @@ export function repoAbsenceError(disc, cwd) {
 export const HOLT_LOCK_PREFIX = 'holt:';
 export const isHoltLock = (reason) =>
   typeof reason === 'string' && reason.startsWith(HOLT_LOCK_PREFIX);
+
+// `clean --apply` never physically deletes a worktree. It moves the whole directory into an
+// unpredictable, same-filesystem quarantine and locks the moved worktree with this reason. Keep
+// the marker narrower than HOLT_LOCK_PREFIX: ordinary protection locks are reconciled away once
+// their risk disappears, while a quarantine lock is the durable recovery handle and must never be
+// released merely because its contents are reproducible.
+export const HOLT_CLEAN_QUARANTINE_LOCK_PREFIX = 'holt: clean quarantine';
+export const isHoltCleanQuarantineLock = (reason) =>
+  typeof reason === 'string' && reason.startsWith(HOLT_CLEAN_QUARANTINE_LOCK_PREFIX);
+export const HOLT_CLEAN_QUARANTINE_MARKER_PREFIX = 'holt-clean-quarantine-';
+
+/**
+ * Read Holt-owned quarantine phase records from a worktree's private, stable Git admin dir.
+ *
+ * The admin dir survives `git worktree move`; a marker beside the checkout does not provide that
+ * identity. Marker filenames carry an unguessable per-attempt token, so concurrent cleaners never
+ * overwrite one another and a restored-then-quarantined-again worktree retains both histories.
+ * Malformed markers only make this return a transition (the conservative state); they never
+ * authorise an action.
+ */
+async function cleanQuarantineRecord(wtPath, lockReason) {
+  const admin = await git(['rev-parse', '--absolute-git-dir'], { cwd: wtPath }).catch(() => null);
+  const adminDir = admin?.code === 0 ? admin.stdout.trim() : '';
+  if (!adminDir || !path.isAbsolute(adminDir)) {
+    return isHoltCleanQuarantineLock(lockReason) ? { state: 'transit' } : null;
+  }
+
+  let names;
+  try { names = await fs.readdir(adminDir); } catch {
+    return isHoltCleanQuarantineLock(lockReason) ? { state: 'transit' } : null;
+  }
+  const target = await canonicalPath(wtPath);
+  /** @type {any|null} */
+  let transit = null;
+  for (const name of names) {
+    if (!name.startsWith(HOLT_CLEAN_QUARANTINE_MARKER_PREFIX) || !name.endsWith('.json')) continue;
+    try {
+      const markerPath = path.join(adminDir, name);
+      const st = await fs.lstat(markerPath);
+      if (!st.isFile() || st.isSymbolicLink() || st.size > 64 * 1024) continue;
+      const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
+      if (marker?.version !== 1 || marker?.kind !== 'holt-clean-quarantine') continue;
+      // A completed restore remains durable evidence, but it is not an active quarantine and
+      // must never make the restored worktree terminal merely because its original path matches.
+      if (marker.state === 'restored') continue;
+      const paths = marker.state === 'quarantined'
+        ? [marker.actualPath]
+        : [marker.originalPath, marker.intendedPath];
+      let concernsThisWorktree = false;
+      for (const p of paths.filter((v) => typeof v === 'string' && path.isAbsolute(v))) {
+        if (samePathSync(await canonicalPath(p), target)) { concernsThisWorktree = true; break; }
+      }
+      if (!concernsThisWorktree) continue;
+      if (marker.state === 'quarantined') return { state: 'quarantined', marker, markerPath };
+      if (marker.state === 'transit') transit = { state: 'transit', marker, markerPath };
+    } catch {
+      // A corrupt operational marker cannot prove completion. The Git lock reason below still
+      // keeps an in-flight quarantine conservative when this process died during its rewrite.
+    }
+  }
+  return transit || (isHoltCleanQuarantineLock(lockReason) ? { state: 'transit' } : null);
+}
 
 /**
  * Un-C-quote a porcelain value.
@@ -618,19 +680,38 @@ export async function discoverGitWorktrees(cwd) {
   const canonRoot = mainWorktree
     ? foldCase(await canonicalPath(mainWorktree))
     : (commonDir ? Symbol('no-main-worktree') : foldCase(await canonicalPath(root)));
-  const workstreams = await Promise.all(records.map(async (w) => ({
-    id: path.basename(w.path),
-    path: w.path,
-    vcs: 'git',
-    head: w.head ?? null,
-    branch: w.branch ? w.branch.replace(/^refs\/heads\//, '') : null,
-    detached: w.detached,
-    locked: w.locked,
-    lockReason: w.lockReason ?? null,
-    prunable: w.prunable,
-    prunableReason: w.prunableReason ?? null,
-    isPrimary: foldCase(await canonicalPath(w.path)) === canonRoot,
-  })));
+  const workstreams = await Promise.all(records.map(async (w) => {
+    const quarantine = await cleanQuarantineRecord(w.path, w.lockReason);
+    const quarantineState = quarantine?.state ?? null;
+    const marker = quarantine?.marker ?? null;
+    return {
+      id: path.basename(w.path),
+      path: w.path,
+      vcs: 'git',
+      head: w.head ?? null,
+      branch: w.branch ? w.branch.replace(/^refs\/heads\//, '') : null,
+      detached: w.detached,
+      locked: w.locked,
+      lockReason: w.lockReason ?? null,
+      quarantineState,
+      quarantined: quarantineState === 'quarantined',
+      quarantineTransition: quarantineState === 'transit',
+      quarantineOriginalPath: marker?.originalPath ?? null,
+      quarantineIntendedPath: marker?.intendedPath ?? null,
+      quarantineMarkerPath: quarantine?.markerPath ?? null,
+      quarantineToken: marker?.token ?? null,
+      quarantineRecordedLockReason: marker?.lockReason ?? null,
+      quarantineRecordedHead: marker?.head ?? null,
+      quarantineRecordedBranch: marker?.branch ?? null,
+      quarantineLockWasAcquired: typeof marker?.lockWasAcquired === 'boolean'
+        ? marker.lockWasAcquired
+        : null,
+      quarantinePreExistingLockReason: marker?.preExistingLockReason ?? null,
+      prunable: w.prunable,
+      prunableReason: w.prunableReason ?? null,
+      isPrimary: foldCase(await canonicalPath(w.path)) === canonRoot,
+    };
+  }));
 
   return { root, workstreams, vcs: 'git' };
 }

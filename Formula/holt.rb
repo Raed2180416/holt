@@ -17,11 +17,13 @@
 require "language/node"
 
 class Holt < Formula
-  desc "Know what your agents made, and don't lose any of it"
+  desc "Coordinate, preserve, and safely clean parallel agent worktrees"
   homepage "https://raed2180416.github.io/holt/"
-  url "https://github.com/Raed2180416/holt/releases/download/v0.3.1/holt.tgz"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-  license "FSL-1.1-MIT"
+  url "https://github.com/Raed2180416/holt/releases/download/v0.3.0/holt.tgz"
+  sha256 "097af7ad10b52e44fd8bd5ca86f7e2efb584b0071ec3574edc1c62adcf15a663"
+  # The tarball contains FSL-1.1-MIT core files and separately licensed commercial Team files.
+  # See LICENSE-NOTICE.md in the installed package for the per-path terms.
+  license :cannot_represent
 
   # Bump this when a new version is released, then update the sha256.
   # `shasum -a 256 <tarball>` or `curl -sL <url> | shasum -a 256`

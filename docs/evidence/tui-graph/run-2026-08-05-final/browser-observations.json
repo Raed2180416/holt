@@ -1,0 +1,137 @@
+{
+  "observedAt": "2026-08-04T21:58:02Z",
+  "browser": "Chromium 150.0.7871.186 (Arch Linux)",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "controlledGraph": {
+    "url": "http://127.0.0.1:8765/docs/evidence/tui-graph/run-2026-08-05-final/controlled-graph.html",
+    "offlineResources": [],
+    "initial": {
+      "nodes": 10,
+      "visibleEdges": 1,
+      "visibleLabels": 10,
+      "checkedEdgeClasses": [
+        "proven conflict",
+        "same symbol, merges clean",
+        "predicted conflict"
+      ],
+      "nodeContract": {
+        "tabindex": "0",
+        "role": "button",
+        "descriptiveAriaLabels": "10/10"
+      },
+      "fills": {
+        "risk": [
+          "01-unique-uncommitted-critical",
+          "10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪"
+        ],
+        "hold": [
+          "02-unique-committed-feature",
+          "03-collision-payments-a",
+          "04-collision-payments-b",
+          "07-duplicate-implementation-a",
+          "08-duplicate-implementation-b"
+        ],
+        "safe": [
+          "05-redundant-twin-a",
+          "06-redundant-twin-b",
+          "09-genuinely-empty"
+        ]
+      }
+    },
+    "duplicateToggle": {
+      "checked": true,
+      "visibleEdgesBefore": 1,
+      "visibleEdgesAfter": 3,
+      "expectedAddedEdges": 2
+    },
+    "search": {
+      "query": "collision-payments",
+      "opaqueNodes": [
+        "03-collision-payments-a",
+        "04-collision-payments-b"
+      ],
+      "dimmedNodes": 8,
+      "slashFocusedSearch": true,
+      "escapeRestoredAllTen": true
+    },
+    "decisionFilters": {
+      "keyboardRiskEnter": {
+        "focusRemained": "risk",
+        "opaqueNodes": [
+          "01-unique-uncommitted-critical",
+          "10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪"
+        ]
+      },
+      "keyboardSafeSpace": {
+        "focusRemained": "safe",
+        "opaqueNodes": [
+          "05-redundant-twin-a",
+          "06-redundant-twin-b",
+          "09-genuinely-empty"
+        ]
+      },
+      "mouseRiskClick": {
+        "focusRemained": "risk",
+        "opaqueNodes": [
+          "01-unique-uncommitted-critical",
+          "10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪"
+        ]
+      }
+    },
+    "nodeKeyboard": {
+      "enterPinnedFirstNode": true,
+      "arrowRightMovedFromIndex": 0,
+      "arrowRightMovedToIndex": 1,
+      "arrowLeftReturnedToIndex": 0,
+      "focusSurvivedSvgRedraw": true
+    },
+    "zoom": {
+      "before": "translate(0.00,0.00) scale(1.000)",
+      "afterOneWheelStep": "translate(-60.00,-48.30) scale(1.120)"
+    }
+  },
+  "liveGroveGraph": {
+    "url": "http://127.0.0.1:8765/docs/evidence/tui-graph/run-2026-08-05-final/live-grove-graph.html",
+    "nodes": 9,
+    "defaultVisibleRelationships": 27,
+    "allRelationshipsWhenAllLayersEnabled": 67,
+    "offlineResources": [],
+    "selected": "dupfix-isolation-check/wt",
+    "reportedDetailEdges": 15,
+    "renderedDetailEdges": 15,
+    "lastRenderedEdge": "duplicate         wf_28cc3a43-545-4"
+  },
+  "interactiveTui": {
+    "fixture": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-final/repo",
+    "terminalColumns": 80,
+    "keysPressed": [
+      "j",
+      "f",
+      "q"
+    ],
+    "navigationChangedSelection": true,
+    "filterChangedFrom": "all",
+    "filterChangedTo": "atRisk",
+    "filteredRows": 2,
+    "quitExitCode": 0,
+    "quitRestoredMainScreenAndCursor": true,
+    "mutatingKeysPressed": []
+  },
+  "focusedAutomatedTests": {
+    "command": "node --test test/e2e/tui.test.mjs test/e2e/graph-html.test.mjs test/unit/ascii-graph.test.mjs",
+    "tests": 28,
+    "passed": 28,
+    "failed": 0,
+    "skipped": 0,
+    "todos": 0,
+    "durationMs": 3032.695924
+  },
+  "typecheck": {
+    "command": "npm run typecheck",
+    "exitCode": 0,
+    "diagnostics": 0
+  }
+}

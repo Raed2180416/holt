@@ -28,11 +28,11 @@ import { newRepo } from '../fixtures.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
-function holt(args, cwd) {
+function holt(args, cwd, env = {}) {
   return new Promise((resolve) => {
     execFile(process.execPath, [BIN, ...args], {
       cwd, timeout: 180_000, maxBuffer: 64 * 1024 * 1024,
-      env: { ...process.env, NO_COLOR: '1' },
+      env: { ...process.env, NO_COLOR: '1', ...env },
     }, (err, stdout, stderr) => resolve({
       code: err ? (err.code ?? 1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''),
     }));
@@ -68,7 +68,7 @@ test('CLI: every command is REACHABLE and exits 0', async (t) => {
   // wired into the dispatcher answers "unknown command".
   const readOnly = [
     ['status'], ['risk'], ['collisions'], ['duplicates'], ['plan'],
-    ['impact'], ['graph'], ['doctor'], ['brief'], ['rescued'],
+    ['impact'], ['graph'], ['doctor'], ['brief'], ['rescued'], ['quarantines'],
     ['context', 'holds'], ['journal'], ['forensics'], ['forensics', 'holds'],
   ];
   for (const args of readOnly) {
@@ -110,6 +110,20 @@ test('CLI HOOK: a payload holt cannot parse fails closed', async (t) => {
   assert.equal(r.code, 2, `malformed hook input must block: ${JSON.stringify(r)}`);
   assert.match(r.stderr + r.stdout, /parse|payload|confirm|unreadable/i,
     `the fail-closed reason must be actionable: ${r.stderr}${r.stdout}`);
+});
+
+test('CLI HOOK: a recognised shell envelope without a command fails closed', async (t) => {
+  const fx = await fixture('cli-hook-missing-command');
+  t.after(() => fx.cleanup());
+
+  // This is schema drift, rather than invalid JSON: a host successfully names Bash but moves or
+  // removes its command field.  Treating it as an empty command would make a correctly installed
+  // hook silently inert exactly when its host contract changes.
+  const r = await hook(['hook', 'pre-tool-use', '--host', 'generic', '--cwd', fx.root], fx.root,
+    JSON.stringify({ tool_name: 'Bash', tool_input: {}, cwd: fx.root }));
+  assert.equal(r.code, 2, `a shell event without its command must block: ${JSON.stringify(r)}`);
+  assert.match(r.stderr + r.stdout, /no command field|payload|confirm/i,
+    `the fail-closed reason must identify schema drift: ${r.stderr}${r.stdout}`);
 });
 
 /**
@@ -282,7 +296,7 @@ test('CLI: a non-repository exits 2 rather than crashing', async () => {
 
 /* --------------------------------------------------- destructive defaults ---- */
 
-test('CLI: `clean` does NOT delete without --apply', async (t) => {
+test('CLI: `clean` does NOT move anything without --apply', async (t) => {
   const fx = await fixture('cli-clean-default');
   t.after(() => fx.cleanup());
 
@@ -290,10 +304,134 @@ test('CLI: `clean` does NOT delete without --apply', async (t) => {
   assert.equal(r.code, 0);
   const payload = JSON.parse(r.stdout);
   assert.equal(payload.dryRun, true, 'clean must be dry-run by default at the CLI too');
+  assert.ok(payload.wouldQuarantine.length >= 1);
 
   // And the worktree is still there.
   assert.ok(await fs.stat(fx.wt('spent')).then(() => true, () => false),
-    'dry-run must not have deleted anything');
+    'dry-run must not have moved or deleted anything');
+});
+
+test('CLI: `clean --apply` reports recoverable quarantine and explicit zero deletion', async (t) => {
+  const fx = await fixture('cli-clean-quarantine');
+  t.after(() => fx.cleanup());
+
+  const r = await holt(['clean', '--apply', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 0, r.stderr);
+  const payload = JSON.parse(r.stdout);
+  assert.ok(payload.quarantined >= 1);
+  assert.equal(payload.removed, 0);
+  assert.equal(payload.branchesRemoved, 0);
+  assert.ok(payload.quarantines.every((q) => q.quarantinePath && Array.isArray(q.restoreArgv)));
+  assert.equal(await fs.access(fx.wt('spent')).then(() => true, () => false), false,
+    'the active path should move out of the way');
+  assert.ok(await fs.stat(payload.quarantines[0].quarantinePath).then((st) => st.isDirectory(), () => false),
+    'the whole worktree must still exist at the returned quarantine path');
+
+  await fx.worktree('spent-two');
+  const human = await holt(['clean', '--apply', '--plain', '--cwd', fx.root], fx.root);
+  assert.equal(human.code, 0, human.stderr);
+  assert.match(human.stdout, /worktree\(s\) quarantined/i);
+  assert.match(human.stdout, /restore with:/,
+    'the human renderer must surface the recovery command, not leave it only in JSON');
+  assert.doesNotMatch(human.stdout, /would remove|removed \d+ worktree/i,
+    'the human renderer must not imply physical deletion');
+});
+
+test('CLI: quarantines and restore provide an executable first-class recovery path', async (t) => {
+  const fx = await fixture('cli-clean-restore');
+  t.after(() => fx.cleanup());
+
+  const cleaned = await holt(['clean', '--apply', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(cleaned.code, 0, cleaned.stderr);
+  const cleanPayload = JSON.parse(cleaned.stdout);
+  assert.ok(cleanPayload.quarantined >= 1, cleanPayload.note);
+
+  const listed = await holt(['quarantines', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(listed.code, 0, listed.stderr);
+  const inventory = JSON.parse(listed.stdout);
+  const spent = inventory.quarantines.find((q) => q.id === 'spent');
+  assert.ok(spent, `the original worktree id must remain discoverable: ${listed.stdout}`);
+  assert.equal(spent.originalPath, fx.wt('spent'));
+
+  const restored = await holt(['restore', spent.id, '--json', '--cwd', fx.root], fx.root);
+  assert.equal(restored.code, 0, `${restored.stdout}${restored.stderr}`);
+  const recovery = JSON.parse(restored.stdout);
+  assert.equal(recovery.ok, true, restored.stdout);
+  assert.equal(recovery.restored, true);
+  assert.ok(await fs.stat(fx.wt('spent')));
+  assert.equal(await fs.access(spent.quarantinePath).then(() => true, () => false), false);
+
+  const empty = JSON.parse((await holt(['quarantines', '--json', '--cwd', fx.root], fx.root)).stdout);
+  assert.equal(empty.quarantines.some((q) => q.id === 'spent'), false);
+});
+
+test('CLI: restore requires an explicit quarantine id', async (t) => {
+  const fx = await fixture('cli-restore-needs-id');
+  t.after(() => fx.cleanup());
+  const r = await holt(['restore', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /needs a quarantine id/);
+});
+
+test('CLI: purge is dry-run first, then reclaims only a completed clean quarantine', async (t) => {
+  const fx = await fixture('cli-clean-purge');
+  t.after(() => fx.cleanup());
+
+  const cleaned = await holt(['clean', '--apply', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(cleaned.code, 0, cleaned.stderr);
+  const inventory = JSON.parse((await holt([
+    'quarantines', '--json', '--cwd', fx.root,
+  ], fx.root)).stdout);
+  const spent = inventory.quarantines.find((q) => q.id === 'spent');
+  assert.ok(spent, JSON.stringify(inventory));
+
+  const preview = await holt(['purge', spent.id, '--json', '--cwd', fx.root], fx.root);
+  assert.equal(preview.code, 0, preview.stderr);
+  const planned = JSON.parse(preview.stdout);
+  assert.equal(planned.dryRun, true);
+  assert.equal(planned.removed, 0);
+  assert.equal(planned.wouldRemove[0].path, spent.quarantinePath);
+  assert.ok(await fs.stat(spent.quarantinePath), 'preview must keep the checkout');
+
+  const applied = await holt([
+    'purge', spent.id, '--apply', '--json', '--cwd', fx.root,
+  ], fx.root);
+  assert.equal(applied.code, 0, `${applied.stdout}${applied.stderr}`);
+  const result = JSON.parse(applied.stdout);
+  assert.equal(result.purged, true);
+  assert.equal(result.removed, 1);
+  assert.equal(result.branchesRemoved, 0);
+  assert.match(result.recoveryRef, /^refs\/holt\/purge\//);
+  await assert.rejects(fs.stat(spent.quarantinePath));
+  assert.equal((await fx.git(['rev-parse', `${result.recoveryRef}^{commit}`])).trim(), result.commit);
+});
+
+test('CLI: purge requires an explicit quarantine id', async (t) => {
+  const fx = await fixture('cli-purge-needs-id');
+  t.after(() => fx.cleanup());
+  const r = await holt(['purge', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 2);
+  assert.match(r.stderr, /needs a quarantine id/);
+});
+
+test('CLI: array-shaped clean failures exit nonzero', { skip: process.platform === 'win32' }, async (t) => {
+  const fx = await fixture('cli-clean-array-failure');
+  t.after(() => fx.cleanup());
+
+  // Keep reads possible but make allocation of the same-filesystem quarantine impossible. This
+  // produces a real action-level failure after the disposable verdict, without mocking the
+  // renderer whose exit-code contract is under test.
+  const worktreeParent = path.dirname(fx.wt('spent'));
+  const oldMode = (await fs.stat(worktreeParent)).mode & 0o777;
+  await fs.chmod(worktreeParent, 0o500);
+  t.after(() => fs.chmod(worktreeParent, oldMode).catch(() => {}));
+
+  const r = await holt(['clean', '--apply', '--json', '--strict-read-only', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 1, `an action payload containing a failures array must not exit zero: ${r.stdout} ${r.stderr}`);
+  const payload = JSON.parse(r.stdout);
+  const failures = payload.failures ?? payload.failed;
+  assert.ok(Array.isArray(failures) && failures.length > 0, 'the injected move error must reach the payload');
+  assert.equal(payload.failedCount, failures.length);
 });
 
 test('CLI: `protect --dry-run` locks nothing', async (t) => {
@@ -419,6 +557,62 @@ test('FIRST RUN: `setup` outside a repository fails fast, not mid-sentence', asy
   // (the intro tagline itself says "agent wiring" in passing, so check for the numbered step).
   assert.ok(!/1\. analysis backends|2\. agent wiring/.test(r.stdout),
     `must fail before step 1/2, got: ${r.stdout}`);
+});
+
+test('SETUP: confirmed Go install uses the exact Enry version, private GOBIN, and verifies the result', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX executable shims; Windows behavior is covered by the hosted setup matrix');
+  const fx = await newRepo('setup-enry-pin');
+  t.after(() => fx.cleanup());
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-enry-install-'));
+  t.after(() => fs.rm(scratch, { recursive: true, force: true }));
+  const fakeBin = path.join(scratch, 'fake-bin');
+  const holtHome = path.join(scratch, 'holt-home');
+  const record = path.join(scratch, 'go-install.json');
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  const writeTool = async (name, body) => {
+    const file = path.join(fakeBin, name);
+    await fs.writeFile(file, `#!${process.execPath}\n${body}`);
+    await fs.chmod(file, 0o755);
+  };
+  await writeTool('ctags', `
+const arg = process.argv.slice(2);
+if (arg[0] === '--version') process.stdout.write('Universal Ctags 6.2.0\\n');
+else if (arg[0] === '--list-features') process.stdout.write('json\\n');
+else if (arg.includes('--list-languages')) process.stdout.write('JavaScript\\n');
+`);
+  await writeTool('enry', 'process.exitCode = 127;');
+  const installedEnry = `#!${process.execPath}\nif (process.argv[2] === '-version') process.stdout.write('undefined\\n');\n`;
+  await writeTool('go', `
+const fs = require('node:fs');
+const path = require('node:path');
+const argv = process.argv.slice(2);
+if (argv[0] === 'version') {
+  process.stdout.write('go version go1.25.0 test/amd64\\n');
+} else if (argv[0] === 'install') {
+  fs.mkdirSync(process.env.GOBIN, { recursive: true });
+  const binary = path.join(process.env.GOBIN, 'enry');
+  fs.writeFileSync(binary, ${JSON.stringify(installedEnry)});
+  fs.chmodSync(binary, 0o755);
+  fs.writeFileSync(process.env.HOLT_TEST_GO_LOG, JSON.stringify({ argv, gobin: process.env.GOBIN }));
+} else {
+  process.exitCode = 64;
+}
+`);
+
+  const r = await holt(['setup', '--yes', '--cwd', fx.root], fx.root, {
+    PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}`,
+    HOLT_HOME: holtHome,
+    HOLT_TEST_GO_LOG: record,
+  });
+  const invocation = JSON.parse(await fs.readFile(record, 'utf8'));
+  assert.deepEqual(invocation.argv, [
+    'install', 'github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6',
+  ]);
+  assert.equal(invocation.gobin, path.join(holtHome, 'bin'));
+  assert.match(r.stdout, /installed and verified enry v2\.9\.6/iu,
+    `setup must prove the binary runs before claiming success: ${r.stdout}\n${r.stderr}`);
+  assert.equal(r.code, 0, `setup should finish after the verified install: ${r.stderr}`);
 });
 
 test('FIRST RUN: a bare repository is diagnosed correctly, not called "not a git repository"', async (t) => {
@@ -654,10 +848,15 @@ test('INTEGRATE: --dry-run writes NOTHING, and says what it would have written',
   // were previewing. The flag is documented on protect/rescue/discard/clean, so a user has every
   // reason to expect it on the command that touches the most files by an order of magnitude.
   const fx = await newRepo('integrate-dry');
-  t.after(() => fx.cleanup());
+  const isolatedHome = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-integrate-home-'));
+  t.after(() => Promise.all([
+    fx.cleanup(), fs.rm(isolatedHome, { recursive: true, force: true }),
+  ]));
+  await fs.mkdir(path.join(fx.root, '.claude'), { recursive: true });
+  const isolatedEnv = { HOME: isolatedHome, USERPROFILE: isolatedHome };
 
   const before = (await fs.readdir(fx.root)).sort();
-  const r = await holt(['integrate', '--dry-run', '--cwd', fx.root], fx.root);
+  const r = await holt(['integrate', '--dry-run', '--cwd', fx.root], fx.root, isolatedEnv);
   assert.equal(r.code, 0, `dry run must succeed: ${r.stdout} ${r.stderr}`);
 
   // GRADE FROM THE FILESYSTEM. The claim is about what is on disk, not about what was printed.
@@ -674,12 +873,28 @@ test('INTEGRATE: --dry-run writes NOTHING, and says what it would have written',
   assert.match(r.stdout, /pre-commit/, `including the git hook: ${r.stdout}`);
 
   // And --json carries the same plan, so a wrapper can gate on it.
-  const j = await holt(['integrate', '--dry-run', '--json', '--cwd', fx.root], fx.root);
+  const j = await holt(['integrate', '--dry-run', '--json', '--cwd', fx.root], fx.root, isolatedEnv);
   const plan = JSON.parse(j.stdout);
   assert.equal(plan.dryRun, true);
-  assert.ok(plan.planned.length > 5, `the JSON plan must list targets: ${j.stdout.slice(0, 300)}`);
+  assert.equal(plan.allHosts, false);
+  assert.ok(plan.planned.some((p) => p.adapter === 'mcp/claude-code'),
+    `the detected host's MCP config must be planned: ${j.stdout.slice(0, 500)}`);
+  assert.ok(!plan.planned.some((p) => p.adapter === 'mcp/cursor'),
+    `an absent host must not pollute the default plan: ${j.stdout.slice(0, 500)}`);
   assert.ok(plan.planned.every((p) => p.file && p.action), 'every planned row names a file and an action');
   assert.deepEqual((await fs.readdir(fx.root)).sort(), before, 'the --json dry run must also write nothing');
+
+  const all = await holt([
+    'integrate', '--dry-run', '--all-hosts', '--json', '--cwd', fx.root,
+  ], fx.root, isolatedEnv);
+  const allPlan = JSON.parse(all.stdout);
+  assert.equal(allPlan.allHosts, true);
+  assert.ok(allPlan.planned.some((p) => p.adapter === 'mcp/cursor'));
+  assert.ok(allPlan.planned.some((p) => p.adapter === 'codex'));
+  assert.ok(allPlan.planned.length > plan.planned.length,
+    'explicit all-host mode must visibly widen the planned compatibility surface');
+  assert.deepEqual((await fs.readdir(fx.root)).sort(), before,
+    'the widened --all-hosts dry run must still write nothing');
 });
 
 test('HOOK: answers and EXITS while the host still holds stdin open', async (t) => {
@@ -856,7 +1071,7 @@ test('DISCARD: the human path prints the recovery route, not a pointer to nothin
 
   assert.match(r.stdout, /refs\/holt\/discard\//,
     `the capture ref must be printed: ${r.stdout}`);
-  assert.match(r.stdout, /restore with:.*git checkout refs\/holt\/discard\//,
+  assert.match(r.stdout, /restore with:.*git.*(?:restore|checkout)/,
     `and the exact command that brings it back: ${r.stdout}`);
   assert.match(r.stdout, /commit:\s*[0-9a-f]{7,}/, `and the commit that holds it: ${r.stdout}`);
   assert.match(r.stdout, /a\.txt/, `and which paths were touched: ${r.stdout}`);

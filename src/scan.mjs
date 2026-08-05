@@ -123,7 +123,18 @@ export async function committedDelta(root, baseOid, headOid, { strictReadOnly, t
     };
   }
 
-  const mt = await git(['merge-tree', '--write-tree', baseOid, headOid], { cwd: root, timeout });
+  let mt;
+  try {
+    mt = await git(['merge-tree', '--write-tree', baseOid, headOid], { cwd: root, timeout });
+  } catch (error) {
+    if (error instanceof GitRefused && error.unmeasured) {
+      return {
+        files: [], how: 'merge-tree-external-driver-refused', conflicted: false,
+        error: error.message,
+      };
+    }
+    throw error;
+  }
   // exit 0 = clean, 1 = conflicts (tree still on line 1), >1 = error.
   if (mt.code > 1) {
     return { files: [], how: 'merge-tree-failed', conflicted: false, error: mt.stderr.trim() };
@@ -148,21 +159,25 @@ export async function committedDelta(root, baseOid, headOid, { strictReadOnly, t
   // prefilter's job is "which pairs might conflict", where a false positive costs one merge-tree
   // run and a false negative costs a broken landing — so it should be generous, and now is.
   const names = await git(['diff', '--name-status', '-M', '-z', baseOid, tree], { cwd: root, timeout });
+  if (names.code !== 0) {
+    return {
+      files: [], how: 'merge-tree-names-failed', conflicted: mt.code === 1,
+      mergedTree: tree, error: names.stderr.trim() || 'git diff --name-status failed',
+    };
+  }
   const files = [];
-  if (names.code === 0) {
-    const parts = splitNul(names.stdout);
-    for (let i = 0; i < parts.length; i++) {
-      const status = parts[i];
-      if (!status) continue;
-      // R and C carry TWO paths: source then destination. Everything else carries one.
-      if (/^[RC]\d*$/.test(status)) {
-        if (parts[i + 1]) files.push(parts[i + 1]);
-        if (parts[i + 2]) files.push(parts[i + 2]);
-        i += 2;
-      } else {
-        if (parts[i + 1]) files.push(parts[i + 1]);
-        i += 1;
-      }
+  const parts = splitNul(names.stdout);
+  for (let i = 0; i < parts.length; i++) {
+    const status = parts[i];
+    if (!status) continue;
+    // R and C carry TWO paths: source then destination. Everything else carries one.
+    if (/^[RC]\d*$/.test(status)) {
+      if (parts[i + 1]) files.push(parts[i + 1]);
+      if (parts[i + 2]) files.push(parts[i + 2]);
+      i += 2;
+    } else {
+      if (parts[i + 1]) files.push(parts[i + 1]);
+      i += 1;
     }
   }
   return {
@@ -294,6 +309,73 @@ async function lineEndingOnlyVsBase(root, baseOid, committed, files, { timeout }
   return true;
 }
 
+/**
+ * Exact Git change identity for every committed-delta path.
+ *
+ * The tuple is Git's own `(path, mode, type, object id)` evidence. The path is kept as the map
+ * key and joined by the analysis layer, so identical bytes at `.github/workflows/deploy.yml`
+ * and `docs/examples/deploy.yml` are not interchangeable. Mode and type are load-bearing too:
+ * a 100755 executable, a 100644 file and a 120000 symlink can carry the same blob bytes while
+ * representing different work. A path absent from the merged result is an exact tombstone bound
+ * to the base entry it removed. This lets a sibling's same deletion preserve the work without
+ * pretending that the old blob still being present in base preserves the deletion intent.
+ */
+async function committedEntryIdentities(root, baseOid, committed, files, { timeout }) {
+  if (committed.how !== 'merge-tree' || !committed.mergedTree || files.length === 0) {
+    return { entries: {}, how: 'unavailable', error: undefined };
+  }
+  const result = await gitPathBatched(
+    ['ls-tree', '-r', '-z', '--full-tree', committed.mergedTree, '--'],
+    files,
+    { cwd: root, timeout },
+  );
+  if (result.code !== 0) return { entries: {}, how: 'ls-tree-failed', error: result.stderr?.trim() };
+
+  const entries = {};
+  const parseEntries = (stdout, prefix = '') => {
+    for (const rec of stdout.split('\0')) {
+      if (!rec) continue;
+      const tab = rec.indexOf('\t');
+      if (tab < 0) continue;
+      const meta = /^(\d+) ([^ ]+) ([0-9a-f]+)$/.exec(rec.slice(0, tab));
+      if (!meta) continue;
+      const file = rec.slice(tab + 1);
+      entries[file] = `${prefix}${meta[1]}:${meta[2]}:${meta[3]}`;
+    }
+  };
+  parseEntries(result.stdout);
+
+  const missing = files.filter((file) => !entries[file]);
+  if (missing.length === 0) return { entries, how: 'ls-tree-exact', error: undefined };
+
+  // A missing result path is normally a deletion or rename source. Query the common base for the
+  // exact entry removed and namespace it as a tombstone; absence of either side remains unknown.
+  const base = await gitPathBatched(
+    ['ls-tree', '-r', '-z', '--full-tree', baseOid, '--'],
+    missing,
+    { cwd: root, timeout },
+  );
+  if (base.code !== 0) {
+    return { entries, how: 'ls-tree-partial', error: base.stderr?.trim() || 'base ls-tree failed' };
+  }
+  const before = { ...entries };
+  for (const rec of base.stdout.split('\0')) {
+    if (!rec) continue;
+    const tab = rec.indexOf('\t');
+    if (tab < 0) continue;
+    const meta = /^(\d+) ([^ ]+) ([0-9a-f]+)$/.exec(rec.slice(0, tab));
+    if (!meta) continue;
+    const file = rec.slice(tab + 1);
+    if (!before[file]) entries[file] = `delete:${meta[1]}:${meta[2]}:${meta[3]}`;
+  }
+  const unresolved = missing.filter((file) => !entries[file]);
+  return {
+    entries,
+    how: unresolved.length ? 'ls-tree-partial' : 'ls-tree-exact',
+    error: unresolved.length ? `${unresolved.length} changed path(s) had no exact base/result entry` : undefined,
+  };
+}
+
 /* ------------------------------------------- the index's per-path reporting filter ---- */
 
 /**
@@ -312,7 +394,7 @@ async function lineEndingOnlyVsBase(root, baseOid, committed, files, { timeout }
  *     git status --porcelain -uall            -> (empty)
  *     holt gate wt-a                          -> exit 0  "✓ disposable — no uncommitted changes"
  *     holt rescue wt-a --json                 -> {"nothingToRescue": true}
- *     holt clean --json                       -> wouldRemove: [wt-a]
+ *     holt clean --json                       -> wouldQuarantine: [wt-a]
  *     hook: rm config/local.json              -> exit 0  ALLOW
  *     git update-index --no-skip-worktree …   (same bytes, same command)
  *     hook: rm config/local.json              -> exit 2  BLOCK
@@ -352,9 +434,11 @@ async function lineEndingOnlyVsBase(root, baseOid, committed, files, { timeout }
  * eol=crlf` fixture: the file on disk is CRLF, the index blob is LF, `git status` says clean,
  * `git hash-object f.txt` returns the index oid e5c5c55… and `git hash-object --no-filters`
  * (what a hand-rolled sha1 computes) returns cf9b2a8… — so a hand-rolled hash would have called
- * an untouched file destroyed work and denied `rm` on it. hash-object applies exactly the clean
- * filter and eol conversion git itself would, which is the only comparison that cannot produce
- * that false positive.
+ * an untouched file destroyed work and denied `rm` on it. Holt's central Git boundary empties
+ * every configured external clean/smudge/process command before this invocation, while Git still
+ * performs its built-in eol/ident/encoding conversion. A path with a `filter=<driver>` attribute
+ * is therefore explicitly UNKNOWN below: executing that driver would be arbitrary code, and
+ * pretending its disabled output is exact would be a different kind of lie.
  *
  * COST, AND IT IS MEASURED WHERE THE COST ACTUALLY IS. One extra `ls-files -v` per worktree.
  * On holt's own 20,189-file repository, where nothing is flagged: `status --porcelain -z -uall
@@ -504,66 +588,213 @@ export async function indexFlagDelta(wtPath, { timeout } = {}) {
       how: 'index-flags-failed', error: staged.stderr?.trim() || `ls-files -s exited ${staged.code}`,
     };
   }
-  const oidByPath = new Map();
+  const indexByPath = new Map();
   for (const rec of staged.stdout.split('\0')) {
     if (!rec) continue;
     const tab = rec.indexOf('\t');
     if (tab < 0) continue;
     const head = rec.slice(0, tab).split(' ');
     if (head.length < 3) continue;
-    oidByPath.set(rec.slice(tab + 1), head[1]);
+    const p = rec.slice(tab + 1);
+    // A non-zero stage is an unresolved merge entry, not one authoritative index identity.
+    if (head[2] !== '0') indexByPath.set(p, null);
+    else indexByPath.set(p, { mode: head[0], oid: head[1] });
   }
 
   // Only the suppressed entries that are on disk reach the stamp — a repository with none of
   // them pays for neither. No index entry for a path `ls-files -v` just listed means the two
   // calls disagree; that is an unreadable state, not a clean one.
   const present = [];
+  const symlinks = [];
+  const modeAtRisk = [];
   const unknown = [];
   const stampParts = [];
   for (const e of onDisk) {
-    const oid = oidByPath.get(e.path) ?? null;
+    const indexed = indexByPath.get(e.path) ?? null;
+    const oid = indexed?.oid ?? null;
+    const mode = indexed?.mode ?? null;
     if (e.st === null) {
       unknown.push(e.path);
-      stampParts.push(`${e.path}\0${e.tag}\0${oid}\0unstattable`);
+      stampParts.push(`${e.path}\0${e.tag}\0${mode}\0${oid}\0unstattable`);
       continue;
     }
-    stampParts.push(`${e.path}\0${e.tag}\0${oid}\0${e.st.size}\0${e.st.mtimeMs}`);
-    // Not a regular file (a directory or a symlink where the index records a blob), or an entry
-    // whose oid the second call did not return: holt has nothing to compare and says so.
-    if (!e.st.isFile() || !oid) { unknown.push(e.path); continue; }
-    present.push({ path: e.path, tag: e.tag, oid });
+    const fsType = e.st.isSymbolicLink() ? 'symlink'
+      : (e.st.isFile() ? 'file' : (e.st.isDirectory() ? 'directory' : 'other'));
+    const fsMode = (e.st.mode & 0o111) !== 0 ? 'exec' : 'plain';
+    stampParts.push(`${e.path}\0${e.tag}\0${mode}\0${oid}\0${fsType}\0${fsMode}\0${e.st.size}\0${e.st.mtimeMs}`);
+    if (!indexed) { unknown.push(e.path); continue; }
+
+    if (mode === '120000') {
+      if (e.st.isFile() && !e.st.isSymbolicLink()) { modeAtRisk.push(e.path); continue; }
+      if (!e.st.isSymbolicLink()) { unknown.push(e.path); continue; }
+      symlinks.push({ path: e.path, tag: e.tag, oid });
+      continue;
+    }
+    if (mode === '100644' || mode === '100755') {
+      if (e.st.isSymbolicLink()) { modeAtRisk.push(e.path); continue; }
+      if (!e.st.isFile()) { unknown.push(e.path); continue; }
+      if (process.platform !== 'win32') {
+        const executable = (e.st.mode & 0o111) !== 0;
+        if (executable !== (mode === '100755')) { modeAtRisk.push(e.path); continue; }
+      }
+      present.push({ path: e.path, tag: e.tag, oid });
+      continue;
+    }
+
+    // Gitlinks and future index modes are not ordinary worktree blobs. Without a recursive
+    // repository-aware instrument Holt cannot prove them unchanged, so they are unknown.
+    unknown.push(e.path);
   }
 
   const stamp = stampParts.join('\n');
-  if (!present.length) return { atRisk: [], unknown, stamp, how: 'ls-files-v' };
+  const atRisk = [...modeAtRisk];
+
+  if (symlinks.length) {
+    const content = new Map();
+    try {
+      await catFileBatch([...new Set(symlinks.map((e) => e.oid))], { cwd: wtPath }, (oid, bytes) => {
+        if (Buffer.isBuffer(bytes)) content.set(oid, bytes);
+      });
+      for (const entry of symlinks) {
+        const indexBytes = content.get(entry.oid);
+        if (!indexBytes) { unknown.push(entry.path); continue; }
+        try {
+          const target = Buffer.from(await fs.readlink(path.join(wtPath, entry.path), { encoding: 'buffer' }));
+          if (!target.equals(indexBytes)) atRisk.push(entry.path);
+        } catch {
+          unknown.push(entry.path);
+        }
+      }
+    } catch {
+      unknown.push(...symlinks.map((entry) => entry.path));
+    }
+  }
+
+  if (!present.length) return { atRisk, unknown: [...new Set(unknown)], stamp, how: 'ls-files-v' };
+
+  // `filter=<driver>` is executable semantics, not merely text normalisation. The configured
+  // clean/process command is deliberately disabled at the process boundary, which means Holt can
+  // no longer prove whether its output would equal the index blob. Ask only for the effective
+  // ATTRIBUTE (git check-attr never runs the driver), mark those paths unmeasured, and hash the
+  // remaining paths through Git's builtin conversion pipeline. A failed attribute query taints
+  // every candidate; silence from a broken classifier is never a clean answer.
+  const filterAttrs = await filterAttributedPaths(wtPath, present.map((entry) => entry.path), { timeout });
+  if (filterAttrs.error) {
+    return {
+      atRisk,
+      unknown: [...new Set([...unknown, ...present.map((entry) => entry.path)])],
+      stamp,
+      how: 'ls-files-v',
+      error: `filter attribute evidence is unmeasured: ${filterAttrs.error}`,
+    };
+  }
+  const filterDependent = filterAttrs.paths;
+  if (filterDependent.size) unknown.push(...filterDependent);
+  const hashable = present.filter((entry) => !filterDependent.has(entry.path));
+  if (!hashable.length) {
+    return {
+      atRisk,
+      unknown: [...new Set(unknown)],
+      stamp,
+      how: 'ls-files-v',
+      error: `${filterDependent.size} path(s) have an external filter attribute; Holt did not execute it`,
+    };
+  }
 
   // One batched hash-object for every suppressed file that is actually on disk, split across as
   // many spawns as the argument-list ceiling requires. `--` and the absolute paths keep a path
   // that begins with `-` from being read as an option.
   const hashed = await gitPathBatched(['hash-object', '--'],
-    present.map((e) => path.join(wtPath, e.path)), { cwd: wtPath, timeout });
+    hashable.map((e) => path.join(wtPath, e.path)), { cwd: wtPath, timeout });
   if (hashed.code !== 0) {
     // The instrument failed. Absence of evidence is not evidence of absence: every file it was
     // asked about is unknown, not clean.
     return {
-      atRisk: [], unknown: [...unknown, ...present.map((e) => e.path)], stamp,
+      atRisk, unknown: [...new Set([...unknown, ...hashable.map((e) => e.path)])], stamp,
       how: 'index-flags-hash-failed', error: hashed.stderr?.trim() || `hash-object exited ${hashed.code}`,
     };
   }
   const oids = hashed.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
-  if (oids.length !== present.length) {
+  if (oids.length !== hashable.length) {
     return {
-      atRisk: [], unknown: [...unknown, ...present.map((e) => e.path)], stamp,
+      atRisk, unknown: [...new Set([...unknown, ...hashable.map((e) => e.path)])], stamp,
       how: 'index-flags-hash-failed',
-      error: `hash-object returned ${oids.length} oid(s) for ${present.length} path(s)`,
+      error: `hash-object returned ${oids.length} oid(s) for ${hashable.length} path(s)`,
     };
   }
 
-  const atRisk = [];
-  for (let i = 0; i < present.length; i++) {
-    if (oids[i] !== present[i].oid) atRisk.push(present[i].path);
+  for (let i = 0; i < hashable.length; i++) {
+    if (oids[i] !== hashable[i].oid) atRisk.push(hashable[i].path);
   }
-  return { atRisk, unknown, stamp, how: 'ls-files-v' };
+  return {
+    atRisk: [...new Set(atRisk)], unknown: [...new Set(unknown)], stamp, how: 'ls-files-v',
+    error: filterDependent.size
+      ? `${filterDependent.size} path(s) have an external filter attribute; Holt did not execute it`
+      : undefined,
+  };
+}
+
+/**
+ * @param {string} wtPath
+ * @param {string[]} paths
+ * @param {{ timeout?: number, drivers?: string[] }} [opts]
+ */
+async function filterAttributedPaths(wtPath, paths, { timeout, drivers } = {}) {
+  if (!paths.length) return { paths: new Set(), error: null };
+  const checked = await gitPathBatched(['check-attr', '-z', 'filter', '--'], paths,
+    { cwd: wtPath, timeout });
+  if (checked.code !== 0) {
+    return {
+      paths: new Set(),
+      error: checked.stderr?.trim() || `git check-attr exited ${checked.code}`,
+    };
+  }
+  const fields = checked.stdout.split('\0');
+  const filtered = new Set();
+  const configured = drivers ? new Set(drivers) : null;
+  for (let i = 0; i + 2 < fields.length; i += 3) {
+    const [file, attribute, value] = fields.slice(i, i + 3);
+    if (attribute !== 'filter') continue;
+    if (value && value !== 'unspecified' && value !== 'unset'
+      && (!configured || configured.has(value))) filtered.add(file);
+  }
+  return { paths: filtered, error: null };
+}
+
+/**
+ * External clean/process semantics can make a raw-index-equal file dirty, or a raw-different file
+ * clean. Once those programs are disabled, status alone cannot distinguish either direction.
+ * Enumerate every tracked pathname only when the exact status preflight found such a program,
+ * then retain only regular on-disk paths whose effective attribute selects that driver.
+ *
+ * @param {string} wtPath
+ * @param {string[]} drivers
+ * @param {{ timeout?: number }} [opts]
+ */
+async function trackedExternalFilterPaths(wtPath, drivers, { timeout } = {}) {
+  if (!drivers.length) return { paths: [], error: null };
+  const listed = await git(['ls-files', '-z'], { cwd: wtPath, timeout });
+  if (listed.code !== 0) {
+    return {
+      paths: [], error: listed.stderr?.trim() || `git ls-files exited ${listed.code}`,
+    };
+  }
+  const tracked = splitNul(listed.stdout);
+  const attributed = await filterAttributedPaths(wtPath, tracked, { timeout, drivers });
+  if (attributed.error) return { paths: [], error: attributed.error };
+
+  const paths = [];
+  await pmap([...attributed.paths], async (file) => {
+    try {
+      const st = await fs.lstat(path.join(wtPath, file));
+      // Git does not feed symlink targets or gitlinks through content filters. Everything else is
+      // retained conservatively if its filesystem type changed underneath the tracked entry.
+      if (!st.isSymbolicLink() && !st.isDirectory()) paths.push(file);
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') paths.push(file);
+    }
+  }, 16);
+  return { paths: paths.sort(), error: null };
 }
 
 /**
@@ -608,12 +839,29 @@ async function uncommittedDelta(wtPath, { timeout }) {
     else files.push(p);
   }
 
+  // Status was intentionally computed with repository filter programs disabled. For paths whose
+  // effective attributes request one of those programs, the conservative modified-path result is
+  // retained, but equivalence to the index remains unmeasured and is named as such. `check-attr`
+  // reads attribute data only; it never launches the configured clean/process command.
+  const statusFilterAttrs = await trackedExternalFilterPaths(
+    wtPath, status.externalCheckinFilterDrivers ?? [], { timeout },
+  );
+  const statusFilterUnknown = statusFilterAttrs.paths;
+
+  if (statusFilterAttrs.error) {
+    return {
+      files, untracked, unmeasured: [...new Set([...flags.unknown, ...files])],
+      how: 'index-flags-failed',
+      error: `filter attribute evidence is unmeasured: ${statusFilterAttrs.error}`,
+    };
+  }
+
   // A BROKEN FILTER-READER IS NOT A CLEAN FILTER. If `ls-files` could not run, holt does not
   // know what status was allowed to tell it, and the scan must refuse to classify rather than
   // publish an answer it cannot stand behind — the same rule committedDelta already follows.
   if (flags.how !== 'ls-files-v') {
     return {
-      files, untracked, unmeasured: flags.unknown,
+      files, untracked, unmeasured: [...new Set([...flags.unknown, ...statusFilterUnknown])],
       how: 'index-flags-failed', error: flags.error ?? flags.how,
     };
   }
@@ -621,9 +869,11 @@ async function uncommittedDelta(wtPath, { timeout }) {
   return {
     files: [...new Set([...files, ...flags.atRisk])],
     untracked,
-    unmeasured: flags.unknown,
+    unmeasured: [...new Set([...flags.unknown, ...statusFilterUnknown])],
     how: 'status+diff-HEAD',
-    error: undefined,
+    error: statusFilterUnknown.length
+        ? `${statusFilterUnknown.length} tracked path(s) use an external filter attribute; Holt did not execute it`
+        : undefined,
   };
 }
 
@@ -936,28 +1186,16 @@ export function testFixtureProfile(paths) {
  *   committed.files        EXCLUDED         — a commit holds the content; `rm` of one is
  *                                             recoverable, so denying it would be pure noise
  *
- * Every layer here has already been filtered through looksGenerated() by scanFiles(), which is
- * why node_modules/, dist/, build/, coverage/, *.log, logs/, tmp/ and lockfiles can never appear
- * in it — the never-worse property of anything that intersects with this set is inherited, not
- * re-implemented.
+ * No pathname convention removes evidence from this set. `node_modules/`, `dist/`, lockfiles and
+ * logs can contain hand edits or incident evidence; a name or manifest is not a recovery proof.
+ * The command guard may use generated-looking names to choose ASK rather than DENY, but it must
+ * first retain the paths here so cleanup can never become a silent ALLOW.
  */
 export function atRiskFiles(ws) {
   if (!ws || !ws.ok) return [];
-  // THE FILE GATE'S AT-RISK SET IS UNCONDITIONAL ON GITIGNORED CONTENT.
-  //
-  // `contentAtRisk()` (analyze.mjs) reads `w.ignored.files` directly to feed the DISPOSABLE
-  // verdict, and there a gitignored `build/` with no build manifest correctly REFUSES — holt
-  // cannot verify it, and the owner's .gitignore entry is not proof the content is regenerable.
-  // But `atRiskFiles()` feeds the FILE GATE: "would `rm build/out.js` destroy the only copy?"
-  // A .gitignore entry declaring `build/` disposable IS the owner's answer to that question —
-  // `rm -rf node_modules` on a gitignored `node_modules/` must stay allowed, or the guard
-  // becomes the "safety that freezes the tool" the product exists not to be. So gitignored
-  // entries are filtered with the unconditional GENERATED list here, while the disposable
-  // verdict keeps the manifest-gated set from `contentAtRisk()`. The two answer different
-  // questions and are right to use different evidence.
   const uncommitted = (ws.uncommitted?.files ?? []).filter(Boolean);
   const untracked = (ws.uncommitted?.untracked ?? []).filter(Boolean);
-  const ignored = (ws.ignored?.files ?? []).filter((f) => Boolean(f) && !looksGenerated(f) && !SCRATCH_WHEN_IGNORED.test(f));
+  const ignored = (ws.ignored?.files ?? []).filter(Boolean);
   return [...new Set([...uncommitted, ...untracked, ...ignored])];
 }
 
@@ -968,15 +1206,15 @@ export function atRiskFiles(ws) {
  * WHY BOTH EXIST. atRiskFiles() is the authority and carries the full analysis with it, but
  * producing it costs a scan. A pre-tool hook runs in the agent's critical path on every single
  * shell command, so the guard needs a way to answer "is this path even interesting?" for the
- * common case — `rm -rf node_modules` — without paying for one. This parses the identical
- * evidence with the identical looksGenerated() filter, so the two cannot drift apart on what
- * counts as at risk — and the test named 'FILE GATE: the fast probe and scan.mjs agree on what
+ * common case — `rm -rf node_modules` — without paying for one. This parses the identical raw
+ * status evidence, without a pathname filter, so the two cannot drift apart on what counts as at
+ * risk — and the test named 'FILE GATE: the fast probe and scan.mjs agree on what
  * is at risk' walks every file atRiskFiles() reports and asserts the guard refuses to lose it,
  * because a probe that saw LESS than the scan would silently re-open the hole.
  *
  * @returns {Map<string,'uncommitted'|'untracked'|'gitignored'>} path -> which layer it is in
  */
-export function atRiskFromStatus(stdoutZ, activeDirs) {
+export function atRiskFromStatus(stdoutZ, _activeDirs) {
   const out = new Map();
   const parts = String(stdoutZ ?? '').split('\0');
   for (let i = 0; i < parts.length; i++) {
@@ -987,21 +1225,57 @@ export function atRiskFromStatus(stdoutZ, activeDirs) {
     if (!p) continue;
     // A rename entry is followed by its source path; consume it so it is not read as an entry.
     if (xy[0] === 'R' || xy[0] === 'C') i++;
-    // THE MANIFEST GATE IS FOR UNTRACKED/UNCOMMITTED CONTENT, NOT GITIGNORED.
-    // A `!!` entry is gitignored — the .gitignore entry IS the provenance signal, so the
-    // unconditional GENERATED list (no activeDirs) is the right filter. An untracked `??`
-    // entry has no .gitignore declaration, so the manifest gate correctly applies: a
-    // `node_modules/` with no package.json might be a hand-copied dependency patch.
-    if (xy === '!!') {
-      if (looksGenerated(p) || SCRATCH_WHEN_IGNORED.test(p)) continue;
-      out.set(p, 'gitignored');
-    } else {
-      if (looksGenerated(p, activeDirs)) continue;
-      if (xy === '??') out.set(p, 'untracked');
-      else out.set(p, 'uncommitted');
-    }
+    if (xy === '!!') out.set(p, 'gitignored');
+    else if (xy === '??') out.set(p, 'untracked');
+    else out.set(p, 'uncommitted');
   }
   return out;
+}
+
+/**
+ * Remove collapsed ignored-directory markers that contain no filesystem object Git could
+ * capture. Git status reports an ignored directory as one trailing-slash entry whether it
+ * contains a unique file or is completely empty. Treating both as a file produced an impossible
+ * remediation loop: Holt claimed an empty directory held sole-copy bytes, while discard and
+ * rescue correctly said a Git tree cannot represent it.
+ *
+ * This walks only directory markers and stops at the first non-directory entry. Symlinks and
+ * special entries stay protected; unreadable or racing paths stay protected too. Only a fully
+ * measured tree containing directories and nothing else is omitted.
+ */
+async function ignoredDirectoryContentState(abs, depth = 0) {
+  if (depth > 256) return 'unknown';
+  let dir;
+  try {
+    dir = await fs.opendir(abs);
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return 'empty';
+    return 'unknown';
+  }
+  try {
+    for await (const entry of dir) {
+      if (!entry.isDirectory()) return 'content';
+      const child = await ignoredDirectoryContentState(path.join(abs, entry.name), depth + 1);
+      if (child !== 'empty') return child;
+    }
+    return 'empty';
+  } catch {
+    return 'unknown';
+  }
+}
+
+export async function omitEmptyIgnoredDirectories(wtPath, entries) {
+  const kept = [];
+  for (const entry of entries) {
+    if (!String(entry).endsWith('/')) {
+      kept.push(entry);
+      continue;
+    }
+    const rel = String(entry).replace(/\/+$/, '');
+    const abs = path.join(wtPath, ...rel.split('/'));
+    if (await ignoredDirectoryContentState(abs) !== 'empty') kept.push(entry);
+  }
+  return kept;
 }
 
 
@@ -1015,10 +1289,11 @@ export function atRiskFromStatus(stdoutZ, activeDirs) {
  * lose" and removed. Absence of evidence is not evidence of absence — the same rule the rest of
  * this file follows.
  *
- * Recognisable build output (node_modules, dist, target, caches — the GENERATED list) is excluded,
- * because refusing to clean a worktree merely for having a dist/ would make the command useless.
- * What remains is content a human plausibly cares about, and its presence downgrades the verdict
- * from "provably disposable" to "holt cannot verify this".
+ * Ignored content is retained in full, including recognisable build output. `.gitignore` says Git
+ * should not track a path; it does not prove the current bytes can be recreated. Usability is
+ * handled at the command boundary, where an all-generated-looking deletion asks for confirmation
+ * instead of issuing a confident denial. The worktree itself is never called disposable on a
+ * naming guess.
  */
 async function ignoredContent(wtPath, { timeout, activeDirs }) {
   const r = await git(['status', '--porcelain', '-z', '--ignored=matching', '--untracked-files=all'],
@@ -1029,37 +1304,30 @@ async function ignoredContent(wtPath, { timeout, activeDirs }) {
     if (!entry || entry.length < 4) continue;
     if (entry.slice(0, 2) !== '!!') continue;      // '!!' marks an ignored path
     const p = entry.slice(3);
-    // THE PROJECT'S OWN .gitignore IS THE PROVENANCE SIGNAL — the directory NAME is not.
-    //
-    // `logs/`, `tmp/` and `.cache/` came off GENERATED_DIRS because a hand-written
-    // logs/incident-postmortem.md was reported disposable and destroyed. But that file was
-    // UNTRACKED — nobody had declared it disposable. A path the repository has explicitly
-    // gitignored is different in kind: someone wrote it down as not-source, and that is a far
-    // stronger statement than a folder happening to be called `logs`.
-    //
-    // So the two cases are separated rather than traded off. Untracked content in a scratch-named
-    // directory is protected (the gauntlet's loss). Gitignored content in one is noise (the
-    // monster's `.cache/blob.bin` and `logs/`, planted precisely so that a worktree full of build
-    // junk is still reclaimable — without this, "safety" freezes the tool it is protecting).
-    // Evidence-aware: a generated-NAMED dir only counts as noise when the manifest that
-    // recreates it exists in this worktree. See GENERATOR_MANIFESTS — the third data-loss
-    // reproduction against this list, and the rule its own comment already stated.
-    if (!p || looksGenerated(p, activeDirs) || SCRATCH_WHEN_IGNORED.test(p)) continue;
+    // `.gitignore` IS NOT A PROVENANCE OR REPRODUCIBILITY CERTIFICATE. It can hide generated
+    // output, local credentials, a patched dependency, or an incident log; none of those names
+    // tells us whether these exact bytes exist anywhere else. Keep every reported path. Generated
+    // evidence remains advisory metadata for the interactive command verdict only.
+    if (!p) continue;
     // A TRAILING SLASH IS A DIRECTORY, AND SKIPPING IT DESTROYED REAL DATA.
     //
     // When .gitignore names a directory (`secrets/`), git's --ignored=matching collapses the whole
     // subtree to the ONE entry `secrets/` and never lists the files inside it. Dropping that entry
     // therefore erased the entire subtree from the verdict, and a worktree whose only unique
     // content was `secrets/prod.env` was reported as holding nothing base lacks — so
-    // `holt clean --apply` deleted the only copy of live credentials. Reproduced 40/40.
+    // the older, destructive `holt clean --apply` deleted the only copy of live credentials.
+    // Reproduced 40/40 before clean was changed to recoverable quarantine.
     //
     // The directory IS the evidence. It is kept, with its slash, so the verdict downgrades to
-    // "holt cannot verify this" exactly as it does for an ignored file. looksGenerated() above
-    // still discards node_modules/, dist/, .cache/ and friends, so ordinary build output stays
-    // disposable — verified, not assumed.
+    // "holt cannot verify this" exactly as it does for an ignored file. That applies equally to
+    // node_modules/, dist/ and caches: ordinary cleanup can be confirmed, but worktree deletion
+    // cannot assume their bytes are reproducible.
     files.push(p);
   }
-  return { files: files.sort(), how: 'status --ignored', error: undefined };
+  // A non-empty collapsed directory remains evidence. An empty directory tree contains no bytes,
+  // symlink target, or special entry to lose, so it must not be reported as a changed file.
+  const nonEmpty = await omitEmptyIgnoredDirectories(wtPath, files);
+  return { files: nonEmpty.sort(), how: 'status --ignored', error: undefined };
 }
 
 /** Phase 1: file-level deltas for one workstream. */
@@ -1124,9 +1392,13 @@ async function scanFiles(ws, ctx) {
     // merge-tree cannot run — offline promisor remote, pruned objects, corrupt odb — it returns
     // an EMPTY file list, which is indistinguishable downstream from "no committed delta". A
     // worktree with committed-ahead work and a clean working tree would then be reported SAFE,
-    // and clean --apply would delete it. An empty answer from a broken instrument is not an
+    // and the older destructive clean implementation would delete it. An empty answer from a
+    // broken instrument is not an
     // answer (Law: prove the instrument can detect presence before trusting its silence).
-    const committedFailed = ['merge-tree-failed', 'merge-tree-no-tree', 'three-dot-failed']
+    const committedFailed = [
+      'merge-tree-failed', 'merge-tree-no-tree', 'merge-tree-names-failed',
+      'merge-tree-external-driver-refused', 'three-dot-failed',
+    ]
       .includes(committed.how);
     // `index-flags-failed` joins `status-failed` here rather than getting its own branch: both
     // mean "the working-tree layer was not measured", and the only safe reading of an unmeasured
@@ -1140,14 +1412,15 @@ async function scanFiles(ws, ctx) {
       return result; // ok stays false -> UNKNOWN -> never safe, never cleaned
     }
 
-    // Evidence-aware on every layer: a generated NAME only earns the noise filter when the
-    // manifest that recreates it exists in this worktree (see GENERATOR_MANIFESTS). Without
-    // this, untracked `dist/handmade.js` in a repo with no build system was dropped from the
-    // at-risk set by its name alone — the same reasoning that destroyed logs/ content twice.
-    const cFiles = committed.files.filter((f) => !looksGenerated(f, activeDirs));
+    // DESTRUCTIVE AUTHORITY RETAINS EVERY PATH GIT REPORTED. A filename, manifest or ignore rule
+    // can rank likely build output, but none proves the bytes are reproducible. In particular,
+    // tracked lockfile edits, hand-authored dist files and gitignored incident logs have all been
+    // reproduced as the only copy of real work. Filtering them here made scan, gate, rescue,
+    // clean and the guard agree on a false empty answer.
+    const cFiles = [...committed.files];
     // `let`: holt's own untouched output is subtracted from both below. See the note there.
-    let uFiles = uncommitted.files.filter((f) => !looksGenerated(f, activeDirs));
-    let uUntracked = (uncommitted.untracked ?? []).filter((f) => !looksGenerated(f, activeDirs));
+    let uFiles = [...uncommitted.files];
+    let uUntracked = [...(uncommitted.untracked ?? [])];
 
     // THE SYMBOL-EXTRACTION SET IS UNCONDITIONAL, NOT MANIFEST-GATED.
     //
@@ -1172,7 +1445,7 @@ async function scanFiles(ws, ctx) {
     //   after  `holt setup`: gate = exit 1, "20 uncommitted file(s), 38 symbol(s) found nowhere
     //                        else" — and those 38 symbols are holt's own config keys
     //                        (mcpServers, PreToolUse, HOLT_CMD, module.exports)
-    //   git worktree remove / --force / rm -rf: ALL THREE BLOCKED. holt clean --apply: removes 0.
+    //   git worktree remove / --force / rm -rf: ALL THREE BLOCKED. holt clean --apply: quarantines 0.
     //
     // The refusal was provably false by md5: repo/AGENTS.md and scratch/AGENTS.md were
     // byte-identical. holt was reporting "found nowhere else" about content it had duplicated
@@ -1203,20 +1476,19 @@ async function scanFiles(ws, ctx) {
     uFiles = uFiles.filter(notHoltOwned);
     uUntracked = uUntracked.filter(notHoltOwned);
 
-    const touchedFiles = [...new Set([
-      ...committed.files.filter((f) => !looksGenerated(f)),
-      ...uFiles.filter((f) => !looksGenerated(f)),
-      ...uUntracked.filter((f) => !looksGenerated(f)),
-    ])].sort();
+    const touchedFiles = [...new Set([...cFiles, ...uFiles, ...uUntracked])].sort();
+    // Symbol extraction is advisory analysis and may filter known dependency/build trees for
+    // cost and signal quality. It is deliberately separate from `touched`, which is the full
+    // collision/review/destructive surface.
+    const symbolFiles = touchedFiles.filter((f) => !looksGenerated(f));
 
-    // BASE CAN BE THE "LIVING SIBLING" TOO. Measured on the 50-language independent-oracle
-    // benchmark: one worktree per repository whose entire committed delta is the SAME FILE(S)
-    // re-saved with CRLF line endings — merge-tree correctly says "base lacks this exact tree",
-    // but base holds the identical text, so this holds no unique content. See
-    // lineEndingOnlyVsBase()'s doc comment for the exact, conjunctive definition.
-    const lineEndingOnlyVsBaseFlag = await lineEndingOnlyVsBase(
-      root, base.oid, committed, cFiles, { timeout },
-    );
+    // Text normalisation is useful duplicate-work evidence, but never destructive authority.
+    // Preserve the measurement for review/diagnostics while the exact Git entry identities below
+    // decide whether base or a sibling durably holds the same path, mode, type and object.
+    const [lineEndingOnlyVsBaseFlag, committedIdentities] = await Promise.all([
+      lineEndingOnlyVsBase(root, base.oid, committed, cFiles, { timeout }),
+      committedEntryIdentities(root, base.oid, committed, cFiles, { timeout }),
+    ]);
 
     result.ok = true;
     result.committed = {
@@ -1230,15 +1502,18 @@ async function scanFiles(ws, ctx) {
       // disposable recall from 0.40 to 1.00. File LISTS cannot answer it: two worktrees can touch
       // the same paths with different content, or different paths with the same content.
       mergedTree: committed.mergedTree ?? null,
+      identities: committedIdentities.entries,
+      identitiesHow: committedIdentities.how,
+      identitiesError: committedIdentities.error,
       // See lineEndingOnlyVsBase() above: true only when the ENTIRE committed delta disappears
-      // once CRLF/CR line endings are normalised against base. Consumed by src/analyze.mjs's
-      // safeToDelete(), which is what actually turns it into a safe:true + redundantWith:['base']
-      // verdict — this field is raw instrument output, not a verdict.
+      // once CRLF/CR line endings are normalised against base. This remains advisory raw
+      // instrument output; it never turns into deletion authority.
       lineEndingOnlyVsBase: lineEndingOnlyVsBaseFlag,
     };
     result.uncommitted = {
       files: uFiles, untracked: uUntracked, count: uFiles.length + uUntracked.length,
       how: uncommitted.how,
+      error: uncommitted.error,
       // Paths the index flagged as not-status-reported that holt could not resolve to a real
       // answer (unreadable, or not a regular file). NOT folded into `files`: an unknown is not
       // an at-risk file, and it is not a clean one either. contentAtRisk() turns it into `blind`,
@@ -1257,6 +1532,7 @@ async function scanFiles(ws, ctx) {
       error: ignored?.error,
     };
     result.touched = touchedFiles;
+    result.symbolFiles = symbolFiles;
     result.stats = {
       committedFiles: cFiles.length,
       uncommittedFiles: uFiles.length,
@@ -1270,29 +1546,26 @@ async function scanFiles(ws, ctx) {
     // See isTestFile()/testFixtureProfile() above for the convention-based detection.
     result.testFixture = testFixtureProfile(touchedFiles);
 
-    // CONTENT IDENTITY, PER FILE — what `safeToDelete` needs to prove "a living sibling holds
-    // this exact work" when the sibling holds it at a DIFFERENT PATH or in a different
-    // indentation style. mergedTree (above) only catches the whole worktree matching another
-    // byte-for-byte at the SAME paths; it cannot see the far more common case of one new file
-    // renamed and reindented. See content-identity.mjs for what "identity" means here and why it
-    // cannot be fooled by two unrelated files sharing a name or a shape.
+    // Advisory per-file content identity for symbol/duplicate analysis. Destructive redundancy
+    // uses `committed.identities` above: exact Git path + mode + type + object id. These raw
+    // filesystem keys must never authorise deletion.
     //
     // Keyed by path so a partial match (one of two committed files has a twin, the other does
     // not) is visible to the caller rather than forcing an all-or-nothing verdict. A file that
     // fails to read (race, permission, symlink loop) gets `null` — the safe direction, since it
     // can only make this file LESS likely to be matched, never falsely redundant.
     //
-    // EVERY LAYER GOES THROUGH ONE READER, AND THAT READER NEVER FOLLOWS A SYMLINK. `result.touched`
-    // is committed + uncommitted + untracked, so the single loop below is the whole content-identity
-    // surface — there is no second, unfixed path for one of the layers. It used to be a bare
+    // EVERY ADVISORY SYMBOL FILE GOES THROUGH ONE READER, AND THAT READER NEVER FOLLOWS A
+    // SYMLINK. It used to be a bare
     // `fs.readFile`, which follows symlinks and hashes the RESOLVED TARGET: two worktrees each
     // committing an unrelated symlink to two DIFFERENT external files that happened to hold the same
     // bytes fingerprinted identically, `safeToDelete` called each redundantWith the other, and
-    // `clean --apply` would have removed the only copy. `pathContentKey` (content-identity.mjs)
+    // the older destructive clean implementation would have removed the only copy.
+    // `pathContentKey` (content-identity.mjs)
     // lstats first and keys a symlink by its TARGET STRING — which is exactly the blob git stores
     // for it — so identity is over what git tracks, not what the filesystem resolves.
     result.contentKeys = {};
-    await pmap(result.touched, async (f) => {
+    await pmap(result.symbolFiles, async (f) => {
       result.contentKeys[f] = await pathContentKey(path.join(ws.path, f));
     }, 6);
   } catch (err) {
@@ -1397,13 +1670,13 @@ export async function scan(disc, opts = {}) {
   if (opts.symbols !== false) {
     backend = await resolveBackend({ force: opts.symbolBackend });
 
-    const union = [...new Set(scanned.flatMap((w) => (w.ok ? w.touched : [])))];
+    const union = [...new Set(scanned.flatMap((w) => (w.ok ? (w.symbolFiles ?? w.touched) : [])))];
     const baseSyms = await symbolsAtBase(disc.root, base.oid, union, backend);
 
     await pmap(
-      scanned.filter((w) => w.ok && w.touched.length),
+      scanned.filter((w) => w.ok && (w.symbolFiles ?? w.touched).length),
       async (w) => {
-        const headSyms = await symbolsOnDisk(w.path, w.touched, backend);
+        const headSyms = await symbolsOnDisk(w.path, w.symbolFiles ?? w.touched, backend);
         w.added = diffSymbols(headSyms, baseSyms);
         w.addedKeys = [...new Set(w.added.map(symbolKey))];
         w.stats.addedSymbols = w.addedKeys.length;

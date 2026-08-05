@@ -36,18 +36,19 @@ const SAFE = new Set([
   // input (`--batch -z`, git >= 2.38) before it can frame a spec containing a newline safely.
   'version',
   'rev-parse', 'rev-list', 'log', 'show', 'cat-file', 'ls-files', 'ls-tree',
+  'check-attr',
   // `hash-object` WITHOUT `-w` computes an object id and writes nothing — the object database is
-  // not opened for writing at all. It is the only correct way to ask "do these working-tree bytes
-  // equal this index blob", because it applies the same clean filter and eol conversion git
-  // itself would: measured on a `text eol=crlf` fixture, a CRLF file whose index blob is LF
-  // hashes to the index oid under hash-object and to a DIFFERENT oid under `--no-filters`, so a
-  // hand-rolled sha1 would report an untouched file as destroyed work. Used by
-  // scan.mjs indexFlagDelta(). The write forms were already forbidden below — FORBIDDEN_SUBVERBS
+  // not opened for writing at all. It is the correct way to ask whether working-tree bytes equal
+  // an index blob under Git's BUILTIN eol/ident/encoding conversion: measured on `text eol=crlf`,
+  // a CRLF file whose index blob is LF hashes to the index oid here and a DIFFERENT oid under
+  // `--no-filters`. Repository program filters are centrally suppressed and their attributed
+  // paths are reported unmeasured before this comparison. Used by scan.mjs indexFlagDelta().
+  // The write forms were already forbidden below — FORBIDDEN_SUBVERBS
   // refuses `-w` and `--stdin-paths`, and that check runs BEFORE this allowlist, so listing the
   // subcommand here cannot widen it to a write.
   'hash-object',
   'status', 'diff', 'diff-tree', 'diff-index', 'merge-base', 'name-rev',
-  'worktree', 'branch', 'for-each-ref', 'config', 'var', 'symbolic-ref',
+  'worktree', 'branch', 'for-each-ref', 'show-ref', 'config', 'var', 'symbolic-ref',
   'describe', 'blame', 'shortlog', 'count-objects',
 ]);
 
@@ -78,10 +79,10 @@ const OBJECT_WRITE = new Set(['merge-tree']);
 /**
  * Tier MUTATE — commands that genuinely change the repository.
  *
- * These are UNREACHABLE unless a caller passes `allowMutation: true`, which only the explicitly
- * destructive/protective commands do (`holt protect`, `holt rescue`, `holt clean`). Scanning
- * and analysis can never reach them, and test/unit/safety.test.mjs proves a full scan still
- * changes nothing byte-for-byte.
+ * These are UNREACHABLE unless a reviewed caller passes `allowMutation: true`. Protective actions
+ * use them for locks, captures, and quarantine; collision/verify code uses only unreferenced
+ * objects, scratch indexes, and temporary worktrees. test/unit/safety.test.mjs proves a full scan
+ * still leaves refs, real indexes, and working-tree bytes unchanged.
  *
  * The read-only guarantee is a core reason to trust holt, so adding write features must not
  * quietly widen the default. It does not: the default for every code path in the scanner remains
@@ -90,25 +91,22 @@ const OBJECT_WRITE = new Set(['merge-tree']);
  *
  * Each entry is here because a specific feature needs it, and nothing else is:
  *   worktree lock/unlock  -> `holt protect`  (git's own protection; defeats a single --force)
- *   worktree remove       -> `holt clean`    (removing provably-disposable worktrees)
- *   branch -d/-D          -> `holt clean`    (the second command nobody runs)
+ *   worktree move/repair  -> `holt clean`    (recoverable quarantine; never physical deletion)
  *   commit-tree/hash-object/update-ref/write-tree/read-tree -> `holt rescue` (capture work)
+ *   add with a scratch index -> collision snapshots (never the user's index)
  */
 const MUTATE_SUBVERBS = {
   // `add` is here for `holt verify`, which materialises a SPECULATIVE MERGE into a scratch
   // worktree (outside the repo, removed afterwards) to run the user's tests against it. It is
   // still refused without the explicit opt-in, so the scanner can never create worktrees.
-  worktree: new Set(['lock', 'unlock', 'remove', 'prune', 'add']),
+  worktree: new Set(['lock', 'unlock', 'remove', 'prune', 'add', 'move', 'repair']),
   branch: new Set(['-d', '-D', '--delete']),
 };
 const MUTATE_COMMANDS = new Set([
-  'commit-tree', 'update-ref', 'write-tree', 'read-tree', 'update-index', 'mktree',
-  // `add` is here for `holt rescue` ONLY, and it is safe there because rescue runs it with
-  // GIT_INDEX_FILE pointed at a scratch index — the user's real index is never touched, which
-  // test/e2e/actions.test.mjs asserts by comparing `git status` before and after.
-  // The hand-rolled update-index fallback that preceded this silently failed to capture files,
-  // and rescue's own verification caught it: an incomplete capture is worse than none, because
-  // it licenses a deletion.
+  'commit-tree', 'hash-object', 'update-ref', 'write-tree', 'read-tree', 'update-index', 'mktree',
+  // `add` is only for worktreeSnapshot(), with GIT_INDEX_FILE pointed at a scratch index. If a
+  // repository clean/process program would own the authored bytes, the central execution boundary
+  // refuses it and collision analysis keeps the side unmeasured.
   'add',
 ]);
 
@@ -122,6 +120,14 @@ const FORBIDDEN_SUBVERBS = {
   branch: new Set(['-d', '-D', '--delete', '-m', '-M', '--move', '-c', '-C', '--copy', '--set-upstream-to', '-u']),
   config: new Set(['--unset', '--unset-all', '--add', '--replace-all', '--edit', '-e', '--rename-section', '--remove-section']),
   'hash-object': new Set(['-w', '--stdin-paths']),
+  diff: new Set(['--ext-diff', '--textconv']),
+  'diff-tree': new Set(['--ext-diff', '--textconv']),
+  'diff-index': new Set(['--ext-diff', '--textconv']),
+  log: new Set(['--ext-diff', '--textconv']),
+  show: new Set(['--ext-diff', '--textconv']),
+  // Both forms feed object bytes through repository-configured programs. catFileBatch uses the
+  // raw batch protocol and never needs either conversion mode.
+  'cat-file': new Set(['--filters', '--textconv']),
 };
 
 /** Global flags that can redirect git at another repo or escalate it. Never allowed from callers. */
@@ -143,10 +149,11 @@ const DESTRUCTIVE_ALWAYS = new Set([
 ]);
 
 export class GitRefused extends Error {
-  constructor(msg) {
+  constructor(msg, { unmeasured = false } = {}) {
     super(msg);
     this.name = 'GitRefused';
     this.refused = true;
+    this.unmeasured = unmeasured;
   }
 }
 
@@ -250,6 +257,442 @@ export function classify(argv, { allowMutation = false } = {}) {
 export const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER = 64 * 1024 * 1024;
 
+/* ==========================================================================================
+ * THE PROCESS ENVIRONMENT IS AN INPUT TO GIT, NOT BACKGROUND NOISE.
+ *
+ * Git gives environment variables authority over its repository, object database, config
+ * stack, helper programs, output file descriptors and network protocols. Inherited wholesale,
+ * these can make a correctly-classified argv answer a different question (`GIT_DIR`,
+ * `GIT_OBJECT_DIRECTORY`), execute a program (`GIT_EXTERNAL_DIFF`, `GIT_ASKPASS`), append to an
+ * arbitrary file (`GIT_TRACE*`) or silently omit work (a lying `core.fsmonitor`). That is the
+ * same class of authority as a caller-supplied `--git-dir`, only hidden outside argv.
+ *
+ * One builder owns the boundary for BOTH execFile() and the long-lived cat-file spawn. It admits
+ * only the OS bootstrap, user-config and scratch-directory variables Git needs across supported
+ * platforms. Unrelated credentials, loader controls and application state never cross merely
+ * because they happened to be ambient. Only the few GIT_* variables created deliberately by
+ * Holt for a scratch index/worktree or a rescue identity can cross back in. Repository
+ * alternates in `.git/objects/info/alternates` remain visible; only ambient ODB redirection is
+ * removed.
+ * ========================================================================================== */
+
+const INTENTIONAL_GIT_ENV = new Set([
+  'GIT_INDEX_FILE', 'GIT_WORK_TREE',
+  'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+  'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE',
+]);
+
+const FORCED_GIT_ENV = Object.freeze({
+  GIT_TERMINAL_PROMPT: '0',
+  GIT_OPTIONAL_LOCKS: '0',
+  GIT_PAGER: 'cat',
+  // Git 2.45 documents this as equivalent to --no-lazy-fetch. The capability probe below proves
+  // the selected executable supports that contract before any repository command is spawned.
+  GIT_NO_LAZY_FETCH: '1',
+  GIT_NO_REPLACE_OBJECTS: '1',
+  GIT_PROTOCOL_FROM_USER: '0',
+  GIT_ALLOW_PROTOCOL: '',
+  GIT_REF_PARANOIA: '1',
+  GIT_COMMIT_GRAPH_PARANOIA: '1',
+  LC_ALL: 'C',
+});
+
+/**
+ * Build the only environment a Holt-owned Git process may receive.
+ *
+ * @param {Record<string, string|undefined>} [intentional]
+ * @returns {Record<string,string>}
+ */
+export function buildGitEnv(intentional = {}) {
+  // Keep this list explicit. A computed process.env lookup would make the capability unknowable,
+  // while copying process.env wholesale would hand unrelated secrets and NODE_OPTIONS/LD_*
+  // execution controls to every Holt-owned Git process.
+  const osInputs = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+    XDG_CONFIG_DIRS: process.env.XDG_CONFIG_DIRS,
+    TMPDIR: process.env.TMPDIR,
+    TMP: process.env.TMP,
+    TEMP: process.env.TEMP,
+    PATHEXT: process.env.PATHEXT,
+    SYSTEMROOT: process.env.SYSTEMROOT,
+    WINDIR: process.env.WINDIR,
+    COMSPEC: process.env.COMSPEC,
+    USERPROFILE: process.env.USERPROFILE,
+    HOMEDRIVE: process.env.HOMEDRIVE,
+    HOMEPATH: process.env.HOMEPATH,
+    APPDATA: process.env.APPDATA,
+    LOCALAPPDATA: process.env.LOCALAPPDATA,
+  };
+  /** @type {Record<string,string>} */
+  const clean = {};
+  for (const [key, value] of Object.entries(osInputs)) {
+    if (typeof value === 'string') clean[key] = value;
+  }
+
+  // Deliberately do not spread `intentional`: a new call-site variable gets no authority until
+  // this central allowlist is reviewed. On Windows environment keys are case-insensitive, so only
+  // the canonical uppercase spelling is admitted.
+  for (const key of INTENTIONAL_GIT_ENV) {
+    const value = intentional[key];
+    if (typeof value === 'string') clean[key] = value;
+  }
+  return addHardenedConfig(Object.assign(clean, FORCED_GIT_ENV));
+}
+
+/** Git 2.45 (2024-04-29) introduced --no-lazy-fetch / GIT_NO_LAZY_FETCH. */
+export const NO_LAZY_FETCH_MIN_GIT = Object.freeze({ major: 2, minor: 45 });
+
+/**
+ * Whether a `git version ...` line names a Git that can make local object reads non-networking.
+ * Unparseable versions fail closed.
+ */
+export function noLazyFetchSupported(versionLine) {
+  const m = /(?:^|\s)(\d+)\.(\d+)/.exec(String(versionLine ?? ''));
+  if (!m) return false;
+  const major = Number(m[1]);
+  const minor = Number(m[2]);
+  return major > NO_LAZY_FETCH_MIN_GIT.major
+    || (major === NO_LAZY_FETCH_MIN_GIT.major && minor >= NO_LAZY_FETCH_MIN_GIT.minor);
+}
+
+// `/dev/null` is intentional even on Windows: Git for Windows is an MSYS program and understands
+// this spelling, whereas Node's os.devNull (`\\.\NUL`) is not a valid Git path there.
+export const INERT_GIT_HOOKS_PATH = '/dev/null';
+
+const HARDENED_GIT_CONFIG = Object.freeze([
+  ['core.fsmonitor', 'false'],
+  ['core.hooksPath', INERT_GIT_HOOKS_PATH],
+  ['log.showSignature', 'false'],
+  ['commit.gpgSign', 'false'],
+  ['core.pager', 'cat'],
+  ['core.askPass', ''],
+  // A merge with renormalisation enabled runs the check-in conversion pipeline for all three
+  // stages. That pipeline includes repository-configured clean/process filters. Holt never needs
+  // renormalisation for its evidence merge, and leaving the user's setting active would turn a
+  // supposedly local inspection into arbitrary program execution.
+  ['merge.renormalize', 'false'],
+  ['protocol.allow', 'never'],
+  ['protocol.ext.allow', 'never'],
+  ['protocol.file.allow', 'never'],
+  ['protocol.git.allow', 'never'],
+  ['protocol.http.allow', 'never'],
+  ['protocol.https.allow', 'never'],
+  ['protocol.ssh.allow', 'never'],
+]);
+
+function addHardenedConfig(env) {
+  env.GIT_CONFIG_COUNT = String(HARDENED_GIT_CONFIG.length);
+  for (let i = 0; i < HARDENED_GIT_CONFIG.length; i++) {
+    env[`GIT_CONFIG_KEY_${i}`] = HARDENED_GIT_CONFIG[i][0];
+    env[`GIT_CONFIG_VALUE_${i}`] = HARDENED_GIT_CONFIG[i][1];
+  }
+  return env;
+}
+
+/* ==========================================================================================
+ * REPOSITORY CONFIG IS ALSO AN EXECUTION ENVIRONMENT.
+ *
+ * `filter.<driver>.clean`, `.smudge` and `.process` are shell commands. They can be supplied by
+ * repository, worktree, global, system or included config and Git may start them while answering
+ * an apparently read-only `status`, worktree `diff`, or filtered `hash-object`. Capture commands
+ * (`add`, `worktree add`) can start them too. argv classification and ambient-environment
+ * scrubbing do not touch that authority.
+ *
+ * Git has no wildcard "disable all filters" switch. Before one of the small set of commands that
+ * can enter the conversion pipeline, Holt reads the effective program-key NAMES with the inert
+ * `git config --name-only` builtin, then appends command-scope empty values for every discovered
+ * filter driver. Git's own convert.c only invokes a driver when the selected command string is
+ * non-empty; the later command-scope values therefore preserve builtin text/eol/ident conversion
+ * but make every external filter a no-op. `required=false` is paired with them so a configured
+ * required driver fails into passthrough instead of turning the instrument into an opaque Git
+ * error.
+ *
+ * A custom `merge.<name>.driver` is different: suppressing it changes the synthetic merge's
+ * semantics, so there is no truthful replacement answer. `merge-tree` fails closed before it can
+ * start that program and the scanner labels the committed delta unmeasured. This is intentionally
+ * broader than checking whether today's files carry `merge=<name>`: deciding applicability is
+ * itself part of the merge instrument whose result is not trusted under external program control.
+ *
+ * Values are deliberately never returned or interpolated: the attacker-controlled command text
+ * remains data inside Git's config parser and never reaches a shell owned by Holt.
+ * ========================================================================================== */
+
+const EXTERNAL_CONVERSION_CONFIG_RE =
+  '^(filter\\..*\\.(clean|smudge|process|required)|merge\\..*\\.driver)$';
+
+function commandMayConvert(argv) {
+  const subAt = subcommandIndex(argv);
+  const sub = argv[subAt];
+  const rest = argv.slice(subAt + 1);
+  if (sub === 'status' || sub === 'add' || sub === 'diff') return true;
+  if (sub === 'diff-index') return !rest.includes('--cached');
+  if (sub === 'hash-object') return !rest.includes('--no-filters');
+  if (sub === 'merge-tree') return true;
+  if (sub === 'worktree') return rest.some((arg) => arg.split('=')[0] === 'add');
+  if (sub === 'read-tree') return commandMaterializesWorkingTree(argv);
+  if (sub === 'update-index') {
+    // These are the only object-only forms Holt uses. Presence of one safe-looking flag is not
+    // enough: update-index accepts options and ordinary file paths in the same invocation.
+    if (rest.length >= 3 && rest[0] === '--force-remove' && rest[1] === '--') return false;
+    if (rest.length === 2 && rest[0] === '--cacheinfo') return false;
+    if (rest.length === 3 && rest[0] === '--add' && rest[1] === '--cacheinfo') return false;
+    if (rest.length === 1 && rest[0] === '--index-info') return false;
+    return true;
+  }
+  return false;
+}
+
+function appendConfigPairs(env, pairs) {
+  let count = Number(env.GIT_CONFIG_COUNT ?? 0);
+  for (const [key, value] of pairs) {
+    env[`GIT_CONFIG_KEY_${count}`] = key;
+    env[`GIT_CONFIG_VALUE_${count}`] = value;
+    count++;
+  }
+  env.GIT_CONFIG_COUNT = String(count);
+  return env;
+}
+
+function externalConversionPrograms(configOutput) {
+  const filterPrefixes = new Set();
+  const checkinFilterPrefixes = new Set();
+  const checkinFilterKeys = new Set();
+  const checkoutFilterPrefixes = new Set();
+  const checkoutFilterKeys = new Set();
+  const mergeDriverKeys = new Set();
+  for (const record of String(configOutput ?? '').split('\0')) {
+    if (!record) continue;
+    const key = record.trim();
+    const match = /^(filter\..+)\.(clean|smudge|process|required)$/i.exec(key);
+    if (match && match[2].toLowerCase() !== 'required') {
+      filterPrefixes.add(match[1]);
+      if (match[2].toLowerCase() !== 'smudge') {
+        checkinFilterPrefixes.add(match[1]);
+        checkinFilterKeys.add(key);
+      }
+      if (match[2].toLowerCase() !== 'clean') {
+        checkoutFilterPrefixes.add(match[1]);
+        checkoutFilterKeys.add(key);
+      }
+    }
+    else if (/^merge\..+\.driver$/i.test(key)) mergeDriverKeys.add(key);
+  }
+  return {
+    filterPrefixes: [...filterPrefixes].sort(),
+    checkinFilterPrefixes: [...checkinFilterPrefixes].sort(),
+    checkinFilterKeys: [...checkinFilterKeys].sort(),
+    checkoutFilterPrefixes: [...checkoutFilterPrefixes].sort(),
+    checkoutFilterKeys: [...checkoutFilterKeys].sort(),
+    mergeDriverKeys: [...mergeDriverKeys].sort(),
+  };
+}
+
+function commandMaterializesWorkingTree(argv) {
+  const subAt = subcommandIndex(argv);
+  const sub = argv[subAt];
+  const rest = argv.slice(subAt + 1);
+  if (sub === 'worktree') {
+    return rest.some((arg) => arg.split('=')[0] === 'add')
+      && !rest.some((arg) => arg.split('=')[0] === '--no-checkout');
+  }
+  if (sub === 'read-tree') {
+    return rest.some((arg) => arg === '-u' || (/^-[^-]*u/.test(arg) && arg.length > 2));
+  }
+  return false;
+}
+
+function commandAuthorsConvertedContent(argv) {
+  const sub = argv[subcommandIndex(argv)];
+  return sub === 'add' || sub === 'update-index';
+}
+
+async function effectiveExternalConversionPrograms(cwd, env, timeout) {
+  return new Promise((resolve, reject) => {
+    execFile('git', [
+      'config', '--null', '--name-only', '--get-regexp', EXTERNAL_CONVERSION_CONFIG_RE,
+    ], {
+      cwd, timeout, maxBuffer: 8 * 1024 * 1024, env,
+    }, (error, stdout, stderr) => {
+      // `git config --get-regexp` uses 1 for "no matches". That is a measured empty answer.
+      if (error && error.code !== 1) {
+        reject(new GitFailed(
+          `could not enumerate repository conversion programs before running Git: ${error.message}`,
+          {
+            code: typeof error.code === 'number' ? error.code : undefined,
+            stderr: String(stderr ?? ''),
+            argv: ['config', '--get-regexp', EXTERNAL_CONVERSION_CONFIG_RE],
+          },
+        ));
+        return;
+      }
+      resolve(externalConversionPrograms(stdout));
+    });
+  });
+}
+
+async function buildGitCommandContext(argv, cwd, intentional, timeout = DEFAULT_TIMEOUT_MS) {
+  const env = buildGitEnv(intentional);
+  if (!commandMayConvert(argv)) {
+    return {
+      env,
+      programs: {
+        filterPrefixes: [], checkinFilterPrefixes: [], checkinFilterKeys: [],
+        checkoutFilterPrefixes: [],
+        checkoutFilterKeys: [], mergeDriverKeys: [],
+      },
+    };
+  }
+  const programs = await effectiveExternalConversionPrograms(cwd, env, timeout);
+  if (commandAuthorsConvertedContent(argv) && programs.checkinFilterKeys.length > 0) {
+    const named = programs.checkinFilterKeys.slice(0, 5).join(', ');
+    const more = programs.checkinFilterKeys.length > 5
+      ? ` (and ${programs.checkinFilterKeys.length - 5} more)` : '';
+    throw new GitRefused(
+      'holt refused to author converted content: repository-configured external check-in '
+      + `filter program(s) ${named}${more} were not executed; authored object bytes are unmeasured`,
+      { unmeasured: true },
+    );
+  }
+  if (commandMaterializesWorkingTree(argv) && programs.checkoutFilterKeys.length > 0) {
+    const named = programs.checkoutFilterKeys.slice(0, 5).join(', ');
+    const more = programs.checkoutFilterKeys.length > 5
+      ? ` (and ${programs.checkoutFilterKeys.length - 5} more)` : '';
+    throw new GitRefused(
+      'holt refused to materialize a working tree: repository-configured external checkout '
+      + `filter program(s) ${named}${more} were not executed; checkout bytes are unmeasured`,
+      { unmeasured: true },
+    );
+  }
+  if (argv[subcommandIndex(argv)] === 'merge-tree' && programs.mergeDriverKeys.length > 0) {
+    const named = programs.mergeDriverKeys.slice(0, 5).join(', ');
+    const more = programs.mergeDriverKeys.length > 5
+      ? ` (and ${programs.mergeDriverKeys.length - 5} more)` : '';
+    throw new GitRefused(
+      'holt refused `git merge-tree`: repository-configured external merge program(s) '
+      + `${named}${more} were not executed; the synthetic merge result is unmeasured`,
+      { unmeasured: true },
+    );
+  }
+  const overrides = [];
+  for (const prefix of programs.filterPrefixes) {
+    overrides.push(
+      [`${prefix}.clean`, ''],
+      [`${prefix}.smudge`, ''],
+      [`${prefix}.process`, ''],
+      [`${prefix}.required`, 'false'],
+    );
+  }
+  return { env: appendConfigPairs(env, overrides), programs };
+}
+
+export async function buildGitCommandEnv(argv, cwd, intentional, timeout = DEFAULT_TIMEOUT_MS) {
+  return (await buildGitCommandContext(argv, cwd, intentional, timeout)).env;
+}
+
+// These commands emit machine evidence, never a human presentation. External diff and textconv
+// programs can both fabricate that evidence; explicit negative flags override repo/global config.
+const MACHINE_DIFF_COMMANDS = new Set(['diff', 'diff-tree', 'diff-index', 'log', 'show']);
+
+function subcommandIndex(argv) {
+  let i = 0;
+  while (i < argv.length && argv[i].startsWith('-')) i++;
+  return i;
+}
+
+/**
+ * Add controls owned by Holt after classification. Callers cannot smuggle these through classify:
+ * the public argv is classified first; this function only narrows what that approved command does.
+ */
+export function hardenGitArgv(argv) {
+  const subAt = subcommandIndex(argv);
+  const sub = argv[subAt];
+  const command = [...argv];
+  // The capability probe reads only the Git executable's own version string. Keeping its argv
+  // primitive is what lets even very old Git run far enough for the explicit 2.45 refusal below.
+  if (sub === 'version') return command;
+  if (MACHINE_DIFF_COMMANDS.has(sub)) {
+    command.splice(subAt + 1, 0, '--no-ext-diff', '--no-textconv');
+  }
+
+  return command;
+}
+
+/** @type {Map<string, Promise<string>>} */
+const noLazyFetchProbes = new Map();
+
+function gitExecutableKey(env) {
+  const value = (name) => {
+    const found = Object.keys(env).find((key) => key.toUpperCase() === name);
+    return found ? env[found] : '';
+  };
+  return `${value('PATH')}\0${value('PATHEXT')}`;
+}
+
+async function requireNoLazyFetch(env) {
+  const key = gitExecutableKey(env);
+  let probe = noLazyFetchProbes.get(key);
+  if (!probe) {
+    probe = new Promise((resolve, reject) => {
+      execFile('git', ['version'], {
+        timeout: 10_000, maxBuffer: 1024 * 1024, env,
+      }, (err, stdout, stderr) => {
+        if (err) {
+          reject(new GitFailed(`git version probe failed: ${err.message}`, {
+            code: typeof err.code === 'number' ? err.code : undefined,
+            stderr: String(stderr ?? ''), argv: ['version'],
+          }));
+          return;
+        }
+        const version = String(stdout ?? '').trim();
+        if (!noLazyFetchSupported(version)) {
+          resolve(version);
+          return;
+        }
+        // A vendor build can carry a modern-looking version while omitting a feature. Probe the
+        // actual option once; real commands use the equivalent environment variable so their
+        // subcommand remains argv[0] for wrappers and instrumentation.
+        execFile('git', ['--no-lazy-fetch', 'version'], {
+          timeout: 10_000, maxBuffer: 1024 * 1024, env,
+        }, (capabilityError, _capabilityStdout, capabilityStderr) => {
+          if (capabilityError) {
+            reject(new GitFailed(
+              'holt requires a Git binary that implements --no-lazy-fetch (Git 2.45 or newer)',
+              {
+                code: typeof capabilityError.code === 'number' ? capabilityError.code : undefined,
+                stderr: String(capabilityStderr ?? ''), argv: ['--no-lazy-fetch', 'version'],
+              },
+            ));
+            return;
+          }
+          resolve(version);
+        });
+      });
+    });
+    noLazyFetchProbes.set(key, probe);
+  }
+
+  let version;
+  try {
+    version = await probe;
+  } catch (error) {
+    noLazyFetchProbes.delete(key);
+    throw error;
+  }
+  if (!noLazyFetchSupported(version)) {
+    throw new GitFailed(
+      `holt requires Git 2.45 or newer for repository operations (found ${version || 'an unparseable version'}): `
+      + 'older Git cannot disable lazy fetching, so a local evidence read could contact a promisor remote',
+      { argv: ['version'] },
+    );
+  }
+  return version;
+}
+
+/** Test seam for PATH-shim compatibility probes. */
+export function _resetGitCapabilityProbe() { noLazyFetchProbes.clear(); }
+
 /**
  * NETWORK FILESYSTEM TIMEOUT ESCALATION.
  *
@@ -303,7 +746,7 @@ export async function resolveTimeout(cwd, timeout) {
  * @param {{ cwd?: string, timeout?: number, allowObjectWrite?: boolean,
  *           allowMutation?: boolean, env?: Record<string, string|undefined> }} [opts]
  */
-export function git(argv, {
+export async function git(argv, {
   cwd, timeout = DEFAULT_TIMEOUT_MS, allowObjectWrite = true, allowMutation = false, env,
 } = {}) {
   const verdict = classify(argv, { allowMutation });
@@ -318,23 +761,20 @@ export function git(argv, {
     );
   }
 
+  const commandContext = await buildGitCommandContext(argv, cwd, env, timeout);
+  const childEnv = commandContext.env;
+  if (argv[subcommandIndex(argv)] !== 'version') await requireNoLazyFetch(childEnv);
+  const childArgv = hardenGitArgv(argv);
+
   return new Promise((resolve, reject) => {
     execFile(
       'git',
-      argv,
+      childArgv,
       {
         cwd,
         timeout,
         maxBuffer: DEFAULT_MAX_BUFFER,
-        // Keep git deterministic and non-interactive. A prompt would hang the scan.
-        env: {
-          ...process.env,
-          ...env,
-          GIT_TERMINAL_PROMPT: '0',
-          GIT_OPTIONAL_LOCKS: '0',
-          GIT_PAGER: 'cat',
-          LC_ALL: 'C',
-        },
+        env: childEnv,
       },
       (err, stdout, stderr) => {
         if (err && err.killed) {
@@ -345,7 +785,11 @@ export function git(argv, {
           reject(new GitFailed(`git ${argv[0]} failed to spawn: ${err.message}`, { argv, stderr }));
           return;
         }
-        resolve({ stdout: stdout ?? '', stderr: stderr ?? '', code: err ? err.code : 0 });
+        resolve({
+          stdout: stdout ?? '', stderr: stderr ?? '', code: err ? err.code : 0,
+          externalCheckinFilterDrivers: commandContext.programs.checkinFilterPrefixes.map(
+            (prefix) => prefix.slice('filter.'.length)),
+        });
       },
     );
   });
@@ -496,7 +940,10 @@ function probeBatchNulSupport(cwd) {
 }
 
 /** Test seam: forget the cached `git version` probe. */
-export function _resetBatchNulProbe() { _batchNulProbe = null; }
+export function _resetBatchNulProbe() {
+  _batchNulProbe = null;
+  _resetGitCapabilityProbe();
+}
 
 /**
  * Batched, STREAMING object reads: ONE `git cat-file --batch` process answers every spec,
@@ -580,6 +1027,10 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
   const argv = useNul ? ['cat-file', '--batch', '-z'] : ['cat-file', '--batch'];
   const label = `git ${argv.join(' ')}`;
 
+  const childEnv = buildGitEnv();
+  await requireNoLazyFetch(childEnv);
+  const childArgv = hardenGitArgv(argv);
+
   return new Promise((resolve, reject) => {
     const verdict = classify(argv);
     if (!verdict.allowed) {
@@ -587,12 +1038,10 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
       return;
     }
 
-    const child = spawn('git', argv, {
+    const child = spawn('git', childArgv, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: {
-        ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', GIT_PAGER: 'cat', LC_ALL: 'C',
-      },
+      env: childEnv,
     });
 
     let pending = Buffer.alloc(0);
@@ -680,16 +1129,37 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
       drain();
     });
     child.stderr.on('data', (d) => { stderrText += d; });
+    child.stdin.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      reject(new GitFailed(`${label} input failed: ${err.message}`, { argv, stderr: stderrText }));
+    });
     child.on('error', (err) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       reject(new GitFailed(`${label} failed to spawn: ${err.message}`, { argv }));
     });
-    child.on('close', () => {
+    child.on('close', (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (code !== 0) {
+        reject(new GitFailed(`${label} exited ${code}: ${stderrText.trim()}`, {
+          code: code ?? undefined, stderr: stderrText, argv,
+        }));
+        return;
+      }
+      if (specIdx !== specs.length || awaitingSize !== null || pending.length !== 0) {
+        reject(new GitFailed(
+          `${label} ended after ${specIdx}/${specs.length} complete records with ${pending.length} trailing byte(s); `
+          + 'partial or surplus object evidence is not usable',
+          { code: code ?? undefined, stderr: stderrText, argv },
+        ));
+        return;
+      }
       // `resolve` is called with NO argument elsewhere in this executor (this function resolves
       // `Promise<void>`); passing it directly as `.then()`'s fulfilled handler would hand it
       // `Promise.all`'s array result instead, which is a real type mismatch, not just a checker

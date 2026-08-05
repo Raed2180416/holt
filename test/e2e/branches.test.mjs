@@ -90,6 +90,24 @@ test('BRANCHES: landed vs content-landed vs unlanded, classified by content not 
   assert.equal(active.safe, false, 'checked-out branches are never auto-deletable');
 });
 
+test('BRANCHES: policy carries every unlanded path separately from the 25-file display sample', async (t) => {
+  const fx = await newRepo('branches-carried-paths');
+  t.after(() => fx.cleanup());
+  await sh('git', ['checkout', '-q', '-b', 'large-wip'], fx.root);
+  for (let i = 0; i < 25; i++) await fx.write(`src/ordinary-${String(i).padStart(2, '0')}.js`, `export const N${i} = ${i};\n`);
+  await fx.write('zz-protected/production/terraform.tf', 'resource "example" "protected" {}\n');
+  await fx.commit('large delta with protected final path');
+  await sh('git', ['checkout', '-q', 'main'], fx.root);
+
+  const branch = (await branchAudit(fx.root, { base: 'main' })).unlanded.find((b) => b.name === 'large-wip');
+  assert.equal(branch.fileCount, 26);
+  assert.equal(branch.files.length, 25, 'the human display remains bounded');
+  assert.equal(branch.carriedPaths.length, 26, 'policy receives the complete authoritative inventory');
+  assert.ok(branch.carriedPaths.includes('zz-protected/production/terraform.tf'));
+  assert.ok(!branch.files.includes('zz-protected/production/terraform.tf'),
+    'the adversarial path is beyond the display sample, not merely in a large branch');
+});
+
 test('BRANCHES: --apply deletes ONLY the landed bucket with -d, and records it in the journal', async (t) => {
   const fx = await graveyardFixture();
   t.after(() => fx.cleanup());

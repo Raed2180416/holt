@@ -41,9 +41,18 @@ carry deliberate-defect mutation tests that must fail the build if the check is 
 
 ## Design properties we intend to hold
 
-- holt makes **no network calls**, on any tier. If you observe one, that is a vulnerability report.
+- Ordinary analysis, hooks, MCP calls, Git actions and offline licence verification make **no Holt-
+  initiated network request**. The explicit, human-confirmed `setup` / `doctor --install` paths may
+  download a pinned ctags asset or invoke a package manager, exactly as disclosed in
+  [SUPPLY-CHAIN.md](SUPPLY-CHAIN.md). An undisclosed destination, credential leak, repository-data
+  egress, telemetry, or network activity from an ordinary offline path is a vulnerability report.
 - Scanning is **read-only**: the only write the analysis path may perform is an unreferenced
   object via `git merge-tree --write-tree`. Mutating git verbs are unreachable without an
   explicit opt-in from a command that exists to mutate.
 - **Fail-closed on missing evidence**: anything holt could not verify is reported as unknown and
   is never treated as safe.
+- `rescue` and `discard` are integrity captures, not secret vaults. They write every captured byte,
+  including ignored or untracked credentials, as an unencrypted local Git object reachable from a
+  `refs/holt/*` ref. Holt does not push those refs, classify secrets, or promise erasure when a ref
+  is removed; Git may retain unreachable objects until garbage collection. Treat the repository
+  object database and anything that backs up `.git` as part of the capture trust boundary.

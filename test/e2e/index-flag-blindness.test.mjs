@@ -101,6 +101,56 @@ for (const flag of ['--skip-worktree', '--assume-unchanged']) {
   });
 }
 
+for (const flag of ['--skip-worktree', '--assume-unchanged']) {
+  test(`index flags: ${flag} cannot hide executable-mode or entry-type changes`, async (t) => {
+    if (process.platform === 'win32') return t.skip('Windows worktrees do not expose Git executable/symlink mode reliably');
+    const fx = await newRepo('idxflag-mode-type');
+    await fx.write('tool.sh', '#!/bin/sh\necho baseline\n');
+    await fx.write('active', 'ordinary file\n');
+    await fx.write('target.txt', 'target remains\n');
+    await fx.commit('plain file identities');
+    const wt = await fx.worktree('w');
+    try {
+      await fx.git(['update-index', flag, 'tool.sh', 'active'], wt);
+      await fs.chmod(path.join(wt, 'tool.sh'), 0o755);
+      await fs.rm(path.join(wt, 'active'));
+      await fs.symlink('target.txt', path.join(wt, 'active'));
+
+      assert.equal(await statusOf(fx, wt), '', `premise: ${flag} must suppress both changes`);
+      const { ws, verdict } = await verdictFor(fx);
+      assert.ok(ws.uncommitted.files.includes('tool.sh'),
+        `the executable-only delta must be work: ${JSON.stringify(ws.uncommitted)}`);
+      assert.ok(ws.uncommitted.files.includes('active'),
+        `the file-to-symlink type change must be work: ${JSON.stringify(ws.uncommitted)}`);
+      assert.equal(verdict.safe, false);
+      for (const rel of ['tool.sh', 'active']) {
+        const guarded = await assessCommand(`rm ${rel}`, wt);
+        assert.equal(guarded.decision, 'deny', `${flag} ${rel}: ${JSON.stringify(guarded)}`);
+      }
+    } finally { await fx.cleanup(); }
+  });
+}
+
+test('index flags: a suppressed symlink-target edit is compared as link bytes, not followed content', async (t) => {
+  if (process.platform === 'win32') return t.skip('symlink creation is privilege-dependent on Windows');
+  const fx = await newRepo('idxflag-symlink-target');
+  await fx.write('target-a', 'same target bytes\n');
+  await fx.write('target-b', 'same target bytes\n');
+  await fs.symlink('target-a', path.join(fx.root, 'active'));
+  await fx.commit('tracked symlink');
+  const wt = await fx.worktree('w');
+  try {
+    await fx.git(['update-index', '--assume-unchanged', 'active'], wt);
+    await fs.rm(path.join(wt, 'active'));
+    await fs.symlink('target-b', path.join(wt, 'active'));
+    assert.equal(await statusOf(fx, wt), '', 'premise: assume-unchanged hides the target change');
+    const { ws, verdict } = await verdictFor(fx);
+    assert.ok(ws.uncommitted.files.includes('active'));
+    assert.equal(verdict.safe, false,
+      'identical referent bytes do not make two different symlink target strings the same entry');
+  } finally { await fx.cleanup(); }
+});
+
 test('index flags: the flag ALONE is not the evidence — an absent path is not at risk (sparse checkout)', async () => {
   // `git sparse-checkout` sets the skip-worktree bit on every excluded path. If holt refused on
   // the bit rather than on the file, every sparse checkout in the world would report unknown.
@@ -156,7 +206,7 @@ test('index flags: content is compared through git filters, so an eol-converted 
   } finally { await fx.cleanup(); }
 });
 
-test('index flags: a flagged file under a generated dir is still build output — rm -rf node_modules stays allowed', async () => {
+test('index flags: a generated-looking flagged edit requires confirmation, never a silent allow', async () => {
   const fx = await newRepo('idxflag-nm');
   await fx.write('package.json', '{"name":"x"}\n');
   await fx.write('node_modules/pkg/index.js', 'module.exports = 1;\n');
@@ -165,10 +215,11 @@ test('index flags: a flagged file under a generated dir is still build output �
   try {
     await fx.git(['update-index', '--skip-worktree', 'node_modules/pkg/index.js'], wt);
     await fx.write('node_modules/pkg/index.js', 'module.exports = 2; // hand patch\n', wt);
-    // The guard applies the same looksGenerated() filter to flagged paths that it applies to
-    // status paths, so the most ordinary destructive command in software is not newly refused.
+    // A manifest and pathname make this LIKELY build output, but cannot prove the hand patch is
+    // reproducible. Ask keeps cleanup usable without licensing irreversible loss.
     const v = await assessCommand('rm -rf node_modules', wt);
-    assert.equal(v.decision, 'allow', `got ${v.decision}: ${v.reason}`);
+    assert.equal(v.decision, 'ask', `got ${v.decision}: ${v.reason}`);
+    assert.match(v.reason, /cannot prove|Confirm/i);
   } finally { await fx.cleanup(); }
 });
 

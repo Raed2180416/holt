@@ -110,6 +110,11 @@ export async function branchAudit(cwd, { apply = false, base: baseRef = null, ..
     branches.push({
       name, tip, ageDays, status: 'unlanded', safe: false, checkedOut: isCheckedOut,
       reason: `holds ${delta.files.length} file(s) of content base does not have${checkedOutReason(name)}`,
+      // `files` is deliberately a small presentation sample.  Policy is a decision surface,
+      // not a renderer: it needs the complete authoritative delta or a protected path beyond
+      // the display cap silently passes.  Keep both fields explicit so a future consumer cannot
+      // mistake the sample for coverage.
+      carriedPaths: delta.files,
       files: delta.files.slice(0, FILE_CAP),
       fileCount: delta.files.length,
       how: delta.how,

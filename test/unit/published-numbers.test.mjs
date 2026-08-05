@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: FSL-1.1-MIT
 /**
- * holt — every published surface must state the SAME numbers.
+ * holt — every published surface must state the SAME numbers, or deliberately publish none.
  *
  * This repository has shipped its test count three different ways at once: README said 348, the
  * live site said 199, and the suite actually reported 352. The site sat under its own sentence
@@ -13,10 +13,11 @@
  * `grep -q <number>`, which passes when the number appears ANYWHERE — "352 languages" would
  * satisfy a check meant to be about tests.
  *
- * This test does the half that needs no test run: every surface must AGREE. CI does the other
- * half — that the agreed number matches what the suite actually reports. Neither alone is enough:
- * agreement on a stale number is still wrong, and a correct README beside a stale site is still
- * a contradiction in public.
+ * This test does the half that needs no test run: every surface must AGREE. "No current figure"
+ * is a valid state only when every surface says so explicitly. CI does the other half when a
+ * figure is published — that the agreed number matches what the suite actually reports. Neither
+ * alone is enough: agreement on a stale number is still wrong, and a correct README beside a
+ * stale site is still a contradiction in public.
  */
 
 import { test } from 'node:test';
@@ -28,6 +29,7 @@ import { TEST_COUNT_PATTERNS as TEST_COUNT, MUTATION_PATTERNS as MUTATION, claim
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SURFACES = ['README.md', 'BENCHMARKS.md', 'site/index.html'];
+const WITHHELD_MARKER = /No current test count or mutation score is\s+published\./i;
 // NO HARDCODED "MEASURED" CONSTANTS LIVE HERE ANY MORE, AND THAT IS THE POINT.
 //
 // This file carried `MEASURED_TEST_COUNT = '1055'` under a comment claiming it was measured
@@ -38,9 +40,9 @@ const SURFACES = ['README.md', 'BENCHMARKS.md', 'site/index.html'];
 //
 // A test cannot honestly produce these numbers. It cannot count the suite it is running inside,
 // and it must not spend two hours running the mutation harness. So this file asserts only what it
-// can prove cheaply and truthfully: that the surfaces AGREE WITH EACH OTHER, that the patterns
-// still match anything at all, that a score with survivors is never a headline, and that no install
-// command is advertised before it works.
+// can prove cheaply and truthfully: that the surfaces AGREE WITH EACH OTHER, that absence is an
+// explicit public choice rather than a vacuous regex pass, that a score with survivors is never a
+// headline, and that no install command is advertised before it works.
 //
 // Agreement between three copies of a stale number is still a publishing failure, so agreement is
 // NOT sufficient — it is only the part a unit test can honestly check. Comparison against a
@@ -53,51 +55,63 @@ async function readAll() {
   return out;
 }
 
-test('published numbers: every surface agrees with every other on the test count', async () => {
-  const files = await readAll();
+function assertSynchronizedOrWithheld(files, { label, patterns, arity = 1, exceptions = [] }) {
   const byFile = new Map();
-  for (const [f, text] of files) byFile.set(f, [...new Set(claims(text, TEST_COUNT))]);
-
-  // Anti-vacuity. If the patterns stop matching — a badge is reworded, the tile markup changes —
-  // this test would agree with itself about nothing and pass forever. The claims must be FOUND.
-  const total = [...byFile.values()].flat().length;
-  assert.ok(total >= SURFACES.length,
-    `only ${total} test-count claims matched across ${SURFACES.length} surfaces — the patterns ` +
-    `have drifted from the copy, so this test is no longer reading the published numbers: ` +
-    JSON.stringify([...byFile]));
-  for (const [f, found] of byFile) {
-    assert.ok(found.length > 0, `${f} publishes no test count this test can see — pattern drift`);
+  for (const [f, text] of files) {
+    byFile.set(f, [...new Set(claims(text, patterns, arity))].filter((c) => !exceptions.includes(c)));
   }
 
-  // One claim per surface, and the same claim on every surface. WHICH value is correct is not
-  // knowable here; scripts/verify-published-numbers.mjs is what compares it against reality.
+  // Absence is allowed only as a visible, synchronized publishing decision. This is the
+  // anti-vacuity condition for the no-headline state: deleting or rewording every recognised
+  // claim does not pass unless all three public surfaces tell readers the figure is withheld.
+  const total = [...byFile.values()].flat().length;
+  if (total === 0) {
+    for (const [f, text] of files) {
+      assert.match(text, WITHHELD_MARKER,
+        `${f} publishes no ${label}, but does not explicitly state that current public figures are withheld`);
+    }
+    return { state: 'withheld', values: [], byFile };
+  }
+
+  // A mixed state is a contradiction: once any surface publishes a figure, all surfaces must
+  // publish the same one and the withholding sentence must disappear from all of them.
+  for (const [f, found] of byFile) {
+    assert.ok(found.length > 0, `${f} publishes no ${label} this test can see — mixed or pattern-drifted state`);
+    assert.doesNotMatch(files.get(f), WITHHELD_MARKER,
+      `${f} both publishes a ${label} and says no current figure is published`);
+    assert.equal(new Set(found).size, 1, `${f} publishes more than one ${label}: ${JSON.stringify(found)}`);
+  }
+
+  // Which value is correct is not knowable here; scripts/verify-published-numbers.mjs is what
+  // compares the synchronized claim against a run that actually measured it.
   const values = new Set([...byFile.values()].flat());
   assert.equal(values.size, 1,
-    `the surfaces disagree with each other about the test count: ${JSON.stringify([...byFile])}`);
-  for (const [f, found] of byFile) {
-    assert.equal(new Set(found).size, 1, `${f} publishes more than one test count: ${JSON.stringify(found)}`);
-  }
+    `the surfaces disagree with each other about the ${label}: ${JSON.stringify([...byFile])}`);
+  return { state: 'published', values: [...values], byFile };
+}
+
+test('published numbers: test count is synchronized or explicitly withheld everywhere', async () => {
+  const files = await readAll();
+  assertSynchronizedOrWithheld(files, { label: 'test count', patterns: TEST_COUNT });
 });
 
-test('published numbers: every surface agrees with every other on the mutation score', async () => {
+test('published numbers: mutation score is synchronized, survivor-free, or explicitly withheld', async () => {
   const files = await readAll();
-  const byFile = new Map();
-  for (const [f, text] of files) byFile.set(f, [...new Set(claims(text, MUTATION, 2))]);
-
-  const total = [...byFile.values()].flat().length;
-  assert.ok(total >= 3,
-    `only ${total} mutation-score claims matched — pattern drift: ${JSON.stringify([...byFile])}`);
-
   // The falsification history ("the first run scored 10/12") is a deliberate, permanent record of
   // a WORSE past score, not a competing claim about today. It is the one legitimate exception.
-  const current = [...new Set([...byFile.values()].flat().filter((c) => c !== '10/12'))];
-  assert.equal(current.length, 1,
-    `the surfaces disagree with each other about the mutation score: ${JSON.stringify([...byFile])}`);
+  const result = assertSynchronizedOrWithheld(files, {
+    label: 'mutation score',
+    patterns: MUTATION,
+    arity: 2,
+    exceptions: ['10/12'],
+  });
+  if (result.state === 'withheld') return;
 
   // A SCORE WITH SURVIVORS IS NOT A HEADLINE. A survivor names a defect the suite cannot see, so
   // publishing "77/78" advertises the hole as though it were the achievement.
-  const [killed, of] = current[0].split('/').map(Number);
-  assert.equal(killed, of, `a published mutation score with survivors (${current[0]}) must not ship as a headline`);
+  const [current] = result.values;
+  const [killed, of] = current.split('/').map(Number);
+  assert.equal(killed, of, `a published mutation score with survivors (${current}) must not ship as a headline`);
 });
 
 test('published numbers: no surface advertises an install command that does not exist yet', async () => {

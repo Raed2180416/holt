@@ -19,7 +19,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { newRepo } from '../fixtures.mjs';
-import { protect, unprotect, rescue, rescues, clean, discard, auto } from '../../src/actions.mjs';
+import {
+  protect, unprotect, rescue, rescues, clean, discard, auto, quarantines, restoreQuarantine,
+  purgeQuarantine,
+} from '../../src/actions.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze, safeToDelete } from '../../src/analyze.mjs';
@@ -52,7 +55,8 @@ test('BOUNDARY: mutating commands are UNREACHABLE without an explicit opt-in', (
   // widen the default door — only open a clearly-marked second one.
   const mutating = [
     ['worktree', 'lock', 'p'], ['worktree', 'unlock', 'p'], ['worktree', 'remove', 'p'],
-    ['branch', '-d', 'b'], ['commit-tree', 't'], ['update-ref', 'r', 'c'], ['write-tree'],
+    ['branch', '-d', 'b'], ['commit-tree', 't'], ['hash-object', '-w', '--no-filters', 'file'],
+    ['update-ref', 'r', 'c'], ['write-tree'],
   ];
   for (const argv of mutating) {
     assert.equal(classify(argv).allowed, false,
@@ -338,8 +342,8 @@ test('PARITY: rescue may never say nothing-to-rescue where gate refuses on conte
   await sh('git', ['worktree', 'lock', '--reason', 'holt: parked', lockedEmpty], fx.root);
   t.after(() => sh('git', ['worktree', 'unlock', lockedEmpty], fx.root));
 
-  const HOLDS_WORK = ['ig-file', 'ig-dir', 'uncommitted', 'committed', 'mixed'];
-  const HOLDS_NOTHING = ['genuinely-empty', 'generated-only', 'locked-empty'];
+  const HOLDS_WORK = ['ig-file', 'ig-dir', 'uncommitted', 'committed', 'mixed', 'generated-only'];
+  const HOLDS_NOTHING = ['genuinely-empty', 'locked-empty'];
 
   const verdicts = await paritySubjects(fx);
   const byId = new Map(verdicts.map((v) => [v.id, v]));
@@ -443,7 +447,7 @@ test('CLEAN ATTACK: dry-run must not delete anything', async (t) => {
 
   const c = await clean(fx.root, {});
   assert.equal(c.dryRun, true, 'clean must be dry-run by DEFAULT');
-  assert.ok(c.wouldRemove.length >= 2);
+  assert.ok(c.wouldQuarantine.length >= 2);
 
   const list = await sh('git', ['worktree', 'list'], fx.root);
   assert.match(list.stdout, /spent-a/, 'dry-run must not have removed anything');
@@ -459,7 +463,9 @@ test('CLEAN ATTACK: never removes a worktree that holds work', async (t) => {
   await fx.write('src/keep.js', 'export function KEEP_ME() {}\n', keep);
 
   const c = await clean(fx.root, { apply: true });
-  assert.equal(c.removed, 1, `only the spent worktree should go: ${JSON.stringify(c.actions)}`);
+  assert.equal(c.quarantined, 1, `only the spent worktree should be quarantined: ${JSON.stringify(c.actions)}`);
+  assert.equal(c.removed, 0, 'clean never physically deletes a worktree');
+  assert.ok(await fs.stat(c.quarantines[0].quarantinePath), 'the complete worktree must remain on disk in quarantine');
 
   const content = await fs.readFile(path.join(keep, 'src/keep.js'), 'utf8');
   assert.match(content, /KEEP_ME/, 'work-holding worktree must survive clean --apply');
@@ -478,7 +484,7 @@ test('CLEAN ATTACK (TOCTOU): work appearing DURING the run must abort that delet
   for (const n of names) paths[n] = await fx.worktree(n);
 
   const dry = await clean(fx.root, {});
-  assert.equal(dry.wouldRemove.length, names.length, 'all look disposable at plan time');
+  assert.equal(dry.wouldQuarantine.length, names.length, 'all look disposable at plan time');
 
   // Deterministic race: the moment clean is about to consider race-d, work lands in it. Racing a
   // timer here would be flaky, and a flaky test for "do not delete on a stale verdict" is worse
@@ -500,6 +506,478 @@ test('CLEAN ATTACK (TOCTOU): work appearing DURING the run must abort that delet
     `race-d should be reported as skipped, got: ${JSON.stringify(applied.skipped)}`);
 });
 
+test('CLEAN POST-VERIFY RACE: ignored bytes arriving after the final verdict move intact into quarantine',
+  async (t) => {
+    const fx = await newRepo('clean-post-verify-ignored');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('late-ignored');
+
+    const c = await clean(fx.root, {
+      apply: true,
+      onAfterVerify: async (candidate) => {
+        if (candidate.id !== 'late-ignored') return;
+        await fx.write('.gitignore', 'late.secret\n', wt);
+        await fx.write('late.secret', 'ONLY COPY ARRIVED AFTER THE VERDICT\n', wt);
+      },
+    });
+
+    assert.equal(c.quarantined, 1, JSON.stringify(c));
+    assert.equal(c.removed, 0, 'the race boundary is a move, never recursive deletion');
+    const q = c.quarantines[0].quarantinePath;
+    assert.equal(await fs.readFile(path.join(q, 'late.secret'), 'utf8'),
+      'ONLY COPY ARRIVED AFTER THE VERDICT\n');
+    assert.equal(await fs.readFile(path.join(q, '.gitignore'), 'utf8'), 'late.secret\n');
+    await assert.rejects(() => fs.stat(wt), 'the old active path is vacated, not recursively erased');
+
+    const discovered = await discover(fx.root);
+    const quarantined = discovered.workstreams.find((w) => w.path === q);
+    assert.equal(quarantined?.quarantined, true,
+      `the stable private-admin marker must identify the moved recovery copy: ${JSON.stringify(quarantined)}`);
+
+    // Terminal means terminal: status may still report the recovery copy, but clean/auto/protect
+    // never recycle it as deletion authority or release its lock.
+    const again = await clean(fx.root, {});
+    assert.equal(again.wouldQuarantine.length, 0, JSON.stringify(again));
+    const automated = await auto(fx.root);
+    assert.equal(automated.needsYou.disposable, 0, JSON.stringify(automated));
+    const protectedAgain = await protect(fx.root);
+    assert.equal(protectedAgain.released, 0, JSON.stringify(protectedAgain));
+    const listed = await fx.git(['worktree', 'list', '--porcelain']);
+    assert.match(listed, new RegExp(`worktree ${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*locked`),
+      'the quarantine must remain registered and locked');
+  });
+
+test('CLEAN POST-VERIFY RACE: a detached commit created after the verdict remains reachable',
+  async (t) => {
+    const fx = await newRepo('clean-post-verify-detached');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('late-detached');
+    assert.equal((await sh('git', ['checkout', '--detach'], wt)).code, 0);
+
+    let lateHead = null;
+    const c = await clean(fx.root, {
+      apply: true,
+      onAfterVerify: async (candidate) => {
+        if (candidate.id !== 'late-detached') return;
+        await fx.write('late-detached.txt', 'COMMIT CREATED AFTER FINAL SCAN\n', wt);
+        lateHead = await fx.commit('late detached commit', wt);
+      },
+    });
+
+    assert.equal(c.quarantined, 1, JSON.stringify(c));
+    assert.ok(lateHead, 'the deterministic race seam must have created the commit');
+    const q = c.quarantines[0].quarantinePath;
+    assert.equal((await fx.git(['rev-parse', 'HEAD'], q)).trim(), lateHead,
+      'the registered quarantine HEAD is the commit that arrived after verification');
+    assert.equal(await fx.git(['show', `${lateHead}:late-detached.txt`], q),
+      'COMMIT CREATED AFTER FINAL SCAN\n');
+    const action = c.actions.find((a) => a.id === 'late-detached');
+    assert.equal(action.head, lateHead, 'the result reports the moved HEAD, not the stale plan HEAD');
+    assert.equal(action.branch, null, 'detached state is preserved and reported honestly');
+  });
+
+test('CLEAN LOCK CONTINUITY: an existing Holt risk lock survives the move without an unlock gap',
+  async (t) => {
+    const fx = await newRepo('clean-lock-continuity');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('locked-safe');
+    const reason = 'holt: ordinary risk lock that must remain continuously present';
+    assert.equal((await sh('git', ['worktree', 'lock', '--reason', reason, wt], fx.root)).code, 0);
+
+    const c = await clean(fx.root, { apply: true });
+    assert.equal(c.quarantined, 1, JSON.stringify(c));
+    const q = c.quarantines[0].quarantinePath;
+    const listed = await fx.git(['worktree', 'list', '--porcelain']);
+    assert.match(listed, new RegExp(`worktree ${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[\\s\\S]*locked ${reason}`),
+      'Git must carry the existing lock file/reason through worktree move -f -f unchanged');
+  });
+
+test('CLEAN RESTORE: exact restore argv preserves a Holt lock that predated quarantine',
+  async (t) => {
+    const fx = await newRepo('clean-restore-existing-lock');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('protected-safe');
+    const reason = 'holt: release engineering hold';
+    assert.equal((await sh('git', ['worktree', 'lock', '--reason', reason, wt], fx.root)).code, 0);
+
+    const c = await clean(fx.root, { apply: true });
+    assert.equal(c.quarantined, 1, JSON.stringify(c));
+    const recovery = c.quarantines[0];
+    assert.equal(recovery.restorePreservesExistingLock, true, JSON.stringify(recovery));
+    assert.equal(recovery.preExistingLockReason, reason);
+    assert.equal(recovery.restoreArgv.length, 1,
+      'restore must move the worktree back but must not append an unlock that erases prior authority');
+
+    for (const [command, ...args] of recovery.restoreArgv) {
+      const restored = await sh(command, args, fx.root);
+      assert.equal(restored.code, 0, `exact restore argv failed: ${JSON.stringify(restored)}`);
+    }
+
+    assert.ok(await fs.stat(wt), 'the worktree must be restored to its original path');
+    await assert.rejects(() => fs.stat(recovery.quarantinePath),
+      'the quarantine payload path must be vacated by restore');
+    assert.equal(await lockReasonOf(fx.root, wt), reason,
+      'recovery must preserve the exact protection reason that existed before quarantine');
+    const restored = await discover(fx.root);
+    const active = restored.workstreams.find((w) => w.path === wt);
+    assert.equal(active?.quarantined, false,
+      `the restored path must be active, not a terminal quarantine: ${JSON.stringify(active)}`);
+  });
+
+test('CLEAN RESTORE: exact restore argv releases only the transit lock Holt acquired',
+  async (t) => {
+    const fx = await newRepo('clean-restore-transit-lock');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('ordinary-safe');
+    assert.equal(await lockReasonOf(fx.root, wt), null, 'fixture must begin unlocked');
+
+    const c = await clean(fx.root, { apply: true });
+    assert.equal(c.quarantined, 1, JSON.stringify(c));
+    const recovery = c.quarantines[0];
+    assert.equal(recovery.restorePreservesExistingLock, false, JSON.stringify(recovery));
+    assert.equal(recovery.preExistingLockReason, null);
+    assert.equal(recovery.restoreArgv.length, 2,
+      'a quarantine-created transit lock needs one explicit unlock after the restore move');
+
+    for (const [command, ...args] of recovery.restoreArgv) {
+      const restored = await sh(command, args, fx.root);
+      assert.equal(restored.code, 0, `exact restore argv failed: ${JSON.stringify(restored)}`);
+    }
+
+    assert.ok(await fs.stat(wt), 'the worktree must be restored to its original path');
+    await assert.rejects(() => fs.stat(recovery.quarantinePath));
+    assert.equal(await lockReasonOf(fx.root, wt), null,
+      'restore must release the transit lock when and only when Holt acquired it');
+  });
+
+test('CLEAN RECOVERY: first-class inventory keeps the original identity and restore is verified',
+  async (t) => {
+    const fx = await newRepo('clean-first-class-restore');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('spent-friendly-name');
+    const originalHead = (await fx.git(['rev-parse', 'HEAD'], wt)).trim();
+
+    const cleaned = await clean(fx.root, { apply: true });
+    assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+    const inventory = await quarantines(fx.root);
+    assert.equal(inventory.count, 1, JSON.stringify(inventory));
+    assert.equal(inventory.quarantines[0].id, 'spent-friendly-name',
+      'recovery identity must come from the original worktree, not a random quarantine basename');
+    assert.equal(inventory.quarantines[0].originalPath, wt);
+    assert.equal(inventory.quarantines[0].head, originalHead);
+
+    const restored = await restoreQuarantine(fx.root, 'spent-friendly-name');
+    assert.equal(restored.ok, true, JSON.stringify(restored));
+    assert.equal(restored.restored, true);
+    assert.equal(restored.originalPath, wt);
+    assert.equal(restored.head, originalHead);
+    assert.ok(await fs.stat(wt));
+    await assert.rejects(() => fs.stat(cleaned.quarantines[0].quarantinePath));
+    assert.equal(await lockReasonOf(fx.root, wt), null,
+      'the first-class route releases the transit lock it created');
+
+    const after = await quarantines(fx.root);
+    assert.equal(after.count, 0, JSON.stringify(after));
+    assert.equal(after.transitions.length, 0, JSON.stringify(after));
+    const common = (await fx.git(['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+    const journalText = await fs.readFile(path.join(common, 'holt', 'journal.jsonl'), 'utf8');
+    assert.match(journalText, /"action":"clean-restore"/,
+      'a recovery mutation must be independently visible in the audit trail');
+  });
+
+test('CLEAN RECOVERY: an occupied original path is refused without touching either copy',
+  async (t) => {
+    const fx = await newRepo('clean-restore-occupied');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('occupied');
+    const cleaned = await clean(fx.root, { apply: true });
+    assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+    await fs.mkdir(wt);
+    await fs.writeFile(path.join(wt, 'new-owner.txt'), 'must survive\n');
+
+    const restored = await restoreQuarantine(fx.root, 'occupied');
+    assert.equal(restored.ok, false, JSON.stringify(restored));
+    assert.match(restored.error, /occupied/);
+    assert.equal(await fs.readFile(path.join(wt, 'new-owner.txt'), 'utf8'), 'must survive\n');
+    assert.ok(await fs.stat(cleaned.quarantines[0].quarantinePath),
+      'the recoverable source must remain in quarantine after refusal');
+  });
+
+test('CLEAN RECOVERY: first-class restore preserves protection that predated quarantine',
+  async (t) => {
+    const fx = await newRepo('clean-first-class-existing-lock');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('held-release');
+    const reason = 'holt: protected for release review';
+    assert.equal((await sh('git', ['worktree', 'lock', '--reason', reason, wt], fx.root)).code, 0);
+
+    const cleaned = await clean(fx.root, { apply: true });
+    assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+    const restored = await restoreQuarantine(fx.root, 'held-release');
+    assert.equal(restored.ok, true, JSON.stringify(restored));
+    assert.equal(restored.preservedLock, true);
+    assert.equal(await lockReasonOf(fx.root, wt), reason,
+      'the first-class action must restore path and exact prior authority together');
+  });
+
+test('CLEAN RECOVERY: changed lock authority is refused rather than unlocked or overwritten',
+  async (t) => {
+    const fx = await newRepo('clean-restore-lock-tamper');
+    t.after(() => fx.cleanup());
+    await fx.worktree('tampered');
+    const cleaned = await clean(fx.root, { apply: true });
+    assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+    const q = cleaned.quarantines[0].quarantinePath;
+    assert.equal((await sh('git', ['worktree', 'unlock', q], fx.root)).code, 0);
+    assert.equal((await sh('git', ['worktree', 'lock', '--reason', 'foreign recovery hold', q], fx.root)).code, 0);
+
+    const restored = await restoreQuarantine(fx.root, 'tampered');
+    assert.equal(restored.ok, false, JSON.stringify(restored));
+    assert.match(restored.error, /no longer protected by a Holt lock|lock changed/);
+    assert.ok(await fs.stat(q));
+    assert.match(await lockReasonOf(fx.root, q) ?? '', /foreign recovery hold/,
+      'Holt must not weaken replacement authority it did not place');
+  });
+
+test('CLEAN PURGE: preview is inert; apply anchors exact HEAD and reclaims a clean quarantine',
+  async (t) => {
+    const fx = await newRepo('clean-purge');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('spent-to-purge');
+    const head = (await fx.git(['rev-parse', 'HEAD'], wt)).trim();
+
+    const cleaned = await clean(fx.root, { apply: true });
+    assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+    const q = cleaned.quarantines[0].quarantinePath;
+
+    const preview = await purgeQuarantine(fx.root, 'spent-to-purge');
+    assert.equal(preview.ok, true, JSON.stringify(preview));
+    assert.equal(preview.dryRun, true);
+    assert.equal(preview.removed, 0);
+    assert.equal(preview.head, head);
+    assert.ok(await fs.stat(q), 'preview must leave the checkout in quarantine');
+    assert.match(await lockReasonOf(fx.root, q) ?? '', /holt:/,
+      'preview must leave the quarantine lock intact');
+
+    const applied = await purgeQuarantine(fx.root, 'spent-to-purge', { apply: true });
+    assert.equal(applied.ok, true, JSON.stringify(applied));
+    assert.equal(applied.purged, true);
+    assert.equal(applied.removed, 1);
+    assert.equal(applied.branchesRemoved, 0);
+    assert.equal(applied.commit, head);
+    assert.match(applied.recoveryRef, /^refs\/holt\/purge\//);
+    await assert.rejects(() => fs.stat(q), 'purge must physically reclaim the checkout directory');
+    const listed = await fx.git(['worktree', 'list', '--porcelain']);
+    assert.doesNotMatch(listed, new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      'the removed checkout must not remain registered');
+    assert.equal((await fx.git(['rev-parse', `${applied.recoveryRef}^{commit}`])).trim(), head,
+      'the exact pre-purge HEAD must remain reachable from the returned recovery ref');
+    assert.ok(applied.branch, 'the fixture is branch-backed and purge must report that branch');
+    assert.equal((await fx.git(['rev-parse', `refs/heads/${applied.branch}^{commit}`])).trim(), head,
+      'purge reclaims a checkout; it never deletes its branch');
+    const { readJournal } = await import('../../src/journal.mjs');
+    const event = (await readJournal(fx.root)).find((entry) => entry.action === 'clean-purge');
+    assert.ok(event, 'physical reclamation must be present in the hash-chained audit trail');
+    assert.equal(event.ref, applied.recoveryRef);
+    assert.equal(event.commit, head);
+  });
+
+test('CLEAN PURGE: modified, untracked, and ignored bytes refuse physical removal', async (t) => {
+  const fx = await newRepo('clean-purge-dirty');
+  t.after(() => fx.cleanup());
+  await fx.worktree('dirty-after-quarantine');
+  const cleaned = await clean(fx.root, { apply: true });
+  assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+  const q = cleaned.quarantines[0].quarantinePath;
+  await fs.writeFile(path.join(q, '.gitignore'), 'sole-copy.secret\n');
+  await fs.writeFile(path.join(q, 'sole-copy.secret'), 'MUST SURVIVE\n');
+
+  const purged = await purgeQuarantine(fx.root, 'dirty-after-quarantine', { apply: true });
+  assert.equal(purged.ok, false, JSON.stringify(purged));
+  assert.equal(purged.blocked, true);
+  assert.match(purged.error, /modified, untracked, or ignored/);
+  assert.equal(await fs.readFile(path.join(q, 'sole-copy.secret'), 'utf8'), 'MUST SURVIVE\n');
+  assert.match(await lockReasonOf(fx.root, q) ?? '', /holt:/,
+    'a refused purge must not weaken the quarantine lock');
+});
+
+test('CLEAN PURGE: an ignored sole copy with no untracked companion refuses physical removal', async (t) => {
+  const fx = await newRepo('clean-purge-ignored-sole-copy');
+  t.after(() => fx.cleanup());
+  await fx.worktree('ignored-sole-copy');
+  const cleaned = await clean(fx.root, { apply: true });
+  assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+  const q = cleaned.quarantines[0].quarantinePath;
+
+  // Do not use a worktree .gitignore: that file would itself be untracked, masking the exact
+  // failure under attack.  info/exclude is pre-existing repository metadata, so this checkout
+  // contains only the ignored, sole-copy byte Holt must still see before it can purge.
+  const commonDir = (await fx.git(['rev-parse', '--git-common-dir'], q)).trim();
+  await fs.appendFile(path.resolve(q, commonDir, 'info', 'exclude'), 'sole-copy.secret\n');
+  await fs.writeFile(path.join(q, 'sole-copy.secret'), 'MUST SURVIVE\n');
+
+  const purged = await purgeQuarantine(fx.root, 'ignored-sole-copy', { apply: true });
+  assert.equal(purged.ok, false, JSON.stringify(purged));
+  assert.equal(purged.blocked, true, JSON.stringify(purged));
+  assert.match(purged.error, /modified, untracked, or ignored/);
+  assert.equal(await fs.readFile(path.join(q, 'sole-copy.secret'), 'utf8'), 'MUST SURVIVE\n');
+  assert.match(await lockReasonOf(fx.root, q) ?? '', /holt:/,
+    'a refused purge must retain the quarantine lock around the exact ignored byte');
+});
+
+test('CLEAN PURGE RACE: Git independently refuses late work and Holt restores the lock',
+  async (t) => {
+    const fx = await newRepo('clean-purge-race');
+    t.after(() => fx.cleanup());
+    await fx.worktree('late-purge-write');
+    const cleaned = await clean(fx.root, { apply: true });
+    assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+    const q = cleaned.quarantines[0].quarantinePath;
+
+    const purged = await purgeQuarantine(fx.root, 'late-purge-write', {
+      apply: true,
+      onBeforeRemove: async ({ quarantinePath }) => {
+        await fs.writeFile(path.join(quarantinePath, 'arrived-after-check.txt'), 'STILL HERE\n');
+      },
+    });
+    assert.equal(purged.ok, false, JSON.stringify(purged));
+    assert.equal(purged.relocked, true, JSON.stringify(purged));
+    assert.match(purged.recoveryRef, /^refs\/holt\/purge\//,
+      'the committed state is anchored even though the final removal refused');
+    assert.equal(await fs.readFile(path.join(q, 'arrived-after-check.txt'), 'utf8'), 'STILL HERE\n');
+    assert.match(await lockReasonOf(fx.root, q) ?? '', /holt:/,
+      'the exact quarantine authority must be restored after Git refuses the dirty checkout');
+  });
+
+test('CLEAN PURGE: replacement lock authority is never removed or overwritten', async (t) => {
+  const fx = await newRepo('clean-purge-lock-tamper');
+  t.after(() => fx.cleanup());
+  await fx.worktree('purge-lock-tamper');
+  const cleaned = await clean(fx.root, { apply: true });
+  assert.equal(cleaned.quarantined, 1, JSON.stringify(cleaned));
+  const q = cleaned.quarantines[0].quarantinePath;
+  assert.equal((await sh('git', ['worktree', 'unlock', q], fx.root)).code, 0);
+  assert.equal((await sh('git', ['worktree', 'lock', '--reason', 'foreign retention hold', q], fx.root)).code, 0);
+
+  const purged = await purgeQuarantine(fx.root, 'purge-lock-tamper', { apply: true });
+  assert.equal(purged.ok, false, JSON.stringify(purged));
+  assert.match(purged.error, /no longer protected by a Holt lock|lock changed/);
+  assert.ok(await fs.stat(q));
+  assert.equal(await lockReasonOf(fx.root, q), 'foreign retention hold');
+});
+
+test('CLEAN OPEN-HANDLE RACE: late descriptor writes follow quarantine or fail protected',
+  async (t) => {
+    const fx = await newRepo('clean-open-handle');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('open-handle');
+    let handle = null;
+
+    const c = await clean(fx.root, {
+      apply: true,
+      onAfterVerify: async () => {
+        handle = await fs.open(path.join(wt, 'late-open.txt'), 'wx');
+        await handle.writeFile('before move\n');
+        await handle.sync();
+      },
+    });
+    t.after(() => handle?.close().catch(() => {}));
+
+    if (c.quarantined === 1) {
+      await handle.writeFile('after move\n');
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      assert.equal(await fs.readFile(path.join(c.quarantines[0].quarantinePath, 'late-open.txt'), 'utf8'),
+        'before move\nafter move\n', 'an open descriptor follows the renamed inode into quarantine');
+    } else {
+      // Windows commonly refuses directory renames while a child file is open. That is a safe
+      // platform outcome only if the source and its lock remain intact and no fallback deletes it.
+      assert.equal(c.failedCount, 1, JSON.stringify(c));
+      assert.equal(c.removed, 0);
+      assert.equal(await fs.readFile(path.join(wt, 'late-open.txt'), 'utf8'), 'before move\n');
+      const listed = await fx.git(['worktree', 'list', '--porcelain']);
+      assert.match(listed, /locked holt: clean quarantine transit/,
+        'a sharing-violation path must remain protected, never fall back to deletion');
+    }
+  });
+
+test('CLEAN IDENTITY RACE: replacing the registered worktree at the same path is refused',
+  async (t) => {
+    const fx = await newRepo('clean-identity-race');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('same-name');
+    const movedAside = path.join(path.dirname(wt), 'original-moved-aside');
+
+    const c = await clean(fx.root, {
+      apply: true,
+      onAfterVerify: async () => {
+        assert.equal((await sh('git', ['worktree', 'move', wt, movedAside], fx.root)).code, 0);
+        assert.equal((await sh('git', ['worktree', 'add', '-b', 'replacement-same-name', wt, 'main'], fx.root)).code, 0);
+      },
+    });
+
+    assert.equal(c.quarantined, 0, JSON.stringify(c));
+    assert.equal(c.failedCount, 1, JSON.stringify(c));
+    assert.match(c.failures[0].why, /identity changed/);
+    assert.ok(await fs.stat(wt), 'the replacement at the original path must survive untouched');
+    assert.ok(await fs.stat(movedAside), 'the original worktree must also remain registered and intact');
+  });
+
+test('CLEAN IDENTITY RACE: a filesystem replacement reusing the same Git admin pointer is refused',
+  async (t) => {
+    const fx = await newRepo('clean-filesystem-identity-race');
+    t.after(() => fx.cleanup());
+    const wt = await fx.worktree('same-admin');
+    const movedAside = path.join(path.dirname(wt), 'same-admin-original');
+    const gitPointer = await fs.readFile(path.join(wt, '.git'), 'utf8');
+
+    const c = await clean(fx.root, {
+      apply: true,
+      onAfterVerify: async () => {
+        // Preserve the Git admin identity and original pathname while replacing the physical
+        // directory inode. A basename/path-only binding accepts this substitution; dev+ino must
+        // participate in the destructive authorization.
+        await fs.rename(wt, movedAside);
+        await fs.mkdir(wt);
+        await fs.writeFile(path.join(wt, '.git'), gitPointer);
+        await fs.writeFile(path.join(wt, 'replacement-only.txt'), 'must survive\n');
+      },
+    });
+
+    assert.equal(c.quarantined, 0, JSON.stringify(c));
+    assert.equal(c.failedCount, 1, JSON.stringify(c));
+    assert.match(c.failures[0].why, /identity changed/);
+    assert.equal(await fs.readFile(path.join(wt, 'replacement-only.txt'), 'utf8'), 'must survive\n',
+      'the substituted directory must not inherit the original checkout\'s disposable verdict');
+    assert.ok(await fs.stat(movedAside), 'the original physical checkout must remain intact too');
+  });
+
+test('CLEAN SUBMODULE: Git move refusal remains protected and never falls back to removal',
+  async (t) => {
+    const fx = await newRepo('clean-submodule');
+    t.after(() => fx.cleanup());
+    const sub = path.join(path.dirname(fx.root), 'submodule-origin');
+    await fs.mkdir(sub, { recursive: true });
+    assert.equal((await sh('git', ['init', '--initial-branch=main', '-q'], sub)).code, 0);
+    assert.equal((await sh('git', ['config', 'user.name', 'holt test'], sub)).code, 0);
+    assert.equal((await sh('git', ['config', 'user.email', 't@holt.invalid'], sub)).code, 0);
+    await fs.writeFile(path.join(sub, 'payload.txt'), 'submodule payload\n');
+    assert.equal((await sh('git', ['add', 'payload.txt'], sub)).code, 0);
+    assert.equal((await sh('git', ['commit', '-m', 'submodule base'], sub)).code, 0);
+    assert.equal((await sh('git', ['-c', 'protocol.file.allow=always', 'submodule', 'add', sub, 'deps/sub'], fx.root)).code, 0);
+    await fx.commit('add populated submodule');
+    const wt = await fx.worktree('with-submodule');
+    assert.equal((await sh('git', ['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init'], wt)).code, 0);
+
+    const c = await clean(fx.root, { apply: true });
+    assert.equal(c.quarantined, 0, JSON.stringify(c));
+    assert.equal(c.failedCount, 1, JSON.stringify(c));
+    assert.equal(c.removed, 0, 'submodule refusal must never fall back to recursive removal');
+    assert.ok(await fs.stat(path.join(wt, 'deps/sub/payload.txt')),
+      'the populated submodule and source worktree remain intact');
+  });
+
 test('CLEAN ATTACK: an unmerged branch must not be silently deleted', async (t) => {
   const fx = await newRepo('clean-branch');
   t.after(() => fx.cleanup());
@@ -514,11 +992,12 @@ test('CLEAN ATTACK: an unmerged branch must not be silently deleted', async (t) 
   const c = await clean(fx.root, { apply: true });
   const acted = c.actions.find((x) => x.id === 'landed');
   assert.ok(acted, 'the landed worktree should be actioned');
-  // holt uses `branch -d`, never -D: git refusing an unmerged branch is a feature, and a
-  // cleanup tool that forces past it would destroy history nobody asked it to.
-  if (acted.action === 'removed' && !acted.branchRemoved) {
-    assert.ok(true, 'branch retained because git considered it unmerged — correct');
-  }
+  // Quarantine keeps the branch registered. Checking stdout is insufficient here because
+  // `show-ref --quiet` emits no text for BOTH success and failure; the exit code is the proof.
+  assert.equal(acted.action, 'quarantined', JSON.stringify(acted));
+  const retained = await sh('git', ['show-ref', '--verify', '--quiet', `refs/heads/${acted.branch}`], fx.root);
+  assert.equal(retained.code, 0, `the branch must remain registered: ${retained.stderr}`);
+  assert.equal(c.branchesRemoved, 0, 'clean quarantine never deletes branches');
 });
 
 test('CLEAN: unknown workstreams are reported and never removed', async (t) => {
@@ -528,7 +1007,7 @@ test('CLEAN: unknown workstreams are reported and never removed', async (t) => {
   await fs.rm(wt, { recursive: true, force: true });
 
   const c = await clean(fx.root, {});
-  assert.ok(!c.wouldRemove.some((w) => w.id === 'ghost'),
+  assert.ok(!c.wouldQuarantine.some((w) => w.id === 'ghost'),
     'a workstream holt could not assess must never be queued for deletion');
 });
 
@@ -748,7 +1227,7 @@ test('PROTECT: holt releases its OWN lock once the work has landed — the tool 
 
   // …and the worktree is reclaimable again, which is the whole point.
   const cleaned = await clean(fx.root, { apply: true });
-  assert.equal(cleaned.removed, 1, `the landed worktree must be reclaimable: ${JSON.stringify(cleaned)}`);
+  assert.equal(cleaned.quarantined, 1, `the landed worktree must be reclaimable: ${JSON.stringify(cleaned)}`);
 });
 
 test('PROTECT: a lock placed by SOMEONE ELSE is never released and still blocks (never-worse)', async (t) => {
@@ -775,7 +1254,7 @@ test('PROTECT: a lock placed by SOMEONE ELSE is never released and still blocks 
     'the foreign lock must survive untouched');
 
   const cleaned = await clean(fx.root, { apply: true });
-  assert.equal(cleaned.removed, 0, `clean must not remove a worktree someone else locked: ${JSON.stringify(cleaned)}`);
+  assert.equal(cleaned.quarantined, 0, `clean must not move a worktree someone else locked: ${JSON.stringify(cleaned)}`);
 });
 
 test('PROTECT: a C-quoted lock reason is still holt’s own lock in the VERDICT, not only in unprotect', async (t) => {
@@ -853,6 +1332,83 @@ test('DISCARD: content is captured and VERIFIED before anything is removed, and 
   assert.match(journal, /"action":"discard"/, `the discard must be journalled: ${journal.slice(-400)}`);
 });
 
+test('DISCARD: nested empty directories do not dead-end recoverable cleanup', async (t) => {
+  const fx = await newRepo('discard-empty-directories');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('generated-tree');
+  const generated = path.join(wt, 'node_modules', 'pkg');
+  await fs.mkdir(path.join(generated, 'empty', 'nested'), { recursive: true });
+  await fs.writeFile(path.join(generated, 'valuable.patch'), 'hand-patched dependency bytes\n');
+
+  const r = await discard(fx.root, [path.join(wt, 'node_modules')]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(r.emptyDirectoriesOmitted?.includes('node_modules/pkg/empty/nested'),
+    `the non-representable shape must be explicit: ${JSON.stringify(r)}`);
+  assert.match(r.note, /cannot be represented or recreated by a Git ref/);
+  await assert.rejects(() => fs.lstat(path.join(wt, 'node_modules')), { code: 'ENOENT' });
+  assert.equal(
+    (await fx.git(['show', `${r.commit}:node_modules/pkg/valuable.patch`])).trim(),
+    'hand-patched dependency bytes',
+    'real bytes beside an empty directory must remain recoverable from the capture ref',
+  );
+});
+
+test('DISCARD: a many-leaf generated tree is captured without exhausting object writers', async (t) => {
+  const fx = await newRepo('discard-many-leaves');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('large-generated-tree');
+  const root = path.join(wt, 'node_modules', 'fixture');
+  const expected = new Map();
+  for (let i = 0; i < 384; i += 1) {
+    const rel = `bucket-${i % 17}/leaf-${String(i).padStart(4, '0')}.txt`;
+    const body = `sole-copy generated leaf ${i}\n`;
+    expected.set(`node_modules/fixture/${rel}`, body);
+    await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
+    await fs.writeFile(path.join(root, rel), body);
+  }
+
+  const r = await discard(fx.root, [path.join(wt, 'node_modules')]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.verified, true, JSON.stringify(r));
+  await assert.rejects(() => fs.lstat(path.join(wt, 'node_modules')), { code: 'ENOENT' });
+
+  const listed = (await fx.git(['ls-tree', '-r', '--name-only', r.commit]))
+    .split('\n').filter((name) => name.startsWith('node_modules/fixture/'));
+  assert.equal(listed.length, expected.size,
+    `every leaf must be represented in the recovery commit: ${JSON.stringify(r)}`);
+  for (const [name, body] of [expected.entries().next().value, [...expected.entries()].at(-1)]) {
+    assert.equal(await fx.git(['show', `${r.commit}:${name}`]), body,
+      `${name} must retain its exact bytes`);
+  }
+});
+
+test('DISCARD RACE: accepting an empty directory never loses bytes added through an open handle', async (t) => {
+  if (process.platform !== 'linux') return t.skip('/proc directory-handle proof is Linux-specific');
+  const fx = await newRepo('discard-empty-directory-race');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('empty-writer');
+  const empty = path.join(wt, 'generated-empty');
+  await fs.mkdir(empty);
+  const handle = await fs.open(empty, 'r');
+  let closed = false;
+  t.after(async () => { if (!closed) await handle.close().catch(() => {}); });
+
+  const r = await discard(fx.root, [empty], {
+    onAfterCapture: async () => {
+      await fs.writeFile(`/proc/self/fd/${handle.fd}/late.txt`, 'late sole-copy bytes\n');
+      await handle.close();
+      closed = true;
+    },
+  });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /changed in quarantine before cleanup/);
+  assert.ok(typeof r.quarantine === 'string');
+  assert.equal(await fs.readFile(path.join(r.quarantine, 'late.txt'), 'utf8'), 'late sole-copy bytes\n',
+    'the late writer must remain physically recoverable');
+  await assert.rejects(() => fx.git(['show', `${r.commit}:generated-empty/late.txt`]),
+    'the earlier capture must not be misrepresented as containing the late bytes');
+});
+
 test('DISCARD: binary content is captured byte-for-byte before removal', async (t) => {
   const fx = await newRepo('discard-binary');
   t.after(() => fx.cleanup());
@@ -874,6 +1430,34 @@ test('DISCARD: binary content is captured byte-for-byte before removal', async (
   assert.ok(Buffer.from(captured).equals(bytes), 'the rescue ref must preserve every binary byte');
 });
 
+test('DISCARD: clean filters and EOL attributes cannot rewrite sole-copy capture bytes', async (t) => {
+  const fx = await newRepo('discard-filter-free');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitattributes', 'secret.txt filter=redact\r\ncrlf.txt text eol=lf\r\n');
+  await fx.git(['config', 'filter.redact.clean', 'sed s/.*/REDACTED/']);
+  await fx.git(['config', 'filter.redact.smudge', 'cat']);
+  await fx.commit('configure deliberately lossy clean filter');
+  const wt = await fx.worktree('filtered');
+  const secret = Buffer.from('TOP SECRET SOLE COPY\n');
+  const crlf = Buffer.from('first\r\nsecond\r\n');
+  await fs.writeFile(path.join(wt, 'secret.txt'), secret);
+  await fs.writeFile(path.join(wt, 'crlf.txt'), crlf);
+
+  const r = await discard(fx.root, [path.join(wt, 'secret.txt'), path.join(wt, 'crlf.txt')]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  for (const [rel, expected] of [['secret.txt', secret], ['crlf.txt', crlf]]) {
+    const captured = await new Promise((resolve, reject) => {
+      execFile('git', ['show', `${r.commit}:${rel}`],
+        { cwd: fx.root, encoding: 'buffer' }, (error, stdout) => {
+          if (error) reject(error); else resolve(Buffer.from(stdout));
+        });
+    });
+    assert.ok(captured.equals(expected), `${rel} must retain exact pre-filter bytes`);
+  }
+  assert.notEqual((await fx.git(['show', `${r.commit}:secret.txt`])).trim(), 'REDACTED',
+    'the capture must never be the clean-filter output');
+});
+
 test('DISCARD: a capture that cannot be verified deletes NOTHING', async (t) => {
   // The safety property, and the only one that really matters. If verification is skipped or
   // wrong, `discard` becomes `rm` with extra steps and a false promise of recoverability — worse
@@ -892,7 +1476,8 @@ test('DISCARD: a capture that cannot be verified deletes NOTHING', async (t) => 
 
   const r = await discard(fx.root, [inner]);
   assert.equal(r.ok, false, `an unverifiable capture must refuse: ${JSON.stringify(r)}`);
-  assert.match(r.error ?? '', /INCOMPLETE/, `the reason must say what went wrong: ${JSON.stringify(r)}`);
+  assert.match(r.error ?? '', /INCOMPLETE|embedded Git boundary/,
+    `the reason must say what went wrong: ${JSON.stringify(r)}`);
 
   // THE ASSERTION THAT MATTERS: nothing was destroyed.
   assert.equal(await fs.readFile(path.join(inner, 'precious.txt'), 'utf8'), 'irreplaceable\n',
@@ -943,6 +1528,322 @@ test('DISCARD: a TRACKED file is reverted to HEAD, not deleted - and the edit st
     `the thrown-away edit must be readable back out of the ref: ${JSON.stringify(back)}`);
 });
 
+test('DISCARD: a modified TRACKED binary is restored byte-for-byte, not UTF-8 decoded', async (t) => {
+  // `git cat-file blob` was read through git()'s text stdout and then written as UTF-8. Every
+  // invalid byte became EF BF BD while discard still returned ok:true. NULs alone do not catch
+  // that corruption; the fixture deliberately mixes NUL with several invalid UTF-8 bytes.
+  const fx = await newRepo('discard-tracked-binary-restore');
+  t.after(() => fx.cleanup());
+  const baseline = Buffer.from([0x00, 0xff, 0x80, 0x41, 0x00, 0xfe, 0x0a]);
+  const edited = Buffer.from([0xde, 0xad, 0x00, 0xbe, 0xef, 0xbf, 0xbd, 0x81]);
+  const baseFile = path.join(fx.root, 'tracked.bin');
+  await fs.writeFile(baseFile, baseline);
+  await fx.commit('track binary baseline');
+
+  const wt = await fx.worktree('binary-edited');
+  const file = path.join(wt, 'tracked.bin');
+  await fs.writeFile(file, edited);
+  const r = await discard(fx.root, [file]);
+  assert.equal(r.ok, true, `binary tracked discard must succeed: ${JSON.stringify(r)}`);
+  assert.deepEqual(r.reverted, [file]);
+  assert.ok((await fs.readFile(file)).equals(baseline),
+    'the materialised file must equal the HEAD blob at every byte');
+
+  const captured = await new Promise((resolve, reject) => {
+    execFile('git', ['show', `${r.commit}:tracked.bin`],
+      { cwd: fx.root, encoding: 'buffer' }, (error, stdout) => {
+        if (error) reject(error); else resolve(Buffer.from(stdout));
+      });
+  });
+  assert.ok(captured.equals(edited), 'the exact binary edit must remain recoverable from the discard ref');
+});
+
+test('DISCARD: restoring a tracked executable proves content, type, and executable mode', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows worktrees do not expose Git executable mode');
+  const fx = await newRepo('discard-tracked-executable');
+  t.after(() => fx.cleanup());
+  const baseFile = path.join(fx.root, 'bin', 'tool.sh');
+  await fs.mkdir(path.dirname(baseFile), { recursive: true });
+  await fs.writeFile(baseFile, Buffer.from('#!/bin/sh\nprintf baseline\\n\n'));
+  await fs.chmod(baseFile, 0o755);
+  await fx.commit('track executable baseline');
+  assert.match(await fx.git(['ls-tree', 'HEAD', '--', 'bin/tool.sh']), /^100755 blob /,
+    'fixture must commit an executable, or it proves nothing');
+
+  const wt = await fx.worktree('executable-edited');
+  const file = path.join(wt, 'bin', 'tool.sh');
+  const edited = Buffer.from('#!/bin/sh\nprintf edited\\n\n');
+  await fs.writeFile(file, edited);
+  await fs.chmod(file, 0o644);
+  const r = await discard(fx.root, [file]);
+  assert.equal(r.ok, true, `executable discard must succeed: ${JSON.stringify(r)}`);
+
+  const st = await fs.lstat(file);
+  assert.equal(st.isFile(), true, 'HEAD entry must be restored as a regular file');
+  assert.equal(st.isSymbolicLink(), false, 'HEAD regular file must not become a symlink');
+  assert.notEqual(st.mode & 0o111, 0, 'HEAD executable bit must be restored');
+  assert.ok((await fs.readFile(file)).equals(Buffer.from('#!/bin/sh\nprintf baseline\\n\n')),
+    'HEAD executable content must be restored exactly');
+  assert.match(await fx.git(['ls-tree', r.commit, '--', 'bin/tool.sh']), /^100644 blob /,
+    'the discard ref must retain the thrown-away non-executable mode as well as its bytes');
+});
+
+test('DISCARD: a modified tracked symlink is restored as the exact HEAD symlink', async (t) => {
+  if (process.platform === 'win32') return t.skip('tracked symlink creation is privilege/config dependent on Windows');
+  const fx = await newRepo('discard-tracked-symlink-restore');
+  t.after(() => fx.cleanup());
+  await fs.writeFile(path.join(fx.root, 'target-a.txt'), 'A stays\n');
+  await fs.writeFile(path.join(fx.root, 'target-b.txt'), 'B stays\n');
+  await fs.symlink(Buffer.from('target-a.txt'), Buffer.from(path.join(fx.root, 'tracked-link')));
+  await fx.commit('track symlink baseline');
+  assert.match(await fx.git(['ls-tree', 'HEAD', '--', 'tracked-link']), /^120000 blob /,
+    'fixture must commit a symlink, or it proves nothing');
+
+  const wt = await fx.worktree('symlink-edited');
+  const link = path.join(wt, 'tracked-link');
+  await fs.rm(link);
+  await fs.symlink(Buffer.from('target-b.txt'), Buffer.from(link));
+  const r = await discard(fx.root, [link]);
+  assert.equal(r.ok, true, `tracked symlink discard must succeed: ${JSON.stringify(r)}`);
+  assert.deepEqual(r.reverted, [link]);
+  assert.equal((await fs.lstat(link)).isSymbolicLink(), true, 'the restored entry must still be a symlink');
+  assert.equal(await fs.readlink(link), 'target-a.txt', 'the link target bytes must match HEAD');
+  assert.equal(await fs.readFile(path.join(wt, 'target-b.txt'), 'utf8'), 'B stays\n',
+    'restoring the link must never write through it to either target');
+  assert.equal((await fx.git(['show', `${r.commit}:tracked-link`])).trim(), 'target-b.txt',
+    'the changed link target must remain recoverable from the discard ref');
+});
+
+test('DISCARD: a tracked deletion is captured as a HEAD-parented tombstone and restored', async (t) => {
+  const fx = await newRepo('discard-tracked-deletion');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('deleted');
+  const file = path.join(wt, 'src/base.js');
+  const baseline = await fs.readFile(file);
+  await fs.rm(file);
+
+  const r = await discard(fx.root, [file]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.reverted, [file]);
+  assert.ok((await fs.readFile(file)).equals(baseline), 'discard must restore the deleted HEAD entry');
+  assert.match(await fx.git(['diff', '--name-status', `${r.commit}^`, r.commit, '--', 'src/base.js']),
+    /^D\s+src\/base\.js$/m, 'the capture must encode absence relative to its exact HEAD parent');
+  const parent = await fx.git(['rev-parse', `${r.commit}^`]);
+  assert.equal(parent.trim(), (await fx.git(['rev-parse', 'HEAD'], wt)).trim());
+});
+
+test('DISCARD: a tracked directory captures every selected leaf and restores the recursive HEAD tree', async (t) => {
+  const fx = await newRepo('discard-tracked-directory');
+  t.after(() => fx.cleanup());
+  await fx.write('pkg/a.txt', 'A baseline\n');
+  await fx.write('pkg/b.txt', 'B baseline\n');
+  await fx.commit('tracked directory baseline');
+  const wt = await fx.worktree('directory-edits');
+  await fs.writeFile(path.join(wt, 'pkg/a.txt'), 'A edited\n');
+  await fs.rm(path.join(wt, 'pkg/b.txt'));
+  await fs.writeFile(path.join(wt, 'pkg/new.txt'), 'new only\n');
+
+  const r = await discard(fx.root, [path.join(wt, 'pkg')]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(await fs.readFile(path.join(wt, 'pkg/a.txt'), 'utf8'), 'A baseline\n');
+  assert.equal(await fs.readFile(path.join(wt, 'pkg/b.txt'), 'utf8'), 'B baseline\n');
+  await assert.rejects(() => fs.lstat(path.join(wt, 'pkg/new.txt')));
+  assert.equal((await fx.git(['show', `${r.commit}:pkg/a.txt`])).trim(), 'A edited');
+  assert.equal((await fx.git(['show', `${r.commit}:pkg/new.txt`])).trim(), 'new only');
+  await assert.rejects(
+    () => sh('git', ['show', `${r.commit}:pkg/b.txt`], fx.root).then((v) => {
+      if (v.code !== 0) throw new Error(v.stderr);
+      return v;
+    }),
+    'the captured tree must preserve the selected deletion too',
+  );
+});
+
+test('DISCARD RACE: a same-name replacement created after capture is never erased', async (t) => {
+  const fx = await newRepo('discard-replacement-race');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('replacement');
+  const file = path.join(wt, 'scratch.txt');
+  await fs.writeFile(file, 'captured generation A\n');
+
+  const r = await discard(fx.root, [file], {
+    onAfterCapture: async () => fs.writeFile(file, 'concurrent generation B\n', { flag: 'wx' }),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(await fs.readFile(file, 'utf8'), 'concurrent generation B\n',
+    'the path created after quarantine belongs to the concurrent writer');
+  assert.equal((await fx.git(['show', `${r.commit}:scratch.txt`])).trim(), 'captured generation A');
+});
+
+test('DISCARD RACE: an open descriptor retains physical quarantine instead of risking late bytes', async (t) => {
+  if (process.platform !== 'linux') return t.skip('/proc descriptor proof is Linux-specific');
+  const fx = await newRepo('discard-open-fd');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('open-writer');
+  const file = path.join(wt, 'live.txt');
+  await fs.writeFile(file, 'generation A\n');
+  const handle = await fs.open(file, 'r+');
+  t.after(() => handle.close().catch(() => {}));
+
+  const r = await discard(fx.root, [file]);
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /held by an active process/);
+  assert.ok(r.activeHandles.some((entry) => entry.pid === process.pid && /^fd:/.test(entry.kind)),
+    JSON.stringify(r.activeHandles));
+  assert.ok(Array.isArray(r.quarantine) && r.quarantine.length === 1);
+  assert.equal(await fs.readFile(r.quarantine[0], 'utf8'), 'generation A\n',
+    'the physical copy remains reachable while the descriptor can still write it');
+  assert.equal((await fx.git(['show', `${r.commit}:live.txt`])).trim(), 'generation A');
+});
+
+test('DISCARD RECOVERY: printed shell command and structured argv are literal for hostile filenames', async (t) => {
+  if (process.platform === 'win32') return t.skip('the printed command in this regression targets a POSIX shell');
+  const fx = await newRepo('discard-restore-escaping');
+  t.after(() => fx.cleanup());
+  await fx.write('other.txt', 'committed other\n');
+  await fx.commit('recovery escaping base');
+  const wt = await fx.worktree('hostile-names');
+  await fs.writeFile(path.join(wt, 'other.txt'), 'valuable unrelated edit\n');
+  const names = [
+    '*.txt',
+    'space name.txt',
+    "quote'file.txt",
+    '$(touch PWNED).txt',
+    '-leading.txt',
+    'line\nbreak.txt',
+  ];
+  for (let i = 0; i < names.length; i++) await fs.writeFile(path.join(wt, names[i]), `payload ${i}\n`);
+
+  const r = await discard(fx.root, names.map((name) => path.join(wt, name)));
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.deepEqual(r.restoreArgv.slice(-names.length), names.map((name) => `:(literal)${name}`),
+    'structured recovery must use literal Git pathspecs');
+  const restored = await sh('/bin/sh', ['-c', r.restore], wt);
+  assert.equal(restored.code, 0, `${r.restore}\n${restored.stderr}`);
+  for (let i = 0; i < names.length; i++) {
+    assert.equal(await fs.readFile(path.join(wt, names[i]), 'utf8'), `payload ${i}\n`, names[i]);
+  }
+  assert.equal(await fs.readFile(path.join(wt, 'other.txt'), 'utf8'), 'valuable unrelated edit\n',
+    'the glob-shaped literal must not restore an unrelated tracked file');
+  await assert.rejects(() => fs.lstat(path.join(wt, 'PWNED')),
+    'command substitution syntax in a filename must remain inert');
+});
+
+test('DISCARD RACE: tracked restoration refuses rather than overwrite a post-capture replacement', async (t) => {
+  const fx = await newRepo('discard-tracked-replacement-race');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('tracked-replacement');
+  const file = path.join(wt, 'src/base.js');
+  await fs.writeFile(file, 'captured edited generation\n');
+
+  const r = await discard(fx.root, [file], {
+    onAfterCapture: async () => fs.writeFile(file, 'concurrent replacement\n', { flag: 'wx' }),
+  });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /without overwriting concurrent work/);
+  assert.equal(await fs.readFile(file, 'utf8'), 'concurrent replacement\n');
+  assert.equal((await fx.git(['show', `${r.commit}:src/base.js`])).trim(), 'captured edited generation');
+});
+
+test('DISCARD RACE: replacing a parent with a symlink never redirects restoration', async (t) => {
+  if (process.platform === 'win32') return t.skip('symlink creation is privilege-dependent on Windows');
+  const fx = await newRepo('discard-parent-swap');
+  t.after(() => fx.cleanup());
+  await fx.write('pkg/valuable.txt', 'baseline\n');
+  await fx.commit('parent swap baseline');
+  const wt = await fx.worktree('parent-swap');
+  const parent = path.join(wt, 'pkg');
+  const movedParent = path.join(wt, 'pkg-before-swap');
+  const external = path.join(wt, 'external-target');
+  const file = path.join(parent, 'valuable.txt');
+  await fs.writeFile(file, 'captured edit\n');
+  await fs.mkdir(external);
+
+  const r = await discard(fx.root, [file], {
+    onAfterCapture: async () => {
+      await fs.rename(parent, movedParent);
+      await fs.symlink('external-target', parent);
+    },
+  });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /parent directory identity changed/);
+  await assert.rejects(() => fs.lstat(path.join(external, 'valuable.txt')),
+    'Holt must not write HEAD through the replacement symlink');
+  assert.equal((await fx.git(['show', `${r.commit}:pkg/valuable.txt`])).trim(), 'captured edit');
+});
+
+test('DISCARD RACE: a parent swapped before quarantine cannot redirect the rename outside the worktree', async (t) => {
+  if (process.platform === 'win32') return t.skip('symlink creation is privilege-dependent on Windows');
+  const fx = await newRepo('discard-pre-quarantine-parent-swap');
+  t.after(() => fx.cleanup());
+  await fx.write('pkg/victim.txt', 'repo baseline\n');
+  await fx.commit('pre-quarantine swap baseline');
+  const wt = await fx.worktree('pre-swap');
+  const parent = path.join(wt, 'pkg');
+  const realParent = path.join(wt, 'pkg-real');
+  const external = path.join(wt, 'external');
+  const file = path.join(parent, 'victim.txt');
+  await fs.writeFile(file, 'repo edit stays\n');
+  await fs.mkdir(external);
+  await fs.writeFile(path.join(external, 'victim.txt'), 'external victim stays\n');
+
+  const r = await discard(fx.root, [file], {
+    onBeforeQuarantine: async () => {
+      await fs.rename(parent, realParent);
+      await fs.symlink('external', parent);
+    },
+  });
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.match(r.error, /changed immediately before quarantine|changed before quarantine/);
+  assert.equal(await fs.readFile(path.join(external, 'victim.txt'), 'utf8'), 'external victim stays\n',
+    'no quarantine operation may be redirected through the replacement symlink');
+  assert.equal(await fs.readFile(path.join(realParent, 'victim.txt'), 'utf8'), 'repo edit stays\n',
+    'the original worktree edit stays in the renamed real parent');
+  assert.equal(r.ref, null, 'the parent mismatch must be caught before capture/ref allocation');
+});
+
+test('DISCARD: every embedded repository and Git metadata selection fails before mutation', async (t) => {
+  const fx = await newRepo('discard-clean-nested');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('nested-clean');
+  const nested = path.join(wt, 'vendor/repo');
+  await fs.mkdir(nested, { recursive: true });
+  await sh('git', ['init', '-q'], nested);
+  await fs.writeFile(path.join(nested, 'only.txt'), 'nested committed bytes\n');
+  await sh('git', ['add', 'only.txt'], nested);
+  const committed = await sh('git', ['commit', '-m', 'nested only commit', '--no-verify'], nested);
+  assert.equal(committed.code, 0, committed.stderr);
+
+  const nestedResult = await discard(fx.root, [nested]);
+  assert.equal(nestedResult.ok, false, JSON.stringify(nestedResult));
+  assert.match(nestedResult.error, /embedded Git boundary/);
+  assert.equal(await fs.readFile(path.join(nested, 'only.txt'), 'utf8'), 'nested committed bytes\n');
+
+  const metadataResult = await discard(fx.root, [path.join(wt, '.git')]);
+  assert.equal(metadataResult.ok, false, JSON.stringify(metadataResult));
+  assert.match(metadataResult.error, /Git repository metadata/);
+  assert.equal((await fx.git(['rev-parse', '--is-inside-work-tree'], wt)).trim(), 'true',
+    'the outer worktree must remain usable after refusing its .git file');
+});
+
+test('DISCARD: duplicate and ancestor-overlapping selections fail before quarantine', async (t) => {
+  const fx = await newRepo('discard-overlap');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('overlap');
+  await fs.mkdir(path.join(wt, 'dir'));
+  await fs.writeFile(path.join(wt, 'dir/file.txt'), 'only copy\n');
+
+  for (const selection of [
+    [path.join(wt, 'dir'), path.join(wt, 'dir/file.txt')],
+    [path.join(wt, 'dir/file.txt'), path.join(wt, 'dir/../dir/file.txt')],
+  ]) {
+    const r = await discard(fx.root, selection);
+    assert.equal(r.ok, false, JSON.stringify(r));
+    assert.match(r.error, /overlap or name the same entry/);
+    assert.equal(await fs.readFile(path.join(wt, 'dir/file.txt'), 'utf8'), 'only copy\n');
+  }
+});
+
 
 /* ================================ the three catastrophic false negatives ==== */
 
@@ -973,8 +1874,8 @@ test('CATASTROPHIC: a hand-authored file under vendor/ is not invisible', async 
   assert.equal(v.decision, 'deny',
     `the guard must refuse to lose it: ${JSON.stringify(v)}`);
 
-  // NEVER-WORSE: the directories that ARE reproducible must stay invisible, or every repository
-  // with a node_modules becomes permanently unclearable — the failure this list exists to prevent.
+  // A manifest makes these paths likely generated, but it does not prove these exact bytes can be
+  // recreated; destructive authority keeps them visible and asks on direct cleanup.
   const fx2 = await newRepo('generated-still-invisible');
   t.after(() => fx2.cleanup());
   // The manifest IS the evidence — committed at base so every worktree checkout carries it.
@@ -984,11 +1885,13 @@ test('CATASTROPHIC: a hand-authored file under vendor/ is not invisible', async 
   await fx2.write('node_modules/react/index.js', 'module.exports = 1;\n', wt2);
   await fx2.write('dist/bundle.js', 'console.log(1);\n', wt2);
   const r2 = await inspect(fx2.root);
-  assert.equal(r2.safe.find((s) => s.id === 'built')?.safe, true,
-    'a worktree holding only build output must still be reclaimable');
+  assert.equal(r2.safe.find((s) => s.id === 'built')?.safe, false,
+    'generated-looking bytes must not silently license worktree deletion');
+  const generatedDelete = await assessCommand('rm -rf node_modules dist', wt2);
+  assert.equal(generatedDelete.decision, 'ask', JSON.stringify(generatedDelete));
 });
 
-test('CATASTROPHIC: git stash drop/clear/pop are destructive, and the guard says so', async (t) => {
+test('CATASTROPHIC: stash drop/clear are destructive; pop remains recovery', async (t) => {
   // The refusal message this guard prints literally reads "No commit, index entry or stash holds
   // this content" — and nothing anywhere checked a stash. `git stash drop` was classified as
   // NOTHING AT ALL (kind:null) and allowed; dropping made the stash commit unreachable at once.
@@ -997,19 +1900,15 @@ test('CATASTROPHIC: git stash drop/clear/pop are destructive, and the guard says
   // worktrees. So the loss path is exactly these verbs, and they were the one part of it that was
   // unguarded — while `reset --hard`, which is no more final, has been covered from the start.
   //
-  // `pop` is classified here too, but NOT denied outright any more — see the guard-asymmetry
-  // fix below (`git stash pop is the recovery action...`): a flat deny on the only way back is
-  // the over-refusal that made the incident this whole rule table exists for worse, not better.
   const { classifyCommand } = await import('../../src/agent.mjs');
 
-  for (const cmd of ['git stash drop', 'git stash clear', 'git stash drop stash@{2}', 'git stash pop']) {
+  for (const cmd of ['git stash drop', 'git stash clear', 'git stash drop stash@{2}']) {
     const v = classifyCommand(cmd);
     assert.ok(v, `${cmd} destroys work and must be classified: got ${JSON.stringify(v)}`);
     assert.match(v.kind, /stash/, `and named for what it is: ${JSON.stringify(v)}`);
   }
-  // `pop` caps its own verdict at 'ask' (recoverable via `apply`); `drop`/`clear` do not (final).
-  assert.equal(classifyCommand('git stash pop').verdict, 'ask',
-    'pop must never harden past ask — it is the recovery action, not a new act of destruction');
+  assert.equal(classifyCommand('git stash pop'), null,
+    'pop applies before dropping and keeps the stash on conflict, so it has no destructive match');
   assert.equal(classifyCommand('git stash drop').verdict, null,
     'drop stays a flat deny — dropping IS the final, unrecoverable act');
 
@@ -1206,7 +2105,7 @@ test('CATASTROPHIC: clean never fingerprints a symlink by what it points at', as
   assert.equal(acted.get('beta'), undefined, `beta must never enter the plan: ${JSON.stringify(applied)}`);
   assert.ok(await fs.stat(a).then(() => true, () => false), 'alpha worktree must still exist');
   assert.ok(await fs.stat(b).then(() => true, () => false), 'beta worktree must still exist');
-  assert.equal(applied.removed, 1, `exactly one of the genuine pair goes: ${JSON.stringify(applied)}`);
+  assert.equal(applied.quarantined, 1, `exactly one of the genuine pair is quarantined: ${JSON.stringify(applied)}`);
 
   // The work is still there, byte for byte, and git agrees the repository is intact.
   assert.equal(await fx.git(['show', 'HEAD:link.js'], a), alphaTracked);
@@ -1216,7 +2115,7 @@ test('CATASTROPHIC: clean never fingerprints a symlink by what it points at', as
 });
 
 
-test('SYMLINK RECALL: identical links at DIFFERENT paths are redundant on content identity alone', async (t) => {
+test('SYMLINK AUTHORITY: identical links at DIFFERENT paths are not deletion-redundant', async (t) => {
   // THE OTHER HALF OF THE DEFECT ABOVE — the half a false-positive-only fix leaves broken, and
   // the half no test in this repository could see.
   //
@@ -1267,25 +2166,22 @@ test('SYMLINK RECALL: identical links at DIFFERENT paths are redundant on conten
   assert.equal(byId('epsilon').contentKeys['x/same.js'], byId('zeta').contentKeys['y/same.js'],
     'identical target strings are identical tracked content, at whatever path they sit');
 
-  // THE VERDICT, reached through content identity alone.
+  // Content similarity is useful review evidence, but paths are part of Git work and therefore
+  // part of destructive authority.
   const verdicts = safeToDelete(sc);
   const v = (id) => verdicts.find((x) => x.id === id);
   for (const id of ['epsilon', 'zeta']) {
-    assert.equal(v(id).safe, true,
-      `${id} is genuinely held by its sibling and must be reclaimable: ${JSON.stringify(v(id))}`);
+    assert.equal(v(id).safe, false,
+      `${id} is the only holder at its path and must survive: ${JSON.stringify(v(id))}`);
+    assert.equal(v(id).redundantWith, undefined);
   }
-  assert.deepEqual(v('epsilon').redundantWith, ['zeta']);
-  assert.deepEqual(v('zeta').redundantWith, ['epsilon']);
 
-  // AND THE COMMAND THAT DELETES: exactly one goes, the survivor keeps the work, git stays intact.
+  // AND THE COMMAND THAT DELETES: neither enters the clean plan.
   const applied = await clean(fx.root, { apply: true, symbols: false });
-  assert.equal(applied.removed, 1, `exactly one of the pair goes: ${JSON.stringify(applied)}`);
+  assert.equal(applied.quarantined, 0, `different paths must not be collapsed: ${JSON.stringify(applied)}`);
   const survivors = await Promise.all([e, z].map((p) => fs.stat(p).then(() => p, () => null)));
   const alive = survivors.filter(Boolean);
-  assert.equal(alive.length, 1, `exactly one worktree survives: ${JSON.stringify(survivors)}`);
-  const rel = alive[0] === e ? 'x/same.js' : 'y/same.js';
-  assert.equal((await fx.git(['show', `HEAD:${rel}`], alive[0])).trim(), '../vendor/dep.js',
-    'the survivor still holds the link, byte for byte');
+  assert.equal(alive.length, 2, `both worktrees survive: ${JSON.stringify(survivors)}`);
   const fsck2 = await fx.git(['fsck', '--strict', '--no-progress'], fx.root);
   assert.doesNotMatch(fsck2, /missing|corrupt/i, `git fsck must be clean: ${fsck2}`);
 });
@@ -1463,7 +2359,8 @@ test('RECALL: mutually redundant worktrees are disposable, and the LAST one neve
   }
 
   assert.equal(left.length, 1,
-    `the set must drain to exactly one survivor, never zero: removed=${cleaned.removed}, left=${JSON.stringify(left)}`);
+    `the active set must drain to exactly one survivor, never zero: quarantined=${cleaned.quarantined}, left=${JSON.stringify(left)}`);
+  assert.equal(cleaned.quarantined, 2, 'the two other members remain recoverable in quarantine');
 
   // …and the work itself is still on disk, which is the only thing that actually matters.
   const survivor = await fs.readFile(path.join(fx.wt(left[0]), 'shared-feature.js'), 'utf8');
@@ -1517,18 +2414,18 @@ test('SAFETY: a sibling holding the identical bytes UNCOMMITTED is not a durable
 
   // (a) THE WINDOW — committed here, UNTRACKED in the sibling.
   const keeper = await fx.worktree('keeper');
-  await fx.write('feat/keeper/work.js', UNTRACKED_BODY, keeper);
+  await fx.write('feat/shared-untracked/work.js', UNTRACKED_BODY, keeper);
   await fx.commit('keeper: committed, recoverable', keeper);
   const sloppy = await fx.worktree('sloppy');
-  await fx.write('feat/sloppy/work.js', UNTRACKED_BODY, sloppy); // never added, never committed
+  await fx.write('feat/shared-untracked/work.js', UNTRACKED_BODY, sloppy); // never added, never committed
 
   // (a2) STAGED IS NOT COMMITTED. `git add` writes a blob but no ref reaches it; a reset, a
   // checkout or a gc takes it, and nothing in git's UI calls that a loss.
   const staged = await fx.worktree('staged-holder');
-  await fx.write('feat/staged/work.js', STAGED_BODY, staged);
-  await fx.git(['add', 'feat/staged/work.js'], staged);
+  await fx.write('feat/shared-staged/work.js', STAGED_BODY, staged);
+  await fx.git(['add', 'feat/shared-staged/work.js'], staged);
   const committedStaged = await fx.worktree('committed-vs-staged');
-  await fx.write('feat/cs/work.js', STAGED_BODY, committedStaged);
+  await fx.write('feat/shared-staged/work.js', STAGED_BODY, committedStaged);
   await fx.commit('committed-vs-staged: the only committed copy of this body', committedStaged);
 
   // (a3) COMMITTED THEN MODIFIED ON TOP. The path IS in the sibling's committed delta, but the
@@ -1536,17 +2433,17 @@ test('SAFETY: a sibling holding the identical bytes UNCOMMITTED is not a durable
   // cannot vouch for them. Without this distinction "is the path committed" would pass for
   // "are these bytes committed".
   const dirtied = await fx.worktree('dirty-holder');
-  await fx.write('feat/dirty/work.js', 'export function SOMETHING_ELSE() { return 0; }\n', dirtied);
+  await fx.write('feat/shared-dirty/work.js', 'export function SOMETHING_ELSE() { return 0; }\n', dirtied);
   await fx.commit('dirty-holder: commits one thing…', dirtied);
-  await fx.write('feat/dirty/work.js', DIRTIED_BODY, dirtied); // …then overwrites it, uncommitted
+  await fx.write('feat/shared-dirty/work.js', DIRTIED_BODY, dirtied); // …then overwrites it, uncommitted
   const committedDirty = await fx.worktree('committed-vs-dirty');
-  await fx.write('feat/cd/work.js', DIRTIED_BODY, committedDirty);
+  await fx.write('feat/shared-dirty/work.js', DIRTIED_BODY, committedDirty);
   await fx.commit('committed-vs-dirty: the only committed copy of this body', committedDirty);
 
   // (b) THE CONTROL, and the recall this must not cost: two COMMITTED copies of one body.
-  for (const [id, dir] of [['pair-x', 'feat/x'], ['pair-y', 'feat/y']]) {
+  for (const id of ['pair-x', 'pair-y']) {
     const wt = await fx.worktree(id);
-    await fx.write(`${dir}/pair.js`, PAIR_BODY, wt);
+    await fx.write('feat/shared-pair/pair.js', PAIR_BODY, wt);
     await fx.commit(`${id}: the same work, committed`, wt);
   }
 
@@ -1605,10 +2502,10 @@ test('SAFETY: a sibling holding the identical bytes UNCOMMITTED is not a durable
 
   for (const id of ['keeper', 'committed-vs-staged', 'committed-vs-dirty']) {
     assert.equal(await alive(id), true,
-      `${id} holds the only DURABLE copy of its work and must survive: removed=${JSON.stringify(cleaned.removed)}`);
+      `${id} holds the only DURABLE copy of its work and must survive: quarantined=${JSON.stringify(cleaned.quarantined)}`);
   }
   // …and the work itself is on disk, which is the only thing that actually matters.
-  assert.match(await fs.readFile(path.join(fx.wt('keeper'), 'feat/keeper/work.js'), 'utf8'),
+  assert.match(await fs.readFile(path.join(fx.wt('keeper'), 'feat/shared-untracked/work.js'), 'utf8'),
     /UNTRACKED_TWIN_WORK/);
 
   const pairLeft = [];
@@ -1618,7 +2515,7 @@ test('SAFETY: a sibling holding the identical bytes UNCOMMITTED is not a durable
     + `safety by refusing everything: left=${JSON.stringify(pairLeft)}`);
 });
 
-test('RECALL: the same work at a DIFFERENT PATH, in a DIFFERENT INDENTATION STYLE, is still disposable',
+test('AUTHORITY: reindented work at a different path is similar but not disposable',
   async (t) => {
     // MEASURED against an independent 50-language, 900-worktree oracle: `mergedTree` whole-tree
     // identity (the ONLY redundancy check before this test was written) requires two worktrees'
@@ -1645,10 +2542,10 @@ test('RECALL: the same work at a DIFFERENT PATH, in a DIFFERENT INDENTATION STYL
     const va = before.safe.find((s) => s.id === 'dup-alpha');
     const vb = before.safe.find((s) => s.id === 'dup-beta');
 
-    assert.equal(va.safe, true, `dup-alpha: a sibling holds the same work, just reindented: ${JSON.stringify(va)}`);
-    assert.equal(vb.safe, true, `dup-beta: a sibling holds the same work, just reindented: ${JSON.stringify(vb)}`);
-    assert.deepEqual(va.redundantWith, ['dup-beta'], JSON.stringify(va));
-    assert.deepEqual(vb.redundantWith, ['dup-alpha'], JSON.stringify(vb));
+    assert.equal(va.safe, false, `dup-alpha has distinct Git bytes/path: ${JSON.stringify(va)}`);
+    assert.equal(vb.safe, false, `dup-beta has distinct Git bytes/path: ${JSON.stringify(vb)}`);
+    assert.equal(va.redundantWith, undefined, JSON.stringify(va));
+    assert.equal(vb.redundantWith, undefined, JSON.stringify(vb));
 
     // NEVER-WORSE: a sibling that merely LOOKS like part of the same fan-out (same directory
     // shape) but holds genuinely different code must not be swept up by the match.
@@ -1660,16 +2557,14 @@ test('RECALL: the same work at a DIFFERENT PATH, in a DIFFERENT INDENTATION STYL
     const vg = withGamma.safe.find((s) => s.id === 'dup-gamma');
     assert.equal(vg.safe, false, `genuinely different code must never be called redundant: ${JSON.stringify(vg)}`);
 
-    // PRECISION: the real destructive command drains the true duplicate pair to one survivor,
-    // and leaves the genuinely unique worktree alone.
+    // The destructive command preserves every non-exact worktree.
     const cleaned = await clean(fx.root, { apply: true });
     const left = [];
     for (const id of ['dup-alpha', 'dup-beta', 'dup-gamma']) {
       try { await fs.stat(fx.wt(id)); left.push(id); } catch { /* removed */ }
     }
-    assert.ok(left.includes('dup-gamma'), `the unique worktree must survive: removed=${cleaned.removed}`);
-    assert.equal(left.filter((id) => id === 'dup-alpha' || id === 'dup-beta').length, 1,
-      `the reindented pair must drain to exactly one survivor, never zero: left=${JSON.stringify(left)}`);
+    assert.ok(left.includes('dup-gamma'), `the unique worktree must survive: quarantined=${cleaned.quarantined}`);
+    assert.equal(left.length, 3, `similarity must not authorise deletion: left=${JSON.stringify(left)}`);
   });
 
 test('PRECISION: one matched file and one genuinely unique file must still be refused, not partially cleared',
@@ -1700,7 +2595,7 @@ test('PRECISION: one matched file and one genuinely unique file must still be re
 
 /* ============================================== LINE-ENDING-ONLY vs BASE ==== */
 
-test('RECALL: a worktree whose ENTIRE committed delta is line-ending-only vs base is disposable, named "base"',
+test('AUTHORITY: line-ending-only similarity to base is advisory, never disposable',
   async (t) => {
     // MEASURED against the 50-language independent-oracle benchmark's `wt-crlf` fixture class:
     // the SAME FILE re-saved with CRLF line endings instead of LF. `merge-tree` correctly reports
@@ -1724,16 +2619,14 @@ test('RECALL: a worktree whose ENTIRE committed delta is line-ending-only vs bas
 
     const before = await inspect(fx.root);
     const v = before.safe.find((s) => s.id === 'crlf-only');
-    assert.equal(v.safe, true, `line-ending-only vs base must be disposable: ${JSON.stringify(v)}`);
-    assert.deepEqual(v.redundantWith, ['base'],
-      `base is the holder, not a sibling — there is no sibling here: ${JSON.stringify(v)}`);
-    assert.ok(!v.reasons.some((r) => /file\(s\) base lacks/.test(r)),
-      `the base-lacks reason must be suppressed once base is proven to hold the same text: ${JSON.stringify(v)}`);
+    assert.equal(v.safe, false, `different line-ending bytes must survive: ${JSON.stringify(v)}`);
+    assert.equal(v.redundantWith, undefined, JSON.stringify(v));
+    assert.ok(v.reasons.some((r) => /file\(s\) base lacks/.test(r)), JSON.stringify(v));
 
-    // PRECISION: the real destructive command actually removes it.
+    // The real destructive command preserves it.
     const cleaned = await clean(fx.root, { apply: true });
-    await assert.rejects(() => fs.stat(fx.wt('crlf-only')),
-      `clean --apply must actually remove a line-ending-only worktree: ${JSON.stringify(cleaned)}`);
+    assert.ok(await fs.stat(fx.wt('crlf-only')),
+      `clean --apply must preserve line-ending bytes: ${JSON.stringify(cleaned)}`);
 
     // NEVER-WORSE #1: a BINARY file containing the byte pair 0x0D 0x0A is not a line ending, and a
     // genuine change to one must still be refused — binary content is never normalised.
@@ -1834,9 +2727,10 @@ test('DISCARD: concurrent discards of DIFFERENT files in the SAME worktree never
     const r = results[i];
     assert.equal(r.ok, true, `discard(${name}) must succeed under concurrency: ${JSON.stringify(r)}`);
 
-    // THE ASSERTION THAT MATTERS: the tree this call produced contains EXACTLY the one file it
-    // asked to discard — nothing borrowed from a sibling call, nothing missing.
-    const ls = await sh('git', ['ls-tree', '-r', '--name-only', r.ref], fx.root);
+    // The capture is a HEAD-parented tree so deletion tombstones and directory type changes are
+    // representable. Its DELTA must contain exactly this call's path — nothing borrowed from a
+    // sibling call, nothing missing.
+    const ls = await sh('git', ['diff-tree', '--no-commit-id', '--name-only', '-r', `${r.ref}^`, r.ref], fx.root);
     const captured = ls.stdout.split('\n').filter(Boolean).sort();
     assert.deepEqual(captured, [name],
       `discard(${name})'s ref must contain exactly its own file, got ${JSON.stringify(captured)} `
@@ -1975,7 +2869,7 @@ test('JOURNAL FAILURE: discard() tells the caller AND the content is still captu
   assert.equal(r.journalFailures[0].ref, r.ref);
 });
 
-test('JOURNAL FAILURE: clean --apply tells the caller AND still removes the disposable worktree', async (t) => {
+test('JOURNAL FAILURE: clean --apply tells the caller AND still quarantines the disposable worktree', async (t) => {
   const fx = await newRepo('journal-clean');
   t.after(() => fx.cleanup());
   await fx.worktree('spent');
@@ -1984,12 +2878,13 @@ test('JOURNAL FAILURE: clean --apply tells the caller AND still removes the disp
 
   const c = await clean(fx.root, { apply: true });
 
-  assert.equal(c.removed, 1, `the disposable worktree must still be removed: ${JSON.stringify(c)}`);
-  await assert.rejects(() => fs.stat(fx.wt('spent')), 'the worktree must actually be gone from disk');
+  assert.equal(c.quarantined, 1, `the disposable worktree must still be quarantined: ${JSON.stringify(c)}`);
+  await assert.rejects(() => fs.stat(fx.wt('spent')), 'the original active path must be vacated');
+  assert.ok(await fs.stat(c.quarantines[0].quarantinePath), 'journal failure must not erase the retained worktree');
 
   assert.ok(c.journalWarning, `a journal failure must be reported: ${JSON.stringify(c)}`);
   assert.ok(c.journalFailures?.length >= 1);
-  assert.equal(c.journalFailures[0].action, 'clean-remove');
+  assert.equal(c.journalFailures[0].action, 'clean-quarantine');
   assert.equal(c.journalFailures[0].id, 'spent');
 });
 
@@ -2123,8 +3018,12 @@ test('DISCARD: NEVER-WORSE — naming an actual file still captures, verifies an
   assert.equal(r.ok, true, `discarding a real file must still work: ${r.error ?? ''}`);
   assert.equal(r.verified, true, 'the capture must be verified before anything is removed');
   assert.deepEqual(r.discarded, ['scratch.js']);
-  assert.match(r.restore ?? '', /git checkout refs\/holt\/discard\//,
-    'it must print the plain-git command that brings the content back');
+  assert.deepEqual(r.restoreArgv?.slice(0, 2), ['git', 'restore'],
+    'the structured recovery command must use plain Git');
+  assert.match(r.restoreArgv?.find((arg) => arg.startsWith('--source=')) ?? '', /^--source=[0-9a-f]+$/,
+    'the structured recovery command must name the immutable capture commit');
+  assert.equal(r.restoreArgv?.at(-1), ':(literal)scratch.js',
+    'the recovery command must preserve the selected path as a literal Git pathspec');
 
   await assert.rejects(() => fs.readFile(path.join(wt, 'scratch.js'), 'utf8'),
     'the file must actually be gone');

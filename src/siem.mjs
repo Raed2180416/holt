@@ -24,6 +24,7 @@
  */
 
 import { canonicalJson, entryLeaf } from './attest.mjs';
+import { HOLT_PUBLIC_NAMESPACE, journalOrigin } from './journal.mjs';
 
 export const OCSF_VERSION = '1.7.0';
 export const ECS_VERSION = '8.11.0';
@@ -32,14 +33,18 @@ export const SIEM_FORMATS = ['json', 'csv', 'ocsf', 'ecs', 'cef', 'intoto'];
 /**
  * holt action → how each schema classifies it.
  *
- * `unprotect` is deliberately the HIGHEST severity of the six. It is the only action that
- * removes protection from work that exists nowhere else; every other entry here either creates
- * safety or destroys something already proven disposable.
+ * `unprotect` is deliberately the HIGHEST severity. It is the only action that removes protection
+ * from work that exists nowhere else. `clean-quarantine` is an Update, not a Delete: the whole
+ * registered worktree and its branch remain local and the record carries restore argv. A current
+ * `clean-purge` and historical `clean-remove` are Deletes; their evidence keeps the distinction.
  */
 export const ACTION_MAP = {
   //                 ocsf activity   ecs event.type   cef sev  what it is
   unprotect: { activity: 3, ecsType: 'change', severity: 8, outcome: 'success', label: 'protection removed from a workstream' },
   blocked: { activity: 4, ecsType: 'deletion', severity: 6, outcome: 'failure', label: 'destructive command refused' },
+  'clean-quarantine': { activity: 3, ecsType: 'change', severity: 2, outcome: 'success', label: 'worktree moved to recoverable quarantine' },
+  'clean-restore': { activity: 3, ecsType: 'change', severity: 1, outcome: 'success', label: 'worktree restored from recoverable quarantine' },
+  'clean-purge': { activity: 4, ecsType: 'deletion', severity: 4, outcome: 'success', label: 'verified clean quarantine physically reclaimed after anchoring HEAD' },
   'clean-remove': { activity: 4, ecsType: 'deletion', severity: 5, outcome: 'success', label: 'disposable worktree removed' },
   'branch-delete': { activity: 4, ecsType: 'deletion', severity: 4, outcome: 'success', label: 'landed branch deleted' },
   rescue: { activity: 1, ecsType: 'creation', severity: 3, outcome: 'success', label: 'unique work captured to a ref' },
@@ -227,7 +232,7 @@ export function toCef(e, { repo = null, product = 'holt', vendor = 'Contrare', v
  * pipeline that already stores attestations can store this one without a new integration.
  * The subject is the Merkle root: the single digest that pins the whole log at that size.
  */
-export const HOLT_PREDICATE_TYPE = 'https://holt.dev/attestation/journal-checkpoint/v1';
+export const HOLT_PREDICATE_TYPE = `${HOLT_PUBLIC_NAMESPACE}/attestation/journal-checkpoint/v1`;
 
 /**
  * @param {any} verification
@@ -238,7 +243,7 @@ export function toInToto(verification, { repo = null, product = 'holt', version 
   return {
     _type: 'https://in-toto.io/Statement/v1',
     subject: [{
-      name: cp.origin ?? `holt.dev/journal/${repo ?? 'repo'}`,
+      name: cp.origin ?? journalOrigin(repo),
       digest: { sha256: verification.root ?? cp.root ?? null },
     }],
     predicateType: HOLT_PREDICATE_TYPE,

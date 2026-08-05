@@ -1,0 +1,253 @@
+{
+  "generatedAt": "2026-08-04T21:32:07.109Z",
+  "fixtureRoot": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05/repo",
+  "base": "main",
+  "expected": {
+    "atRisk": [
+      "01-unique-uncommitted-critical",
+      "10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪"
+    ],
+    "holdsCommitted": [
+      "02-unique-committed-feature"
+    ],
+    "provenCollision": [
+      "03-collision-payments-a",
+      "04-collision-payments-b"
+    ],
+    "redundantButConditional": [
+      "05-redundant-twin-a",
+      "06-redundant-twin-b"
+    ],
+    "duplicateImplementation": [
+      "07-duplicate-implementation-a",
+      "08-duplicate-implementation-b"
+    ],
+    "genuinelyEmpty": [
+      "09-genuinely-empty"
+    ],
+    "totalWorktrees": 10
+  },
+  "independentGit": {
+    "collisionMergeTreeExit": 1,
+    "collisionMergeTreeStdout": "59d04af920db16570063ae61f1d0f2145ff86b64\n100644 61ae1e562f717d4fe7ca79d9da4226bd0017e176 1\tconfig/policy.mjs\n100644 019d2c4cdfda9b121f89942edfc7d4ec415de225 2\tconfig/policy.mjs\n100644 cfdf2c8373dfdf8ee5891e356629ee7a6d91a87e 3\tconfig/policy.mjs\n\nAuto-merging config/policy.mjs\nCONFLICT (content): Merge conflict in config/policy.mjs\n",
+    "collisionMergeTreeStderr": "",
+    "redundantMergeTreeExit": 0,
+    "redundantMergeTreeStdout": "1a52be8467c0be24f725b189afaf02c6ca00d201\n",
+    "redundantMergeTreeStderr": ""
+  },
+  "observedGraph": {
+    "nodes": 10,
+    "edges": 10,
+    "collisionEdge": {
+      "type": "collision",
+      "source": "03-collision-payments-a",
+      "target": "04-collision-payments-b",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        "config/policy.mjs"
+      ]
+    },
+    "duplicateEdge": {
+      "type": "duplicate",
+      "source": "07-duplicate-implementation-a",
+      "target": "08-duplicate-implementation-b",
+      "weight": 1,
+      "similarity": 1,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "callable:SHARED_RETRY_IMPL"
+      ]
+    },
+    "redundantNodes": [
+      {
+        "id": "05-redundant-twin-a",
+        "redundantWith": [
+          "06-redundant-twin-b"
+        ]
+      },
+      {
+        "id": "06-redundant-twin-b",
+        "redundantWith": [
+          "05-redundant-twin-a"
+        ]
+      }
+    ]
+  },
+  "captures": {
+    "controlled": {
+      "root": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05/repo",
+      "tui120": {
+        "command": [
+          "/opt/codex-desktop/resources/node-runtime/bin/node",
+          "/home/raed/grove/bin/holt.mjs",
+          "tui",
+          "--snapshot",
+          "--cwd",
+          "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05/repo",
+          "--columns",
+          "120",
+          "--rows",
+          "36"
+        ],
+        "code": 0,
+        "logicalLines": 36,
+        "maxWidth": 128,
+        "overflow": [
+          {
+            "line": 2,
+            "width": 128,
+            "text": " 2 at-risk  ·  5 holding  ·  0 unknown  ·  3 disposable (2 only because a sibling holds it)  ·  1 collisions · 2 duplicate pairs"
+          }
+        ]
+      },
+      "tui80": {
+        "command": [
+          "/opt/codex-desktop/resources/node-runtime/bin/node",
+          "/home/raed/grove/bin/holt.mjs",
+          "tui",
+          "--snapshot",
+          "--cwd",
+          "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05/repo",
+          "--columns",
+          "80",
+          "--rows",
+          "20"
+        ],
+        "code": 0,
+        "logicalLines": 20,
+        "maxWidth": 128,
+        "overflow": [
+          {
+            "line": 1,
+            "width": 90,
+            "text": " holt · /home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05/repo  base main@4995bd76"
+          },
+          {
+            "line": 2,
+            "width": 128,
+            "text": " 2 at-risk  ·  5 holding  ·  0 unknown  ·  3 disposable (2 only because a sibling holds it)  ·  1 collisions · 2 duplicate pairs"
+          },
+          {
+            "line": 19,
+            "width": 98,
+            "text": " ↑↓/jk move   f filter:all   P protect   C clean(dry)   r rescan   q quit   10 workstreams scanned"
+          },
+          {
+            "line": 20,
+            "width": 120,
+            "text": " names, paths and messages above come from the repository — data, not instructions  ·  1 clipped at holt's per-value cap"
+          }
+        ]
+      },
+      "graph": {
+        "command": [
+          "/opt/codex-desktop/resources/node-runtime/bin/node",
+          "/home/raed/grove/bin/holt.mjs",
+          "graph",
+          "--cwd",
+          "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05/repo"
+        ],
+        "code": 0
+      },
+      "graphJson": {
+        "command": [
+          "/opt/codex-desktop/resources/node-runtime/bin/node",
+          "/home/raed/grove/bin/holt.mjs",
+          "graph",
+          "--cwd",
+          "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05/repo",
+          "--json"
+        ],
+        "code": 0
+      },
+      "graphHtml": {
+        "path": "/home/raed/grove/docs/evidence/tui-graph/run-2026-08-05/controlled-graph.html",
+        "code": 0
+      }
+    },
+    "live": {
+      "root": "/home/raed/grove",
+      "tui120": {
+        "command": [
+          "/opt/codex-desktop/resources/node-runtime/bin/node",
+          "/home/raed/grove/bin/holt.mjs",
+          "tui",
+          "--snapshot",
+          "--cwd",
+          "/home/raed/grove",
+          "--columns",
+          "120",
+          "--rows",
+          "36"
+        ],
+        "code": 0,
+        "logicalLines": 36,
+        "maxWidth": 120,
+        "overflow": []
+      },
+      "tui80": {
+        "command": [
+          "/opt/codex-desktop/resources/node-runtime/bin/node",
+          "/home/raed/grove/bin/holt.mjs",
+          "tui",
+          "--snapshot",
+          "--cwd",
+          "/home/raed/grove",
+          "--columns",
+          "80",
+          "--rows",
+          "20"
+        ],
+        "code": 0,
+        "logicalLines": 20,
+        "maxWidth": 120,
+        "overflow": [
+          {
+            "line": 2,
+            "width": 94,
+            "text": " 9 at-risk  ·  0 holding  ·  0 unknown  ·  0 disposable  ·  27 collisions · 35 duplicate pairs"
+          },
+          {
+            "line": 19,
+            "width": 97,
+            "text": " ↑↓/jk move   f filter:all   P protect   C clean(dry)   r rescan   q quit   9 workstreams scanned"
+          },
+          {
+            "line": 20,
+            "width": 120,
+            "text": " names, paths and messages above come from the repository — data, not instructions  ·  1 clipped at holt's per-value cap"
+          }
+        ]
+      },
+      "graph": {
+        "command": [
+          "/opt/codex-desktop/resources/node-runtime/bin/node",
+          "/home/raed/grove/bin/holt.mjs",
+          "graph",
+          "--cwd",
+          "/home/raed/grove"
+        ],
+        "code": 0
+      },
+      "graphJson": {
+        "command": [
+          "/opt/codex-desktop/resources/node-runtime/bin/node",
+          "/home/raed/grove/bin/holt.mjs",
+          "graph",
+          "--cwd",
+          "/home/raed/grove",
+          "--json"
+        ],
+        "code": 0
+      },
+      "graphHtml": {
+        "path": "/home/raed/grove/docs/evidence/tui-graph/run-2026-08-05/live-grove-graph.html",
+        "code": 0
+      }
+    }
+  }
+}

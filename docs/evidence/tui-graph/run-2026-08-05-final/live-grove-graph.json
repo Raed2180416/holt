@@ -1,0 +1,993 @@
+{
+  "nodes": [
+    {
+      "id": "dupfix-isolation-check/wt",
+      "family": "burst:2026-08-01T145720903Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.holt-work/dupfix-isolation-check/wt",
+      "head": "dd04b58c",
+      "branch": null,
+      "committedFiles": 0,
+      "uncommittedFiles": 6,
+      "addedSymbols": 18,
+      "uniqueSymbols": 18,
+      "uncommittedOnly": 18,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "pre-fix",
+      "family": "burst:2026-08-01T145720903Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.holt-work/pre-fix",
+      "head": "dd04b58c",
+      "branch": null,
+      "committedFiles": 0,
+      "uncommittedFiles": 6,
+      "addedSymbols": 3,
+      "uniqueSymbols": 3,
+      "uncommittedOnly": 11,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "rev-supply-chain/wt",
+      "family": "burst:2026-07-31T234204932Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.holt-work/rev-supply-chain/wt",
+      "head": "313190dd",
+      "branch": null,
+      "committedFiles": 0,
+      "uncommittedFiles": 2,
+      "addedSymbols": 2,
+      "uniqueSymbols": 2,
+      "uncommittedOnly": 9,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "wt-revert",
+      "family": "burst:2026-07-31T234204932Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.holt-work/vfy-cigate/wt-revert",
+      "head": "1b2d30c5",
+      "branch": null,
+      "committedFiles": 0,
+      "uncommittedFiles": 3,
+      "addedSymbols": 2,
+      "uniqueSymbols": 2,
+      "uncommittedOnly": 8,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "wt-buyer-review-policy",
+      "family": "burst:2026-07-31T234204932Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.holt-work/wt-buyer-review-policy",
+      "head": "ab889303",
+      "branch": null,
+      "committedFiles": 0,
+      "uncommittedFiles": 3,
+      "addedSymbols": 2,
+      "uniqueSymbols": 2,
+      "uncommittedOnly": 8,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "collapse-teamB",
+      "family": "burst:2026-08-02T143742955Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/collapse-teamB",
+      "head": "36f755b3",
+      "branch": "teamB-impl",
+      "committedFiles": 2,
+      "uncommittedFiles": 1,
+      "addedSymbols": 7,
+      "uniqueSymbols": 7,
+      "uncommittedOnly": 6,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "wf_28cc3a43-545-1",
+      "family": "burst:2026-08-02T223008828Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/grove/.claude/worktrees/wf_28cc3a43-545-1",
+      "head": "31546411",
+      "branch": "worktree-wf_28cc3a43-545-1",
+      "committedFiles": 0,
+      "uncommittedFiles": 9,
+      "addedSymbols": 2,
+      "uniqueSymbols": 2,
+      "uncommittedOnly": 14,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "wf_28cc3a43-545-3",
+      "family": "burst:2026-08-02T223008828Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/grove/.claude/worktrees/wf_28cc3a43-545-3",
+      "head": "31546411",
+      "branch": "worktree-wf_28cc3a43-545-3",
+      "committedFiles": 0,
+      "uncommittedFiles": 14,
+      "addedSymbols": 4,
+      "uniqueSymbols": 4,
+      "uncommittedOnly": 19,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "wf_28cc3a43-545-4",
+      "family": "burst:2026-08-02T223008828Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/grove/.claude/worktrees/wf_28cc3a43-545-4",
+      "head": "31546411",
+      "branch": "worktree-wf_28cc3a43-545-4",
+      "committedFiles": 0,
+      "uncommittedFiles": 14,
+      "addedSymbols": 4,
+      "uniqueSymbols": 4,
+      "uncommittedOnly": 19,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    }
+  ],
+  "edges": [
+    {
+      "type": "sibling",
+      "source": "dupfix-isolation-check/wt",
+      "target": "pre-fix",
+      "family": "burst:2026-08-01T145720903Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "rev-supply-chain/wt",
+      "target": "wt-revert",
+      "family": "burst:2026-07-31T234204932Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "rev-supply-chain/wt",
+      "target": "wt-buyer-review-policy",
+      "family": "burst:2026-07-31T234204932Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "wf_28cc3a43-545-1",
+      "target": "wf_28cc3a43-545-3",
+      "family": "burst:2026-08-02T223008828Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "wf_28cc3a43-545-1",
+      "target": "wf_28cc3a43-545-4",
+      "family": "burst:2026-08-02T223008828Z",
+      "weight": 1
+    },
+    {
+      "type": "collision",
+      "source": "dupfix-isolation-check/wt",
+      "target": "rev-supply-chain/wt",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wt-revert",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wt-buyer-review-policy",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "dupfix-isolation-check/wt",
+      "target": "collapse-teamB",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 3,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "node_modules",
+        "src/git.mjs"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "src/git.mjs"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "src/git.mjs"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "pre-fix",
+      "target": "rev-supply-chain/wt",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "pre-fix",
+      "target": "wt-revert",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "pre-fix",
+      "target": "wt-buyer-review-policy",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "AGENTS.md"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "pre-fix",
+      "target": "collapse-teamB",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "pre-fix",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 2,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "node_modules"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "pre-fix",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "pre-fix",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "rev-supply-chain/wt",
+      "target": "collapse-teamB",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "rev-supply-chain/wt",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "rev-supply-chain/wt",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "rev-supply-chain/wt",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-revert",
+      "target": "wt-buyer-review-policy",
+      "weight": 3,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json",
+        "AGENTS.md",
+        "src/team/policy.mjs"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-revert",
+      "target": "collapse-teamB",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-revert",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-revert",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-revert",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-buyer-review-policy",
+      "target": "collapse-teamB",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-buyer-review-policy",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-buyer-review-policy",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "collision",
+      "source": "wt-buyer-review-policy",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        ".claude/settings.json"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wf_28cc3a43-545-3",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 4,
+      "similarity": 1,
+      "classification": "expected-fanout",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop",
+        "value:CONTROL_RE",
+        "value:line"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "rev-supply-chain/wt",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 2,
+      "similarity": 1,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-revert",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 2,
+      "similarity": 1,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-buyer-review-policy",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 2,
+      "similarity": 1,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "rev-supply-chain/wt",
+      "target": "wt-revert",
+      "weight": 2,
+      "similarity": 1,
+      "classification": "expected-fanout",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "rev-supply-chain/wt",
+      "target": "wt-buyer-review-policy",
+      "weight": 2,
+      "similarity": 1,
+      "classification": "expected-fanout",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-revert",
+      "target": "wt-buyer-review-policy",
+      "weight": 2,
+      "similarity": 1,
+      "classification": "expected-fanout",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "pre-fix",
+      "target": "rev-supply-chain/wt",
+      "weight": 2,
+      "similarity": 0.667,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "pre-fix",
+      "target": "wt-revert",
+      "weight": 2,
+      "similarity": 0.667,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "pre-fix",
+      "target": "wt-buyer-review-policy",
+      "weight": 2,
+      "similarity": 0.667,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "pre-fix",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 2,
+      "similarity": 0.667,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "rev-supply-chain/wt",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 2,
+      "similarity": 0.5,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "rev-supply-chain/wt",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 2,
+      "similarity": 0.5,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-revert",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 2,
+      "similarity": 0.5,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-revert",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 2,
+      "similarity": 0.5,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-buyer-review-policy",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 2,
+      "similarity": 0.5,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-buyer-review-policy",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 2,
+      "similarity": 0.5,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wf_28cc3a43-545-1",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 2,
+      "similarity": 0.5,
+      "classification": "expected-fanout",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wf_28cc3a43-545-1",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 2,
+      "similarity": 0.5,
+      "classification": "expected-fanout",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "pre-fix",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 2,
+      "similarity": 0.4,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "pre-fix",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 2,
+      "similarity": 0.4,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "rev-supply-chain/wt",
+      "target": "collapse-teamB",
+      "weight": 2,
+      "similarity": 0.286,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-revert",
+      "target": "collapse-teamB",
+      "weight": 2,
+      "similarity": 0.286,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "wt-buyer-review-policy",
+      "target": "collapse-teamB",
+      "weight": 2,
+      "similarity": 0.286,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "collapse-teamB",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 2,
+      "similarity": 0.286,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "pre-fix",
+      "target": "collapse-teamB",
+      "weight": 2,
+      "similarity": 0.25,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "collapse-teamB",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 2,
+      "similarity": 0.222,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "collapse-teamB",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 2,
+      "similarity": 0.222,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "dupfix-isolation-check/wt",
+      "target": "rev-supply-chain/wt",
+      "weight": 2,
+      "similarity": 0.111,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wt-revert",
+      "weight": 2,
+      "similarity": 0.111,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wt-buyer-review-policy",
+      "weight": 2,
+      "similarity": 0.111,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wf_28cc3a43-545-1",
+      "weight": 2,
+      "similarity": 0.111,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "dupfix-isolation-check/wt",
+      "target": "pre-fix",
+      "weight": 2,
+      "similarity": 0.105,
+      "classification": "expected-fanout",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wf_28cc3a43-545-3",
+      "weight": 2,
+      "similarity": 0.1,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "dupfix-isolation-check/wt",
+      "target": "wf_28cc3a43-545-4",
+      "weight": 2,
+      "similarity": 0.1,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "other:SessionEnd",
+        "other:Stop"
+      ]
+    }
+  ],
+  "families": [
+    {
+      "name": "burst:2026-08-01T145720903Z",
+      "members": [
+        "dupfix-isolation-check/wt",
+        "pre-fix"
+      ]
+    },
+    {
+      "name": "burst:2026-07-31T234204932Z",
+      "members": [
+        "rev-supply-chain/wt",
+        "wt-revert",
+        "wt-buyer-review-policy"
+      ]
+    },
+    {
+      "name": "burst:2026-08-02T143742955Z",
+      "members": [
+        "collapse-teamB"
+      ]
+    },
+    {
+      "name": "burst:2026-08-02T223008828Z",
+      "members": [
+        "wf_28cc3a43-545-1",
+        "wf_28cc3a43-545-3",
+        "wf_28cc3a43-545-4"
+      ]
+    }
+  ]
+}

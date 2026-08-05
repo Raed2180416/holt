@@ -17,7 +17,17 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { symbolsOnDisk, resolveBackend, detectCtags, ctagsLanguages, languageCoverage, compatReport } from '../../src/symbols.mjs';
+import {
+  symbolsOnDisk, resolveBackend, detectCtags, ctagsLanguages, languageCoverage, compatReport,
+  normalizeEnryVersionOutput,
+} from '../../src/symbols.mjs';
+
+test('enry probe does not present upstream source-build placeholders as real versions', () => {
+  assert.equal(normalizeEnryVersionOutput('undefined\n'), '(unversioned build)');
+  assert.equal(normalizeEnryVersionOutput('not-set\n'), '(unversioned build)');
+  assert.equal(normalizeEnryVersionOutput(''), '(unversioned build)');
+  assert.equal(normalizeEnryVersionOutput('v2.9.6\n'), 'v2.9.6');
+});
 
 /**
  * Filename -> the ctags LANGUAGE NAME that parses it, for the cases where a stock/older ctags may

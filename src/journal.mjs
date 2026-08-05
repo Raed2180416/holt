@@ -2,9 +2,12 @@
 /**
  * holt — hash-chained, actor-attributed action journal.
  *
- * Every mutating action (protect, UNPROTECT, rescue, clean-remove, branch-delete, blocked)
+ * Every mutating action (protect, UNPROTECT, rescue, clean-quarantine, clean-restore,
+ * clean-purge, branch-delete, blocked)
  * appends one JSONL line under the repository's COMMON git dir, so the record survives worktree
- * deletion, is shared by every worktree, and never appears in `git status`.
+ * movement or deletion, is shared by every worktree, and never appears in `git status`.
+ * Historical `clean-remove` entries remain readable: they describe physical removals performed by
+ * older Holt versions and are intentionally not reclassified as reversible quarantine events.
  *
  * WHAT CHANGED AND WHY. The plain JSONL version recorded what and when. A compliance reviewer
  * needs three more things, and their absence is not a polish item — it is the difference between
@@ -52,9 +55,34 @@ import {
 /** 64 zeros: the `prev` of the first entry. A real SHA-256 can never be this. */
 export const GENESIS = '0'.repeat(64);
 
+/**
+ * Public identifier namespace for Holt-authored evidence formats.
+ *
+ * This is the project's HTTPS-enforced GitHub Pages origin, backed by the public
+ * `Raed2180416/holt` repository. It deliberately does not use an aspirational custom domain:
+ * an audit identifier under a domain the project does not control weakens provenance rather
+ * than improving it.
+ */
+export const HOLT_PUBLIC_NAMESPACE = 'https://raed2180416.github.io/holt';
+
+/**
+ * A stable, single-segment C2SP checkpoint origin for one repository label.
+ * Existing checkpoint origins are always inherited verbatim; this is only the default for new
+ * journals and for evidence objects that genuinely have no stored checkpoint origin.
+ * @param {string|null|undefined} [repo]
+ * @returns {string}
+ */
+export function journalOrigin(repo = 'repo') {
+  const candidate = String(repo ?? 'repo').replace(/[^A-Za-z0-9._-]/g, '_');
+  const slug = !candidate || candidate === '.' || candidate === '..' ? 'repo' : candidate;
+  return `${HOLT_PUBLIC_NAMESPACE}/journal/${slug}`;
+}
+
 /** The mutating actions this journal is expected to carry. Documentation, never a filter. */
 export const JOURNALLED_ACTIONS = [
-  'protect', 'unprotect', 'rescue', 'clean-remove', 'branch-delete', 'blocked',
+  'protect', 'unprotect', 'rescue', 'clean-quarantine', 'clean-restore', 'clean-purge',
+  // Historical reader compatibility only. New clean runs never emit physical-removal events.
+  'clean-remove', 'branch-delete', 'blocked',
 ];
 
 /**
@@ -285,7 +313,22 @@ export async function withLock(lockPath, fn, { timeoutMs = 5_000, staleMs = 30_0
       handle = await fs.open(lockPath, 'wx');
       break;
     } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
+      // O_EXCL creation is the atomic primitive git uses for its `.lock` files, and on POSIX it
+      // reports a pre-existing file as EEXIST. Windows is different: when the lock file exists AND
+      // is still held open by another process (the common case here — the holder has not closed its
+      // handle yet), the CreateFile sharing violation is mapped by libuv to EPERM (and occasionally
+      // EACCES), NOT EEXIST. Treating that as a hard error made one of twelve concurrent appends
+      // fail on Windows-only CI, producing an 11-entry chain where twelve were expected. So: when
+      // we get EPERM/EACCES, treat it as contention ONLY if the file actually exists — a genuine
+      // permission problem on a path that cannot be created still throws.
+      if (e.code !== 'EEXIST') {
+        if (e.code === 'EPERM' || e.code === 'EACCES') {
+          const exists = await fs.stat(lockPath).then(() => true, () => false);
+          if (!exists) throw e;
+        } else {
+          throw e;
+        }
+      }
       const age = await fs.stat(lockPath).then((s) => Date.now() - s.mtimeMs, () => 0);
       if (age > staleMs) { await fs.rm(lockPath, { force: true }); continue; }
       if (Date.now() > deadline) {
@@ -387,7 +430,7 @@ function defaultOrigin(dir) {
   // from the existing checkpoint forever — so moving or renaming the repository can never make
   // an existing log fail to verify. Swapping in a foreign checkpoint still fails, on the root.
   const repo = path.basename(path.dirname(path.dirname(dir))) || 'repo';
-  return `holt.dev/journal/${repo.replace(/[^A-Za-z0-9._-]/g, '_') || 'repo'}`;
+  return journalOrigin(repo);
 }
 
 /**
@@ -465,10 +508,22 @@ export async function appendEvent(cwd, event, { actor = null, env = process.env,
   }
 }
 
+/** Give parsed entries the stable reader shape without changing the bytes verification hashes. */
+function readableJournalEntries(entries) {
+  return entries.map((entry) => {
+    if (!entry || typeof entry !== 'object' || entry.corrupt !== undefined) return entry;
+    // Every reader gets the same shape, and an event predating identity is reported as
+    // unattributed rather than as a missing key some caller will forget to handle.
+    return (!entry.actor || typeof entry.actor !== 'object')
+      ? { ...entry, actor: { ...UNATTRIBUTED } }
+      : entry;
+  });
+}
+
 /** Read the whole journal, oldest first. A corrupt line is surfaced, not swallowed. */
 export async function readJournal(cwd) {
   const p = await journalPath(cwd);
-  if (!p) return [];   // nowhere to keep a journal means there are no events, not an error
+  if (!p) return [];   // preserve the raw journal-view contract outside a resolvable repository
   let raw;
   try {
     raw = await fs.readFile(p, 'utf8');
@@ -476,15 +531,15 @@ export async function readJournal(cwd) {
     if (e.code === 'ENOENT') return [];
     throw e;
   }
-  return raw.split('\n').filter(Boolean).map((line) => {
-    let e;
-    try { e = JSON.parse(line); } catch { return { corrupt: line }; }
-    if (!e || typeof e !== 'object') return { corrupt: line };
-    // Every reader gets the same shape, and an event predating identity is reported as
-    // unattributed rather than as a missing key some caller will forget to handle.
-    if (!e.actor || typeof e.actor !== 'object') e.actor = { ...UNATTRIBUTED };
-    return e;
+  const entries = raw.split('\n').filter(Boolean).map((line) => {
+    try {
+      const entry = JSON.parse(line);
+      return entry && typeof entry === 'object' ? entry : { corrupt: line };
+    } catch {
+      return { corrupt: line };
+    }
   });
+  return readableJournalEntries(entries);
 }
 
 /* ================================================================ VERIFY ==== */
@@ -498,12 +553,10 @@ export async function readJournal(cwd) {
  * failure is a journal written before chaining existed, which is reported as `legacy` with an
  * explicit count and an explicit statement that those entries cannot be verified.
  *
- * @returns {Promise<{ok:boolean, code:string, broken:{index:number, line:number, seq:number|null, at:string|null, action:string|null, actor:object|null, reason:string, missing?:number}|null, reason?:string, legacy?:number, chained?:number, entries?:number, root?:string|null, size?:number, checkpoint?:{origin:string, size:number, root:string, signed:boolean, signatureValid:boolean|null, signers:string[]}|null}>}
- * @param {string} cwd
+ * @param {{entries:any[], checkpointText:string|null, journalExists:boolean}} snapshot
  * @param {{trustedKeys?: any[]}} [opts]
  */
-export async function verifyJournal(cwd, { trustedKeys = [] } = {}) {
-  const { entries, checkpointText, journalExists } = await readJournalRaw(cwd);
+function verifyJournalSnapshot({ entries, checkpointText, journalExists }, { trustedKeys = [] } = {}) {
 
   const empty = {
     entries: entries.length, legacy: 0, chained: 0, root: null, size: 0,
@@ -661,6 +714,27 @@ export async function verifyJournal(cwd, { trustedKeys = [] } = {}) {
     reason: legacy
       ? `${chained.length} entry(ies) verify against the checkpoint; ${legacy} earlier entry(ies) predate hash chaining and are NOT covered`
       : `all ${chained.length} entry(ies) verify against the checkpoint`,
+  };
+}
+
+export async function verifyJournal(cwd, opts = {}) {
+  return verifyJournalSnapshot(await readJournalRaw(cwd), opts);
+}
+
+/**
+ * Read and verify ONE immutable in-memory snapshot.
+ *
+ * Calling verifyJournal() and readJournal() separately creates a time-of-check/time-of-use gap:
+ * appendEvent writes the journal line before its checkpoint, so a reader can verify the old log
+ * and then attribute a newly appended, not-yet-checkpointed event. The returned entries here are
+ * parsed from the exact same `readJournalRaw` result whose chain/checkpoint was verified. Reader
+ * normalisation happens only after hashing, so legacy actor defaults do not change the evidence.
+ */
+export async function readVerifiedJournal(cwd, opts = {}) {
+  const snapshot = await readJournalRaw(cwd);
+  return {
+    verification: verifyJournalSnapshot(snapshot, opts),
+    entries: readableJournalEntries(snapshot.entries),
   };
 }
 

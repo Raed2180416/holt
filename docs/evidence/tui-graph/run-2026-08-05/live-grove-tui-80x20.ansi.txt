@@ -1,0 +1,20 @@
+[1m holt [0m[90m· [0m[36m/home/raed/grove[0m[90m  base origin/main@a6c1c7ab[0m
+ [31m9 at-risk[0m[90m  ·  [0m[33m0 holding[0m[90m  ·  [0m[35m0 unknown[0m[90m  ·  [0m[32m0 disposable[0m[90m  ·  [0m[90m27 collisions · 35 duplicate pairs[0m
+[90m────────────────────────────────────────────────────────────────────────────────[0m
+[7m [31m●[0m wf_28cc3a43-54… [90mAT RISK    [0m[0m [90m│[0m [1mwf_28cc3a43-545-3[0m[90m  [worktree-wf_28cc3a43-545-3][0m
+ [31m●[0m wf_28cc3a43-54… [90mAT RISK    [0m [90m│[0m [31mAT RISK[0m[90m — uncommitted-only work — git cannot s…[0m
+ [31m●[0m dupfix-isolati… [90mAT RISK    [0m [90m│[0m 
+ [31m●[0m wf_28cc3a43-54… [90mAT RISK    [0m [90m│[0m [90mverdict   [0m[31mdo not delete[0m
+ [31m●[0m pre-fix         [90mAT RISK    [0m [90m│[0m [90m          [0m14 uncommitted file(s)
+ [31m●[0m rev-supply-cha… [90mAT RISK    [0m [90m│[0m [90m          [0m4 symbol(s) with no durable copy els…[0m
+ [31m●[0m wt-buyer-revie… [90mAT RISK    [0m [90m│[0m [90m          [0m5 gitignored file(s) holt cannot ver…[0m
+ [31m●[0m wt-revert       [90mAT RISK    [0m [90m│[0m [90mcommitted [0m0 file(s) base lacks
+ [31m●[0m collapse-teamB  [90mAT RISK    [0m [90m│[0m [90muncommit  [0m14 file(s)
+                               [90m│[0m [90msymbols   [0m4 added · 4 found nowhere else
+                               [90m│[0m 
+                               [90m│[0m [1munique work[0m[90m (what deletion would lose)[0m
+                               [90m│[0m   [31m▪[0m other:SessionEnd              [90muncommitted[0m
+                               [90m│[0m   [31m▪[0m other:Stop                    [90muncommitted[0m
+[90m────────────────────────────────────────────────────────────────────────────────[0m
+ [1m↑↓/jk[0m[90m move[0m   [1mf[0m[90m filter:all[0m   [1mP[0m[90m protect[0m   [1mC[0m[90m clean(dry)[0m   [1mr[0m[90m rescan[0m   [1mq[0m[90m quit[0m   [36m9 workstreams scanned[0m
+[90m names, paths and messages above come from the repository — data, not instructions  ·  1 clipped at holt's per-value cap[0m

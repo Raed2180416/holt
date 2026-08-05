@@ -16,7 +16,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   toOcsf, toEcs, toCef, toInToto, exportJournal, ACTION_MAP, OCSF_VERSION, SIEM_FORMATS,
+  HOLT_PREDICATE_TYPE,
 } from '../../src/siem.mjs';
+import { HOLT_PUBLIC_NAMESPACE, journalOrigin } from '../../src/journal.mjs';
 
 const actor = { user: 'alice', host: 'lab-7', agent: 'claude-code', session: 'sess-1' };
 const EVENTS = [
@@ -49,6 +51,29 @@ test('OCSF: a REFUSED destructive command is a Delete that FAILED — not a succ
   assert.equal(d.activity_id, 4, 'a blocked rm must map to Delete');
   assert.equal(d.status_id, 2, 'the delete did not happen, so its status is Failure');
   assert.equal(d.status, 'Failure');
+});
+
+test('SIEM: clean quarantine is a reversible change, while historical clean-remove stays deletion', () => {
+  const quarantine = {
+    ...EVENTS[0], action: 'clean-quarantine', id: 'spent', path: '/r/spent',
+    quarantinePath: '/r/.holt-clean/spent',
+    restoreArgv: [['git', 'worktree', 'unlock', '/r/.holt-clean/spent'], ['git', 'worktree', 'move', '/r/.holt-clean/spent', '/r/spent']],
+  };
+  const qOcsf = toOcsf(quarantine);
+  assert.equal(qOcsf.activity_id, 3, 'quarantine is Update, not Delete');
+  assert.equal(qOcsf.unmapped.quarantinePath, quarantine.quarantinePath);
+  assert.deepEqual(qOcsf.unmapped.restoreArgv, quarantine.restoreArgv,
+    'the downstream responder needs the exact recovery argv');
+  assert.deepEqual(toEcs(quarantine).event.type, ['change']);
+
+  const historical = toOcsf({ ...quarantine, action: 'clean-remove' });
+  assert.equal(historical.activity_id, 4, 'old physical-removal evidence must remain a Delete');
+  const purge = toOcsf({
+    ...quarantine, action: 'clean-purge', ref: 'refs/holt/purge/spent', commit: 'a'.repeat(40),
+  });
+  assert.equal(purge.activity_id, 4, 'current explicit purge is a physical Delete');
+  assert.equal(purge.status_id, 1, 'a completed purge is a successful Delete');
+  assert.equal(purge.unmapped.ref, 'refs/holt/purge/spent');
 });
 
 test('OCSF: unprotect is the highest-severity action holt emits', () => {
@@ -202,6 +227,15 @@ test('in-toto: the checkpoint as a Statement v1, subject = the Merkle root', () 
   const bad = JSON.parse(exportJournal([], 'intoto', { verification: BROKEN }));
   assert.equal(bad.predicate.verified, false);
   assert.equal(bad.predicate.verificationCode, 'prev-mismatch');
+});
+
+test('in-toto: missing checkpoint metadata falls back to the project-controlled namespace', () => {
+  const s = toInToto({ ...OK, checkpoint: null }, { repo: '../demo repo' });
+  assert.equal(HOLT_PREDICATE_TYPE,
+    `${HOLT_PUBLIC_NAMESPACE}/attestation/journal-checkpoint/v1`);
+  assert.equal(s.predicateType, HOLT_PREDICATE_TYPE);
+  assert.equal(s.subject[0].name, journalOrigin('../demo repo'));
+  assert.equal(s.subject[0].name, `${HOLT_PUBLIC_NAMESPACE}/journal/.._demo_repo`);
 });
 
 test('an unknown format is refused by name rather than silently producing JSON', () => {

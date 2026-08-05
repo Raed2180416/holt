@@ -15,6 +15,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import {
   loadPolicy, loadPolicyFromRef, loadGatePolicy, gateVerdict, evaluatePolicy, globToRegExp,
+  evaluatePolicyAuthoritySources, parsePolicy,
 } from '../../src/team/policy.mjs';
 
 async function repoWith(policyText, name = 'policy.json') {
@@ -130,6 +131,39 @@ test('policy: protected-paths matches globs across segments and names the offend
   const res = evaluatePolicy({ rules: [{ id: 'prot', type: 'protected-paths', paths: ['infra/**'] }] }, { audit: AUDIT });
   assert.equal(res.ok, false);
   assert.deepEqual(res.violations[0].evidence, ['infra/terraform/main.tf']);
+});
+
+test('POLICY MUST SEARCH every authoritative carried path, not branchAudit\'s 25-file display sample', () => {
+  const ordinary = Array.from({ length: 25 }, (_, i) => `src/ordinary-${String(i).padStart(2, '0')}.js`);
+  const protectedPath = 'infra/production/terraform.tf';
+  const branch = {
+    name: 'wip/large-delta',
+    fileCount: 26,
+    files: ordinary,
+    carriedPaths: [...ordinary, protectedPath],
+  };
+  const res = evaluatePolicy(
+    { rules: [{ id: 'prot', type: 'protected-paths', paths: ['infra/**'] }] },
+    { audit: { unlanded: [branch], unknown: [] } },
+  );
+  assert.equal(res.ok, false, 'the protected 26th path must not disappear behind a display cap');
+  assert.deepEqual(res.violations[0].evidence, [protectedPath]);
+
+  // Anti-vacuity control: the full inventory does not make every large branch fail.
+  const clean = evaluatePolicy(
+    { rules: [{ id: 'prot', type: 'protected-paths', paths: ['infra/**'] }] },
+    { audit: { unlanded: [{ ...branch, fileCount: ordinary.length, carriedPaths: ordinary }], unknown: [] } },
+  );
+  assert.equal(clean.ok, true, 'a non-protected large delta must still pass');
+});
+
+test('POLICY MUST REFUSE a truncated branch inventory rather than treating its display sample as complete', () => {
+  const res = evaluatePolicy(
+    { rules: [{ id: 'prot', type: 'protected-paths', paths: ['infra/**'] }] },
+    { audit: { unlanded: [{ name: 'old-caller', fileCount: 26, files: Array.from({ length: 25 }, (_, i) => `src/${i}.js`) }], unknown: [] } },
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.violations[0].message, /truncated carried-path inventory/i);
 });
 
 test('policy: protected-paths also sees UNCOMMITTED worktree work, which is the riskiest kind', () => {
@@ -299,6 +333,100 @@ test('policy: glob translation is anchored — a prefix match must not pass as a
   assert.equal(globToRegExp('src/*.ts').test('src/a.ts'), true);
   assert.equal(globToRegExp('src/*.ts').test('src/nested/a.ts'), false);
   assert.equal(globToRegExp('a.b').test('axb'), false, 'dots must be literal, not any-char');
+});
+
+test('POLICY AVAILABILITY: hostile wildcard chains are deterministic, not regex backtracking', () => {
+  const hostile = '**a'.repeat(15) + 'b';
+  const subject = 'a'.repeat(30) + 'c';
+  const started = performance.now();
+  assert.equal(globToRegExp(hostile).test(subject), false);
+  const elapsedMs = performance.now() - started;
+  assert.ok(elapsedMs < 250,
+    `a 46-byte hostile glob must complete deterministically, took ${elapsedMs.toFixed(1)}ms`);
+});
+
+test('POLICY INTEGRITY: duplicate JSONC members refuse before object materialisation', () => {
+  const cases = [
+    '{"version":1,"version":1,"rules":[{"id":"x","type":"no-unlanded"}]}',
+    `{
+      // A reviewer sees enabled; direct object parsing would silently keep the later value.
+      "version": 1,
+      "rules": [{"id":"must-run","type":"no-unlanded","enabled":true,"enabled":false,}],
+    }`,
+  ];
+  for (const raw of cases) {
+    assert.throws(() => parsePolicy(raw, 'duplicate-probe'), (error) => {
+      assert.equal(error.code, 'POLICY_DUPLICATE_KEY');
+      assert.match(error.message, /repeats key/);
+      return true;
+    });
+  }
+});
+
+test('POLICY BOUNDS: bytes, nesting, identifiers, descriptions, rules and globs are bounded', () => {
+  const rule = (extra = {}) => ({ id: 'x', type: 'no-unlanded', ...extra });
+  const cases = [
+    [JSON.stringify({ version: 1, description: 'x'.repeat(1024 * 1024), rules: [rule()] }), 'POLICY_LIMIT'],
+    [JSON.stringify({ version: 1, description: 'x'.repeat(4097), rules: [rule()] }), 'POLICY_LIMIT'],
+    [JSON.stringify({ version: 1, rules: [rule({ id: 'line\nbreak' })] }), 'POLICY_RULE'],
+    [JSON.stringify({ version: 1, rules: Array.from({ length: 513 }, (_, index) =>
+      ({ id: `r-${index}`, type: 'no-unlanded' })) }), 'POLICY_LIMIT'],
+    [JSON.stringify({ version: 1, rules: [rule({ exempt: Array.from({ length: 129 }, (_, index) => `b-${index}`) })] }), 'POLICY_LIMIT'],
+    [JSON.stringify({ version: 1, rules: [rule({ exempt: ['x'.repeat(513)] })] }), 'POLICY_LIMIT'],
+  ];
+
+  let nested = '"leaf"';
+  for (let depth = 0; depth < 40; depth++) nested = `{"x":${nested}}`;
+  cases.push([`{"version":1,"description":${nested},"rules":[{"id":"x","type":"no-unlanded"}]}`, 'POLICY_LIMIT']);
+
+  for (const [raw, code] of cases) {
+    assert.throws(() => parsePolicy(raw, 'bounds-probe'), (error) => {
+      assert.equal(error.code, code);
+      return true;
+    });
+  }
+});
+
+test('POLICY AVAILABILITY: one work budget spans a complete evaluation', () => {
+  // No literal prefix/suffix can short-circuit this case. The evaluator refuses before allocating
+  // or traversing more than its fixed state budget.
+  const glob = '*a'.repeat(256);
+  const policy = parsePolicy(JSON.stringify({
+    version: 1,
+    rules: [{ id: 'bounded', type: 'protected-paths', paths: [glob] }],
+  }), 'complexity-probe');
+  const subject = 'a'.repeat(20_000);
+  assert.throws(() => evaluatePolicy(policy, {
+    audit: {
+      unlanded: [{ name: 'hostile', fileCount: 1, files: [subject], carriedPaths: [subject] }],
+      unknown: [],
+    },
+  }), (error) => {
+    assert.equal(error.code, 'POLICY_COMPLEXITY');
+    assert.match(error.message, /deterministic work budget/);
+    return true;
+  });
+});
+
+test('POLICY AVAILABILITY: managed and lower authorities share one work budget', () => {
+  const glob = '*a'.repeat(256);
+  const policy = parsePolicy(JSON.stringify({
+    version: 1,
+    rules: [{ id: 'bounded', type: 'protected-paths', paths: [glob] }],
+  }), 'authority-complexity-probe');
+  const subject = 'a'.repeat(11_000);
+  const audit = {
+    unlanded: [{ name: 'hostile', fileCount: 1, files: [subject], carriedPaths: [subject] }],
+    unknown: [],
+  };
+  assert.throws(() => evaluatePolicyAuthoritySources({
+    managedSources: [{ namespace: 'managed.one', policy }],
+    lowerSources: [{ namespace: 'base.one', policy }],
+    audit,
+  }), (error) => {
+    assert.equal(error.code, 'POLICY_COMPLEXITY');
+    return true;
+  });
 });
 
 

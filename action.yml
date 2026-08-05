@@ -1,5 +1,5 @@
 name: 'holt ci'
-description: 'Fail a merge that would abandon work: audits every branch by CONTENT (merge-tree), not ancestry. Requires fetch-depth: 0.'
+description: 'Fail a merge that would abandon work: audits every branch by content, not ancestry. Requires fetch-depth: 0.'
 branding: { icon: 'shield', color: 'green' }
 inputs:
   base:
@@ -18,34 +18,13 @@ inputs:
     description: 'Comma-separated branch names to exempt'
     required: false
     default: ''
+  working-directory:
+    description: 'Repository directory under GITHUB_WORKSPACE (default: workspace root)'
+    required: false
+    default: '.'
 runs:
-  using: 'composite'
-  steps:
-    # Inputs are passed through the ENVIRONMENT, never interpolated into the script with
-    # ${{ }}. Interpolating an input straight into a run: block lets a value derived from a PR
-    # title or branch name inject shell — the classic GitHub Actions script-injection hole.
-    # In env, an input is only ever data; the script quotes it and holt itself validates it.
-    - shell: bash
-      env:
-        HOLT_IN_BASE: ${{ inputs.base }}
-        HOLT_IN_FAIL: ${{ inputs.fail-on-unlanded }}
-        HOLT_IN_AGE: ${{ inputs.max-age-days }}
-        HOLT_IN_IGNORE: ${{ inputs.ignore }}
-      run: |
-        set -euo pipefail
-        # The pinned GitHub tag, and ONLY the pinned GitHub tag. This used to try `holt@^0` from
-        # the npm registry first and fall back here — but `holt` is not a name we own (it 404s
-        # today), so that ordering meant the day anyone registered it, every consumer's CI would
-        # silently start installing a stranger's package with our name on it. A 404 fallback is
-        # not a safe default when the thing being fallen back FROM is unclaimed.
-        # A tag is immutable to force-push, so a consumer's CI cannot be moved under it.
-        npm install -g "github:Raed2180416/holt#v0.3.1" >/dev/null 2>&1
-        ARGS=()
-        [ "$HOLT_IN_FAIL" = "true" ] && ARGS+=(--fail-on-unlanded)
-        [ -n "$HOLT_IN_AGE" ] && ARGS+=(--max-age-days "$HOLT_IN_AGE")
-        [ -n "$HOLT_IN_BASE" ] && ARGS+=(--base "$HOLT_IN_BASE")
-        if [ -n "$HOLT_IN_IGNORE" ]; then
-          IFS=',' read -ra IG <<< "$HOLT_IN_IGNORE"
-          for b in "${IG[@]}"; do [ -n "$b" ] && ARGS+=(--ignore "$b"); done
-        fi
-        holt ci "${ARGS[@]}"
+  # GitHub's embedded Node 24 runtime executes the dependency-complete bundle from the exact
+  # caller-pinned action commit. No shell interpolation, package-manager install, secondary checkout, or
+  # mutable network bootstrap occurs at runtime.
+  using: 'node24'
+  main: 'dist/holt-action.mjs'

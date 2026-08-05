@@ -107,6 +107,8 @@ test('package: every module the shipped code imports is inside the tarball', asy
     `only ${packed.size} packed files were parsed out of npm pack — the parser has drifted from ` +
     'npm\'s output format, so this test is no longer reading what ships');
   assert.ok(packed.has('package.json'), 'package.json must be in the tarball');
+  assert.ok(packed.has('docs/MANAGED-POLICY.md'),
+    'the README links the Enterprise administrator guide, so that guide must ship in the installed artifact');
 
   const sources = (await walk(path.join(ROOT, 'src')))
     .concat(await walk(path.join(ROOT, 'bin')))
@@ -131,7 +133,7 @@ test('package: every module the shipped code imports is inside the tarball', asy
 
 test('package: the language gap packs ship, or the language claim silently becomes false', async () => {
   // The quieter half. A missing .mjs crashes loudly; a missing .ctags pack does not fail at all —
-  // ctags simply parses nothing for those languages, and the README's "12 gap pack" claim becomes
+  // ctags simply parses nothing for those languages, and the README's "15 gap pack" claim becomes
   // untrue with no error anywhere. The published v0.2.0 shipped 2 of 14.
   const packed = new Set(await packedFiles());
   assert.ok(packed.size > 20, 'npm pack output did not parse — see the anti-vacuity note above');
@@ -149,21 +151,15 @@ test('package: the language gap packs ship, or the language claim silently becom
 });
 
 
-test('package: every external module the shipped code imports is a declared DEPENDENCY', async () => {
+test('package: every shipped bare import is declared and optional imports are load-time degradable', async () => {
   // THE OTHER HALF OF "WHAT SHIPS MUST BE ABLE TO RUN". The test above proves holt's own modules
-  // are inside the tarball; this proves the third-party ones are declared, and declared in the
-  // right place.
+  // are inside the tarball; this proves every bare import is declared and no optional package is
+  // imported statically, which would crash the whole CLI when optionals are deliberately omitted.
   //
-  // `@modelcontextprotocol/sdk` was an optionalDependency. `holt integrate` writes 29 MCP config
-  // targets by default - Claude Code, Cursor, Codex, Zed, Amp, Factory, Junie, Warp and the rest -
-  // and every one of them points at `holt mcp`. An install that omits optional dependencies
-  // (`npm i --omit=optional`, some corporate mirrors, older `--production`) therefore wires 29
-  // agents to a server that cannot start. That is not an optional feature; it is one of the three
-  // integration pillars the README advertises.
-  //
-  // jscpd stays optional and that distinction is the point: it powers `duplicates --deep`, an
-  // explicit opt-in flag, and its absence is reported by `holt doctor`. The rule is not "declare
-  // everything as required" - it is that a module the DEFAULT path depends on cannot be optional.
+  // This test deliberately does NOT claim the feature backed by an optional package still works:
+  // without the SDK, jsonc-parser, or jscpd, MCP serving, JSONC-backed integration/policy handling,
+  // or deep token-clone analysis respectively are unavailable. The isolated omit-optional package
+  // lane proves that narrower core installation separately and checks its exact installed binary.
   const pkg = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
   const required = new Set(Object.keys(pkg.dependencies ?? {}));
   const optional = new Set(Object.keys(pkg.optionalDependencies ?? {}));
@@ -187,24 +183,38 @@ test('package: every external module the shipped code imports is a declared DEPE
 
   const undeclared = [];
   const wronglyOptional = [];
+  let bareImportsSeen = 0;
+  let optionalImportsSeen = 0;
   for (const file of sources) {
     const code = codeOnly(await fs.readFile(file, 'utf8'));
+    const specs = [];
     for (const re of BARE) {
-      for (const m of code.matchAll(re)) {
-        const spec = m[1];
-        if (spec.startsWith('node:')) continue;
-        const name = pkgNameOf(spec);
-        if (required.has(name)) continue;
-        if (optional.has(name)) {
-          // An optional module is only legitimate if its absence is HANDLED. The convention here
-          // is a dynamic import inside a try/catch or behind a detect* probe; a top-level static
-          // import of an optional module cannot be recovered from.
-          const staticImport = new RegExp(`^import[^;]*['"]${spec.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}['"]`, 'm');
-          if (staticImport.test(code)) wronglyOptional.push(`${rel(file)} statically imports optional '${name}'`);
-          continue;
-        }
-        undeclared.push(`${rel(file)} imports '${spec}' - '${name}' is in neither dependencies nor optionalDependencies`);
+      for (const m of code.matchAll(re)) specs.push(m[1]);
+    }
+    // Optional CommonJS CLIs can be located without loading them via
+    // `const require = createRequire(import.meta.url); require.resolve('pkg/package.json')`.
+    // That is exactly how the jscpd probe remains load-time degradable, and omitting this shape
+    // made the anti-vacuity assertion claim there were no optional imports at all.
+    for (const binding of code.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*createRequire\s*\(/g)) {
+      const escaped = binding[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const resolved = new RegExp(`\\b${escaped}\\.resolve\\(\\s*['"]([^.'"][^'"]*)['"]\\s*\\)`, 'g');
+      for (const m of code.matchAll(resolved)) specs.push(m[1]);
+    }
+    for (const spec of specs) {
+      if (spec.startsWith('node:')) continue;
+      bareImportsSeen += 1;
+      const name = pkgNameOf(spec);
+      if (required.has(name)) continue;
+      if (optional.has(name)) {
+        optionalImportsSeen += 1;
+        // An optional module is only legitimate if its absence is HANDLED. The convention here
+        // is a dynamic import inside a try/catch or behind a detect* probe; a top-level static
+        // import of an optional module cannot be recovered from.
+        const staticImport = new RegExp(`^import[^;]*['"]${spec.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}['"]`, 'm');
+        if (staticImport.test(code)) wronglyOptional.push(`${rel(file)} statically imports optional '${name}'`);
+        continue;
       }
+      undeclared.push(`${rel(file)} imports '${spec}' - '${name}' is in neither dependencies nor optionalDependencies`);
     }
   }
 
@@ -213,8 +223,9 @@ test('package: every external module the shipped code imports is a declared DEPE
   assert.deepEqual(wronglyOptional, [],
     `an optional dependency imported statically cannot degrade - it throws at load:\n  ${wronglyOptional.join('\n  ')}`);
 
-  // ANTI-VACUITY: the scan must actually be finding imports, or both assertions are about nothing.
-  const anyBare = sources.some((f) => /\bfrom\s+['"][^.'"]/.test(''));
+  // ANTI-VACUITY: the scan must actually find both a bare import and the optional-import shape
+  // whose load-time safety this test claims, or the two arrays above can be empty by accident.
   assert.ok(required.size + optional.size > 0, 'the manifest declares no dependencies at all');
-  assert.equal(anyBare, false, 'sanity placeholder');
+  assert.ok(bareImportsSeen > 0, 'the package import scan found no bare imports');
+  assert.ok(optionalImportsSeen > 0, 'the package import scan found no optional imports');
 });

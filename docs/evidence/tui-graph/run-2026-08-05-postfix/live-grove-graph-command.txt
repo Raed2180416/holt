@@ -1,0 +1,1 @@
+wrote /home/raed/grove/docs/evidence/tui-graph/run-2026-08-05-postfix/live-grove-graph.html  (9 nodes, 67 edges)

@@ -140,11 +140,10 @@ export function overlappingPairs(workstreams) {
  * this: it only proves the bytes are still on disk at that instant, which was never in doubt.
  * The set drains to one survivor, and the survivor is the copy nothing can recover.
  *
- * So: a copy counts as DURABLE when the sibling has COMMITTED it — the path is in that
- * workstream's committed delta AND is not also dirty in its working tree (a committed path with
- * uncommitted modifications on top fingerprints as the MODIFIED bytes, which are not what the
- * commit holds, so it cannot vouch for them). Base is durable by definition and is handled
- * separately, by `lineEndingOnlyVsBase`, which compares against base's committed content.
+ * So: a copy counts as DURABLE only when the sibling has committed the same Git tree entry at the
+ * same path: path + mode + object type + raw object id. A committed path with working-tree edits
+ * cannot vouch for the edited bytes. Text normalisation and same bytes at another path remain
+ * useful duplicate-work evidence, but neither can license deletion.
  *
  * Non-durable holders are still tracked and still REPORTED — "your sibling has these exact bytes
  * but has not committed them" is a true and useful observation. It is simply not a licence to
@@ -153,27 +152,34 @@ export function overlappingPairs(workstreams) {
  * @param {Record<string, any>[]} live  scanned workstreams with `ok === true`
  */
 function contentOwnership(live) {
-  const all = new Map();      // content-identity key -> Set(workstream id) — every holder
-  const durable = new Map();  // content-identity key -> Set(workstream id) — committed holders
+  const all = new Map();      // path + raw on-disk key -> Set(workstream id), advisory holders
+  const durable = new Map();  // path + exact Git entry tuple -> Set(workstream id)
+
+  const compound = (file, key) => (file && key ? `${file}\0${key}` : null);
 
   for (const w of live) {
     const committed = new Set(w.committed?.files ?? []);
-    // Both halves matter: a tracked path with working-tree modifications, and an untracked path.
-    // In either case the bytes fingerprinted from disk are NOT the bytes any commit holds.
-    const dirty = new Set([...(w.uncommitted?.files ?? []), ...(w.uncommitted?.untracked ?? [])]);
-
     for (const [file, key] of Object.entries(w.contentKeys ?? {})) {
       if (!key) continue; // unreadable/oversized: cannot prove a match, the safe direction
-      if (!all.has(key)) all.set(key, new Set());
-      all.get(key).add(w.id);
-      if (!committed.has(file) || dirty.has(file)) continue;
-      if (!durable.has(key)) durable.set(key, new Set());
-      durable.get(key).add(w.id);
+      const k = compound(file, key);
+      if (!all.has(k)) all.set(k, new Set());
+      all.get(k).add(w.id);
+    }
+    for (const [file, entry] of Object.entries(w.committed?.identities ?? {})) {
+      // This tuple belongs to the merged HEAD tree, not to the mutable checkout bytes. Dirt in
+      // the working tree cannot erase an exact object that remains reachable from the commit/ref.
+      if (!entry || !committed.has(file)) continue;
+      const k = compound(file, entry);
+      if (!durable.has(k)) durable.set(k, new Set());
+      durable.get(k).add(w.id);
     }
   }
 
-  /** Workstreams OTHER than `w` holding `key`; `durableOnly` restricts to committed copies. */
-  const others = (key, w, durableOnly) => {
+  /** Workstreams OTHER than `w` holding the same path and identity. */
+  const others = (file, w, durableOnly) => {
+    const identity = durableOnly ? w.committed?.identities?.[file] : w.contentKeys?.[file];
+    const key = compound(file, identity);
+    if (!key) return [];
     const holders = (durableOnly ? durable : all).get(key);
     if (!holders) return [];
     return [...holders].filter((id) => id !== w.id);
@@ -185,31 +191,23 @@ function contentOwnership(live) {
 /**
  * THE SECOND REDUNDANCY INSTRUMENT: git's own merged-tree oid, per workstream.
  *
- * WHY IT EXISTS BESIDE contentOwnership() AND NOT INSTEAD OF IT. These two answer the same
- * question with opposite strengths, and each is blind exactly where the other sees:
+ * WHY IT EXISTS BESIDE contentOwnership() AND NOT INSTEAD OF IT. Both are exact Git-object
+ * instruments, at different granularity:
  *
- *   contentOwnership  — path-blind and reindent-blind (its whole reason for being), but it must
- *                       READ every file's bytes. It returns NOTHING for a file over the 16 MiB
- *                       fingerprint cap, for a path that is not on disk at all (a committed
- *                       DELETE, a rename's source path — both of which `merge-tree` lists in the
- *                       committed delta), and for any read that fails.
+ *   contentOwnership  — compares path + operation + mode + type + object id per committed change.
+ *                       It can show partial coverage; an unresolvable path or failed identity
+ *                       probe deliberately has no tuple.
  *   mergedTreeTwins   — a narrower question (identical tree, therefore identical content at
  *                       identical paths) answered with total reliability: no cap, no file reads,
  *                       no per-file failure modes. It is git comparing two objects.
  *
- * MEASURED, and this is the regression that put this function back: two worktrees each
- * committing a byte-identical file past the 16 MiB cap — and two worktrees each committing the
- * same DELETION, which costs nothing to construct and is what happens whenever two agents are
- * told to remove the same dead module — produce ONE tree oid between them. git has proven they
- * are the same work. Per-file coverage has no bytes to read, never reaches `allMatched`, and one
- * such file silently poisoned the redundancy verdict for the ENTIRE workstream. A stronger
- * instrument's blind spot must never veto a weaker-scoped instrument's proof: EITHER one
- * establishes redundancy.
+ * Two worktrees committing the same deletion or other identical merged result produce one tree
+ * oid even when no on-disk file exists to inspect. Git has then proven the complete committed
+ * result is identical. Either exact instrument may establish redundancy; advisory filesystem
+ * fingerprints never do.
  *
- * DURABILITY IS FREE HERE. contentOwnership has to work to tell a committed copy from a dirty
- * working-tree copy (see its doc comment) because it fingerprints bytes off the disk. A merged
- * tree is computed from base and the sibling's HEAD COMMIT, so a match is a match against
- * committed content by construction — it can never name a holder whose only copy is uncommitted.
+ * DURABILITY IS FREE HERE. A merged tree is computed from base and the sibling's HEAD commit, so
+ * it can never name a holder whose only copy is uncommitted.
  *
  * Only NON-NULL oids are compared. `strictReadOnly` scans have no merged tree at all, and a
  * `null === null` grouping would have declared every one of them a twin of every other.
@@ -257,9 +255,9 @@ export function uniqueWork(scanResult) {
     }
   }
 
-  // FILE-LEVEL CONTENT IDENTITY — the SAME key space safeToDelete()'s fpOwners map uses (see
-  // content-identity.mjs), read from `w.contentKeys` rather than recomputed, so "unique" and
-  // "disposable" can never disagree about whether a file's bytes are held elsewhere.
+  // FILE-LEVEL COMMITTED IDENTITY — the same path + Git-entry key space safeToDelete() uses, read
+  // from `w.committed.identities` so "unique" and "disposable" cannot disagree about durable
+  // ownership. `w.contentKeys` remains advisory duplicate-analysis data only.
   //
   // WHY THIS IS NEEDED BESIDES SYMBOL IDENTITY. `symbolOwners` above is a NAME match: a symbol
   // is "shared" the instant two live workstreams both declare something called, say, `Handler`
@@ -304,14 +302,14 @@ export function uniqueWork(scanResult) {
    * "either instrument proves it" composition safeToDelete applies to the opposite polarity.
    */
   function fileIsContentUnique(w, file) {
-    const key = w.contentKeys?.[file];
+    const key = w.committed?.identities?.[file];
     if (!key) {
       // Whole-tree identity can only speak for COMMITTED paths; an uncommitted or untracked file
       // is not in the merged tree at all, so nothing proves a sibling holds it.
       const provenByTree = committedPaths.get(w.id)?.has(file) && (treeTwins.get(w.id)?.length ?? 0) > 0;
       return !provenByTree;
     }
-    return ownership.others(key, w, true).length === 0;
+    return ownership.others(file, w, true).length === 0;
   }
 
   return live
@@ -397,8 +395,8 @@ export function uniqueWork(scanResult) {
       for (const file of w.touched ?? []) {
         const key = w.contentKeys?.[file];
         if (!key) continue;
-        for (const id of ownership.others(key, w, false)) redundantWith.add(id);
-        for (const id of ownership.others(key, w, true)) redundantWithDurable.add(id);
+        for (const id of ownership.others(file, w, false)) redundantWith.add(id);
+        for (const id of ownership.others(file, w, true)) redundantWithDurable.add(id);
       }
 
       // A SYMBOL COUNT OF ZERO MUST NOT CLAIM TO BE A MEASUREMENT WHEN IT ISN'T ONE.
@@ -517,23 +515,31 @@ export function contentAtRisk(w) {
 
   // Name the instrument, not the symptom: whoever refuses has to be able to say WHY it refused.
   const blind = [];
+  const instrumentBlind = [];
   if (w?.uncommitted?.how === 'status-failed') {
-    blind.push(`working-tree status probe failed (${w.uncommitted.error ?? 'unknown'})`);
+    const message = `working-tree status probe failed (${w.uncommitted.error ?? 'unknown'})`;
+    blind.push(message);
+    instrumentBlind.push(message);
   }
   // The index's per-path reporting filter (skip-worktree / assume-unchanged) could not be read,
   // so holt does not know what `git status` was permitted to tell it. See indexFlagDelta().
   if (w?.uncommitted?.how === 'index-flags-failed') {
-    blind.push(`index-flag probe failed (${w.uncommitted.error ?? 'unknown'}) — cannot tell what git status was allowed to report`);
+    const message = `index-flag probe failed (${w.uncommitted.error ?? 'unknown'}) — cannot tell what git status was allowed to report`;
+    blind.push(message);
+    instrumentBlind.push(message);
   }
-  // Individually unresolvable paths: the flag says status did not report them, and holt could
-  // not read them to find out whether that mattered. Named, so a refusal can say which.
+  // Individually unresolvable paths: either an index flag hid them from status, or exact
+  // comparison would require executing a repository-configured content filter. Named, so a
+  // refusal can say which bytes were deliberately left untrusted.
   const unmeasured = (w?.uncommitted?.unmeasured ?? []).filter(Boolean);
   if (unmeasured.length) {
-    blind.push(`${unmeasured.length} path(s) hidden from git status by an index flag could not be read`
+    blind.push(`${unmeasured.length} path(s) could not be compared without untrusted Git conversion semantics`
       + ` (e.g. ${unmeasured.slice(0, 3).join(', ')})`);
   }
   if (w?.ignored?.how === 'ignored-probe-failed') {
-    blind.push(`gitignored-content probe failed (${w.ignored.error ?? 'unknown'})`);
+    const message = `gitignored-content probe failed (${w.ignored.error ?? 'unknown'})`;
+    blind.push(message);
+    instrumentBlind.push(message);
   }
 
   const files = [...new Set([...uncommitted, ...untracked, ...ignored])].sort();
@@ -542,6 +548,8 @@ export function contentAtRisk(w) {
     layers: { uncommitted, untracked, ignored },
     committedCount,
     blind,
+    instrumentBlind,
+    unmeasured,
     // TRUE only when every instrument ran AND every layer came back empty.
     empty: blind.length === 0 && files.length === 0 && committedCount === 0,
   };
@@ -557,49 +565,43 @@ export function contentAtRisk(w) {
  * a cleanup tool that says "safe" because it failed to look is the worst possible defect.
  */
 export function safeToDelete(scanResult, unique = null) {
-  const uniq = unique ?? uniqueWork(scanResult);
+  // Recovery copies are deliberately not deletion authority for active worktrees. Otherwise a
+  // completed quarantine keeps every remaining member of a redundant set green forever and a
+  // later `gate && rm` can drain the last ACTIVE copy. Recompute the unique layer over active
+  // streams when quarantine exists, even if analyze() supplied its broader reporting view.
+  const authorityStreams = scanResult.workstreams.filter(
+    (w) => !w.quarantined && !w.quarantineTransition);
+  const uniq = authorityStreams.length === scanResult.workstreams.length
+    ? (unique ?? uniqueWork(scanResult))
+    : uniqueWork({ ...scanResult, workstreams: authorityStreams });
   const uniqById = new Map(uniq.map((u) => [u.id, u]));
 
-  // CONTENT-IDENTITY OWNER MAP — path-blind, whitespace-insensitive, one per scan.
-  //
-  // `mergedTree` (the old check here) can only prove redundancy when TWO WORKTREES' ENTIRE
-  // committed state hashes to one git tree oid — the same branch checked out twice. It is blind
-  // to the far more common shape: one new file, present in only one worktree, that a sibling also
-  // added under a DIFFERENT PATH or in a different indentation style. Measured against an
-  // independent 50-language oracle: `feat/alpha/a.py` (4-space indent) and `feat/beta/a.py` (tab
-  // indent) are the SAME work by the oracle's own definition — delete either one and it survives
-  // in the sibling — and mergedTree cannot see the pair because neither the path nor the bytes
-  // match.
-  //
-  // So identity is decided PER FILE, using content-identity.mjs's fingerprint (raw bytes, or a
-  // normalised form insensitive to indentation width/style, line endings, BOM and blank lines —
-  // NEVER to the actual code text, so two different functions sharing a name or a shape cannot
-  // collide here). One owner map, built once, exactly mirrors uniqueWork()'s symbol-owner map:
-  // a file is "held elsewhere" when some OTHER live workstream carries a file with the same
-  // content-identity key, at any path.
-  const live = scanResult.workstreams.filter((w) => w.ok);
+  // DELETION AUTHORITY IS EXACT AND PATH-SENSITIVE. A per-file holder must commit the same path,
+  // mode, object type and object id. Same bytes at another path, a normalised/reindented match,
+  // or a line-ending-only similarity can support duplicate-work review but cannot prove the tree
+  // entry being deleted is recoverable.
+  const live = authorityStreams.filter((w) => w.ok);
   const ownership = contentOwnership(live);
   // ...AND the whole-tree instrument, which answers exactly where the per-file one cannot. See
   // mergedTreeTwins() for why deleting it in favour of per-file identity was a regression.
   const treeTwins = mergedTreeTwins(live);
 
   /**
-   * Does every file in `files` have a content-identity twin in some OTHER live workstream?
+   * Does every file in `files` have the same committed Git entry in another live workstream?
    * Returns the full set of files matched, and every sibling that contributed a match — so a
    * partial match (one of two files has a twin, the other does not) is visible rather than
    * forcing an all-or-nothing verdict, and the caller can still decide the count precisely.
    *
-   * `durableOnly` is the difference between "a sibling has these bytes on disk" (an observation)
-   * and "a sibling has COMMITTED these bytes" (a backup). Only the second may authorise a
-   * deletion — see contentOwnership's doc comment for why the first one gets holt blamed for the
-   * loss it caused. Both are computed below: the durable one decides, the other one reports.
+   * `durableOnly` keeps the advisory raw-on-disk observation available to reporting. Only the
+   * committed entry tuple may authorise deletion; both key spaces remain path-sensitive.
    *
    * THE TWO WAYS A FILE FAILS TO MATCH ARE NOT THE SAME ANSWER, and collapsing them is what let
    * one file veto a whole workstream's verdict:
    *
-   *   `unreadable` — no fingerprint exists for this path at all (over the 16 MiB cap, not on disk
-   *                  because the commit DELETED it or it is a rename's source, or the read
-   *                  failed). Content identity CANNOT ANSWER. Another instrument may.
+   *   `unreadable` — the selected instrument has no identity for this path. For advisory on-disk
+   *                  evidence that can mean a size cap/read failure; for durable evidence it
+   *                  means the exact Git entry/tombstone lookup could not resolve the path.
+   *                  Identity CANNOT ANSWER. Another exact instrument may.
    *   `mismatched` — the fingerprint was computed fine and no other live workstream holds it.
    *                  That is content identity ANSWERING NO, and nothing may overrule it.
    *
@@ -612,9 +614,9 @@ export function safeToDelete(scanResult, unique = null) {
     const unreadable = [];
     const mismatched = [];
     for (const f of files) {
-      const key = w.contentKeys?.[f];
+      const key = durableOnly ? w.committed?.identities?.[f] : w.contentKeys?.[f];
       if (!key) { unreadable.push(f); continue; }
-      const others = ownership.others(key, w, durableOnly);
+      const others = ownership.others(f, w, durableOnly);
       if (!others.length) { mismatched.push(f); continue; }
       matchedFiles.push(f);
       for (const id of others) owners.add(id);
@@ -661,8 +663,7 @@ export function safeToDelete(scanResult, unique = null) {
     if (w.isPrimary) {
       const u0 = uniqById.get(w.id);
       const risk0 = contentAtRisk(w);
-      const nothingUnique = !(u0?.uniqueSymbolCount > 0) && !(risk0?.count > 0)
-        && !(w.committed?.files?.length > 0);
+      const nothingUnique = !(u0?.uniqueSymbolCount > 0) && risk0.empty;
       return {
         id: w.id,
         path: w.path,
@@ -675,6 +676,29 @@ export function safeToDelete(scanResult, unique = null) {
             + 'but it is not a removable worktree (git itself refuses `git worktree remove` here, '
             + 'and .git lives inside it)'
           : 'this is the repository\'s main working tree, and it holds work base lacks'],
+      };
+    }
+
+    // A clean quarantine is deliberately still a registered, locked worktree. Calling it
+    // disposable again would let repeated clean runs move the recovery copy forever, and `auto`
+    // would keep recommending an action that has already happened. More importantly, the lock is
+    // not evidence that its bytes are redundant: it is evidence that Holt retained this exact
+    // directory because no cross-platform primitive can freeze every possible writer between a
+    // final scan and recursive deletion. Quarantine is a terminal recoverable state until a user
+    // explicitly restores or disposes of it.
+    if (w.quarantined || w.quarantineTransition) {
+      return {
+        id: w.id,
+        path: w.path,
+        safe: false,
+        confidence: 'measured',
+        quarantined: !!w.quarantined,
+        quarantineTransition: !!w.quarantineTransition,
+        reasons: [w.quarantineTransition
+          ? 'an interrupted Holt clean quarantine transition needs recovery — refusing every '
+            + 'automatic cleanup action until its source/destination state is resolved'
+          : 'retained in Holt clean quarantine — recover or explicitly dispose of this locked '
+            + 'worktree; it is never an automatic cleanup candidate'],
       };
     }
 
@@ -716,23 +740,16 @@ export function safeToDelete(scanResult, unique = null) {
     // full match is computed too, and reported, but it cannot authorise a deletion. See
     // contentOwnership() above for the full argument.
     //
-    // PER-FILE CONTENT IDENTITY, NOT WHOLE-TREE IDENTITY. `w.committed.mergedTree` equality (the
-    // original form of this check) only fires when the worktree's ENTIRE committed state matches
-    // a sibling's at the SAME paths — the same branch checked out twice. `siblingCoverage`
-    // (defined above, over the scan-wide fingerprint owner map) asks the finer question this
-    // worktree's deletion actually turns on: does EVERY committed file have a content-identical
-    // twin in some other live workstream, wherever that twin lives? A worktree whose committed
-    // files are only PARTLY covered is correctly left un-redundant — `allMatched` requires all of
-    // them, so one genuinely unique file among three still blocks the verdict.
+    // PER-ENTRY IDENTITY COMPLEMENTS WHOLE-TREE IDENTITY. `siblingCoverage` asks whether every
+    // committed path has the identical Git entry in another durable workstream. A worktree whose
+    // committed entries are only partly covered remains non-redundant; same content elsewhere in
+    // the tree is not a substitute for the operative path.
     //
-    // ...BUT NOT *INSTEAD OF* WHOLE-TREE IDENTITY. Replacing one with the other bought the recall
-    // gain by deleting a fallback, and the bill came due on every committed path per-file
-    // identity structurally cannot fingerprint: anything over the 16 MiB cap, anything not on
-    // disk (a committed DELETE, a rename's source path), anything whose read fails. One such file
-    // dragged `allMatched` to false and poisoned the verdict for the WHOLE workstream — even when
-    // `merge-tree` had already handed both worktrees the SAME tree oid, which is git itself
-    // proving the committed content is byte-for-byte identical. The two instruments are blind in
-    // different places and compose: EITHER proves redundancy.
+    // ...BUT NOT *INSTEAD OF* WHOLE-TREE IDENTITY. Per-change identities now include exact
+    // deletion tombstones, but any instrument can still fail or meet an unresolvable path. Such a
+    // gap must not veto an identical merged-tree oid, which is Git itself proving the complete
+    // committed result is byte-for-byte identical. The two exact instruments compose: EITHER may
+    // prove redundancy.
     //
     // THE FALLBACK IS SCOPED TO "CANNOT ANSWER", NEVER TO "ANSWERED NO". It fires only when every
     // file that failed to match failed for lack of a fingerprint (`unreadable`) — a file whose
@@ -761,25 +778,10 @@ export function safeToDelete(scanResult, unique = null) {
       : { owners: [], matchedFiles: [], unreadable: [], mismatched: [], allMatched: false };
     const heldUncommittedBy = gapCoverage.allMatched ? gapCoverage.owners : [];
 
-    // BASE CAN BE THE LIVING SIBLING TOO — the same reasoning as `heldAlsoBy` above, aimed at
-    // base instead of another worktree.
-    //
-    // Measured on the 50-language independent-oracle benchmark: 50 of 150 disposable misses were
-    // one worktree per repository whose ENTIRE committed delta was the SAME FILE(S), re-saved
-    // with CRLF line endings. `merge-tree` correctly says "base lacks this exact tree" — a CRLF
-    // byte and an LF byte are different bytes to git — but base holds the identical TEXT, so
-    // nothing here is unique work. scan.mjs computed the conjunction (every file, not some) as
-    // `committed.lineEndingOnlyVsBase`; this is pure computation over that already-proven fact.
-    //
-    // Named 'base' rather than a workstream id, because base is the holder and is not itself a
-    // member of scanResult.workstreams — `gate` and `clean --apply` need nothing more than a
-    // non-empty redundantWith to apply the identical safe-but-refuse-on-gate shape (see
-    // bin/holt.mjs's `gate`), so no new mechanism was needed, only a new holder name.
-    const lineEndingOnlyVsBase = heldAlsoBy.length === 0
-      && risk.committedCount > 0
-      && w.committed?.lineEndingOnlyVsBase === true;
-
-    if (risk.committedCount > 0 && heldAlsoBy.length === 0 && !lineEndingOnlyVsBase) {
+    // Line-ending/whitespace similarity to base remains advisory scan evidence only. Git records
+    // different bytes as different work, and those bytes can be semantically significant data;
+    // only exact Git entry/tree identity may clear this reason.
+    if (risk.committedCount > 0 && heldAlsoBy.length === 0) {
       // The refusal SAYS WHY it is not accepting the match it can plainly see, and names the one
       // thing that would change the answer. A bare "N file(s) base lacks" next to a sibling
       // holding the identical bytes reads as holt failing to notice.
@@ -808,9 +810,10 @@ export function safeToDelete(scanResult, unique = null) {
 
     // GITIGNORED CONTENT DOWNGRADES THE VERDICT, it does not silently vanish from it.
     // git does not track ignored files, so holt cannot prove anything about them — but deleting
-    // the worktree destroys them all the same. A `.env` of live credentials or a hand-patched
-    // dependency was being called "provably nothing to lose". Recognisable build output is
-    // already filtered out upstream, so what reaches here is content a human plausibly wants.
+    // the worktree destroys them all the same. A `.env` of live credentials, a hand-patched
+    // dependency, generated output and incident logs all remain visible because no pathname or
+    // manifest proves these exact bytes are reproducible. The command guard can ask for
+    // confirmation on generated-looking cleanup; worktree disposal cannot guess.
     const ignoredCount = risk.layers.ignored.length;
     if (ignoredCount > 0) {
       const sample = risk.layers.ignored.slice(0, 3).join(', ');
@@ -864,10 +867,10 @@ export function safeToDelete(scanResult, unique = null) {
       prunable: !!w.prunable,
       safe: reasons.length === 0,
       // Named, so nobody has to infer it: this worktree is disposable BECAUSE a living sibling
-      // (or base itself, see lineEndingOnlyVsBase above) holds the identical content, not
+      // holds the identical committed changes, not
       // because it holds nothing. The distinction matters to a human reading the report and it
       // is what makes the last-one-standing behaviour legible rather than surprising.
-      redundantWith: heldAlsoBy.length ? heldAlsoBy : (lineEndingOnlyVsBase ? ['base'] : undefined),
+      redundantWith: heldAlsoBy.length ? heldAlsoBy : undefined,
       // The observation that is NOT a redundancy claim: siblings holding this worktree's exact
       // content, uncommitted. Reported (it is true, and it names the action that would make this
       // worktree disposable) and deliberately kept OUT of `redundantWith`, which every consumer
@@ -888,8 +891,8 @@ export function safeToDelete(scanResult, unique = null) {
       // also holds. Every surface (risk, MCP, TUI, graph) prints this string verbatim, so the
       // false version sat directly next to the contradicting redundantWith field in all of them.
       reasons: reasons.length ? reasons
-        : (heldAlsoBy.length || lineEndingOnlyVsBase)
-          ? [`committed content is identical to work also held by ${heldAlsoBy.length ? heldAlsoBy.join(', ') : 'base (line endings aside)'}`]
+        : heldAlsoBy.length
+          ? [`committed content is exactly identical at the same paths and modes in ${heldAlsoBy.join(', ')}`]
           : ['no committed delta, no uncommitted changes, no unique symbols'],
     };
   }).sort((a, b) => Number(b.safe) - Number(a.safe));
@@ -1656,14 +1659,12 @@ export function landingPlan(scanResult, {
     const ar = find(a), br = find(b);
     if (ar !== br) parent.set(ar, br);
   };
-  const contentKeys = (w) => new Set(Object.values(w?.contentKeys ?? {}).filter(Boolean));
   const durableDuplicate = (a, b) => {
     const ua = uniqById.get(a.id), ub = uniqById.get(b.id);
     if (!ua || !ub || ua.uncommittedOnlyCount > 0 || ub.uncommittedOnlyCount > 0) return false;
-    const bKeys = contentKeys(b), aKeys = contentKeys(a);
-    if (!a.touched?.length || !b.touched?.length) return false;
-    return [...contentKeys(a)].every((key) => bKeys.has(key))
-      && [...contentKeys(b)].every((key) => aKeys.has(key));
+    const aTree = a.committed?.mergedTree;
+    const bTree = b.committed?.mergedTree;
+    return Boolean(aTree && bTree && aTree === bTree);
   };
 
   // Collapse only measured, exact, durable duplicates. Similarity below 1.0 can still be useful

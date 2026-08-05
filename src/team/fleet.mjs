@@ -24,7 +24,7 @@ import { branchAudit } from '../branches.mjs';
 import { git } from '../git.mjs';
 import { checkEntitlement } from '../license.mjs';
 import { samePathAsync } from '../paths.mjs';
-import { verifyJournal, readJournalRaw } from '../journal.mjs';
+import { readVerifiedJournal } from '../journal.mjs';
 
 export class EntitlementError extends Error {
   constructor(entitlement) {
@@ -33,6 +33,25 @@ export class EntitlementError extends Error {
     this.entitlement = entitlement;
   }
 }
+
+/**
+ * Integrity and usable audit evidence are deliberately different states.
+ *
+ * A repository with no journal can have nothing malformed, but it contributes no evidence to a
+ * fleet audit. Likewise an empty (even valid) journal says only that no events are present. The
+ * totals below are compliance claims, so they admit only a fully checkpoint-verified, populated
+ * chain with no legacy prefix. Keeping these labels on the row prevents "0 events" from reading
+ * as "verified clean".
+ */
+export function journalEvidenceState(verification) {
+  if (!verification?.ok) return 'tampered-or-unverifiable';
+  if (verification.code === 'empty') return 'no-journal';
+  if ((verification.entries ?? 0) === 0) return 'empty-valid';
+  if ((verification.legacy ?? 0) > 0) return 'partially-verified-legacy';
+  return 'valid-populated';
+}
+
+export const hasTrustedJournalEvidence = (verification) => journalEvidenceState(verification) === 'valid-populated';
 
 /*
  * REPOSITORY IDENTITY LIVES IN ONE PLACE: `repoIdentity` in src/git.mjs.
@@ -219,10 +238,15 @@ export async function fleetAudit(roots, {
     while (cursor < repos.length) {
       const root = repos[cursor++];
       try {
-        const v = await verifyJournal(root);
-        const { entries } = await readJournalRaw(root);
-        const list = entries.filter((e) => e && e.corrupt === undefined
+        const { verification: v, entries } = await readVerifiedJournal(root);
+        const observed = entries.filter((e) => e && e.corrupt === undefined
           && (sinceMs === null || Date.parse(e.at ?? '') >= sinceMs));
+        const journalState = journalEvidenceState(v);
+        const trusted = hasTrustedJournalEvidence(v);
+        // Do not derive actor/action claims from a missing, empty, legacy-partial, or broken
+        // record and then merely omit them from totals. Rows are routinely exported on their own;
+        // an explicitly zero trusted count is safer than an unlabelled count from bad evidence.
+        const list = trusted ? observed : [];
 
         const byAction = {};
         const actors = new Map();
@@ -240,11 +264,14 @@ export async function fleetAudit(roots, {
         rows.push({
           repo: root,
           name: path.basename(root),
-          verified: v.ok,
+          verified: trusted,
+          integrityVerified: !!v.ok,
+          journalState,
           code: v.code,
           reason: v.reason,
           broken: v.broken ?? null,
           entries: list.length,
+          observedEntries: trusted ? undefined : observed.length,
           legacy: v.legacy ?? 0,
           root: v.root,
           byAction,
@@ -280,7 +307,8 @@ export async function fleetAudit(roots, {
     verifiedRepositories: verified.length,
     // NEVER folded into the totals below.
     unverifiedRepositories: unverified.map((r) => ({
-      repo: r.repo, name: r.name, code: r.code, reason: r.reason, broken: r.broken,
+      repo: r.repo, name: r.name, journalState: r.journalState, code: r.code, reason: r.reason,
+      broken: r.broken, observedEntries: r.observedEntries,
     })),
     totals: {
       events: total('entries'),
@@ -293,7 +321,7 @@ export async function fleetAudit(roots, {
     repos: rows,
     failures,
     note: (unverified.length || failures.length)
-      ? `${unverified.length} repository(ies) FAILED verification and ${failures.length} could not be read — none is counted in the totals above. They are not clean, they are unaccounted for.`
+      ? `${unverified.length} repository(ies) supplied no trusted populated journal evidence and ${failures.length} could not be read — none is counted in the totals above. They are not clean, they are unaccounted for.`
       : `every discovered repository's audit chain verifies (${verified.length}/${rows.length})`,
   };
 }

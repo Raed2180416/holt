@@ -1,0 +1,375 @@
+{
+  "schema": "holt-empty-ignored-directory-reproducer-v1",
+  "generatedAt": "2026-08-04T21:45:53.883Z",
+  "reproductionMatches": true,
+  "reproductionChecks": {
+    "emptyDirExistsBefore": true,
+    "rmdirIsRefused": true,
+    "discardCannotResolveEmptyDir": true,
+    "rescueDryRunClaimsSuccess": true,
+    "rescueActualFails": true,
+    "emptyDirSurvivesFailedRescue": true,
+    "variableChainIsRefused": true,
+    "renameWorkaroundIsAllowed": true,
+    "renamedRmdirWorkaroundIsAllowed": true
+  },
+  "scope": "one clean linked worktree containing one empty ignored dist directory and no uncommitted file bytes",
+  "source": {
+    "script": "/home/raed/grove/eval/reproduce-codex-empty-ignored-dir.mjs",
+    "runtimeRoot": "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package",
+    "holtBin": "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+    "holtBinSha256": "32db0d89d5c6fa394359ad80a04d20839799dc4517d9a07fe4900996a6760b79",
+    "pinnedTarball": "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/packed/holt-0.3.1.tgz",
+    "pinnedTarballSha256": "eb7a438505735cd3a11de66c9a03c81bfe0ab204952edc0673ffd2746f1bb77d"
+  },
+  "retainedFixture": {
+    "workRoot": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1",
+    "repo": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+    "worktree": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated",
+    "dist": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/dist",
+    "distAfterRescue": true
+  },
+  "commands": {
+    "rmdir": "rmdir '/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/dist'",
+    "variableRemove": "repo_root=\"/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo\"\nwt_root=\"$repo_root/../worktrees\"\ngit -C \"$repo_root\" worktree remove \"$wt_root/empty-generated\"",
+    "mvWorkaround": "mv '/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/dist' '/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/build-temp'",
+    "rmdirWorkaround": "rmdir '/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/build-temp'"
+  },
+  "setup": [
+    {
+      "label": "git-init",
+      "argv": [
+        "git",
+        "init",
+        "-b",
+        "main",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1",
+      "stdin": null,
+      "exitCode": 0,
+      "signal": null,
+      "ms": 5,
+      "stdout": "Initialized empty Git repository in /home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo/.git/\n",
+      "stdoutSha256": "b2d0c0f99487d386b16a11e4a17ed8518629dadca8c0ddffa503724178a5728c",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "git-user-email",
+      "argv": [
+        "git",
+        "-C",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+        "config",
+        "user.email",
+        "repro@holt.invalid"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1",
+      "stdin": null,
+      "exitCode": 0,
+      "signal": null,
+      "ms": 3,
+      "stdout": "",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "git-user-name",
+      "argv": [
+        "git",
+        "-C",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+        "config",
+        "user.name",
+        "Holt Reproducer"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1",
+      "stdin": null,
+      "exitCode": 0,
+      "signal": null,
+      "ms": 2,
+      "stdout": "",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "git-add",
+      "argv": [
+        "git",
+        "-C",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+        "add",
+        ".gitignore",
+        "README.md"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1",
+      "stdin": null,
+      "exitCode": 0,
+      "signal": null,
+      "ms": 3,
+      "stdout": "",
+      "stdoutSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "git-commit",
+      "argv": [
+        "git",
+        "-C",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+        "commit",
+        "-m",
+        "reproduction base"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1",
+      "stdin": null,
+      "exitCode": 0,
+      "signal": null,
+      "ms": 4,
+      "stdout": "[main (root-commit) de45412] reproduction base\n 2 files changed, 2 insertions(+)\n create mode 100644 .gitignore\n create mode 100644 README.md\n",
+      "stdoutSha256": "9f41fa41e3940958ccf4a4675cbd352e790c65a6dcd392cd2d9573ecb85d53cd",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "git-worktree-add",
+      "argv": [
+        "git",
+        "-C",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+        "worktree",
+        "add",
+        "-b",
+        "empty-generated",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1",
+      "stdin": null,
+      "exitCode": 0,
+      "signal": null,
+      "ms": 5,
+      "stdout": "HEAD is now at de45412 reproduction base\n",
+      "stdoutSha256": "1967260d2e15287725ec7e74b91366d89b04d8475f9d23fed66313083fadfbff",
+      "stderr": "Preparing worktree (new branch 'empty-generated')\n",
+      "stderrSha256": "de6a2275418de971b8230f4c2a6ed1b8860edcfef1547be5afad5847fe65498d"
+    }
+  ],
+  "observations": [
+    {
+      "label": "gate-before",
+      "argv": [
+        "/opt/codex-desktop/resources/node-runtime/bin/node",
+        "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+        "gate",
+        "empty-generated",
+        "--cwd",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+        "--json"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+      "stdin": null,
+      "exitCode": 1,
+      "signal": null,
+      "ms": 158,
+      "stdout": "{\n  \"id\": \"empty-generated\",\n  \"path\": \"/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated\",\n  \"family\": \"burst:2026-08-04T214552706Z\",\n  \"prunable\": false,\n  \"safe\": false,\n  \"confidence\": \"unverifiable\",\n  \"ignoredFiles\": [\n    \"dist/\"\n  ],\n  \"reasons\": [\n    \"1 gitignored file(s) holt cannot verify (e.g. dist/)\"\n  ]\n}\n",
+      "stdoutSha256": "f7ee85f339137e8d8b31c4d924a2d2602116de3d0217bce36a7d86b35dfb6551",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "hook-rmdir-empty-dist",
+      "argv": [
+        "/opt/codex-desktop/resources/node-runtime/bin/node",
+        "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+        "hook",
+        "pre-tool-use",
+        "--host",
+        "codex"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+      "stdin": {
+        "bytes": 335,
+        "sha256": "de18cd5533d4eae7177583094a592e16a9116e15dbb5514bb79000f5361c358e",
+        "value": {
+          "session_id": "codex-empty-dir-reproducer",
+          "tool_use_id": "rmdir-empty-dist",
+          "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "rmdir '/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/dist'"
+          }
+        }
+      },
+      "exitCode": 2,
+      "signal": null,
+      "ms": 244,
+      "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"holt blocked this: rmdir (deletes the file) would destroy 1 file(s) whose only copy is on disk.\\n  • empty-generated: dist/ (gitignored)\\nNo commit, index entry or stash holds this content — git cannot bring it back.\\nRun `holt risk` to inspect, `holt rescue <id>` to capture the whole worktree, or commit it.\\nIf it is genuinely disposable: holt discard dist/ — that captures the content to a verified ref FIRST, then removes it, so this is recoverable and recorded rather than gone.\\nIf you believe this is wrong, say so and stop — do not edit holt's configuration to get past it. Overruling this is a human decision, and it is journalled.\"}}\n",
+      "stdoutSha256": "ed86789ad3bcac96496f9e114a17d56bbac65a43896052ebb556f5b210429fd0",
+      "stderr": "holt blocked this: rmdir (deletes the file) would destroy 1 file(s) whose only copy is on disk.\n  • empty-generated: dist/ (gitignored)\nNo commit, index entry or stash holds this content — git cannot bring it back.\nRun `holt risk` to inspect, `holt rescue <id>` to capture the whole worktree, or commit it.\nIf it is genuinely disposable: holt discard dist/ — that captures the content to a verified ref FIRST, then removes it, so this is recoverable and recorded rather than gone.\nIf you believe this is wrong, say so and stop — do not edit holt's configuration to get past it. Overruling this is a human decision, and it is journalled.\n",
+      "stderrSha256": "37dd45070e2a02421fba146becf0a8fc4c234ef3de823d49c5914ab6ca463728"
+    },
+    {
+      "label": "discard-empty-dist-dry-run",
+      "argv": [
+        "/opt/codex-desktop/resources/node-runtime/bin/node",
+        "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+        "discard",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/dist",
+        "--dry-run",
+        "--cwd",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+      "stdin": null,
+      "exitCode": 1,
+      "signal": null,
+      "ms": 103,
+      "stdout": "{\n  \"ok\": false,\n  \"error\": \"'dist' is an empty directory, which a Git tree cannot represent exactly\",\n  \"note\": \"NOTHING WAS CAPTURED OR REMOVED.\"\n}\n",
+      "stdoutSha256": "86cbf926e4056cc536277ba76a700d21fcbbd784531a9c5f30045720a8209f1b",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "rescue-empty-worktree-dry-run",
+      "argv": [
+        "/opt/codex-desktop/resources/node-runtime/bin/node",
+        "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+        "rescue",
+        "empty-generated",
+        "--dry-run",
+        "--cwd",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+      "stdin": null,
+      "exitCode": 0,
+      "signal": null,
+      "ms": 148,
+      "stdout": "{\n  \"ok\": true,\n  \"dryRun\": true,\n  \"id\": \"empty-generated\",\n  \"ref\": \"refs/holt/rescue/empty-generated\",\n  \"wouldCapture\": {\n    \"files\": [\n      \"dist/\"\n    ],\n    \"committedDelta\": 0\n  }\n}\n",
+      "stdoutSha256": "8f9f4a23892250093fa76bee9a7d920aeeec09487cb0ec86b56cc8ce53a713dc",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "rescue-empty-worktree",
+      "argv": [
+        "/opt/codex-desktop/resources/node-runtime/bin/node",
+        "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+        "rescue",
+        "empty-generated",
+        "--cwd",
+        "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+      "stdin": null,
+      "exitCode": 1,
+      "signal": null,
+      "ms": 176,
+      "stdout": "{\n  \"ok\": false,\n  \"id\": \"empty-generated\",\n  \"error\": \"rescue is INCOMPLETE — exact raw capture failed: 'dist' is an empty directory, which a Git tree cannot represent exactly\",\n  \"missing\": [\n    \"dist\"\n  ],\n  \"note\": \"the worktree has NOT been released and nothing was deleted. Holt never executes repository content filters while rescuing. A submodule, embedded Git repository, unsupported filesystem node, or concurrently changing path must be handled at its own boundary.\"\n}\n",
+      "stdoutSha256": "1f1ff834d0fecdd596ed638c8e208c0a47843612b9c0b9a39c2e17e4923faa4d",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "hook-variable-worktree-remove",
+      "argv": [
+        "/opt/codex-desktop/resources/node-runtime/bin/node",
+        "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+        "hook",
+        "pre-tool-use",
+        "--host",
+        "codex"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+      "stdin": {
+        "bytes": 428,
+        "sha256": "5cdbc6142e5df8b80c78c1a36457566ad79c7475d822af2bc6b169f93260403a",
+        "value": {
+          "session_id": "codex-empty-dir-reproducer",
+          "tool_use_id": "variable-worktree-remove",
+          "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "repo_root=\"/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo\"\nwt_root=\"$repo_root/../worktrees\"\ngit -C \"$repo_root\" worktree remove \"$wt_root/empty-generated\""
+          }
+        }
+      },
+      "exitCode": 2,
+      "signal": null,
+      "ms": 92,
+      "stdout": "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"holt could not resolve the command safely: unresolved variable $wt_root. Confirm manually before proceeding.\\nIf you believe this is wrong, say so and stop — do not edit holt's configuration to get past it. Overruling this is a human decision, and it is journalled.\"}}\n",
+      "stdoutSha256": "003d25840201870526ba178be812d8a10250309edcd2da70c61ae638cc8273ef",
+      "stderr": "holt could not resolve the command safely: unresolved variable $wt_root. Confirm manually before proceeding.\nIf you believe this is wrong, say so and stop — do not edit holt's configuration to get past it. Overruling this is a human decision, and it is journalled.\n",
+      "stderrSha256": "1001c6df73f81c623cb1a74f0121979396441f546a507ec03388ab1c146f2e83"
+    },
+    {
+      "label": "hook-mv-empty-dist",
+      "argv": [
+        "/opt/codex-desktop/resources/node-runtime/bin/node",
+        "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+        "hook",
+        "pre-tool-use",
+        "--host",
+        "codex"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+      "stdin": {
+        "bytes": 448,
+        "sha256": "7eb183a1e380fda2c33fb94c917a7ca850376492f1e6bc54d2bda237b7d07ffb",
+        "value": {
+          "session_id": "codex-empty-dir-reproducer",
+          "tool_use_id": "mv-empty-dist",
+          "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "mv '/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/dist' '/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/build-temp'"
+          }
+        }
+      },
+      "exitCode": 0,
+      "signal": null,
+      "ms": 91,
+      "stdout": "{}\n",
+      "stdoutSha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "hook-rmdir-renamed-empty-dir",
+      "argv": [
+        "/opt/codex-desktop/resources/node-runtime/bin/node",
+        "/home/raed/.cache/holt-benchmark/runtime-20260805-codex-luna-smoke-1/package/bin/holt.mjs",
+        "hook",
+        "pre-tool-use",
+        "--host",
+        "codex"
+      ],
+      "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+      "stdin": {
+        "bytes": 348,
+        "sha256": "d00a0ba9e2f894ae2fa1f6b89bd5cd9373ad2f93043419ee9d705b5acf073d1a",
+        "value": {
+          "session_id": "codex-empty-dir-reproducer",
+          "tool_use_id": "rmdir-renamed-empty-dir",
+          "cwd": "/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/repo",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "rmdir '/home/raed/.cache/holt-benchmark/codex-empty-ignored-dir-reproducer-20260805-v1/worktrees/empty-generated/build-temp'"
+          }
+        }
+      },
+      "exitCode": 0,
+      "signal": null,
+      "ms": 161,
+      "stdout": "{}\n",
+      "stdoutSha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "stderr": "",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "causalFinding": "Holt blocks deletion of an empty ignored directory, recommends capture operations that cannot represent it, and allows the same deletion after a name-only rename."
+}

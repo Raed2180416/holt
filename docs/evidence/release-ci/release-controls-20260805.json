@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-08-05T04:39:02+05:30",
+  "repository": "Raed2180416/holt",
+  "apiVersion": "2026-03-10",
+  "immutableReleases": {
+    "enabled": true,
+    "enforcedByOwner": false,
+    "endpoint": "GET /repos/Raed2180416/holt/immutable-releases"
+  },
+  "releaseEnvironment": {
+    "exists": true,
+    "name": "release",
+    "canAdminsBypass": true,
+    "protectionRuleTypes": [
+      "branch_policy"
+    ],
+    "deploymentBranchPolicy": {
+      "protectedBranches": false,
+      "customBranchPolicies": true
+    },
+    "customPolicies": [
+      {
+        "name": "v*",
+        "type": "tag"
+      }
+    ],
+    "environmentSecretNames": [
+      "HOLT_RELEASE_ADMIN_TOKEN",
+      "HOLT_RELEASE_SIGNING_KEY"
+    ],
+    "secretValuesCaptured": false
+  },
+  "releaseSigningKey": {
+    "algorithm": "Ed25519",
+    "pinnedPublicKeySpkiSha256": "fdc0f121ca21f23a6ae7d448f4cbb7f16a6c214d4bfae855f380cc54b4e170d8",
+    "locallyDerivedPublicKeySpkiSha256": "fdc0f121ca21f23a6ae7d448f4cbb7f16a6c214d4bfae855f380cc54b4e170d8",
+    "publicKeysMatch": true,
+    "localPrivateKeyFileMode": "0600",
+    "privateKeyMaterialCaptured": false,
+    "environmentSecretValueReadable": false,
+    "workflowRechecksMatchBeforeSigning": true
+  },
+  "immutableStateCredential": {
+    "environmentSecretName": "HOLT_RELEASE_ADMIN_TOKEN",
+    "configuredFrom": "maintainer GitHub OAuth credential",
+    "observedScopes": [
+      "gist",
+      "read:org",
+      "repo",
+      "workflow"
+    ],
+    "secretValueCaptured": false,
+    "leastPrivilegeTarget": {
+      "repository": "Raed2180416/holt",
+      "permission": "Administration",
+      "access": "read"
+    },
+    "status": "rotation-required"
+  },
+  "limitations": [
+    "This is a point-in-time control-plane observation; repository settings can drift.",
+    "GitHub exposes environment secret names and timestamps, not secret values.",
+    "A successful release run is still required to prove that the stored signing secret is usable and matches the pinned public key.",
+    "The v* tag rule is not a required-reviewer rule, and administrators can currently bypass environment protection.",
+    "These controls do not retroactively sign or attest v0.3.0.",
+    "SLSA Build L3 remains unclaimed."
+  ],
+  "officialDocumentation": [
+    "https://docs.github.com/en/enterprise-cloud@latest/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository",
+    "https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments",
+    "https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens",
+    "https://slsa.dev/spec/v1.2/build-track-basics"
+  ]
+}

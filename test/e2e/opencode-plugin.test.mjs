@@ -1,21 +1,20 @@
 /**
- * holt — the OpenCode plugin, driven exactly as OpenCode drives it.
+ * holt — the OpenCode plugin contract and discovery smoke.
  *
- * VERIFIED AGAINST THE REAL HOST, not a doc summary. `opencode debug config` on a repo where
- * `holt integrate` had run shows:
+ * `opencode debug config` on a repo where `holt integrate` had run shows:
  *
  *   "plugin": ["file:///…/.opencode/plugins/holt.js"],
  *   "plugin_origins": [{ "spec": "…", "source": "…/.opencode", "scope": "local" }]
  *
- * so the file is genuinely discovered and loaded. An earlier revision wrote to
+ * so the file is genuinely discovered by the installed host. That is a configuration smoke, not
+ * a live destructive-tool refusal: the hook handler below is executed directly against OpenCode's
+ * documented plugin shape. An earlier revision wrote to
  * `.opencode/plugin/` (singular) — silently ignored: the file exists, looks installed, and never
  * runs. That is the worst possible failure for a safety gate, so the plural path is asserted here.
  *
- * These tests import the generated plugin the same way OpenCode does (dynamic import of a file
- * URL), call the factory with the real context shape `{project, client, $, directory, worktree}`,
- * and drive `tool.execute.before` with real tool-call payloads. Deterministic on purpose: a live
- * model run cannot be made to reliably attempt a destructive command, and cannot reach the
- * failure branches at all.
+ * These tests import the generated plugin through a file URL, call the factory with OpenCode's
+ * documented context shape `{project, client, $, directory, worktree}`, and drive
+ * `tool.execute.before` with contract payloads. They deliberately do not claim a live host run.
  */
 
 import os from 'node:os';
@@ -73,13 +72,14 @@ test('OPENCODE: the plugin is written where OpenCode actually looks', async (t) 
   await fs.access(file);
 });
 
-test('OPENCODE: the plugin exposes the hooks OpenCode calls', async (t) => {
+test('OPENCODE: the plugin exposes the documented shell gate without a fake context event', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
 
   const { hooks } = await loadPlugin(fx.root);
   assert.equal(typeof hooks['tool.execute.before'], 'function', 'missing tool.execute.before');
-  assert.equal(typeof hooks.event, 'function', 'missing event hook');
+  assert.equal(hooks.event, undefined,
+    'session.created console output is terminal noise, not model context; do not ship that hook');
 });
 
 test('OPENCODE: a destructive command THROWS, naming what would be lost', async (t) => {
@@ -172,40 +172,26 @@ test('OPENCODE: when holt is broken the plugin fails open — but says so LOUDLY
     `a failed-open gate MUST announce itself; warnings were: ${JSON.stringify(warnings)}`);
 });
 
-test('OPENCODE: the session hook emits a brief when there is something to say', async (t) => {
+test('OPENCODE: plugin initialization emits no terminal pseudo-context', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
 
-  const { hooks } = await loadPlugin(fx.root);
   const logs = [];
   const original = console.log;
   console.log = (...a) => logs.push(a.join(' '));
+  let hooks;
   try {
-    await hooks.event({ event: { type: 'session.created' } });
+    ({ hooks } = await loadPlugin(fx.root));
   } finally {
     console.log = original;
   }
 
-  assert.ok(logs.length > 0, 'a repo with at-risk work must produce a session brief');
-  assert.match(logs.join('\n'), /holt/);
-});
-
-test('OPENCODE: unrelated events produce nothing', async (t) => {
-  const { fx } = await standardFixture();
-  t.after(() => fx.cleanup());
-
-  const { hooks } = await loadPlugin(fx.root);
-  const logs = [];
-  const original = console.log;
-  console.log = (...a) => logs.push(a.join(' '));
-  try {
-    await hooks.event({ event: { type: 'message.updated' } });
-    await hooks.event({ event: {} });
-    await hooks.event({});
-  } finally {
-    console.log = original;
-  }
-  assert.equal(logs.length, 0, 'only session.created should emit');
+  assert.equal(logs.length, 0,
+    `console output is not consumable model context and must not be emitted: ${JSON.stringify(logs)}`);
+  assert.equal(hooks.event, undefined, 'the stable plugin exposes no model-context event contract');
+  const source = opencodePlugin('holt');
+  assert.doesNotMatch(source, /event\s*:\s*async|console\.log\(text\)/,
+    'the generated plugin must not relabel a session event log as injected context');
 });
 
 test('OPENCODE: the generated plugin has no imports OpenCode cannot resolve', async (t) => {

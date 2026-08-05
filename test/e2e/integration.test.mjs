@@ -365,7 +365,8 @@ test('BRIEF: every capped repository-derived list announces its remainder', asyn
   assert.ok(text, 'the fixture must produce a brief');
   assert.match(text, /… and 1 more workstream/);
   assert.match(text, /… and 1 more symbol/);
-  assert.match(text, /6 workstream.*uncommitted changes — .*… and 1 more\./);
+  assert.match(text,
+    /6 workstream.*uncommitted or ignored work with no durable copy proven — .*… and 1 more\./);
   assert.match(text, /4 stash entr.*NO ref holds — .*… and 1 more\./);
 });
 
@@ -479,7 +480,7 @@ test('INSTALL: MCP targets cover the major hosts, split by scope', async (t) => 
   ]));
 
   const all = mcpTargets(dir, home, { scope: 'all' }).map((x) => x.host).join(' ');
-  for (const expected of ['claude-code', 'cursor', 'vscode', 'devin-desktop', 'gemini-cli', 'zed', 'continue']) {
+  for (const expected of ['claude-code', 'cursor', 'vscode', 'devin-cli', 'cascade', 'gemini-cli', 'qwen-code', 'zed', 'continue']) {
     assert.match(all, new RegExp(expected), `MCP target list should include ${expected}`);
   }
 
@@ -570,9 +571,39 @@ test('INSTALL: integrate() wires AGENTS.md + MCP + detected hosts only', async (
   assert.ok(adapters.includes('agents-md'), 'AGENTS.md is universal and always installed');
   assert.ok(adapters.includes('claude-code'), 'detected host hooks installed');
 
+  const mcp = results.filter((r) => r.adapter === 'mcp');
+  assert.deepEqual(mcp.map((r) => r.host), ['claude-code'],
+    `default integration must configure only detected MCP clients, got ${JSON.stringify(mcp)}`);
+  assert.ok(await fs.stat(path.join(dir, '.mcp.json')), 'detected Claude MCP config must exist');
+  await assert.rejects(fs.stat(path.join(dir, '.cursor', 'mcp.json')),
+    'default integration must not fabricate an absent Cursor config');
+  await assert.rejects(fs.stat(path.join(dir, '.codex', 'config.toml')),
+    'default integration must not fabricate an absent Codex config');
+
   const settings = JSON.parse(await fs.readFile(path.join(dir, '.claude', 'settings.json'), 'utf8'));
   assert.ok(settings.hooks.PreToolUse, 'PreToolUse hook wired');
   assert.match(JSON.stringify(settings.hooks), /holt hook/);
+});
+
+test('INSTALL: allHosts is an explicit team-template mode, not the default', async (t) => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-int-all-'));
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-inthome-all-'));
+  t.after(() => Promise.all([
+    fs.rm(dir, { recursive: true, force: true }),
+    fs.rm(home, { recursive: true, force: true }),
+  ]));
+  await fs.mkdir(path.join(dir, '.git', 'hooks'), { recursive: true });
+
+  const out = await integrate(dir, { home, allHosts: true });
+  assert.equal(out.allHosts, true);
+  assert.ok(out.configuredHosts.includes('codex'));
+  assert.ok(out.configuredHosts.includes('cursor'));
+  assert.ok(await fs.stat(path.join(dir, '.codex', 'config.toml')),
+    'explicit all-host mode prepares Codex MCP');
+  assert.ok(await fs.stat(path.join(dir, '.cursor', 'mcp.json')),
+    'explicit all-host mode prepares Cursor MCP');
+  assert.ok(await fs.stat(path.join(dir, '.codex', 'hooks.json')),
+    'explicit all-host mode prepares Codex proactive hooks');
 });
 
 test('ADAPTER: the generated OpenCode plugin is syntactically valid JS', async (t) => {
@@ -586,13 +617,15 @@ test('ADAPTER: the generated OpenCode plugin is syntactically valid JS', async (
   assert.equal(typeof mod.holt, 'function', 'plugin must export a holt factory');
 });
 
-test('ADAPTER: Claude Code hook config targets Bash and all three events', () => {
+test('ADAPTER: Claude Code wires quiet context events and omits continuation-producing Stop context', () => {
   const h = claudeCodeHooks('holt');
-  assert.equal(h.PreToolUse[0].matcher, 'Bash');
+  assert.equal(h.PreToolUse[0].matcher, 'Bash|Write|Edit');
   for (const evt of ['PreToolUse', 'SessionStart', 'UserPromptSubmit']) {
     assert.ok(h[evt], `missing ${evt}`);
     assert.match(JSON.stringify(h[evt]), /holt hook/);
   }
+  assert.ok(!('Stop' in h),
+    'Claude Stop additionalContext continues the conversation; do not call that a passive advisory');
 });
 
 test('ADAPTER: host detection reports only what exists', async (t) => {
@@ -622,6 +655,11 @@ test('AGENTS.md text tells an agent the exit-code contract', () => {
   assert.match(block, /holt gate/);
   assert.match(block, /holt context/);
   assert.match(block, /--json/, 'agents need to know machine output exists');
+  assert.match(block, /locked, recoverable local quarantine/);
+  assert.match(block, /does \*\*not\*\* delete files or branches/);
+  assert.match(block, /exact restore argv/);
+  assert.doesNotMatch(block, /removes those worktrees and their merged branches/,
+    'generated instructions must not preserve the obsolete physical-deletion contract');
 });
 
 test('HOSTS: the manifest is well-formed and holt is honest about strength', async () => {
@@ -639,19 +677,17 @@ test('HOSTS: the manifest is well-formed and holt is honest about strength', asy
   }
   // TWO GRADES OF "BLOCKING", AND THE DIFFERENCE IS LOAD-BEARING.
   //
-  // `verifiedLive` means holt has been DRIVEN against the real host and observed to deny. Only
-  // Claude Code and OpenCode have been. Cursor's adapter is written from Cursor's own published
-  // hook schema — better than the guess this project has always refused to ship, and still not
-  // the same claim. Collapsing the two would let a documentation-derived adapter inherit the
-  // credibility of a demonstrated one, which is the overclaim this test exists to stop.
+  // `verifiedLive` means holt was DRIVEN through a real host process and the host refused the
+  // target. Config discovery, source inspection and importing a generated plugin are useful
+  // contract evidence, but none is that enforcement run. Do not promote them by prose.
   const blocking = HOSTS.filter((h) => h.strength === 'block').map((h) => h.id).sort();
   const live = HOSTS.filter((h) => h.strength === 'block' && h.verifiedLive === true).map((h) => h.id).sort();
-  assert.deepEqual(live, ['claude-code', 'opencode'],
-    'only adapters actually driven against the real host may claim VERIFIED blocking');
+  assert.deepEqual(live, [],
+    'no current adapter has a recorded real-host enforcement run; config/source smokes must not claim one');
   for (const h of HOSTS.filter((x) => x.strength === 'block')) {
     assert.equal(typeof h.verifiedLive, 'boolean',
       `${h.id} claims blocking without stating whether it has been verified live`);
-    assert.match(h.note, /verified|not guessed|deterministic/i,
+    assert.match(h.note, /implemented|not driven live/i,
       `${h.id} claims blocking but its note does not say what that claim rests on`);
   }
   assert.ok(blocking.length >= live.length, 'sanity: verified blocking is a subset of blocking');
@@ -666,9 +702,9 @@ test('HOSTS: hostsReport marks what is detected and never claims cloud blocking'
 
   await fs.mkdir(path.join(dir, '.claude'), { recursive: true });
   const rep = await hostsReport(dir, home);
-  // Counts blocking adapters, of which only a subset has been driven live — see the manifest
-  // test above for why the two grades are kept apart.
-  assert.ok(rep.counts.blocking >= 2, `at least the two verified adapters block: ${rep.counts.blocking}`);
+  // Counts implemented blocking adapters. The manifest test above separately prevents that
+  // contract-level count from being presented as a real-host enforcement run.
+  assert.ok(rep.counts.blocking >= 2, `expected implemented blocking adapters: ${rep.counts.blocking}`);
   assert.ok(rep.detectedHere.includes('Claude Code'), 'a real marker is detected');
   // Was >= 3 (Jules, Replit, Amazon Q). Amazon Q Developer was reclassified: its detection markers
   // (.amazonq / .aws/amazonq) belong to the Q Developer CLI, a LOCAL terminal agent with a real,
@@ -858,7 +894,7 @@ test('COVERAGE: stash SCOPED to a pathspec is deliberate and bounded — it stay
     'a real pathspec still bounds the blast radius, dirty tree or not');
 });
 
-test('COVERAGE: `git stash pop` stops being a flat deny — it is the recovery action, not a new act', async (t) => {
+test('COVERAGE: `git stash pop` is allowed — success restores first and conflict keeps the entry', async (t) => {
   // MEASURED: an agent that had just had eleven siblings' work swept into the stash by a bare
   // `git stash` was then BLOCKED from putting any of it back with `pop`. A guard that blocks the
   // only way back is not protecting anyone.
@@ -875,9 +911,8 @@ test('COVERAGE: `git stash pop` stops being a flat deny — it is the recovery a
   assert.match(list.out, /stash@\{0\}/, `fixture setup: an entry must exist: ${JSON.stringify(list)}`);
 
   const v = await assessCommand('git stash pop', wt);
-  assert.equal(v.decision, 'ask', `pop must ask, never flatly deny the only way back: ${JSON.stringify(v)}`);
-  assert.match(v.reason, /git stash apply/,
-    `the message must name apply as the entry-preserving equivalent: ${v.reason}`);
+  assert.equal(v.decision, 'allow',
+    `pop preserves the bytes in both Git outcomes and must not interrupt recovery: ${JSON.stringify(v)}`);
 
   // `drop`/`clear` are genuinely final — dropping IS the destructive act, with no equivalent that
   // keeps the entry — and stay denied outright. If this fix had accidentally softened those too,
@@ -969,10 +1004,7 @@ test('CATASTROPHIC: pop/drop/clear are weighed against `git stash list`, not aga
     `a stash verdict must not be justified by committed history: ${dropped.reason}`);
 
   const popped = await assessCommand('git stash pop', wt);
-  assert.equal(popped.decision, 'ask', `pop stays the recovery action: ${JSON.stringify(popped)}`);
-  assert.match(popped.reason, /git stash apply/, `naming apply: ${popped.reason}`);
-  assert.doesNotMatch(popped.reason, COMMITTED_EVIDENCE,
-    `and not resting on committed history either: ${popped.reason}`);
+  assert.equal(popped.decision, 'allow', `pop stays the recovery action: ${JSON.stringify(popped)}`);
 });
 
 test('CATASTROPHIC: a drop is weighed against the ONE entry it removes, not the whole stash', async (t) => {
@@ -1153,6 +1185,9 @@ async function findWorkstreamByPath(workstreams, dir) {
 async function fileRiskFixture() {
   const fx = await newRepo('file-risk');
   await fx.write('.gitignore', 'node_modules/\ndist/\nbuild/\ncoverage/\n*.log\n.env\nsecrets/\n');
+  // The manifest is the evidence that the conventional JS output directories below are
+  // recreatable. Their names alone are deliberately insufficient.
+  await fx.write('package.json', '{"name":"file-risk-fixture","private":true}\n');
   await fx.write('src/committed.js', 'export function COMMITTED_HERE() {}\n');
   await fx.write('docs/guide.md', '# guide\n');
   await fx.commit('ignore rules, a committed source file and a committed doc');
@@ -1178,10 +1213,6 @@ test('FILE GATE: ordinary file operations stay allowed — the never-worse half'
   t.after(() => fx.cleanup());
 
   const mustAllow = [
-    // regenerable output, by holt's own generated-file rule — never by a name allowlist
-    'rm -rf node_modules', 'rm -rf ./node_modules', 'rm -rf dist', 'rm build/out.js',
-    'rm -rf coverage', 'rm app.log', 'truncate -s0 app.log', '> app.log',
-    'rm -rf dist/* build/*', 'shred -u coverage/lcov.info',
     // committed content: a commit still holds it, so removing the file is recoverable
     'rm src/committed.js', 'git rm -f src/committed.js', 'rm -rf docs', '> src/committed.js',
     'mv src/committed.js /tmp/elsewhere.js',
@@ -1206,6 +1237,38 @@ test('FILE GATE: ordinary file operations stay allowed — the never-worse half'
     const v = await assessCommand(cmd, fx.root);
     assert.equal(v.decision, 'allow', `ordinary operation must stay allowed: ${cmd}\n${v.reason ?? ''}`);
   }
+
+  const mustAsk = [
+    'rm -rf node_modules', 'rm -rf ./node_modules', 'rm -rf dist', 'rm build/out.js',
+    'rm -rf coverage', 'rm app.log', 'truncate -s0 app.log', '> app.log',
+    'rm -rf dist/* build/*', 'shred -u coverage/lcov.info',
+  ];
+  for (const cmd of mustAsk) {
+    const v = await assessCommand(cmd, fx.root);
+    assert.equal(v.decision, 'ask', `generated-looking output needs confirmation: ${cmd}\n${v.reason ?? ''}`);
+  }
+});
+
+test('FILE GATE: a scoped git clean is judged only against its pathspec and reachable layers', async (t) => {
+  const fx = await fileRiskFixture();
+  t.after(() => fx.cleanup());
+
+  const generated = await assessCommand('git clean -fdx -- dist', fx.root);
+  assert.equal(generated.decision, 'ask',
+    'manifest-backed output still needs explicit confirmation because names do not prove bytes');
+  assert.ok(generated.files?.every((f) => f === 'dist/' || f.startsWith('dist/')),
+    'the verdict must carry only the selected dist path: ' + JSON.stringify(generated));
+  assert.doesNotMatch(generated.reason ?? '', /notes\.md|src\/only_here/,
+    'unrelated work elsewhere in the worktree is outside this clean pathspec');
+
+  const authored = await assessCommand('git clean -fd -- src/only_here.js', fx.root);
+  assert.equal(authored.decision, 'deny',
+    'the same narrowing must feed real protection for an authored untracked file');
+  assert.ok(authored.files?.includes('src/only_here.js'));
+
+  const absent = await assessCommand('git clean -fd -- does-not-exist', fx.root);
+  assert.equal(absent.decision, 'allow',
+    'a pathspec that selects nothing must not inherit a whole-worktree refusal');
 });
 
 test('FILE GATE: the verbs that destroy one file at a time are denied', async (t) => {
@@ -1227,8 +1290,8 @@ test('FILE GATE: the verbs that destroy one file at a time are denied', async (t
     assert.ok(atRisk.has(f), `PRECONDITION: holt must already report ${f} as at risk — got ${[...atRisk]}`);
   }
   assert.ok(!atRisk.has('src/committed.js'), 'a committed file is not at risk');
-  assert.ok(![...atRisk].some((f) => f.startsWith('node_modules/') || f.startsWith('dist/')),
-    'regenerable output must never be in the at-risk set');
+  assert.ok([...atRisk].some((f) => f.startsWith('node_modules') || f.startsWith('dist')),
+    'generated-looking paths stay in the destructive at-risk set');
 
   const mustDeny = [
     'rm src/only_here.js',
@@ -1332,8 +1395,8 @@ test('FILE GATE: the fast probe and scan.mjs agree on what is at risk', async (t
 
   for (const f of computed) {
     const v = await assessCommand(`rm ${JSON.stringify(f)}`, fx.root);
-    assert.equal(v.decision, 'deny',
-      `scan.mjs calls ${f} at risk, so the guard must too — otherwise the probe is blind to it`);
+    assert.notEqual(v.decision, 'allow',
+      `scan.mjs calls ${f} at risk, so the guard must deny or ask — never silently allow it`);
   }
 });
 

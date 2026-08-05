@@ -10,9 +10,9 @@
  *               read natively by 30+ agents (Codex, Cursor, Copilot, Gemini CLI, Aider, Zed,
  *               Windsurf, Jules, Factory, Devin, VS Code…). This is the widest-reach surface
  *               that exists and it costs one markdown block.
- *   mcp         UNIVERSAL TOOLS. Any MCP-speaking host. Writes the server entry into whichever
- *               config files are present, so one command wires Cursor, Windsurf, Codex, Claude
- *               Code, Continue, Zed and others at once.
+ *   mcp         UNIVERSAL TOOLS. Any MCP-speaking host. By default writes only for hosts detected
+ *               in this repository or on this machine; an explicit all-hosts mode prepares a
+ *               committed project for clients teammates may use later.
  *   claude-code DETERMINISTIC ENFORCEMENT via settings.json hooks (PreToolUse can deny).
  *   opencode    DETERMINISTIC ENFORCEMENT via its JS plugin API.
  *   git-hooks   AGENT-INDEPENDENT ENFORCEMENT. Works even for an agent with no plugin system at
@@ -21,9 +21,9 @@
  *   generic     A documented stdin-JSON/stdout-JSON protocol plus exit codes, for any host not
  *               listed above. Nothing here requires holt to know the host in advance.
  *
- * ORDER MATTERS: awareness (AGENTS.md) and tools (MCP) work everywhere and are safe to install
- * unconditionally. Hooks are installed only for hosts actually detected in the repo/home, so we
- * never write config for a tool the user does not use.
+ * ORDER MATTERS: awareness (AGENTS.md) is cross-host. Tools (MCP) and hooks are installed only
+ * for hosts actually detected in the repo/home unless the caller explicitly requests all hosts,
+ * so a normal setup never litters a repository with configs for tools the user does not use.
  */
 
 import fs from 'node:fs/promises';
@@ -35,16 +35,10 @@ import { recordCreated, readReceipt, holtOwnsFile, clearReceipt } from './receip
 import { relativeWithinAsync } from '../paths.mjs';
 
 /**
- * jsonc-parser is an OPTIONAL dependency (see package.json optionalDependencies). A static import
- * would throw ERR_MODULE_NOT_FOUND on an install that omits optionals (`npm i --omit=optional`,
- * some corporate mirrors, older `--production`), killing the CLI before it prints anything — even
- * `holt --help`. So it is loaded dynamically, cached, and a missing install is reported as a clear
- * error at the point of use rather than at module load.
- *
- * The synchronous helpers below (parseJsonc, jsoncWrite, …) read from the cache, which is preloaded
- * once at module init via the top-level await. In an install without jsonc-parser the preload
- * catches the failure, leaves the cache empty, and the helpers throw a clear message when a JSONC
- * edit is actually attempted — every other code path (including `--help`) works unchanged.
+ * jsonc-parser is an exact required runtime dependency. It remains dynamically loaded and cached
+ * so a damaged installation reaches an actionable reinstall error instead of dying inside Node's
+ * module loader before Holt can explain what is missing. The synchronous helpers below read the
+ * cache preloaded by the top-level await.
  */
 /** @type {any} */
 let _jsonc = null;
@@ -61,8 +55,8 @@ async function loadJsonc() {
 await loadJsonc();
 function missingJsonc() {
   throw new Error(
-    "holt requires the optional 'jsonc-parser' dependency to read and edit JSONC config files, " +
-    "and it is not installed. Install it with: npm install jsonc-parser",
+    "holt requires its exact 'jsonc-parser' runtime dependency to read and edit JSONC config files; " +
+    'reinstall Holt from an intact release',
   );
 }
 const jsoncParse = (text, errors, options) => { if (!_jsonc) missingJsonc(); return _jsonc.parse(text, errors, options); };
@@ -105,13 +99,15 @@ relate UNCOMMITTED changes across worktrees, so a worktree can hold the only cop
 ### If you were asked to clean up worktrees, this is the whole task
 
 \`\`\`bash
-${bin} clean            # shows exactly what holds nothing base lacks — changes nothing
-${bin} clean --apply    # removes those worktrees and their merged branches
+${bin} clean            # previews which active worktrees would enter quarantine — changes nothing
+${bin} clean --apply    # moves them into locked, recoverable local quarantine
 \`\`\`
 
-That is the safe, complete action. \`clean\` re-verifies each worktree immediately before removing
-it, never touches one that holds work found nowhere else, and never touches one it could not
-assess. **You do not need to decide which worktrees are disposable — that is what this computes.**
+That is the safe action. \`clean\` re-verifies each worktree immediately before an atomic local
+move, never touches one that holds work found nowhere else, and never touches one it could not
+assess. It does **not** delete files or branches: the whole registered worktree stays locked in
+local quarantine and the result includes exact restore argv. **You do not need to decide which
+worktrees are disposable — that is what this computes.**
 
 Do not hand-inspect worktrees and reason about them yourself. Measured across real trials, that
 approach deleted a worktree holding the only copy of a security fix and kept two empty ones, in
@@ -148,11 +144,13 @@ to a verifiable ref first and then releases the lock.
 A worktree is not the only thing that can hold the only copy of something. An untracked file, a
 modified-but-uncommitted file and a gitignored file are all content **git cannot bring back** —
 so \`rm\`, \`git rm\`, \`truncate\`, \`shred\`, \`mv\` out of the tree, \`cp\`/\`tee\`/\`dd\` over it
-and \`> file\` are refused against those paths exactly as a worktree deletion is. Regenerable
-output (\`node_modules/\`, \`dist/\`, \`build/\`, \`coverage/\`, \`*.log\`, lockfiles) and anything
-already committed are never protected, so ordinary cleanup is unaffected. If a refusal names a
-file you truly do not want, commit it, \`${bin} rescue\` it, or delete it yourself outside the
-agent — do not look for another verb that gets past the guard.
+and \`> file\` are refused against those paths exactly as a worktree deletion is. Existing
+generated-looking output (\`node_modules/\`, \`dist/\`, \`build/\`, \`coverage/\`, \`*.log\`,
+lockfiles) is not accepted on its name alone: holt asks for confirmation because names are not
+proof that the bytes are reproducible. Paths that do not exist yet remain free to create, and
+anything already committed is recoverable. If a refusal names a file you truly do not want,
+commit it, \`${bin} rescue\` it, or delete it yourself outside the agent — do not look for another
+verb that gets past the guard.
 
 **Before starting work, check what your siblings are doing:**
 
@@ -233,8 +231,14 @@ export async function installAgentsMd(repoRoot, { bin = 'holt', filename = 'AGEN
  * project.
  *
  * `--global` opts into user scope explicitly.
+ *
+ * @param {string} repoRoot
+ * @param {string} [home]
+ * @param {{scope?: string, hosts?: string[]|null}} [options]
  */
-export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } = {}) {
+export function mcpTargets(repoRoot, home = os.homedir(), {
+  scope = 'project', hosts = null,
+} = {}) {
   const project = [
     { host: 'claude-code', scope: 'project', file: path.join(repoRoot, '.mcp.json'), key: 'mcpServers' },
     { host: 'cursor', scope: 'project', file: path.join(repoRoot, '.cursor', 'mcp.json'), key: 'mcpServers' },
@@ -251,6 +255,12 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     // coverage is explicit and independently testable, not an accident of file-sharing.
     { host: 'copilot', scope: 'project', file: path.join(repoRoot, '.github', 'mcp.json'), key: 'mcpServers' },
     { host: 'gemini-cli', scope: 'project', file: path.join(repoRoot, '.gemini', 'settings.json'), key: 'mcpServers' },
+    // Antigravity 2, IDE and CLI share this documented sparse project configuration. MCP remains
+    // model-pull; the separate PreInvocation hook below is the proactive context channel.
+    { host: 'antigravity', scope: 'project', file: path.join(repoRoot, '.agents', 'mcp_config.json'), key: 'mcpServers' },
+    // Qwen Code composes MCP and hooks in one JSONC settings file. Both installers use surgical
+    // edits, so adding Holt never replaces sibling servers, hook groups, comments, or settings.
+    { host: 'qwen-code', scope: 'project', file: path.join(repoRoot, '.qwen', 'settings.json'), key: 'mcpServers' },
     // OpenCode uses a DIFFERENT key AND a different entry shape. Verified against a live
     // `opencode debug config`: mcp: { name: { type: "local", command: [bin, ...args] } }.
     // Writing the mcpServers shape here would produce a config opencode silently ignores.
@@ -287,13 +297,22 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     // classifying the whole "amazon-q" row as cloud-only. Confirmed against docs.aws.amazon.com:
     // legacy-but-enabled-by-default mcpServers file, both scopes — see the user-scope row below.
     { host: 'amazon-q', scope: 'project', file: path.join(repoRoot, '.amazonq', 'mcp.json'), key: 'mcpServers' },
+    // Continue's current project surface is a directory of standalone MCP JSON files. Its docs
+    // explicitly accept a standard JSON MCP config here; the old ~/.continue/config.json target
+    // is deprecated and becomes inert once config.yaml exists.
+    { host: 'continue', scope: 'project', file: path.join(repoRoot, '.continue', 'mcpServers', 'holt.json'), key: 'mcpServers' },
+    // Devin CLI has a shared, repository-scoped MCP file. The sibling
+    // `.devin/mcp_config.local.json` is the secrets/local-override surface and is deliberately
+    // not written by holt.
+    { host: 'devin-cli', scope: 'project', file: path.join(repoRoot, '.devin', 'mcp_config.json'), key: 'mcpServers' },
   ];
   const user = [
     { host: 'cursor', scope: 'user', file: path.join(home, '.cursor', 'mcp.json'), key: 'mcpServers' },
-    { host: 'devin-desktop', scope: 'user', file: path.join(home, '.codeium', 'windsurf', 'mcp_config.json'), key: 'mcpServers' },
+    { host: 'cascade', scope: 'user', file: path.join(home, '.codeium', 'windsurf', 'mcp_config.json'), key: 'mcpServers' },
     { host: 'gemini-cli', scope: 'user', file: path.join(home, '.gemini', 'settings.json'), key: 'mcpServers' },
+    { host: 'antigravity', scope: 'user', file: path.join(home, '.gemini', 'config', 'mcp_config.json'), key: 'mcpServers' },
+    { host: 'qwen-code', scope: 'user', file: path.join(home, '.qwen', 'settings.json'), key: 'mcpServers' },
     { host: 'zed', scope: 'user', file: path.join(home, '.config', 'zed', 'settings.json'), key: 'context_servers' },
-    { host: 'continue', scope: 'user', file: path.join(home, '.continue', 'config.json'), key: 'mcpServers' },
     { host: 'opencode', scope: 'user', file: path.join(home, '.config', 'opencode', 'opencode.json'), key: 'mcp', shape: 'opencode' },
     { host: 'codex', scope: 'user', file: path.join(home, '.codex', 'config.toml'), key: 'mcp_servers', format: 'toml' },
     // GitHub Copilot CLI. Its cloud coding agent is a different product with no repository file
@@ -303,15 +322,26 @@ export function mcpTargets(repoRoot, home = os.homedir(), { scope = 'project' } 
     // The code reads ~/.cline/data/settings/cline_mcp_settings.json. holt was shipping the same
     // wrong path the docs had, which means it had never actually written a Cline config anywhere
     // Cline would load it.
-    { host: 'cline', scope: 'user', file: path.join(home, '.cline', 'data', 'settings', 'cline_mcp_settings.json'), key: 'mcpServers' },
+    { host: 'cline-cli', scope: 'user', file: path.join(home, '.cline', 'data', 'settings', 'cline_mcp_settings.json'), key: 'mcpServers' },
     { host: 'amp', scope: 'user', file: path.join(home, '.config', 'amp', 'settings.json'), key: 'amp.mcpServers' },
     { host: 'factory', scope: 'user', file: path.join(home, '.factory', 'mcp.json'), key: 'mcpServers' },
     { host: 'junie', scope: 'user', file: path.join(home, '.junie', 'mcp', 'mcp.json'), key: 'mcpServers' },
     { host: 'warp', scope: 'user', file: path.join(home, '.warp', '.mcp.json'), key: 'mcpServers' },
     { host: 'kilo', scope: 'user', file: path.join(home, '.config', 'kilo', 'kilo.jsonc'), key: 'mcp', shape: 'kilo' },
     { host: 'amazon-q', scope: 'user', file: path.join(home, '.aws', 'amazonq', 'mcp.json'), key: 'mcpServers' },
+    { host: 'devin-cli', scope: 'user', file: path.join(home, '.config', 'devin', 'mcp_config.json'), key: 'mcpServers' },
   ];
-  return scope === 'user' ? user : scope === 'all' ? [...project, ...user] : project;
+  const targets = scope === 'user' ? user : scope === 'all' ? [...project, ...user] : project;
+  if (hosts === null) return targets;
+  const selected = Array.isArray(hosts) ? hosts : [];
+  // Cline exposes one product under two IDs. Keep that relationship explicit: a loose prefix
+  // match also equates codex-cloud with codex (and copilot-cloud with copilot), causing a cloud-
+  // only detection to fabricate a local-client config the cloud product never reads.
+  const sameHost = (target, detected) => target === detected
+    || (new Set([target, detected]).size === 2
+      && new Set([target, detected]).has('cline')
+      && new Set([target, detected]).has('cline-cli'));
+  return targets.filter((target) => selected.some((host) => sameHost(target.host, String(host))));
 }
 
 /**
@@ -338,6 +368,10 @@ export function legacyMcpTargets(repoRoot, home = os.homedir()) {
     {
       host: 'cline', scope: 'user', file: path.join(home, '.cline', 'mcp.json'), key: 'mcpServers',
       reason: 'wrong path — Cline reads ~/.cline/data/settings/cline_mcp_settings.json, never this file',
+    },
+    {
+      host: 'continue', scope: 'user', file: path.join(home, '.continue', 'config.json'), key: 'mcpServers',
+      reason: 'deprecated path — current Continue project configs live under .continue/mcpServers/',
     },
   ];
 }
@@ -674,23 +708,7 @@ export async function installMcp(repoRoot, {
   bin = 'holt', home = os.homedir(), scope = 'project', hosts = null,
 } = {}) {
   const results = [];
-  for (const t of mcpTargets(repoRoot, home, { scope })) {
-    // DETECTION GATES USER SCOPE, NOT PROJECT SCOPE — which is what this file has claimed in
-    // three separate comments ("AGENTS.md and project MCP config go in unconditionally") while
-    // doing the opposite. The gate applied to every row, so `holt integrate` in a repository
-    // where the user has not yet installed, say, Codex wrote nothing for Codex — and the whole
-    // point of a project-scope config is that it is committed and works for the NEXT person, who
-    // does have it. A repo wired for six agents by one developer is the feature.
-    //
-    // The asymmetry is deliberate and is the same one everywhere else here:
-    //   project scope  lives in the repository, is reviewed, and is the artefact being created
-    //   user scope     is somebody's machine — writing there for a tool they do not run is
-    //                  indistinguishable from installing software they did not ask for
-    if (t.scope === 'user' && hosts
-      && !hosts.some((h) => t.host.startsWith(h.replace('-cli', '')) || h.startsWith(t.host))) {
-      results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'skipped (host not detected)' });
-      continue;
-    }
+  for (const t of mcpTargets(repoRoot, home, { scope, hosts })) {
 
     // TOML hosts (Codex CLI) merge textually, preserving every setting holt does not understand.
     if (t.format === 'toml') {
@@ -963,21 +981,25 @@ function commandsOf(entry) {
  * the schema below is no longer a guess: .cursor/hooks.json, version 1, `beforeShellExecution`,
  * blocked by a stdout object carrying `permission: "deny"`.
  *
- * beforeShellExecution is the right event and the only one needed: every command holt refuses is
- * a shell command. Hooking more events would put holt in the critical path of file reads and
- * prompt submissions for no additional protection.
+ * beforeShellExecution is the only event needed for BLOCKING: every command holt refuses is a
+ * shell command. The separate Stop/sessionEnd entries below are bounded lifecycle notices; they
+ * do not widen the command gate or put Holt in the path of file reads and prompt submissions.
  */
 export function cursorHooks(bin = 'holt') {
   return {
     version: 1,
     hooks: {
       beforeShellExecution: [
-        { command: `${bin} hook pre-tool-use --host cursor`, timeout: 120 },
+        // Cursor's documented default for a crashed, timed-out, or invalid hook is fail-open.
+        // Keep that behavior explicit in the generated file: this adapter is a shell-command
+        // guard, not an availability boundary, and the manifest says so in the same words.
+        { command: `${bin} hook pre-tool-use --host cursor`, timeout: 120, failClosed: false },
       ],
-      // Cursor supports stop (fires when the agent loop ends) and sessionEnd (fires when
-      // the IDE session ends). Both are advisory — holt injects context only when something
-      // CHANGED during the response, and warns at session end. See the SOTA research in the
-      // Claude Code section for the full design rationale.
+      // Cursor's documented Stop response is `followup_message`: it starts another agent loop,
+      // rather than passively adding context after the response. The CLI therefore emits it only
+      // for a completed loop_count=0 event and only when the actionable brief changed. The
+      // follow-up's own Stop (loop_count >= 1) is always a no-op, which bounds continuation and
+      // prevents a warning from becoming an agent loop. sessionEnd remains a user-facing warning.
       stop: [
         { command: `${bin} hook stop --host cursor`, timeout: 60 },
       ],
@@ -997,6 +1019,7 @@ const CURSOR_EVENT_SUBCOMMAND = {
 
 export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   const file = path.join(repoRoot, '.cursor', 'hooks.json');
+  /** @type {string|null} */
   /** @type {string|null} */
   /** @type {string|null} */
   let rawText = null;
@@ -1080,12 +1103,637 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   return { adapter: 'cursor', path: file, created, installed, reconciled, unchanged, action };
 }
 
+/* ----------------------------------------- current project hook surfaces (shared JSON) ---- */
+
+/** Codex's current project hook file: <repo>/.codex/hooks.json. */
+export function codexHooks(bin = 'holt') {
+  return {
+    description: 'holt destructive shell/native-file guard and concise sibling-workstream context for this workspace.',
+    hooks: {
+      PreToolUse: [
+        {
+          // Codex's current hook contract names apply_patch as a canonical PreToolUse path and
+          // passes its patch DSL in tool_input.command. That exact grammar lets Holt measure Delete
+          // File and rename-destination replacement without putting ordinary Update File hunks in
+          // the expensive scan path. Other local functions and MCP inputs are tool-specific and
+          // deliberately remain unclaimed.
+          matcher: 'Bash|apply_patch',
+          hooks: [
+            { type: 'command', command: `${bin} hook pre-tool-use --host codex`, timeout: 120 },
+          ],
+        },
+      ],
+      SessionStart: [
+        {
+          matcher: 'startup|resume|clear|compact',
+          hooks: [
+            {
+              type: 'command',
+              command: `${bin} hook session-start --autoprotect --host codex`,
+              timeout: 120,
+              additionalContextLimit: 1500,
+            },
+          ],
+        },
+      ],
+      // Codex currently ignores a UserPromptSubmit matcher, so omit it instead of writing a
+      // decorative filter that suggests a narrower cadence than the host actually implements.
+      UserPromptSubmit: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command: `${bin} hook user-prompt-submit --host codex`,
+              timeout: 60,
+              additionalContextLimit: 1500,
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * Qwen Code's current project hook surface. Its matcher is a regex over canonical runtime tool
+ * IDs, not display labels; anchoring it prevents a third-party MCP tool with a similar suffix
+ * from inheriting filesystem authority. Qwen's current runner documents exit 2 as blocking and
+ * other hook failures as fail-open, which the host manifest states separately.
+ */
+export function qwenCodeHooks(bin = 'holt') {
+  return {
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: '^(run_shell_command|write_file|edit)$',
+          hooks: [
+            { type: 'command', command: `${bin} hook pre-tool-use --host qwen-code`, timeout: 120 },
+          ],
+        },
+      ],
+      SessionStart: [
+        {
+          hooks: [
+            { type: 'command', command: `${bin} hook session-start --autoprotect --host qwen-code`, timeout: 120 },
+          ],
+        },
+      ],
+      UserPromptSubmit: [
+        {
+          hooks: [
+            { type: 'command', command: `${bin} hook user-prompt-submit --host qwen-code`, timeout: 60 },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * Antigravity's direct hooks.json is keyed by hook NAME, not by event.  PreInvocation is a
+ * genuine host-push context surface: stdout injectSteps[].ephemeralMessage enters the model
+ * trajectory before the invocation.  There is intentionally no PreToolUse entry here.  The
+ * documented `decision:"allow"` auto-approves a tool and the host documents no neutral response,
+ * so installing an allow/deny adapter before live permission-preservation proof could make the
+ * user's native policy weaker.  Context is useful independently and has no execution authority.
+ */
+const ANTIGRAVITY_HOOK_KEY = 'holt-workstream-context-v1';
+
+export function antigravityHooks(bin = 'holt') {
+  return {
+    [ANTIGRAVITY_HOOK_KEY]: {
+      PreInvocation: [
+        {
+          type: 'command',
+          command: `${bin} hook pre-invocation --autoprotect --host antigravity`,
+          timeout: 120,
+        },
+      ],
+    },
+  };
+}
+
+/** Devin CLI's standalone project file is the bare event map (there is no `hooks` wrapper). */
+export function devinCliHooks(bin = 'holt') {
+  return {
+    PreToolUse: [
+      {
+        matcher: 'exec',
+        hooks: [
+          { type: 'command', command: `${bin} hook pre-tool-use --host devin-cli`, timeout: 120 },
+        ],
+      },
+    ],
+  };
+}
+
+/** Cascade/Devin Desktop uses its own snake_case event names and direct command entries. */
+export function cascadeHooks(bin = 'holt') {
+  return {
+    hooks: {
+      pre_run_command: [
+        {
+          command: `${bin} hook pre-tool-use --host cascade`,
+          powershell: `${bin} hook pre-tool-use --host cascade`,
+          show_output: true,
+        },
+      ],
+    },
+  };
+}
+
+const PROJECT_JSON_HOOK_SPECS = [
+  {
+    host: 'codex', rel: path.join('.codex', 'hooks.json'), prefix: ['hooks'],
+    build: codexHooks,
+    subcommands: {
+      PreToolUse: 'pre-tool-use',
+      SessionStart: 'session-start',
+      UserPromptSubmit: 'user-prompt-submit',
+    },
+  },
+  {
+    host: 'qwen-code', rel: path.join('.qwen', 'settings.json'), prefix: ['hooks'],
+    build: qwenCodeHooks,
+    subcommands: {
+      PreToolUse: 'pre-tool-use',
+      SessionStart: 'session-start',
+      UserPromptSubmit: 'user-prompt-submit',
+    },
+  },
+  {
+    host: 'devin-cli', rel: path.join('.devin', 'hooks.v1.json'), prefix: [],
+    build: devinCliHooks, subcommands: { PreToolUse: 'pre-tool-use' },
+  },
+  {
+    host: 'cascade', rel: path.join('.windsurf', 'hooks.json'), prefix: ['hooks'],
+    build: cascadeHooks, subcommands: { pre_run_command: 'pre-tool-use' },
+  },
+];
+
+const DIRECT_HOOK_COMMAND_FIELDS = ['command', 'bash', 'powershell'];
+
+/** Direct and Open-Plugins-style nested hook commands, in one ownership view. */
+function allHookCommandsOf(entry) {
+  const out = [];
+  for (const field of DIRECT_HOOK_COMMAND_FIELDS) {
+    if (typeof entry?.[field] === 'string') out.push(entry[field]);
+  }
+  for (const h of Array.isArray(entry?.hooks) ? entry.hooks : []) {
+    for (const field of DIRECT_HOOK_COMMAND_FIELDS) {
+      if (typeof h?.[field] === 'string') out.push(h[field]);
+    }
+  }
+  return out;
+}
+
+function hookActionRemains(entry) {
+  return DIRECT_HOOK_COMMAND_FIELDS.some((field) => typeof entry?.[field] === 'string')
+    || (Array.isArray(entry?.hooks) && entry.hooks.length > 0)
+    || typeof entry?.prompt === 'string'
+    || typeof entry?.url === 'string';
+}
+
+/** Remove only matching command fields, preserving sibling user commands/actions in the entry. */
+function withoutProjectHoltCommands(entry, predicate) {
+  const next = { ...entry };
+  for (const field of DIRECT_HOOK_COMMAND_FIELDS) {
+    if (predicate(next[field])) delete next[field];
+  }
+  if (Array.isArray(entry?.hooks)) {
+    next.hooks = entry.hooks.flatMap((hook) => {
+      if (!hook || typeof hook !== 'object') return [hook];
+      const stripped = { ...hook };
+      for (const field of DIRECT_HOOK_COMMAND_FIELDS) {
+        if (predicate(stripped[field])) delete stripped[field];
+      }
+      return hookActionRemains(stripped) ? [stripped] : [];
+    });
+  }
+  return next;
+}
+
+function objectAt(root, segments) {
+  let value = root;
+  for (const segment of segments) value = value?.[segment];
+  return value;
+}
+
+/** Does `actual` contain every contract field in `required`, while permitting user additions? */
+function containsHookShape(actual, required) {
+  if (Array.isArray(required)) {
+    return Array.isArray(actual)
+      && required.every((wanted) => actual.some((candidate) => containsHookShape(candidate, wanted)));
+  }
+  if (required && typeof required === 'object') {
+    if (!actual || typeof actual !== 'object' || Array.isArray(actual)) return false;
+    return Object.entries(required).every(([key, value]) => containsHookShape(actual[key], value));
+  }
+  return Object.is(actual, required);
+}
+
+/**
+ * Reconcile one event without claiming a user's matcher, timeout, or sibling hook command.
+ * An entry already running the current holt command is the user's configured shape and stays
+ * byte-for-byte at the object level. A stale holt command is removed; if it shares a matcher
+ * group with user commands, only holt's nested command is stripped.
+ */
+function reconcileProjectHookEntries(existing, wanted, subcommand) {
+  const canonical = new Set(wanted.flatMap(allHookCommandsOf));
+  const kept = [];
+  const covered = new Set();
+  let touched = false;
+
+  for (const entry of existing) {
+    const commands = allHookCommandsOf(entry);
+    const holtCommands = commands.filter((command) => isHoltHookCommand(command, subcommand));
+    const userCommands = commands.filter((command) => !isHoltHookCommand(command, subcommand));
+    if (holtCommands.length === 0) {
+      kept.push(entry);
+      continue;
+    }
+    // Command text alone is not a host contract. The same command under matcher `Write` rather
+    // than `Bash` never runs for shell calls; Cascade's POSIX `command` without its `powershell`
+    // sibling silently leaves Windows unguarded. Accept user-added fields, but require every
+    // field of one canonical entry and remove duplicate/stale Holt actions before appending any
+    // missing shape.
+    const matchedWanted = wanted.findIndex((shape, index) => !covered.has(index)
+      && containsHookShape(entry, shape));
+    if (matchedWanted >= 0 && holtCommands.every((command) => canonical.has(command))) {
+      kept.push(entry);
+      covered.add(matchedWanted);
+      continue;
+    }
+
+    touched = true;
+    const stripped = withoutProjectHoltCommands(
+      entry, (command) => isHoltHookCommand(command, subcommand),
+    );
+    if (userCommands.length > 0 || hookActionRemains(stripped)) kept.push(stripped);
+  }
+
+  const missing = wanted.filter((_shape, index) => !covered.has(index));
+  kept.push(...missing);
+  return { entries: kept, installed: missing.length > 0, reconciled: touched };
+}
+
+async function installProjectJsonHooks(repoRoot, spec, { bin = 'holt' } = {}) {
+  const file = path.join(repoRoot, spec.rel);
+  let rawText = '';
+  let cfg = null;
+  let created = false;
+  try {
+    rawText = await fs.readFile(file, 'utf8');
+    cfg = readJsoncOrThrow(rawText);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      return {
+        adapter: spec.host, path: file, created: false,
+        action: `skipped (existing hook config is unreadable: ${error?.message ?? error})`,
+      };
+    }
+    created = true;
+    cfg = spec.build(bin);
+  }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    return {
+      adapter: spec.host, path: file, created: false,
+      action: 'skipped (existing hook config is not a JSON object; left it untouched)',
+    };
+  }
+
+  const wantedRoot = spec.build(bin);
+  const wantedEvents = objectAt(wantedRoot, spec.prefix) ?? {};
+  const nextEvents = new Map();
+  let installed = 0;
+  let reconciled = 0;
+
+  for (const [event, wanted] of Object.entries(wantedEvents)) {
+    const existing = objectAt(cfg, [...spec.prefix, event]);
+    if (existing != null && !Array.isArray(existing)) {
+      return {
+        adapter: spec.host, path: file, created: false,
+        action: `skipped (${event} is not an array; left the user's hook config untouched)`,
+      };
+    }
+    const next = reconcileProjectHookEntries(
+      Array.isArray(existing) ? existing : [], wanted, spec.subcommands[event],
+    );
+    if (next.installed) installed++;
+    if (next.reconciled) reconciled++;
+    nextEvents.set(event, next.entries);
+  }
+  if (created) installed = Object.keys(wantedEvents).length;
+
+  const rel = await relativeWithinAsync(repoRoot, file);
+  const receiptBefore = created ? null : await readReceipt(repoRoot);
+  const ownedBefore = !created && receiptBefore
+    ? await holtOwnsFile(repoRoot, rel, receiptBefore)
+    : false;
+
+  let output;
+  if (created) {
+    output = `${JSON.stringify(cfg, null, 2)}\n`;
+  } else {
+    let result = rawText;
+    if (spec.prefix.length > 0 && objectAt(cfg, spec.prefix) == null) {
+      result = jsoncWrite(result, [[spec.prefix, {}]], { tabSize: 2, insertSpaces: true });
+    }
+    for (const [event, entries] of nextEvents) {
+      result = jsoncWrite(result, [[[...spec.prefix, event], entries]], { tabSize: 2, insertSpaces: true });
+    }
+    output = result.endsWith('\n') ? result : `${result}\n`;
+  }
+
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, output, 'utf8');
+  if (created || ownedBefore) {
+    await recordCreated(repoRoot, { files: [rel], dirs: created ? ancestorDirs(rel) : [] });
+  }
+  const action = reconciled
+    ? `reconciled ${reconciled} stale hook event(s)${installed ? `, installed ${installed}` : ''}`
+    : installed ? 'installed' : 'already present';
+  return { adapter: spec.host, path: file, created, installed, reconciled, action };
+}
+
+function projectJsonHookSpec(host) {
+  const spec = PROJECT_JSON_HOOK_SPECS.find((candidate) => candidate.host === host);
+  if (!spec) throw new Error(`internal error: no project hook spec for ${host}`);
+  return spec;
+}
+
+export async function installCodexHooks(repoRoot, opts = {}) {
+  return installProjectJsonHooks(repoRoot, projectJsonHookSpec('codex'), opts);
+}
+
+export async function installQwenCodeHooks(repoRoot, opts = {}) {
+  return installProjectJsonHooks(repoRoot, projectJsonHookSpec('qwen-code'), opts);
+}
+
+function isAntigravityHoltHook(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.some((key) => !['enabled', 'PreInvocation'].includes(key))) return false;
+  if (!Array.isArray(value.PreInvocation) || value.PreInvocation.length !== 1) return false;
+  const commands = value.PreInvocation.flatMap((handler) => allHookCommandsOf(handler));
+  return commands.length === 1 && isHoltHookCommand(commands[0], 'pre-invocation');
+}
+
+/** Install only Antigravity's non-authoritative proactive context hook. */
+export async function installAntigravityHooks(repoRoot, { bin = 'holt' } = {}) {
+  const file = path.join(repoRoot, '.agents', 'hooks.json');
+  const wanted = antigravityHooks(bin)[ANTIGRAVITY_HOOK_KEY];
+  /** @type {string|null} */
+  let rawText = null;
+  let created = false;
+  try {
+    rawText = await fs.readFile(file, 'utf8');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      return { adapter: 'antigravity', path: file, action: `left alone — could not read hooks.json (${error?.message ?? error})` };
+    }
+    created = true;
+  }
+
+  let cfg = {};
+  if (rawText != null) {
+    try { cfg = readJsoncOrThrow(rawText); } catch (error) {
+      return { adapter: 'antigravity', path: file, action: `left alone — could not parse hooks.json (${error?.message ?? error})` };
+    }
+    if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+      return { adapter: 'antigravity', path: file, action: 'left alone — hooks.json is not an object' };
+    }
+    const existing = cfg[ANTIGRAVITY_HOOK_KEY];
+    if (existing && !isAntigravityHoltHook(existing)) {
+      return {
+        adapter: 'antigravity', path: file,
+        action: `skipped (the ${ANTIGRAVITY_HOOK_KEY} name is occupied by content Holt cannot prove it owns)`,
+      };
+    }
+    if (existing && JSON.stringify(existing) === JSON.stringify(wanted)) {
+      return { adapter: 'antigravity', path: file, action: 'already present' };
+    }
+  }
+
+  let output;
+  if (rawText == null) {
+    output = `${JSON.stringify({ [ANTIGRAVITY_HOOK_KEY]: wanted }, null, 2)}\n`;
+  } else {
+    output = jsoncWrite(rawText, [[[ANTIGRAVITY_HOOK_KEY], wanted]], { tabSize: 2, insertSpaces: true });
+    if (!output.endsWith('\n')) output += '\n';
+  }
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, output, 'utf8');
+  if (created) {
+    const rel = await relativeWithinAsync(repoRoot, file);
+    await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) });
+  }
+  return { adapter: 'antigravity', path: file, action: created ? 'created' : 'reconciled' };
+}
+
+export async function installDevinCliHooks(repoRoot, opts = {}) {
+  return installProjectJsonHooks(repoRoot, projectJsonHookSpec('devin-cli'), opts);
+}
+
+export async function installCascadeHooks(repoRoot, opts = {}) {
+  return installProjectJsonHooks(repoRoot, projectJsonHookSpec('cascade'), opts);
+}
+
+/* --------------------------------------- dedicated project hook files/plugins ---- */
+
+const COPILOT_MARKER = 'holt-project-shell-guard-v1';
+
+/**
+ * Copilot CLI and cloud agent load the same repository file. The cloud sandbox does not
+ * necessarily contain holt, so the command probes for the executable and deliberately exits 0
+ * when it is absent. Locally, where `holt integrate` resolved that executable, explicit denials
+ * are fail-closed; in cloud this remains advisory unless the project also installs holt there.
+ */
+export function copilotHooks(bin = 'holt') {
+  const [executable] = String(bin).trim().split(/\s+/);
+  const invoke = `${bin} hook pre-tool-use --host copilot`;
+  return {
+    version: 1,
+    hooks: {
+      PreToolUse: [
+        {
+          type: 'command',
+          matcher: 'Bash',
+          bash: `if command -v ${executable} >/dev/null 2>&1; then ${invoke}; else exit 0; fi`,
+          powershell: `if (Get-Command ${executable} -ErrorAction SilentlyContinue) { ${invoke}; exit $LASTEXITCODE } else { exit 0 }`,
+          timeoutSec: 120,
+          env: { HOLT_INTEGRATION: COPILOT_MARKER },
+        },
+      ],
+    },
+  };
+}
+
+function isCopilotHoltEntry(entry) {
+  return entry?.env?.HOLT_INTEGRATION === COPILOT_MARKER;
+}
+
+export async function installCopilotHooks(repoRoot, { bin = 'holt' } = {}) {
+  const file = path.join(repoRoot, '.github', 'hooks', 'holt.json');
+  const wanted = copilotHooks(bin);
+  // Empty is only the not-yet-created sentinel; the existing-file branch always replaces it.
+  let rawText = '';
+  /** @type {any} */
+  let cfg = {};
+  let created = false;
+  try {
+    rawText = await fs.readFile(file, 'utf8');
+    cfg = readJsoncOrThrow(rawText);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      return { adapter: 'copilot', path: file, action: `skipped (existing hook config is unreadable: ${error?.message ?? error})` };
+    }
+    created = true;
+  }
+  if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
+    return { adapter: 'copilot', path: file, action: 'skipped (existing hook config is not a JSON object; left it untouched)' };
+  }
+  if (cfg.version != null && cfg.version !== 1) {
+    return { adapter: 'copilot', path: file, action: `skipped (unsupported existing version ${JSON.stringify(cfg.version)})` };
+  }
+  if (cfg.hooks?.PreToolUse != null && !Array.isArray(cfg.hooks.PreToolUse)) {
+    return { adapter: 'copilot', path: file, action: 'skipped (PreToolUse is not an array; left it untouched)' };
+  }
+
+  const existing = Array.isArray(cfg.hooks?.PreToolUse) ? cfg.hooks.PreToolUse : [];
+  const ours = existing.filter(isCopilotHoltEntry);
+  const next = [...existing.filter((entry) => !isCopilotHoltEntry(entry)), ...wanted.hooks.PreToolUse];
+  let output;
+  if (created) {
+    output = `${JSON.stringify(wanted, null, 2)}\n`;
+  } else {
+    let result = rawText;
+    if (cfg.version == null) result = jsoncWrite(result, [[['version'], 1]], { tabSize: 2, insertSpaces: true });
+    if (cfg.hooks == null) result = jsoncWrite(result, [[['hooks'], {}]], { tabSize: 2, insertSpaces: true });
+    result = jsoncWrite(result, [[['hooks', 'PreToolUse'], next]], { tabSize: 2, insertSpaces: true });
+    output = result.endsWith('\n') ? result : `${result}\n`;
+  }
+
+  const rel = await relativeWithinAsync(repoRoot, file);
+  const receiptBefore = created ? null : await readReceipt(repoRoot);
+  const ownedBefore = !created && receiptBefore ? await holtOwnsFile(repoRoot, rel, receiptBefore) : false;
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, output, 'utf8');
+  if (created || ownedBefore) await recordCreated(repoRoot, { files: [rel], dirs: created ? ancestorDirs(rel) : [] });
+  const unchanged = ours.length === 1 && JSON.stringify(ours[0]) === JSON.stringify(wanted.hooks.PreToolUse[0]);
+  return {
+    adapter: 'copilot', path: file, created,
+    action: created ? 'installed' : unchanged ? 'already present' : ours.length ? 'reconciled stale hook' : 'installed',
+  };
+}
+
+export function goosePlugin(bin = 'holt') {
+  return {
+    manifest: {
+      name: 'holt',
+      version: '0.1.0',
+      description: 'holt project shell guard (generated by `holt integrate`).',
+    },
+    hooks: {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: '^developer__shell$',
+            hooks: [
+              { type: 'command', command: `${bin} hook pre-tool-use --host goose`, timeout: 120 },
+            ],
+          },
+        ],
+      },
+    },
+  };
+}
+
+async function mayReplaceGeneratedFile(repoRoot, file, wantedText) {
+  try {
+    const existing = await fs.readFile(file, 'utf8');
+    if (existing === wantedText) return { ok: true, created: false, unchanged: true, ownedBefore: false };
+    const rel = await relativeWithinAsync(repoRoot, file);
+    const receipt = await readReceipt(repoRoot);
+    const ownedBefore = receipt ? await holtOwnsFile(repoRoot, rel, receipt) : false;
+    return { ok: ownedBefore, created: false, unchanged: false, ownedBefore };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: true, created: true, unchanged: false, ownedBefore: false };
+    return { ok: false, created: false, unchanged: false, ownedBefore: false, error };
+  }
+}
+
+export async function installGooseHooks(repoRoot, { bin = 'holt' } = {}) {
+  const root = path.join(repoRoot, '.agents', 'plugins', 'holt');
+  const pluginFile = path.join(root, 'plugin.json');
+  const hooksFile = path.join(root, 'hooks', 'hooks.json');
+  const generated = goosePlugin(bin);
+  const files = [
+    [pluginFile, `${JSON.stringify(generated.manifest, null, 2)}\n`],
+    [hooksFile, `${JSON.stringify(generated.hooks, null, 2)}\n`],
+  ];
+  const checks = [];
+  for (const [file, text] of files) checks.push(await mayReplaceGeneratedFile(repoRoot, file, text));
+  if (checks.some((check) => !check.ok)) {
+    return {
+      adapter: 'goose', path: root,
+      action: 'skipped (the .agents/plugins/holt path contains content holt cannot prove it owns)',
+    };
+  }
+
+  const madeFiles = [];
+  const madeDirs = [];
+  for (let i = 0; i < files.length; i++) {
+    const [file, text] = files[i];
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, text, 'utf8');
+    const rel = await relativeWithinAsync(repoRoot, file);
+    if (checks[i].created || checks[i].ownedBefore) madeFiles.push(rel);
+    if (checks[i].created) madeDirs.push(...ancestorDirs(rel));
+  }
+  if (madeFiles.length) await recordCreated(repoRoot, { files: madeFiles, dirs: [...new Set(madeDirs)] });
+  return {
+    adapter: 'goose', path: root,
+    action: checks.every((check) => check.unchanged) ? 'already present' : 'installed',
+  };
+}
+
+const CLINE_HOOK_MARKER = '# holt — Cline PreToolUse hook (generated by `holt integrate`).';
+
+export function clineHookScript(bin = 'holt') {
+  return `#!/bin/sh\n${CLINE_HOOK_MARKER}\nexec ${bin} hook pre-tool-use --host cline\n`;
+}
+
+export async function installClineHooks(repoRoot, { bin = 'holt' } = {}) {
+  const file = path.join(repoRoot, '.clinerules', 'hooks', 'PreToolUse');
+  const wanted = clineHookScript(bin);
+  const check = await mayReplaceGeneratedFile(repoRoot, file, wanted);
+  if (!check.ok) {
+    return {
+      adapter: 'cline', path: file,
+      action: 'skipped (a PreToolUse hook already exists and holt cannot prove it owns that executable)',
+    };
+  }
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, wanted, { mode: 0o755 });
+  await fs.chmod(file, 0o755);
+  const rel = await relativeWithinAsync(repoRoot, file);
+  if (check.created || check.ownedBefore) {
+    await recordCreated(repoRoot, { files: [rel], dirs: check.created ? ancestorDirs(rel) : [] });
+  }
+  return { adapter: 'cline', path: file, action: check.unchanged ? 'already present' : 'installed' };
+}
+
 /* ------------------------------------------------------------------ Claude Code ---- */
 
 export function claudeCodeHooks(bin = 'holt') {
   return {
     PreToolUse: [
-      { matcher: 'Bash', hooks: [{ type: 'command', command: `${bin} hook pre-tool-use --host claude-code`, timeout: 120 }] },
+      // Claude documents exact file_path/content and old_string/new_string contracts for Write
+      // and Edit. Write and a measured whole-file Edit receive fresh Holt evidence; an ordinary
+      // incremental Edit exits silently without a repository scan. MCP schemas remain server-
+      // defined, so this matcher does not guess from arbitrary argument names.
+      { matcher: 'Bash|Write|Edit', hooks: [{ type: 'command', command: `${bin} hook pre-tool-use --host claude-code`, timeout: 120 }] },
     ],
     SessionStart: [
       { hooks: [{ type: 'command', command: `${bin} hook session-start --autoprotect --host claude-code`, timeout: 120 }] },
@@ -1093,14 +1741,11 @@ export function claudeCodeHooks(bin = 'holt') {
     UserPromptSubmit: [
       { hooks: [{ type: 'command', command: `${bin} hook user-prompt-submit --host claude-code`, timeout: 60 }] },
     ],
-    // Stop fires when Claude finishes responding. holt uses it to warn the agent about at-risk
-    // work before it stops — closing the "biggest cadence hole" where an agent creates something
-    // irreplaceable and then stops, with no warning that the worktree holds the only copy. The
-    // hook can block with decision:"block" to keep the agent running, but must check
-    // stop_hook_active to prevent infinite loops.
-    Stop: [
-      { hooks: [{ type: 'command', command: `${bin} hook stop --host claude-code`, timeout: 60 }] },
-    ],
+    // Deliberately no Stop hook. Claude's current Stop contract accepts `additionalContext`, but
+    // explicitly continues the conversation so Claude can act on it (under the same loop guards
+    // as decision:"block"). That is not a passive/non-blocking briefing, so using it for an
+    // advisory would change the user's workflow. SessionStart and UserPromptSubmit are the quiet
+    // model-context surfaces Holt uses instead.
     // SessionEnd fires when the session terminates. Advisory-only — cannot block. holt uses it
     // for a final warning about at-risk work, which is precisely when someone tears down worktrees.
     SessionEnd: [
@@ -1115,9 +1760,27 @@ const CLAUDE_EVENT_SUBCOMMAND = {
   PreToolUse: 'pre-tool-use',
   SessionStart: 'session-start',
   UserPromptSubmit: 'user-prompt-submit',
-  Stop: 'stop',
   SessionEnd: 'session-end',
 };
+
+/**
+ * Is this byte-for-structure the PreToolUse entry Holt generated before native Write/Edit
+ * coverage existed? Exactness matters: a different matcher, timeout, wrapper, sibling action, or
+ * extra field is user configuration and remains untouched. This one historical shape is Holt's
+ * own upgrade marker even though old releases predated a separate receipt for individual hooks.
+ */
+function isLegacyClaudeShellOnlyEntry(event, entry, canonicalCommands) {
+  if (event !== 'PreToolUse' || !entry || typeof entry !== 'object'
+    || entry.matcher !== 'Bash' || !Array.isArray(entry.hooks) || entry.hooks.length !== 1
+    || Object.keys(entry).some((key) => key !== 'matcher' && key !== 'hooks')) return false;
+  const hook = entry.hooks[0];
+  return hook && typeof hook === 'object'
+    && Object.keys(hook).every((key) => ['type', 'command', 'timeout'].includes(key))
+    && Object.keys(hook).length === 3
+    && hook.type === 'command'
+    && canonicalCommands.has(hook.command)
+    && hook.timeout === 120;
+}
 
 /**
  * Install/reconcile holt's Claude Code hooks, UPGRADE-SAFE.
@@ -1173,9 +1836,9 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
     // A USER MODIFICATION IS NOT A STALE ENTRY.
     //
     // MEASURED: a user who deliberately WIDENED holt's own hook —
-    //   { matcher: "Bash|Write|Edit", hooks: [{ command: "holt hook pre-tool-use --host claude-code",
+    //   { matcher: "Bash|Write|Edit|NotebookEdit", hooks: [{ command: "holt hook pre-tool-use --host claude-code",
     //     timeout: 600 }] }
-    // — had it silently rewritten to holt's canonical `matcher: "Bash"`, `timeout: 120`, and was
+    // — had it silently rewritten to holt's canonical matcher and `timeout: 120`, and was
     // told "reconciled 1 stale hook(s) from a prior version". It was not stale; the COMMAND was
     // already exactly what holt writes today. Only the matcher and timeout were theirs, and both
     // were WIDER than holt's defaults — so holt narrowed a user's guard and described it as an
@@ -1196,7 +1859,8 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
         foundHolt = true;
         // Already running the current command: this entry is DONE. Keep the user's matcher,
         // timeout and any wrapping untouched, and do not append a duplicate below.
-        if (userCmds.length === 0 && holtCmds.every((c) => canonicalCmds.has(c))) {
+        if (userCmds.length === 0 && holtCmds.every((c) => canonicalCmds.has(c))
+          && !isLegacyClaudeShellOnlyEntry(event, entry, canonicalCmds)) {
           preserved.push(entry);
           keptUserShaped++;
           continue;
@@ -1276,7 +1940,8 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
           const holtCmds = cmds.filter((c) => isHoltHookCommand(c, sub));
           return holtCmds.length > 0
             && cmds.every((c) => isHoltHookCommand(c, sub))
-            && holtCmds.every((c) => canonical.has(c));
+            && holtCmds.every((c) => canonical.has(c))
+            && !isLegacyClaudeShellOnlyEntry(event, entry, canonical);
         };
         const keepsUserShape = eventArr.some(alreadyCurrent);
         const isMine = (entry) => {
@@ -1366,9 +2031,13 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
 export function opencodePlugin(bin = 'holt', { esm = true } = {}) {
   return `// holt — OpenCode plugin (generated by \`holt integrate\`).
 //
-// Blocks worktree destruction that would lose work existing nowhere else, and injects
-// sibling-workstream context at session start. Every decision is delegated to the holt CLI,
-// so the logic lives in one place and this file never goes stale.
+// Blocks worktree destruction that would lose work existing nowhere else. Every decision is
+// delegated to the holt CLI, so the logic lives in one place and this file never goes stale.
+//
+// Deliberately no session.created logger: console output is terminal/UI output, not model context.
+// The stable OpenCode plugin API documents events and logging but no consumable context hook, so
+// holt does not label terminal noise as proactive injection. AGENTS.md and MCP remain the honest
+// advisory context surfaces; the plugin's deterministic responsibility is the shell gate below.
 ${esm ? 'import { execFile } from "node:child_process"' : 'const { execFile } = require("node:child_process")'}
 
 // The configured binary may carry arguments (e.g. "node /path/to/holt.mjs" during development,
@@ -1440,13 +2109,6 @@ ${esm ? 'export const holt' : 'const holt'} = async ({ directory, worktree }) =>
         console.warn("[holt] " + (verdict.reason || "could not verify this command"))
       }
     },
-
-    event: async ({ event }) => {
-      if (event?.type !== "session.created") return
-      const res = await run(["brief"], cwd)
-      const text = res.stdout.trim()
-      if (text && !text.startsWith("[holt] no parallel")) console.log(text)
-    },
   }
 }
 ${esm ? '' : 'module.exports = { holt }'}
@@ -1489,12 +2151,30 @@ export async function installOpenCode(repoRoot, { bin = 'holt' } = {}) {
   // `.opencode/plugins/` — plural. The singular form is silently ignored by opencode, which is
   // the worst kind of wrong: the file exists, looks installed, and never runs.
   const file = path.join(repoRoot, '.opencode', 'plugins', 'holt.js');
-  await fs.mkdir(path.dirname(file), { recursive: true });
   const esm = await repoIsEsm(repoRoot);
-  const openCodeExisted = await fs.access(file).then(() => true, () => false);
-  await fs.writeFile(file, opencodePlugin(bin, { esm }), 'utf8');
-  if (!openCodeExisted) { const rel = await relativeWithinAsync(repoRoot, file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
-  return { adapter: 'opencode', path: file, action: 'installed', dialect: esm ? 'esm' : 'commonjs' };
+  const wanted = opencodePlugin(bin, { esm });
+  // A well-known filename is not ownership. A repository may already have its own `holt.js`, and
+  // the previous installer overwrote it without checking its bytes. Replace only a file this
+  // install receipt still proves holt created, or an exact current no-op; otherwise leave it.
+  const check = await mayReplaceGeneratedFile(repoRoot, file, wanted);
+  if (!check.ok) {
+    return {
+      adapter: 'opencode', path: file,
+      action: 'skipped (an OpenCode plugin already exists at holt.js and holt cannot prove it owns those bytes)',
+      dialect: esm ? 'esm' : 'commonjs',
+    };
+  }
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.writeFile(file, wanted, 'utf8');
+  const rel = await relativeWithinAsync(repoRoot, file);
+  if (check.created || check.ownedBefore) {
+    await recordCreated(repoRoot, { files: [rel], dirs: check.created ? ancestorDirs(rel) : [] });
+  }
+  return {
+    adapter: 'opencode', path: file,
+    action: check.unchanged ? 'already present' : check.ownedBefore ? 'reconciled' : 'installed',
+    dialect: esm ? 'esm' : 'commonjs',
+  };
 }
 
 /* ------------------------------------------------------- git hooks (agent-free) ---- */
@@ -1530,6 +2210,17 @@ exit 0
 `;
 }
 
+/** True only for the complete byte shape generated above, while allowing its recorded bin text. */
+function isExactGeneratedPreCommit(text) {
+  if (!String(text).includes(PRE_COMMIT_MARKER)) return false;
+  const suffix = ' >/dev/null 2>&1; then';
+  const line = String(text).split(/\r?\n/).find((value) => value.startsWith('if command -v ')
+    && value.endsWith(suffix));
+  if (!line) return false;
+  const bin = line.slice('if command -v '.length, -suffix.length);
+  return !!bin && text === preCommitHook(bin);
+}
+
 
 /** Where a repository's SHARED git directory lives — the same for the main tree and every linked one. */
 async function gitCommonDir(cwd) {
@@ -1556,16 +2247,20 @@ export async function installGitHooks(repoRoot, { bin = 'holt' } = {}) {
   if (common) hooksRoot = common;
   const dir = path.join(hooksRoot, 'hooks');
   const file = path.join(dir, 'pre-commit');
+  const wanted = preCommitHook(bin);
+  let reconciled = false;
   try {
     const existing = await fs.readFile(file, 'utf8');
-    if (!existing.includes(PRE_COMMIT_MARKER)) {
-      return { adapter: 'git-hooks', path: file, action: 'skipped (a pre-commit hook already exists)' };
+    if (existing === wanted) return { adapter: 'git-hooks', path: file, action: 'already present' };
+    if (!isExactGeneratedPreCommit(existing)) {
+      return { adapter: 'git-hooks', path: file, action: 'skipped (a pre-commit hook already exists or the prior holt hook was edited)' };
     }
+    reconciled = true;
   } catch { /* none yet */ }
 
   await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(file, preCommitHook(bin), { mode: 0o755 });
-  return { adapter: 'git-hooks', path: file, action: 'installed' };
+  await fs.writeFile(file, wanted, { mode: 0o755 });
+  return { adapter: 'git-hooks', path: file, action: reconciled ? 'reconciled' : 'installed' };
 }
 
 /* ---------------------------------------------------------------- host detection ---- */
@@ -1633,16 +2328,10 @@ export async function hostsReport(repoRoot, home = os.homedir()) {
 /**
  * Install everything applicable.
  *
- * AGENTS.md and MCP go in unconditionally (widest reach, zero risk). Host-specific hooks go in
- * only where that host is detected.
- */
-/**
- * Install everything applicable, PROJECT-SCOPED by default.
- *
- * AGENTS.md and project MCP config go in unconditionally: they live in the repository, they are
- * what the user asked to wire, and they are trivially reversible with git. Host hooks go in only
- * where that host is present. User-global config is touched ONLY with scope:'user'|'all', and
- * even then never created from nothing.
+ * AGENTS.md is the cross-host baseline. MCP configs and host hooks follow detected hosts by
+ * default; `allHosts:true` is the explicit team-template mode that prepares every supported
+ * project client. User-global config is touched ONLY with scope:'user'|'all', and even then an
+ * absent user config is never created from nothing.
  */
 /**
  * Resolve the command every integration should reference.
@@ -1742,21 +2431,51 @@ async function foreignHookReport(repoRoot, scope) {
       });
     }
   }
+
+  // Antigravity's direct file is keyed by hook name, then event.  A repository can ship one of
+  // these and the host will execute it before model/tool activity, so surface foreign commands at
+  // the same moment as Claude/Cursor rather than silently merging beside them.
+  {
+    const rel = '.agents/hooks.json';
+    const file = path.join(repoRoot, '.agents', 'hooks.json');
+    try {
+      const cfg = readJsoncOrThrow(await fs.readFile(file, 'utf8'));
+      const foreign = [];
+      for (const [name, definition] of Object.entries(cfg ?? {})) {
+        for (const [event, handlers] of Object.entries(definition ?? {})) {
+          if (!Array.isArray(handlers)) continue;
+          for (const handler of handlers) {
+            for (const command of allHookCommandsOf(handler)) {
+              if (!isAnyHoltHookCommand(command)) foreign.push(`${name}/${event}: ${command}`);
+            }
+          }
+        }
+      }
+      if (foreign.length) {
+        out.push({
+          adapter: 'foreign-hooks', host: 'antigravity', scope, path: rel,
+          action: `this repository already registers ${foreign.length} Antigravity hook command(s) Holt did not write — `
+            + `your agent runs these too: ${foreign.slice(0, 3).join(' | ')}`
+            + `${foreign.length > 3 ? ` | …and ${foreign.length - 3} more` : ''}`,
+        });
+      }
+    } catch { /* absent or unreadable: the installer reports its own bounded result */ }
+  }
   return out;
 }
 
 /**
  * @param {string} repoRoot
- * @param {{bin?: string, home?: string, hosts?: string[]|null, scope?: string}} [opts]
+ * @param {{bin?: string, home?: string, hosts?: string[]|null, scope?: string, allHosts?: boolean}} [opts]
  */
 export async function integrate(repoRoot, {
-  bin = 'holt', home = os.homedir(), hosts = null, scope = 'project',
+  bin = 'holt', home = os.homedir(), hosts = null, scope = 'project', allHosts = false,
 } = {}) {
   const rawDetected = hosts ?? await detectHosts(repoRoot, home);
   const detected = Array.isArray(rawDetected)
     ? { all: rawDetected, project: rawDetected, user: [] }
     : rawDetected;
-  const present = detected.all;
+  const present = allHosts ? HOSTS.map((host) => host.id) : detected.all;
   const results = [];
 
   // Every integration references the SAME command, and it must be one a host will actually run.
@@ -1768,7 +2487,9 @@ export async function integrate(repoRoot, {
   results.push(...await foreignHookReport(repoRoot, scope));
 
   results.push(await installAgentsMd(repoRoot, { bin }));
-  results.push(...await installMcp(repoRoot, { bin, home, scope, hosts: present }));
+  results.push(...await installMcp(repoRoot, {
+    bin, home, scope, hosts: allHosts ? null : present,
+  }));
   // UPGRADE SAFETY: clean up locations a PAST version of holt wrote that are now known wrong,
   // before anything else gets a chance to read them. See legacyMcpTargets for the proven case
   // this closes (v0.3.0 itself shipped a wrong `.cline/mcp.json` for one commit).
@@ -1778,9 +2499,21 @@ export async function integrate(repoRoot, {
   // Cursor blocks deterministically now that its hook schema is confirmed rather than guessed.
   if (present.includes('cursor')) results.push(await installCursorHooks(repoRoot, { bin }));
   if (present.includes('opencode')) results.push(await installOpenCode(repoRoot, { bin }));
+  if (present.includes('codex')) results.push(await installCodexHooks(repoRoot, { bin }));
+  if (present.includes('qwen-code')) results.push(await installQwenCodeHooks(repoRoot, { bin }));
+  if (present.includes('antigravity')) results.push(await installAntigravityHooks(repoRoot, { bin }));
+  if (present.includes('copilot')) results.push(await installCopilotHooks(repoRoot, { bin }));
+  if (present.includes('goose')) results.push(await installGooseHooks(repoRoot, { bin }));
+  if (present.includes('cline')) results.push(await installClineHooks(repoRoot, { bin }));
+  if (present.includes('devin-cli')) results.push(await installDevinCliHooks(repoRoot, { bin }));
+  if (present.includes('cascade') || present.includes('devin-desktop')) {
+    results.push(await installCascadeHooks(repoRoot, { bin }));
+  }
   results.push(await installGitHooks(repoRoot, { bin }));
 
-  return { detected, scope, results, bin: { ...resolved } };
+  return {
+    detected, configuredHosts: present, allHosts, scope, results, bin: { ...resolved },
+  };
 }
 
 /**
@@ -1825,7 +2558,7 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
         // The receipt answers the question both attempts were guessing at: did holt make this
         // file, and are these still holt's bytes?
         const ours = await holtOwnsFile(repoRoot, 'AGENTS.md', receipt);
-        if (ours || !stripped) {
+        if (ours) {
           await fs.rm(file, { force: true });
           results.push({ adapter: 'agents-md', path: file, action: 'removed (holt created it)' });
         } else {
@@ -2049,16 +2782,162 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
     } catch { /* no hooks.json */ }
   }
 
+  // ---- Current project hook surfaces: Codex, Devin CLI and Cascade -----------------------
+  {
+    const file = path.join(repoRoot, '.agents', 'hooks.json');
+    try {
+      const rawText = await fs.readFile(file, 'utf8');
+      const cfg = readJsoncOrThrow(rawText);
+      const entry = cfg?.[ANTIGRAVITY_HOOK_KEY];
+      if (entry && isAntigravityHoltHook(entry)) {
+        let result = jsoncWrite(
+          rawText,
+          [[[ANTIGRAVITY_HOOK_KEY], undefined]],
+          { tabSize: 2, insertSpaces: true },
+        );
+        if (!result.endsWith('\n')) result += '\n';
+        const rel = await relativeWithinAsync(repoRoot, file);
+        if (await holtOwnsFile(repoRoot, rel, receipt)) {
+          await fs.rm(file, { force: true });
+          results.push({ adapter: 'antigravity', path: file, action: 'removed (holt-only content)' });
+        } else {
+          await fs.writeFile(file, result, 'utf8');
+          results.push({ adapter: 'antigravity', path: file, action: 'Holt context hook removed, your other hooks kept' });
+        }
+      } else if (entry) {
+        results.push({
+          adapter: 'antigravity', path: file,
+          action: `left in place (${ANTIGRAVITY_HOOK_KEY} is not structurally Holt-owned)`,
+        });
+      }
+    } catch { /* absent or unreadable: leave it alone */ }
+  }
+
+  // ---- Current project hook surfaces: Codex, Qwen, Devin CLI and Cascade -----------------
+  for (const spec of PROJECT_JSON_HOOK_SPECS) {
+    const file = path.join(repoRoot, spec.rel);
+    try {
+      const rawText = await fs.readFile(file, 'utf8');
+      const cfg = readJsoncOrThrow(rawText);
+      const events = objectAt(cfg, spec.prefix);
+      if (!events || typeof events !== 'object' || Array.isArray(events)) continue;
+      let result = rawText;
+      let removed = 0;
+      for (const [event, entries] of Object.entries(events)) {
+        if (!Array.isArray(entries)) continue;
+        const kept = [];
+        for (const entry of entries) {
+          const commands = allHookCommandsOf(entry);
+          const holtCommands = commands.filter((command) => isAnyHoltHookCommand(command));
+          if (holtCommands.length === 0) {
+            kept.push(entry);
+            continue;
+          }
+          removed += holtCommands.length;
+          const userCommands = commands.filter((command) => !isAnyHoltHookCommand(command));
+          const stripped = withoutProjectHoltCommands(entry, isAnyHoltHookCommand);
+          if (userCommands.length > 0 || hookActionRemains(stripped)) kept.push(stripped);
+        }
+        result = jsoncWrite(
+          result,
+          [[[...spec.prefix, event], kept.length ? kept : undefined]],
+          { tabSize: 2, insertSpaces: true },
+        );
+      }
+      if (removed === 0) continue;
+      const parsed = readJsoncOrThrow(result);
+      if (spec.prefix.length > 0) {
+        const root = objectAt(parsed, spec.prefix);
+        if (root && Object.keys(root).length === 0) {
+          result = jsoncWrite(result, [[spec.prefix, undefined]], { tabSize: 2, insertSpaces: true });
+        }
+      }
+      if (!result.endsWith('\n')) result += '\n';
+      const rel = await relativeWithinAsync(repoRoot, file);
+      if (await holtOwnsFile(repoRoot, rel, receipt)) {
+        await fs.rm(file, { force: true });
+        results.push({ adapter: spec.host, path: file, action: 'removed (holt-only content)' });
+      } else {
+        await fs.writeFile(file, result, 'utf8');
+        results.push({ adapter: spec.host, path: file, action: `${removed} holt hook command(s) removed, your settings kept` });
+      }
+    } catch { /* absent or unreadable: leave it alone */ }
+  }
+
+  // ---- Copilot's dedicated project file: remove only the entry carrying holt's marker ------
+  {
+    const file = path.join(repoRoot, '.github', 'hooks', 'holt.json');
+    try {
+      const rawText = await fs.readFile(file, 'utf8');
+      const cfg = readJsoncOrThrow(rawText);
+      const entries = cfg.hooks?.PreToolUse;
+      if (!Array.isArray(entries)) throw new Error('no PreToolUse array');
+      const kept = entries.filter((entry) => !isCopilotHoltEntry(entry));
+      const removed = entries.length - kept.length;
+      if (removed > 0) {
+        const rel = await relativeWithinAsync(repoRoot, file);
+        if (await holtOwnsFile(repoRoot, rel, receipt)) {
+          await fs.rm(file, { force: true });
+          results.push({ adapter: 'copilot', path: file, action: 'removed (holt-only content)' });
+        } else {
+          let result = jsoncWrite(
+            rawText,
+            [[['hooks', 'PreToolUse'], kept.length ? kept : undefined]],
+            { tabSize: 2, insertSpaces: true },
+          );
+          if (!result.endsWith('\n')) result += '\n';
+          await fs.writeFile(file, result, 'utf8');
+          results.push({ adapter: 'copilot', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+        }
+      }
+    } catch { /* absent, unreadable or foreign: leave it alone */ }
+  }
+
+  // ---- Cline executable: no shared-file merge is possible, so ownership is receipt-backed ---
+  {
+    const file = path.join(repoRoot, '.clinerules', 'hooks', 'PreToolUse');
+    try {
+      const text = await fs.readFile(file, 'utf8');
+      if (text.includes(CLINE_HOOK_MARKER)) {
+        const rel = await relativeWithinAsync(repoRoot, file);
+        if (await holtOwnsFile(repoRoot, rel, receipt)) {
+          await fs.rm(file, { force: true });
+          results.push({ adapter: 'cline', path: file, action: 'removed' });
+        } else {
+          results.push({ adapter: 'cline', path: file, action: 'left in place (generated hook was modified or ownership could not be proved)' });
+        }
+      }
+    } catch { /* no hook */ }
+  }
+
+  // ---- Goose project plugin: both files are generated and deleted only while byte-owned -----
+  {
+    const root = path.join(repoRoot, '.agents', 'plugins', 'holt');
+    const rels = [path.join('.agents', 'plugins', 'holt', 'plugin.json'), path.join('.agents', 'plugins', 'holt', 'hooks', 'hooks.json')];
+    const files = rels.map((rel) => path.join(repoRoot, rel));
+    const ownership = [];
+    for (let i = 0; i < files.length; i++) {
+      ownership.push(await holtOwnsFile(repoRoot, rels[i], receipt));
+    }
+    if (ownership.every(Boolean)) {
+      for (const file of files) await fs.rm(file, { force: true });
+      results.push({ adapter: 'goose', path: root, action: 'removed' });
+    } else if (ownership.some(Boolean)) {
+      results.push({ adapter: 'goose', path: root, action: 'left in place (one generated plugin file was modified; ownership is no longer complete)' });
+    }
+  }
+
   // ---- OpenCode plugin: the whole file is holt's ----
   {
     const file = path.join(repoRoot, '.opencode', 'plugins', 'holt.js');
     try {
-      const text = await fs.readFile(file, 'utf8');
-      if (text.includes('holt — OpenCode plugin')) {
+      await fs.readFile(file, 'utf8');
+      const rel = await relativeWithinAsync(repoRoot, file);
+      if (await holtOwnsFile(repoRoot, rel, receipt)) {
         await fs.rm(file, { force: true });
-        results.push({ adapter: 'opencode', path: file, action: 'removed' });
+        results.push({ adapter: 'opencode', path: file, action: 'removed (receipt-owned, unmodified)' });
       } else {
-        results.push({ adapter: 'opencode', path: file, action: 'left in place (does not look holt-authored)' });
+        results.push({ adapter: 'opencode', path: file, action: 'left in place (modified or ownership could not be proved)' });
       }
     } catch { /* no plugin file */ }
   }
@@ -2068,7 +2947,7 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
     const file = path.join(repoRoot, '.git', 'hooks', 'pre-commit');
     try {
       const text = await fs.readFile(file, 'utf8');
-      if (text.includes(PRE_COMMIT_MARKER)) {
+      if (isExactGeneratedPreCommit(text)) {
         await fs.rm(file, { force: true });
         results.push({ adapter: 'git-hooks', path: file, action: 'removed' });
       } else {
@@ -2115,28 +2994,83 @@ export function formatVerdict(verdict, { host = 'generic', eventName = 'PreToolU
     if (verdict.decision === 'deny') {
       return {
         permission: 'deny',
-        userMessage: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.',
-        agentMessage: verdict.reason ?? 'holt refused this command.',
+        user_message: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.',
+        agent_message: verdict.reason ?? 'holt refused this command.',
       };
     }
     // Cursor has no 'ask' state here; the honest mapping for "holt could not verify" is to
     // surface it as a denial with the reason, never a silent allow.
     if (verdict.decision === 'ask') {
-      return { permission: 'deny', userMessage: verdict.reason, agentMessage: verdict.reason };
+      return { permission: 'deny', user_message: verdict.reason, agent_message: verdict.reason };
     }
     return { permission: 'allow' };
   }
 
   // Devin CLI (formerly Windsurf): .devin/hooks.v1.json, PreToolUse. Its documented block signal
   // is {"decision":"block","reason":...}.
-  if (host === 'devin') {
+  if (host === 'devin' || host === 'devin-cli') {
     if (verdict.decision === 'deny' || verdict.decision === 'ask') {
       return { decision: 'block', reason: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.' };
     }
     return {};
   }
 
-  if (host === 'claude-code') {
+  // Codex accepts Claude's hookSpecificOutput shape, but not permissionDecision:"ask". An
+  // unverified command is therefore denied, never turned into an unsupported response that Codex
+  // documents as a hook failure followed by allowing the tool call.
+  if (host === 'codex') {
+    if (verdict.decision === 'allow') return {};
+    const out = { hookEventName: eventName, permissionDecision: 'deny' };
+    if (verdict.reason) out.permissionDecisionReason = verdict.reason;
+    return { hookSpecificOutput: out };
+  }
+
+  // Copilot's PreToolUse decision object is top-level. Empty allow output preserves Copilot's
+  // normal permission flow; returning permissionDecision:"allow" would grant more than holt
+  // actually decided.
+  if (host === 'copilot') {
+    if (verdict.decision === 'allow') return {};
+    return {
+      permissionDecision: 'deny',
+      permissionDecisionReason: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.',
+    };
+  }
+
+  if (host === 'goose') {
+    if (verdict.decision === 'allow') return {};
+    return {
+      decision: 'block',
+      reason: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.',
+    };
+  }
+
+  // Antigravity documents `allow` as an authority-granting decision, not a neutral pass-through.
+  // Holt therefore never emits it.  This formatter exists for an explicit/manual hook invocation;
+  // integrate wires context only until live proof shows how to preserve native permissions.
+  if (host === 'antigravity') {
+    if (verdict.decision === 'deny') {
+      return { decision: 'deny', reason: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.' };
+    }
+    return {
+      decision: 'ask',
+      reason: verdict.reason ?? 'Holt did not prove a neutral Antigravity pass-through; keep the host permission prompt.',
+    };
+  }
+
+  // Cline's file hook protocol blocks with cancel:true on stdout while exiting successfully.
+  if (host === 'cline') {
+    if (verdict.decision === 'allow') return { cancel: false };
+    return {
+      cancel: true,
+      errorMessage: verdict.reason ?? 'holt: this would destroy work that exists nowhere else.',
+      contextModification: '',
+    };
+  }
+
+  // Cascade branches on exit 2 + stderr for pre-hooks and does not define a decision JSON body.
+  if (host === 'cascade') return {};
+
+  if (host === 'claude-code' || host === 'qwen-code') {
     if (verdict.decision === 'allow') return {};
     const out = { hookEventName: eventName, permissionDecision: verdict.decision };
     if (verdict.reason) out.permissionDecisionReason = verdict.reason;
@@ -2146,9 +3080,20 @@ export function formatVerdict(verdict, { host = 'generic', eventName = 'PreToolU
 }
 
 export function formatContext(text, { host = 'generic', eventName = 'SessionStart' } = {}) {
-  if (!text) return host === 'claude-code' ? {} : { context: null };
-  if (host === 'claude-code') {
+  if (!text) return host === 'claude-code' || host === 'codex' || host === 'cursor'
+    || host === 'qwen-code' || host === 'antigravity'
+    ? {} : { context: null };
+  // Cursor Stop does not have an additional-context channel. `followup_message` is consumed as a
+  // new prompt and deliberately continues the loop, so cmdHook applies status, loop-count and
+  // changed-state guards before this formatter is reached.
+  if (host === 'cursor' && eventName === 'Stop') return { followup_message: text };
+  // Claude Stop context continues the conversation. Keep this guard even though Holt no longer
+  // wires the event, so a stale/manual invocation cannot resurrect it as a supposedly passive
+  // advisory channel.
+  if (host === 'claude-code' && eventName === 'Stop') return {};
+  if (host === 'claude-code' || host === 'codex' || host === 'qwen-code') {
     return { hookSpecificOutput: { hookEventName: eventName, additionalContext: text } };
   }
+  if (host === 'antigravity') return { injectSteps: [{ ephemeralMessage: text }] };
   return { context: text };
 }

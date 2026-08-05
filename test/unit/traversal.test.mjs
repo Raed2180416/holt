@@ -19,7 +19,7 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-import { assertUsablePath, canonicalPath, underOrEqualAsync, PathBoundaryError } from '../../src/paths.mjs';
+import { assertUsablePath, canonicalPath, samePathAsync, underOrEqualAsync, PathBoundaryError } from '../../src/paths.mjs';
 import { __test } from '../../src/mcp/server.mjs';
 
 const { validateArgs, guardRepoArg, TOOLS, neutralise, sanitizeForModel, MAX_AGENTS, MAX_LIMIT } = __test;
@@ -196,7 +196,13 @@ test('REPO BOUNDARY: two worktrees of ONE repository are ONE repository — allo
   // `--show-toplevel` returns three different answers, one of them a failure.
   assert.equal(await gitCommonDir(fleet.wtB), homeId, 'two worktrees of one repo must share an identity');
   assert.equal(await gitCommonDir(fleet.bare), homeId, 'the bare directory is the same repository');
-  assert.equal(homeId, path.resolve(fleet.bare));
+  // git resolves symlinks and 8.3 short names to the real filesystem path when printing
+  // `--git-common-dir --path-format=absolute`; `path.resolve` does not. On macOS `os.tmpdir()`
+  // is `/var/folders/...` (a symlink to `/private/var/folders/...`) and on Windows it is an 8.3
+  // short name (`RUNNER~1`), so a raw string compare of the two is a portability trap. Compare
+  // canonicalised paths instead — same location, never the literal string.
+  assert.ok(await samePathAsync(homeId, fleet.bare),
+    `homeId and the bare directory must be the same location: ${homeId} vs ${fleet.bare}`);
 
   const deep = path.join(fleet.wtB, 'src', 'deep');
   await fs.mkdir(deep, { recursive: true });
@@ -323,6 +329,7 @@ test('ARGUMENTS: the declaration each tool already publishes is now the thing th
     [at, { repo: 'x\u0000/etc' }, /NUL byte/],
     [at, { repo: 'x'.repeat(5000) }, /the maximum is 4096/],
     [check, { id: 'x'.repeat(600) }, /the maximum is 512/],
+    [clean, { operation: 'delete' }, /must be one of preview, quarantine, list, restore/],
     [at, { limit: {} }, /'limit' must be a finite number/],
     [at, { limit: 'lots' }, /'limit' must be a finite number/],
     [at, { limit: Infinity }, /'limit' must be a finite number/],

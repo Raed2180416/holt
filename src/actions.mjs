@@ -21,8 +21,13 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { git, gitOk, gitPathBatched, pmap, authorEnv } from './git.mjs';
-import { discover, isHoltLock, unquotePorcelain, repoAbsenceError } from './discover.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+import { git, gitOk, gitPathBatched, catFileBatch, pmap, authorEnv } from './git.mjs';
+import {
+  discover, isHoltLock, isHoltCleanQuarantineLock, HOLT_CLEAN_QUARANTINE_LOCK_PREFIX,
+  HOLT_CLEAN_QUARANTINE_MARKER_PREFIX, parseWorktreePorcelain, unquotePorcelain, repoAbsenceError,
+  disambiguate,
+} from './discover.mjs';
 import {
   underOrEqualAsync, relativeWithinAsync, relativeLinkAwareAsync, canonicalPath, samePathSync,
 } from './paths.mjs';
@@ -120,6 +125,30 @@ async function assess(cwd, opts = {}) {
   return { disc, scanned, report };
 }
 
+/**
+ * Clean's authority must ignore worktrees it already quarantined.
+ *
+ * A quarantined worktree remains registered and byte-for-byte intact on purpose. If it were left
+ * in the sibling-identity set, three mutually redundant active worktrees would all appear safe:
+ * after moving the first two, the quarantine copies would keep authorising the third. Filtering
+ * only Holt's exact quarantine marker preserves the original invariant — the active set drains to
+ * one durable survivor — without hiding those recovery copies from ordinary status/risk scans.
+ */
+async function assessForClean(cwd, opts = {}) {
+  const disc = await discover(cwd, opts);
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
+  const quarantined = disc.workstreams.filter(
+    (w) => w.quarantined === true || w.quarantineTransition === true);
+  const activeDisc = {
+    ...disc,
+    workstreams: disc.workstreams.filter(
+      (w) => w.quarantined !== true && w.quarantineTransition !== true),
+  };
+  const scanned = await scan(activeDisc, opts);
+  const report = await analyze(scanned, opts);
+  return { disc: activeDisc, scanned, report, quarantined };
+}
+
 /* ============================================================== PROTECT ==== */
 
 /**
@@ -201,6 +230,7 @@ export async function protect(cwd, { dryRun = false, ...opts } = {}) {
     const ws = report.graph.nodes.find((n) => n.id === s.id);
     if (!ws?.path) continue;
     const st = await lockState(ws.path, cwd);
+    if (st.locked && isHoltCleanQuarantineLock(st.reason)) continue;
     if (!st.locked || !isHoltLock(st.reason)) continue;
 
     if (!dryRun) {
@@ -474,18 +504,23 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
   // exit 0 is what a `holt rescue X && git worktree remove X` chain acts on. Deriving the set
   // here instead of in contentAtRisk() is what allowed the drift; it is not done here any more.
   const risk = contentAtRisk(ws);
-  const files = risk.files;
+  // A NAMED path whose comparison semantics are untrusted can still be rescued: the exact-capture
+  // path below reads its filesystem bytes without Git conversion and independently verifies the
+  // resulting blob. A failed whole-layer instrument is different because it may have hidden paths
+  // Holt cannot name; that remains a hard refusal. This distinction keeps gate conservative while
+  // letting rescue remediate the very uncertainty gate reports.
+  const files = [...new Set([...risk.files, ...risk.unmeasured])].sort();
   const committedDelta = risk.committedCount;
 
   // AN INSTRUMENT THAT FAILED IS NOT AN EMPTY WORKTREE. Both look like zero paths from here, and
   // only one of them makes deletion safe — so a probe failure must produce a NAMED refusal with
   // a non-zero exit, never the cheerful nothing-to-rescue that licenses the deletion.
-  if (risk.blind.length) {
+  if (risk.instrumentBlind.length) {
     return {
       ok: false,
       id,
-      error: `holt could not enumerate this worktree's content: ${risk.blind.join('; ')}`,
-      blind: risk.blind,
+      error: `holt could not enumerate this worktree's content: ${risk.instrumentBlind.join('; ')}`,
+      blind: risk.instrumentBlind,
       note: 'nothing was captured and nothing was released. holt cannot tell an empty worktree '
         + 'from one it failed to look inside, so it refuses rather than report nothing-to-rescue.',
     };
@@ -511,31 +546,72 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
   // Build a tree from the worktree's CURRENT state in a scratch index. UNIQUE per invocation —
   // see the comment on scratchIndexPath() above for why a fixed name here is a data-loss bug,
   // not a style nit.
+  //
+  // `git add` is deliberately absent. It enters the check-in conversion pipeline: repository
+  // clean/process commands can execute, and built-in eol/ident/encoding rules can rewrite the
+  // sole-copy bytes a rescue promises to preserve. The exact path below seeds the scratch index
+  // from the real index tree, removes each at-risk selection, hashes filesystem leaves with
+  // --no-filters, and writes explicit mode/object/path tuples through update-index --cacheinfo.
   const tmpIndex = scratchIndexPath(ws.path, 'rescue');
   // holt authors this capture; a repo with no configured identity must still be rescuable.
   const env = { GIT_INDEX_FILE: tmpIndex, ...(await authorEnv(ws.path)) };
   try {
-    // Seed from HEAD so committed content is included, then overlay everything on disk.
-    await gitOk(['read-tree', 'HEAD'], { cwd: ws.path, env, allowMutation: true });
-    // --force so .gitignore'd files are captured too: a rescue that honoured ignore rules would
-    // silently drop exactly the local config an agent might have spent an hour on.
-    //
-    // Deliberately NOT gitOk: a PARTIAL add must reach verification rather than throw. Measured
-    // case — a nested git repository inside the worktree (a vendored checkout, a stray
-    // `git init`) makes add exit non-zero with "'nested/' does not have a commit checked out"
-    // while still indexing everything else. Throwing there would report a generic failure;
-    // continuing to verification reports exactly WHICH files were not captured, which is the
-    // information that decides whether this worktree may be released.
-    const added = await git(['add', '--all', '--force', '--', '.'],
-      { cwd: ws.path, env, allowMutation: true });
+    // The real index already carries staged additions, deletions, and both sides of renames. Its
+    // tree is object-only evidence and needs no working-tree conversion. Starting from HEAD would
+    // resurrect a staged rename's source unless Holt reimplemented the entire index delta.
+    const indexTreeR = await gitOk(['write-tree'], { cwd: ws.path, allowMutation: true });
+    await gitOk(['read-tree', indexTreeR.stdout.trim()], { cwd: ws.path, env, allowMutation: true });
+
+    const selected = [...new Set(files.map((file) => file.replace(/\/+$/, '')).filter(Boolean))].sort();
+    /** @type {any[]} */
+    let sourceLeaves;
+    try {
+      const rawLeaves = await selectedFilesystemManifest(ws.path, selected);
+
+      const seeded = await indexEntriesFor(ws.path, selected, env);
+      for (const entry of seeded) {
+        await gitOk(['update-index', '--force-remove', '--', entry.path],
+          { cwd: ws.path, env, allowMutation: true });
+      }
+      // Rescue and discard share the same raw-object capture primitive and therefore the same
+      // process budget. A large ignored/vendor tree is not unusual rescue input; launching one
+      // `git hash-object` per leaf at once can exhaust descriptors/process slots before Holt has
+      // made anything durable. Keep the bound identical to discard so neither recovery route
+      // turns corpus size into a false refusal.
+      sourceLeaves = await pmap(
+        rawLeaves,
+        (leaf) => hashRawManifestLeaf(ws.path, ws.path, leaf),
+        8,
+      );
+      sourceLeaves.sort((a, b) => a.path.localeCompare(b.path));
+      for (const leaf of sourceLeaves) {
+        await gitOk(['update-index', '--add', '--cacheinfo', `${leaf.mode},${leaf.oid},${leaf.path}`],
+          { cwd: ws.path, env, allowMutation: true });
+      }
+      const indexed = await indexEntriesFor(ws.path, selected, env);
+      if (!sameEntryTuples(sourceLeaves, indexed)) {
+        throw new Error('scratch index does not contain the exact raw mode/object/path tuples');
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        id,
+        error: `rescue is INCOMPLETE — exact raw capture failed: ${error?.message ?? error}`,
+        missing: selected,
+        note: 'the worktree has NOT been released and nothing was deleted. Holt never executes repository '
+          + 'content filters while rescuing. A submodule, embedded Git repository, unsupported '
+          + 'filesystem node, or concurrently changing path must be handled at its own boundary.',
+      };
+    }
 
     const treeR = await gitOk(['write-tree'], { cwd: ws.path, env, allowMutation: true });
     const tree = treeR.stdout.trim();
 
     const msg = `holt rescue: ${id}\n\n`
-      + `Captured ${files.length} at-risk path(s) `
+      + `Captured ${files.length} at-risk or named-unmeasured path(s) `
       + `(${risk.layers.uncommitted.length} modified, ${risk.layers.untracked.length} untracked, `
-      + `${risk.layers.ignored.length} gitignored) and the worktree's committed state.\n`
+      + `${risk.layers.ignored.length} gitignored, ${risk.unmeasured.length} unmeasured) `
+      + `and the worktree's committed state.\n`
       + `Restore with:  git checkout <this-ref> -- .   (see 'holt rescued')\n`;
     const commitR = await gitOk(
       ['commit-tree', tree, '-p', ws.head, '-m', msg],
@@ -545,6 +621,42 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     // is reused, and reporting the one we built rather than the one that is reachable is the same
     // class of lie this whole change exists to remove.
     let commit = commitR.stdout.trim();
+
+    // Verification is identity and bytes, not mere path containment. The old check was satisfied
+    // by a clean-filter replacement blob because the requested pathname still existed in the
+    // tree. Compare exact tuples, then independently digest every captured blob.
+    try {
+      let capturedEntries = await treeEntriesFor(ws.path, commit, selected);
+      if (!sameEntryTuples(sourceLeaves, capturedEntries)) {
+        throw new Error('capture commit does not contain the exact raw mode/object/path tuples');
+      }
+      capturedEntries = await hydrateBlobEntries(ws.path, capturedEntries);
+      const expectedByPath = new Map(sourceLeaves.map((entry) => [entry.path, entry]));
+      for (const entry of capturedEntries) {
+        const expected = expectedByPath.get(entry.path);
+        if (!expected || !Buffer.isBuffer(entry.content)) {
+          throw new Error(`capture blob for '${entry.path}' is unreadable`);
+        }
+        const digest = createHash('sha256').update(entry.content).digest('hex');
+        if (digest !== expected.sha256 || entry.content.length !== expected.size) {
+          throw new Error(`capture blob for '${entry.path}' differs from the filesystem bytes`);
+        }
+      }
+      const finalLeaves = await selectedFilesystemManifest(ws.path, selected);
+      if (!sameRawLeafTuples(sourceLeaves, finalLeaves)) {
+        throw new Error('selected filesystem content changed while the capture was being verified');
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        id,
+        commit,
+        error: `rescue is INCOMPLETE — exact verification failed: ${error?.message ?? error}`,
+        missing: selected,
+        note: 'the worktree has NOT been released and nothing was deleted. The unreferenced commit oid is '
+          + 'reported for forensics, but Holt will not call an unverified capture recoverable.',
+      };
+    }
 
     // Declared before the capture because the failure path below reports through it too: a rescue
     // that could not write its ref still has to say so, and still has to carry any journal warning.
@@ -571,68 +683,6 @@ export async function rescue(cwd, id, { dryRun = false, release = false, ...opts
     }
     ref = alloc.ref;
     commit = alloc.commit;
-
-    // VERIFY before claiming success. A rescue that silently captured nothing is worse than no
-    // rescue at all, because it licenses a deletion.
-    // -z is LOAD-BEARING: without it ls-tree C-quotes non-ASCII paths ("src/\303\274ni.js"),
-    // while the `files` list (from status --porcelain -z) carries them raw. The comparison then
-    // mismatches and rescue refuses a capture that actually succeeded — found by the monster
-    // round on a worktree named ünïcode-3. NUL-separated output is never quoted.
-    const captured = await git(['ls-tree', '-r', '--name-only', '-z', commit], { cwd: ws.path });
-    const capturedFiles = captured.code === 0 ? captured.stdout.split('\0').filter(Boolean) : [];
-    const capturedSet = new Set(capturedFiles);
-
-    // `git status` reports an unaddable directory as `nested/`; the tree lists files. Count a
-    // directory entry as captured only if SOMETHING beneath it made it in.
-    const isCaptured = (f) => (f.endsWith('/')
-      ? capturedFiles.some((c) => c.startsWith(f))
-      : capturedSet.has(f));
-
-    // A GITLINK SATISFIES "THE PATH IS IN THE TREE" WITHOUT CAPTURING ANYTHING.
-    //
-    // `git add --all --force` cannot record a submodule's UNCOMMITTED work: the only thing it can
-    // write for a submodule is the gitlink, and the gitlink only moves when something is COMMITTED
-    // inside. So for a dirty submodule the rescue commit contains the same `160000 commit <sha>`
-    // it started with — the path IS present, capturedSet.has(f) is true, and verification passed
-    // while nothing whatsoever had been captured.
-    //
-    // Reproduced end to end: rescue returned {ok:true, verified:true, capturedFiles:1} for a
-    // submodule holding an untracked file; the rescue commit's diff contained no trace of it, and
-    // removing the worktree afterwards — which is exactly what rescue's own output invites — left
-    // the content in no git object in either repository. The comment above this function sets the
-    // standard it was failing: "a rescue that silently captured nothing is worse than no rescue
-    // at all, because it licenses a deletion."
-    //
-    // holt does not try to recurse and capture the submodule's state: a submodule is a separate
-    // repository with its own history, and quietly committing into it would be a mutation the
-    // user never asked for. It REFUSES instead, and names the command that does work.
-    const dirtySubmodules = [];
-    for (const f of files) {
-      const rel = f.replace(/\/$/, '');
-      const inTree = await git(['ls-tree', '-z', commit, '--', rel], { cwd: ws.path });
-      if (inTree.code !== 0 || !/^160000 /.test(inTree.stdout)) continue;   // not a gitlink
-      const sub = path.join(ws.path, rel);
-      const dirty = await git(['status', '--porcelain', '--untracked-files=all'], { cwd: sub })
-        .catch(() => ({ code: 1, stdout: '' }));
-      if (dirty.code === 0 && dirty.stdout.trim()) dirtySubmodules.push(rel);
-    }
-
-    const missing = files.filter((f) => !isCaptured(f))
-      .concat(dirtySubmodules.map((d) => `${d} (submodule with uncommitted work)`));
-
-    if (missing.length) {
-      return {
-        ok: false, id, ref, commit,
-        error: `rescue is INCOMPLETE — ${missing.length} path(s) not captured: ${missing.slice(0, 5).join(', ')}`,
-        missing,
-        addWarnings: added.code === 0 ? [] : added.stderr.split('\n').filter(Boolean).slice(0, 5),
-        note: 'the worktree has NOT been released and nothing was deleted. '
-          + 'A nested git repository or a SUBMODULE holding uncommitted work is the usual cause: '
-          + 'git can only record a submodule\'s committed state, so its working-tree changes '
-          + 'cannot be captured from here. Commit inside the submodule (or move the work out), '
-          + 'then rescue again.',
-      };
-    }
 
     /** @type {boolean | null} */
     let released = null;
@@ -782,6 +832,441 @@ export async function auto(cwd, opts = {}) {
 
 /* ============================================================== DISCARD ==== */
 
+const isSelectedPath = (candidate, selected) => candidate === selected
+  || candidate.startsWith(`${selected}/`);
+
+function parseTreeRecords(raw, source) {
+  const out = [];
+  for (const record of raw.split('\0').filter(Boolean)) {
+    const tab = record.indexOf('\t');
+    const meta = tab < 0 ? null : /^(\d+) ([^ ]+) ([0-9a-f]+)$/.exec(record.slice(0, tab));
+    if (!meta) throw new Error(`could not parse ${source} tree entry`);
+    out.push({ mode: meta[1], type: meta[2], oid: meta[3], path: record.slice(tab + 1) });
+  }
+  return out;
+}
+
+async function treeEntriesFor(cwd, treeish, selectedPaths) {
+  const byPath = new Map();
+  for (const selected of selectedPaths) {
+    const r = await git(
+      ['ls-tree', '-r', '-z', '--full-tree', treeish, '--', `:(literal)${selected}`],
+      { cwd },
+    );
+    if (r.code !== 0) throw new Error(r.stderr.trim() || `git ls-tree ${treeish} failed`);
+    for (const entry of parseTreeRecords(r.stdout, treeish)) {
+      if (!isSelectedPath(entry.path, selected)) {
+        throw new Error(`tree lookup for '${selected}' returned unrelated path '${entry.path}'`);
+      }
+      byPath.set(entry.path, entry);
+    }
+  }
+  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+async function indexEntriesFor(cwd, selectedPaths, env) {
+  const byPath = new Map();
+  for (const selected of selectedPaths) {
+    const r = await git(
+      ['ls-files', '--stage', '-z', '--', `:(literal)${selected}`],
+      { cwd, env },
+    );
+    if (r.code !== 0) throw new Error(r.stderr.trim() || 'git ls-files --stage failed');
+    for (const record of r.stdout.split('\0').filter(Boolean)) {
+      const m = /^(\d+) ([0-9a-f]+) ([0-3])\t([\s\S]*)$/.exec(record);
+      if (!m) throw new Error(`could not parse scratch-index entry for '${selected}'`);
+      const entry = { mode: m[1], oid: m[2], stage: Number(m[3]), path: m[4] };
+      if (!isSelectedPath(entry.path, selected)) {
+        throw new Error(`index lookup for '${selected}' returned unrelated path '${entry.path}'`);
+      }
+      if (entry.stage !== 0) throw new Error(`'${entry.path}' has an unmerged index entry`);
+      byPath.set(entry.path, entry);
+    }
+  }
+  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+const entryTuple = (entry) => `${entry.mode} ${entry.oid}\t${entry.path}`;
+
+function sameEntryTuples(indexEntries, treeEntries) {
+  const left = indexEntries.map(entryTuple);
+  const right = treeEntries.map(entryTuple);
+  return left.length === right.length && left.every((v, i) => v === right[i]);
+}
+
+async function directoryIdentity(dir) {
+  const st = await fs.lstat(dir);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`parent '${dir}' is not a real directory`);
+  }
+  return {
+    path: dir,
+    canonical: await canonicalPath(dir),
+    dev: String(st.dev),
+    ino: String(st.ino),
+  };
+}
+
+async function sameDirectoryIdentity(identity) {
+  try {
+    const now = await directoryIdentity(identity.path);
+    return samePathSync(now.canonical, identity.canonical)
+      && now.dev === identity.dev && now.ino === identity.ino;
+  } catch {
+    return false;
+  }
+}
+
+async function openDirectoryAnchor(identity) {
+  if (!(await sameDirectoryIdentity(identity))) {
+    throw new Error(`parent '${identity.path}' changed before quarantine`);
+  }
+  // Linux exposes an open directory descriptor as a traversable path. Keeping that descriptor
+  // open turns subsequent mkdir/rename/restore calls into operations relative to the directory
+  // inode we measured, even if an adversary renames the path and replaces it with a symlink.
+  const fdRoot = process.platform === 'linux' ? '/proc/self/fd'
+    : (process.platform === 'darwin' || process.platform === 'freebsd' ? '/dev/fd' : null);
+  if (!fdRoot) return { handle: null, path: identity.path };
+  const handle = await fs.open(identity.path, 'r');
+  try {
+    const st = await handle.stat();
+    if (String(st.dev) !== identity.dev || String(st.ino) !== identity.ino || !st.isDirectory()) {
+      throw new Error(`parent '${identity.path}' changed while its directory handle was opened`);
+    }
+    const anchored = `${fdRoot}/${handle.fd}`;
+    const anchoredStat = await fs.stat(anchored);
+    if (String(anchoredStat.dev) !== identity.dev || String(anchoredStat.ino) !== identity.ino
+      || !anchoredStat.isDirectory()) {
+      throw new Error(`could not anchor '${identity.path}' by descriptor`);
+    }
+    return { handle, path: anchored };
+  } catch (error) {
+    await handle.close().catch(() => {});
+    throw error;
+  }
+}
+
+const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+
+async function validateCaptureNode(abs, logicalPath) {
+  const st = await fs.lstat(abs);
+  if (st.isSymbolicLink() || st.isFile()) return;
+  if (!st.isDirectory()) {
+    throw new Error(`'${logicalPath}' has unsupported filesystem type; only files, directories, and symlinks can be captured`);
+  }
+  const names = (await fs.readdir(abs)).sort();
+  // Git stores leaves, not empty directory entries. An empty directory therefore contains no
+  // bytes, link target, mode-bearing file, or special node for a capture ref to preserve. Refusing
+  // the whole discard because ONE nested package directory is empty made the documented recovery
+  // route unusable on ordinary generated trees (npm leaves these behind in real installs). The
+  // quarantine below still proves the directory is empty and removes it atomically; the result
+  // explicitly names empty directory paths as non-Git-representable instead of pretending the ref
+  // can recreate them.
+  for (const name of names) {
+    const childLogical = `${logicalPath}/${name}`;
+    if (name === '.git') {
+      throw new Error(`'${childLogical}' is an embedded Git boundary; run Holt inside that repository first`);
+    }
+    await validateCaptureNode(path.join(abs, name), childLogical);
+  }
+}
+
+async function selectedFilesystemManifest(wsPath, selected) {
+  const byPath = new Map();
+  for (const logicalPath of selected) {
+    if (path.isAbsolute(logicalPath)
+      || logicalPath.split('/').some((piece) => piece === '' || piece === '.' || piece === '..')) {
+      throw new Error(`Git reported an unsafe capture path '${logicalPath}'`);
+    }
+    const abs = path.join(wsPath, ...logicalPath.split('/'));
+    try {
+      await validateCaptureNode(abs, logicalPath);
+      for (const leaf of await filesystemManifest(abs, logicalPath)) byPath.set(leaf.path, leaf);
+    } catch (error) {
+      // Missing means a real deletion. Removing the seeded entry and adding no leaf is the exact
+      // Git-tree representation of that state; a later recheck detects an appearing replacement.
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error;
+    }
+  }
+  return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
+}
+
+const rawLeafTuple = (leaf) => [
+  leaf.path, leaf.type, leaf.mode, leaf.size, leaf.sha256,
+].join('\0');
+
+function sameRawLeafTuples(left, right) {
+  const a = left.map(rawLeafTuple);
+  const b = right.map(rawLeafTuple);
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+async function embeddedBoundaryAbove(wsPath, abs) {
+  let dir = path.dirname(abs);
+  const root = await canonicalPath(wsPath);
+  for (let n = 0; n < 256; n++) {
+    const canonical = await canonicalPath(dir);
+    if (samePathSync(canonical, root)) return null;
+    if (!(await underOrEqualAsync(dir, wsPath))) return `path escaped worktree while checking '${abs}'`;
+    try {
+      await fs.lstat(path.join(dir, '.git'));
+      return path.join(dir, '.git');
+    } catch (error) {
+      if (error?.code !== 'ENOENT') return `could not inspect ${path.join(dir, '.git')}: ${error?.message ?? error}`;
+    }
+    const parent = path.dirname(dir);
+    if (samePathSync(await canonicalPath(parent), await canonicalPath(dir))) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * @param {string} abs
+ * @param {string} logicalPath
+ * @param {any[]} [out]
+ * @param {string[]|null} [emptyDirectories]
+ */
+async function filesystemManifest(abs, logicalPath, out = [], emptyDirectories = null) {
+  const before = await fs.lstat(abs);
+  if (before.isDirectory() && !before.isSymbolicLink()) {
+    const names = (await fs.readdir(abs)).sort();
+    for (const name of names) {
+      await filesystemManifest(path.join(abs, name), `${logicalPath}/${name}`, out, emptyDirectories);
+    }
+    // Re-read the directory after its children. A disappearing/replaced child must invalidate the
+    // snapshot; accepting empty directories must not turn a concurrent deletion into a clean
+    // capture. Pure empty-directory topology is named separately because Git cannot encode it.
+    const after = await fs.lstat(abs);
+    const afterNames = (await fs.readdir(abs)).sort();
+    if (!after.isDirectory() || after.isSymbolicLink()
+      || String(before.dev) !== String(after.dev) || String(before.ino) !== String(after.ino)
+      || before.mtimeMs !== after.mtimeMs
+      || names.length !== afterNames.length || names.some((name, i) => name !== afterNames[i])) {
+      throw new Error(`'${logicalPath}' changed while it was being captured`);
+    }
+    if (names.length === 0 && emptyDirectories) emptyDirectories.push(logicalPath);
+    return out;
+  }
+
+  let type;
+  let bytes;
+  let mode;
+  if (before.isSymbolicLink()) {
+    type = 'symlink';
+    mode = '120000';
+    bytes = Buffer.from(await fs.readlink(abs, { encoding: 'buffer' }));
+  } else if (before.isFile()) {
+    type = 'file';
+    mode = (before.mode & 0o111) !== 0 ? '100755' : '100644';
+    bytes = await fs.readFile(abs);
+  } else {
+    throw new Error(`'${logicalPath}' changed to an unsupported filesystem type during capture`);
+  }
+
+  const after = await fs.lstat(abs);
+  if (String(before.dev) !== String(after.dev) || String(before.ino) !== String(after.ino)
+    || before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
+    throw new Error(`'${logicalPath}' changed while it was being captured`);
+  }
+  out.push({
+    path: logicalPath,
+    type,
+    mode,
+    size: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  });
+  return out;
+}
+
+const sameManifest = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+async function hashRawManifestLeaf(cwd, stageRoot, leaf) {
+  const source = path.join(stageRoot, ...leaf.path.split('/'));
+  let hashPath = source;
+  /** @type {string|null} */
+  let temp = null;
+  if (leaf.type === 'symlink') {
+    temp = scratchIndexPath(cwd, 'discard-link-blob');
+    const target = Buffer.from(await fs.readlink(source, { encoding: 'buffer' }));
+    await fs.writeFile(temp, target, { flag: 'wx' });
+    hashPath = temp;
+  }
+  try {
+    const r = await gitOk(['hash-object', '-w', '--no-filters', '--', hashPath],
+      { cwd, allowMutation: true });
+    const oid = r.stdout.trim();
+    // Object-format independent: SHA-1 repositories return 40 hex bytes, SHA-256 repositories
+    // return 64. A successful process with missing/malformed evidence is still a failed
+    // instrument; do not hand an empty oid to update-index and report the later parser error as if
+    // it were the cause.
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) {
+      throw new Error(`git hash-object returned an invalid object id for '${leaf.path}'`);
+    }
+    return { ...leaf, oid };
+  } finally {
+    if (temp) await fs.rm(temp, { force: true }).catch(() => {});
+  }
+}
+
+async function hydrateBlobEntries(cwd, entries) {
+  const blobs = entries.filter((entry) => entry.type === 'blob');
+  const content = new Map();
+  if (blobs.length) {
+    await catFileBatch([...new Set(blobs.map((entry) => entry.oid))], { cwd }, (spec, bytes) => {
+      if (Buffer.isBuffer(bytes)) content.set(spec, bytes);
+    });
+  }
+  return entries.map((entry) => ({ ...entry, content: content.get(entry.oid) ?? null }));
+}
+
+async function materialiseHeadLeaf(abs, relPath, entry) {
+  if (!['100644', '100755', '120000'].includes(entry.mode)
+    || entry.type !== 'blob' || !Buffer.isBuffer(entry.content)) {
+    throw new Error(`HEAD entry '${relPath}' has unsupported or unreadable ${entry.mode} ${entry.type}`);
+  }
+  if (entry.mode === '120000') {
+    await fs.symlink(entry.content, Buffer.from(abs));
+  } else {
+    const permissions = entry.mode === '100755' ? 0o755 : 0o644;
+    await fs.writeFile(abs, entry.content, { flag: 'wx', mode: permissions });
+    await fs.chmod(abs, permissions);
+  }
+}
+
+async function verifyHeadLeaf(abs, relPath, entry) {
+  const st = await fs.lstat(abs);
+  if (entry.mode === '120000') {
+    if (!st.isSymbolicLink()) throw new Error(`restored '${relPath}' is not a symbolic link`);
+    const target = Buffer.from(await fs.readlink(abs, { encoding: 'buffer' }));
+    if (!target.equals(entry.content)) throw new Error(`restored '${relPath}' link target differs from HEAD`);
+    return;
+  }
+  if (!st.isFile() || st.isSymbolicLink()) throw new Error(`restored '${relPath}' is not a regular file`);
+  if (!(await fs.readFile(abs)).equals(entry.content)) throw new Error(`restored '${relPath}' bytes differ from HEAD`);
+  if (process.platform !== 'win32') {
+    const executable = (st.mode & 0o111) !== 0;
+    if (executable !== (entry.mode === '100755')) {
+      throw new Error(`restored '${relPath}' executable mode differs from HEAD`);
+    }
+  }
+}
+
+async function ensureOwnedDirectory(root, segments) {
+  let cursor = root;
+  for (const segment of segments) {
+    cursor = path.join(cursor, segment);
+    try {
+      await fs.mkdir(cursor);
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    const st = await fs.lstat(cursor);
+    if (!st.isDirectory() || st.isSymbolicLink()) {
+      throw new Error(`restore path '${cursor}' is not a real directory`);
+    }
+  }
+}
+
+async function restoreHeadSelection(abs, relPath, entries) {
+  if (!entries.length) return;
+  const exact = entries.find((entry) => entry.path === relPath);
+  if (exact) {
+    if (entries.length !== 1) throw new Error(`HEAD contains both '${relPath}' and descendants`);
+    await materialiseHeadLeaf(abs, relPath, exact);
+    await verifyHeadLeaf(abs, relPath, exact);
+    return;
+  }
+
+  await fs.mkdir(abs); // exclusive: a concurrent replacement makes this fail, never get erased.
+  for (const entry of entries) {
+    if (!entry.path.startsWith(`${relPath}/`)) throw new Error(`unrelated HEAD entry '${entry.path}'`);
+    const child = entry.path.slice(relPath.length + 1).split('/');
+    const leaf = child.pop();
+    await ensureOwnedDirectory(abs, child);
+    await materialiseHeadLeaf(path.join(abs, ...child, leaf), entry.path, entry);
+  }
+  for (const entry of entries) {
+    const child = entry.path.slice(relPath.length + 1).split('/');
+    await verifyHeadLeaf(path.join(abs, ...child), entry.path, entry);
+  }
+  const restored = await filesystemManifest(abs, relPath);
+  const expectedPaths = entries.map((entry) => entry.path).sort();
+  const actualPaths = restored.map((entry) => entry.path).sort();
+  if (JSON.stringify(expectedPaths) !== JSON.stringify(actualPaths)) {
+    throw new Error(`restored '${relPath}' contains concurrent or missing paths`);
+  }
+}
+
+async function rollbackQuarantines(quarantines) {
+  const failures = [];
+  for (const q of [...quarantines].reverse()) {
+    if (!q.payload) continue;
+    if (!(await sameDirectoryIdentity(q.parentIdentity))) {
+      failures.push({ path: q.abs, quarantine: q.payload, error: 'parent directory identity changed' });
+      continue;
+    }
+    try {
+      await fs.lstat(q.anchoredAbs ?? q.abs);
+      failures.push({ path: q.abs, quarantine: q.payload, error: 'original path was recreated concurrently' });
+      continue;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        failures.push({ path: q.abs, quarantine: q.payload, error: error?.message ?? String(error) });
+        continue;
+      }
+    }
+    try {
+      await fs.rename(q.payload, q.anchoredAbs ?? q.abs);
+      await fs.rmdir(q.dir);
+    } catch (error) {
+      failures.push({ path: q.abs, quarantine: q.payload, error: error?.message ?? String(error) });
+    }
+  }
+  return failures;
+}
+
+async function activeLinuxHandlesUnder(paths) {
+  if (process.platform !== 'linux' || typeof process.getuid !== 'function') return [];
+  const roots = [];
+  for (const p of paths) {
+    try { roots.push(await fs.realpath(p)); } catch { roots.push(p); }
+  }
+  const underRoot = async (target) => {
+    for (const root of roots) {
+      if (await underOrEqualAsync(target, root)) return true;
+    }
+    return false;
+  };
+  const active = [];
+  let procEntries;
+  try { procEntries = await fs.readdir('/proc'); } catch { return [{ pid: null, kind: 'unverifiable', path: '/proc' }]; }
+  const ownUid = process.getuid();
+  for (const name of procEntries) {
+    if (!/^\d+$/.test(name)) continue;
+    const proc = `/proc/${name}`;
+    let status;
+    try { status = await fs.readFile(path.join(proc, 'status'), 'utf8'); } catch { continue; }
+    const uid = /^Uid:\s+(\d+)/m.exec(status);
+    if (!uid || Number(uid[1]) !== ownUid) continue;
+    for (const kind of ['cwd']) {
+      try {
+        const target = (await fs.readlink(path.join(proc, kind))).replace(/ \(deleted\)$/, '');
+        if (await underRoot(target)) active.push({ pid: Number(name), kind, path: target });
+      } catch { /* process exited or has no readable cwd */ }
+    }
+    let fds;
+    try { fds = await fs.readdir(path.join(proc, 'fd')); } catch { continue; }
+    for (const fd of fds) {
+      try {
+        const target = (await fs.readlink(path.join(proc, 'fd', fd))).replace(/ \(deleted\)$/, '');
+          if (await underRoot(target)) active.push({ pid: Number(name), kind: `fd:${fd}`, path: target });
+      } catch { /* descriptor/process disappeared between listing and readlink */ }
+    }
+  }
+  return active;
+}
+
 /**
  * The escape hatch. Delete something holt is guarding, with the content captured first.
  *
@@ -808,30 +1293,43 @@ export async function auto(cwd, opts = {}) {
  * The result is an action an agent is allowed to take, which is the only kind of gate that
  * survives contact with someone in a hurry.
  */
-export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride = null, ...opts } = {}) {
+export async function discard(cwd, paths, {
+  dryRun = false,
+  stamp: stampOverride = null,
+  onBeforeQuarantine = null,
+  onAfterCapture = null,
+  ...opts
+} = {}) {
   const list = (Array.isArray(paths) ? paths : [paths]).filter(Boolean);
   if (!list.length) return { ok: false, error: 'discard needs at least one path' };
 
   const disc = await discover(cwd, opts);
   if (!disc.root) throw repoAbsenceError(disc, cwd);
 
-  // Every path must sit inside ONE worktree: the capture is a tree built in that worktree's
-  // index, and silently splitting a discard across two of them would produce two half-captures.
+  // Every path must sit inside ONE worktree. Missing paths are accepted only when HEAD proves
+  // they are tracked: absence is itself a change (a tombstone), and the old lstat-first gate made
+  // that change impossible to capture or discard.
   const resolved = [];
   for (const p of list) {
     const abs = path.resolve(cwd, p);
-    // lstat, NOT stat: stat follows the link and answers about its target. Which entry the user
-    // named is the whole question here.
-    let st;
+    let exists = false;
     try {
-      st = await fs.lstat(abs);
-    } catch {
-      return { ok: false, error: `no such path: ${p}` };
+      await fs.lstat(abs);
+      exists = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        return { ok: false, error: `could not inspect '${p}': ${error?.message ?? error}` };
+      }
     }
-    const isSymlink = st.isSymbolicLink();
     const owner = await findOwningWorktree(abs, disc);
     if (!owner) return { ok: false, error: `'${p}' is not inside a worktree of this repository` };
-    resolved.push({ input: p, abs, owner, isSymlink });
+    let parentIdentity;
+    try {
+      parentIdentity = await directoryIdentity(path.dirname(abs));
+    } catch (error) {
+      return { ok: false, error: `cannot safely address '${p}': ${error?.message ?? error}` };
+    }
+    resolved.push({ input: p, abs, owner, exists, parentIdentity });
   }
   const owners = [...new Set(resolved.map((r) => r.owner.path))];
   if (owners.length > 1) {
@@ -839,7 +1337,8 @@ export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride
   }
 
   const ws = resolved[0].owner;
-  const rel = await Promise.all(resolved.map((r) => relativeLinkAwareAsync(ws.path, r.abs)));
+  for (const r of resolved) r.relPath = await relativeLinkAwareAsync(ws.path, r.abs);
+  const rel = resolved.map((r) => r.relPath);
 
   // NAMING THE WORKTREE ITSELF IS A DIFFERENT COMMAND, AND SAYING SO IS THE WHOLE FIX.
   //
@@ -871,8 +1370,120 @@ export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride
     };
   }
 
+  // The repository metadata is not worktree content. Quarantining `.git` would sever the very
+  // object database needed to finish and verify the capture. This also closes selection of a file
+  // *under* `.git`, plus a selected nested-repository root that the child-only check cannot see.
+  const metadataPath = resolved.find((r) => r.relPath.split('/').includes('.git'));
+  if (metadataPath) {
+    return {
+      ok: false,
+      error: `'${metadataPath.input}' is Git repository metadata, not discardable worktree content`,
+      note: 'NOTHING WAS CAPTURED OR REMOVED.',
+    };
+  }
+
+  for (const r of resolved) {
+    if (r.relPath.startsWith('../') || path.posix.isAbsolute(r.relPath)) {
+      return { ok: false, error: `'${r.input}' escapes worktree '${ws.id}'` };
+    }
+  }
+
+  // Normalize aliases before touching the filesystem. `dir` plus `dir/file` cannot be
+  // quarantined independently: the first rename makes the second disappear. Refusing is clearer
+  // than silently collapsing the user's requested result lists.
+  const byRel = [...resolved].sort((a, b) => a.relPath.localeCompare(b.relPath));
+  for (let i = 0; i < byRel.length; i++) {
+    for (let j = i + 1; j < byRel.length; j++) {
+      if (byRel[j].relPath === byRel[i].relPath || isSelectedPath(byRel[j].relPath, byRel[i].relPath)) {
+        return {
+          ok: false,
+          error: `discard paths overlap or name the same entry: '${byRel[i].input}' and '${byRel[j].input}'`,
+          note: 'name the ancestor once; NOTHING WAS CAPTURED OR REMOVED.',
+        };
+      }
+    }
+  }
+
+  let head = null;
+  const headProbe = await git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { cwd: ws.path });
+  if (headProbe.code === 0 && headProbe.stdout.trim()) {
+    head = headProbe.stdout.trim();
+  } else {
+    // A failed HEAD probe is not automatically an unborn repository. Prove the one legitimate
+    // absence shape: symbolic HEAD names a branch and show-ref proves that branch does not exist.
+    // Timeouts, corrupt refs, detached-HEAD failures, and injected instrument errors all refuse.
+    const symbolic = await git(['symbolic-ref', '--quiet', 'HEAD'], { cwd: ws.path })
+      .catch(() => ({ code: -1, stdout: '', stderr: '' }));
+    const branchRef = symbolic.code === 0 ? symbolic.stdout.trim() : '';
+    const absent = branchRef
+      ? await git(['show-ref', '--verify', '--quiet', branchRef], { cwd: ws.path })
+        .catch(() => ({ code: -1 }))
+      : { code: -1 };
+    if (!branchRef || absent.code !== 1) {
+      return {
+        ok: false,
+        error: `could not resolve worktree HEAD exactly: ${headProbe.stderr?.trim() || `exit ${headProbe.code}`}`,
+        note: 'NOTHING WAS CAPTURED OR REMOVED.',
+      };
+    }
+  }
+
+  let headEntries;
+  let actualIndexEntries;
+  try {
+    headEntries = head ? await treeEntriesFor(ws.path, head, rel) : [];
+    actualIndexEntries = await indexEntriesFor(ws.path, rel, undefined);
+  } catch (error) {
+    return { ok: false, error: `could not inspect exact Git state: ${error?.message ?? error}` };
+  }
+  const unsupportedGitlink = [...headEntries, ...actualIndexEntries]
+    .find((entry) => entry.mode === '160000');
+  if (unsupportedGitlink) {
+    return {
+      ok: false,
+      error: `'${unsupportedGitlink.path}' is a Git link/submodule; its repository bytes are not in the outer tree`,
+      hint: 'run Holt inside the nested repository and make its work durable before discarding the outer path',
+      note: 'NOTHING WAS CAPTURED OR REMOVED.',
+    };
+  }
+
+  for (const r of resolved) {
+    const heldByHead = headEntries.some((entry) => isSelectedPath(entry.path, r.relPath));
+    if (!r.exists && !heldByHead) return { ok: false, error: `no such path: ${r.input}` };
+    const boundary = await embeddedBoundaryAbove(ws.path, r.abs);
+    if (boundary) {
+      return {
+        ok: false,
+        error: `'${r.input}' crosses an embedded Git boundary (${boundary})`,
+        hint: 'run Holt inside that repository first',
+        note: 'NOTHING WAS CAPTURED OR REMOVED.',
+      };
+    }
+    if (r.exists) {
+      try {
+        await validateCaptureNode(r.abs, r.relPath);
+      } catch (error) {
+        return { ok: false, error: error?.message ?? String(error), note: 'NOTHING WAS CAPTURED OR REMOVED.' };
+      }
+    }
+  }
+
+  try {
+    headEntries = await hydrateBlobEntries(ws.path, headEntries);
+  } catch (error) {
+    return { ok: false, error: `could not read HEAD content exactly: ${error?.message ?? error}` };
+  }
+
   if (dryRun) {
-    return { ok: true, dryRun: true, worktree: ws.id, paths: rel, note: 'nothing was captured or removed' };
+    return {
+      ok: true,
+      dryRun: true,
+      worktree: ws.id,
+      paths: rel,
+      tracked: resolved.filter((r) => headEntries.some((entry) => isSelectedPath(entry.path, r.relPath)))
+        .map((r) => r.input),
+      note: 'nothing was captured or removed',
+    };
   }
 
   // INJECTABLE ONLY SO THE COLLISION IS TESTABLE. A ref name derived from the wall clock cannot
@@ -880,48 +1491,151 @@ export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride
   // seam evictCacheFiles() already uses for `now`.
   const stamp = stampOverride ?? new Date().toISOString().replace(/[:.]/g, '-');
   const baseRef = `refs/holt/discard/${refSafeId(ws.id)}-${stamp}`;
-  // UNIQUE per invocation — see the comment on scratchIndexPath() above.
   const tmpIndex = scratchIndexPath(ws.path, 'discard');
-  const env = { GIT_INDEX_FILE: tmpIndex, ...(await authorEnv(ws.path)) };
+  /** @type {string|null} */
+  let stageRoot = null;
+  /** @type {Awaited<ReturnType<typeof captureRef>>|null} */
+  let allocated = null;
+  /** @type {any[]} */
+  const quarantines = [];
+  /** @type {string|null} */
+  let tree = null;
+  /** @type {string|null} */
+  let commit = null;
 
   try {
-    // An EMPTY index, not HEAD: a discard captures the paths being discarded and nothing else,
-    // so the ref reads as exactly what was thrown away rather than a whole worktree snapshot.
-    await gitOk(['read-tree', '--empty'], { cwd: ws.path, env, allowMutation: true });
-    // --force so gitignored paths are captured too — those are precisely the ones git cannot
-    // bring back, and the ones the guard refuses hardest.
-    // Batched under the OS argument-list ceiling: a discard of a whole build tree can name tens
-    // of thousands of paths, and `execve` answers E2BIG rather than adding them. `add` into one
-    // scratch index accumulates, so adding in groups leaves exactly the index adding at once
-    // would have — and a partial add would be caught by the read-back verification below anyway.
-    const added = await gitPathBatched(['add', '--all', '--force', '--'], rel,
-      { cwd: ws.path, env, allowMutation: true });
+    for (const r of resolved) r.parentAnchor = await openDirectoryAnchor(r.parentIdentity);
+    if (onBeforeQuarantine) {
+      await /** @type {(detail:any)=>any} */ (onBeforeQuarantine)({
+        worktree: ws.id,
+        paths: resolved.map((r) => ({ input: r.input, path: r.abs, relative: r.relPath })),
+      });
+    }
 
+    // Rename is the destructive action's linearisation point. The old bytes leave the user path
+    // atomically and stay in a same-parent quarantine. A concurrent process recreating the
+    // original path writes a NEW entry which Holt never removes or overwrites.
+    for (const r of resolved) {
+      const anchoredAbs = path.join(r.parentAnchor.path, path.basename(r.abs));
+      const q = { ...r, anchoredAbs, dir: null, payload: null, manifest: [], emptyDirectories: [] };
+      quarantines.push(q);
+      if (!r.exists) continue;
+      if (!(await sameDirectoryIdentity(r.parentIdentity))) {
+        throw new Error(`parent '${path.dirname(r.abs)}' changed immediately before quarantine`);
+      }
+      q.dir = await fs.mkdtemp(path.join(r.parentAnchor.path, `.holt-discard-${path.basename(r.abs)}-`));
+      q.payload = path.join(q.dir, 'payload');
+      try {
+        // Descriptor-anchored on Linux: neither operand can be redirected through a replacement
+        // parent symlink between the identity check and this syscall.
+        await fs.rename(anchoredAbs, q.payload);
+        q.visiblePayload = await fs.realpath(q.payload).catch(() => q.payload);
+      } catch (error) {
+        await fs.rmdir(q.dir).catch(() => {});
+        q.dir = null;
+        q.payload = null;
+        throw new Error(`could not quarantine '${r.input}': ${error?.message ?? error}`);
+      }
+      q.manifest = await filesystemManifest(q.payload, q.relPath, [], q.emptyDirectories);
+    }
+
+    // Capture from a private mirror, never by putting the quarantined bytes back at their old
+    // names. The user's real index stays untouched. HEAD seeds every unselected path; selected
+    // entries are removed and rebuilt with filter-free object plumbing, so deletions and directory
+    // type changes are exact deltas and a clean filter/EOL rule cannot replace sole-copy bytes.
+    stageRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-discard-stage-'));
+    const activeStageRoot = stageRoot;
+    for (const q of quarantines) {
+      if (!q.payload) continue;
+      const destination = path.join(activeStageRoot, ...q.relPath.split('/'));
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      await fs.cp(q.payload, destination, {
+        recursive: true,
+        force: false,
+        errorOnExist: true,
+        preserveTimestamps: true,
+        verbatimSymlinks: true,
+      });
+      const mirroredEmptyDirectories = [];
+      const mirrored = await filesystemManifest(destination, q.relPath, [], mirroredEmptyDirectories);
+      if (!sameManifest(q.manifest, mirrored)) {
+        throw new Error(`private capture mirror for '${q.input}' differs from the quarantined bytes`);
+      }
+      if (JSON.stringify(q.emptyDirectories) !== JSON.stringify(mirroredEmptyDirectories)) {
+        throw new Error(`private capture mirror for '${q.input}' differs in empty-directory shape`);
+      }
+    }
+
+    const env = {
+      GIT_INDEX_FILE: tmpIndex,
+      GIT_WORK_TREE: stageRoot,
+      ...(await authorEnv(ws.path)),
+    };
+    if (head) await gitOk(['read-tree', head], { cwd: ws.path, env, allowMutation: true });
+    else await gitOk(['read-tree', '--empty'], { cwd: ws.path, env, allowMutation: true });
+
+    // Remove every selected HEAD leaf one exact argv at a time. `update-index` file operands are
+    // literal after `--`; there is no shell and therefore no glob/pathspec expansion to turn a
+    // filename like `[x]` into its neighbours.
+    const seeded = await indexEntriesFor(ws.path, rel, env);
+    for (const entry of seeded) {
+      await gitOk(['update-index', '--force-remove', '--', entry.path],
+        { cwd: ws.path, env, allowMutation: true });
+    }
+
+    let sourceLeaves = quarantines.flatMap((q) => q.manifest);
+    // A package tree can contain tens of thousands of leaves. Promise.all here launched one Git
+    // process per file at once; measured on a 200 MB npm install, a child eventually exited 0 with
+    // no oid and the whole documented recovery path rolled back after more than a minute. This is
+    // the same bounded fan-out rule used by the scanner: eight object writers keep throughput while
+    // preventing file-descriptor/process exhaustion and object-store lock storms.
+    sourceLeaves = await pmap(
+      sourceLeaves,
+      (leaf) => hashRawManifestLeaf(ws.path, activeStageRoot, leaf),
+      8,
+    );
+    sourceLeaves.sort((a, b) => a.path.localeCompare(b.path));
+    for (const leaf of sourceLeaves) {
+      await gitOk(['update-index', '--add', '--cacheinfo', `${leaf.mode},${leaf.oid},${leaf.path}`],
+        { cwd: ws.path, env, allowMutation: true });
+    }
+
+    const indexed = await indexEntriesFor(ws.path, rel, env);
+    if (!sameEntryTuples(sourceLeaves, indexed)) {
+      throw new Error('capture index does not contain the exact selected path/mode/object tuples');
+    }
     const treeR = await gitOk(['write-tree'], { cwd: ws.path, env, allowMutation: true });
-    const tree = treeR.stdout.trim();
+    const captureTree = treeR.stdout.trim();
+    tree = captureTree;
     const msg = `holt discard: ${rel.length} path(s) from ${ws.id}\n\n`
-      + `${rel.join('\n')}\n\nRestore with:  git checkout <this-ref> -- .\n`;
-    const commitR = await gitOk(['commit-tree', tree, '-m', msg],
+      + `${rel.join('\n')}\n\nBase: ${head ?? '(unborn repository)'}\n`
+      + 'Inspect/reapply with: git diff <this-ref>^ <this-ref> -- <path>\n';
+    const commitArgs = ['commit-tree', captureTree];
+    if (head) commitArgs.push('-p', head);
+    commitArgs.push('-m', msg);
+    const commitR = await gitOk(commitArgs,
       { cwd: ws.path, env, allowMutation: true });
-    const commit = commitR.stdout.trim();
+    const captureCommit = commitR.stdout.trim();
+    commit = captureCommit;
 
-    // VERIFY BEFORE DELETING — the whole point. Read the tree back and confirm every path asked
-    // for is really in it. -z because ls-tree C-quotes non-ASCII paths otherwise, which made an
-    // earlier verification refuse captures that had actually succeeded.
-    const captured = await git(['ls-tree', '-r', '--name-only', '-z', commit], { cwd: ws.path });
-    const capturedFiles = captured.code === 0 ? captured.stdout.split('\0').filter(Boolean) : [];
-    const capturedSet = new Set(capturedFiles);
-    const isCaptured = (f) => capturedSet.has(f) || capturedFiles.some((c) => c.startsWith(`${f}/`));
-    const missing = rel.filter((f) => !isCaptured(f));
-    if (missing.length) {
-      return {
-        ok: false,
-        error: `capture is INCOMPLETE — ${missing.length} path(s) not captured: ${missing.slice(0, 5).join(', ')}`,
-        missing,
-        addWarnings: added.code === 0 ? [] : added.stderr.split('\n').filter(Boolean).slice(0, 5),
-        note: 'NOTHING WAS DELETED. A discard that cannot prove it captured the content must not '
-          + 'proceed — that would be the loss this command exists to prevent.',
-      };
+    let captured = await treeEntriesFor(ws.path, captureCommit, rel);
+    if (!sameEntryTuples(sourceLeaves, captured)) {
+      throw new Error('capture commit does not contain the exact selected index tuples');
+    }
+    captured = await hydrateBlobEntries(ws.path, captured);
+    for (const entry of captured) {
+      const expected = sourceLeaves.find((leaf) => leaf.path === entry.path);
+      const digest = Buffer.isBuffer(entry.content)
+        ? createHash('sha256').update(entry.content).digest('hex') : null;
+      if (!expected || digest !== expected.sha256) {
+        throw new Error(`capture blob for '${entry.path}' differs from quarantined bytes`);
+      }
+    }
+    const ancestry = await git(['rev-list', '--parents', '-n', '1', captureCommit], { cwd: ws.path });
+    const parents = ancestry.code === 0 ? ancestry.stdout.trim().split(/\s+/) : [];
+    if (parents[0] !== captureCommit
+      || (head ? parents.length !== 2 || parents[1] !== head : parents.length !== 1)) {
+      throw new Error('capture commit parent does not exactly bind the worktree HEAD');
     }
 
     // A CAPTURE REF IS ALLOCATED, NEVER OVERWRITTEN — the class captureRef() already closed for
@@ -934,60 +1648,135 @@ export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride
     // captureRef NEVER THROWS, where gitOk did. That difference is load-bearing: the throw was what
     // stopped the deletion below, so the explicit refusal here is not defensive decoration, it is
     // the thing that keeps a failed allocation from costing the user their files.
-    const alloc = await captureRef(ws.path, { baseRef, commit, tree, kind: 'discard', id: ws.id });
-    if (!alloc.ok) {
-      return {
-        ok: false,
-        error: `capture ref could not be allocated (${alloc.reason}): ${alloc.gitError ?? ''}`.trim(),
-        commit,
-        note: 'NOTHING WAS DELETED. The content IS captured as the commit above, but holt could not '
-          + 'give it a name, and deleting the files would leave that capture reachable only until gc.',
-      };
-    }
-    const ref = alloc.ref;
-    const capturedCommit = alloc.commit ?? commit;
+    allocated = await captureRef(ws.path, {
+      baseRef, commit: captureCommit, tree: captureTree, kind: 'discard', id: ws.id,
+    });
+    if (!allocated.ok) throw new Error(`capture ref could not be allocated (${allocated.reason}): ${allocated.gitError ?? ''}`.trim());
+    const ref = allocated.ref;
+    const capturedCommit = allocated.commit ?? captureCommit;
 
-    // ONLY NOW IS ANYTHING TOUCHED — and what "discard" MEANS depends on what the path is.
-    //
-    // For an UNTRACKED path, discarding is deleting: nothing else holds it.
-    //
-    // For a TRACKED path with local modifications, deleting would be wrong and surprising. What
-    // a user means is "throw away my edits", and the standard way to say that — `git checkout --
-    // <path>` — is refused by holt's own guard for the correct reason: it destroys uncommitted
-    // work. Refusing that with no permitted alternative is the same hole `discard` was added to
-    // close, one level down; hit twice in real use while building this. So a tracked path is
-    // RESTORED from HEAD after its modified content is captured, and the file stays where it is.
+    // Re-read the quarantined bytes after Git has finished. An already-open writer follows the
+    // inode through rename; if it changed A to B during capture, B remains in quarantine and this
+    // call refuses rather than deleting a version the ref does not hold.
+    for (const q of quarantines) {
+      if (!q.payload) continue;
+      const now = await filesystemManifest(q.payload, q.relPath);
+      if (!sameManifest(q.manifest, now)) {
+        return {
+          ok: false, ref, commit: capturedCommit,
+          error: `'${q.input}' changed through an open handle after capture`,
+          quarantine: q.visiblePayload ?? q.payload,
+          note: 'The ref holds the captured version and the later bytes remain in quarantine. Nothing was erased.',
+        };
+      }
+    }
+
+    if (onAfterCapture) {
+      try {
+        await /** @type {(detail:any)=>any} */ (onAfterCapture)({
+          worktree: ws.id, ref, commit: capturedCommit,
+          paths: resolved.map((r) => ({ input: r.input, path: r.abs, relative: r.relPath })),
+        });
+      } catch (error) {
+        return {
+          ok: false, ref, commit: capturedCommit,
+          error: `post-capture hook failed: ${error?.message ?? error}`,
+          quarantine: quarantines.filter((q) => q.payload).map((q) => q.visiblePayload ?? q.payload),
+          note: 'The capture and quarantine were retained; no replacement path was touched.',
+        };
+      }
+    }
+
+    for (const q of quarantines) {
+      if (!(await sameDirectoryIdentity(q.parentIdentity))) {
+        q.visiblePayload = await fs.realpath(q.payload).catch(() => q.visiblePayload ?? q.payload);
+        return {
+          ok: false, ref, commit: capturedCommit,
+          error: `parent directory identity changed for '${q.input}' after capture`,
+          quarantine: q.visiblePayload ?? q.payload,
+          note: 'Holt will not follow a replaced parent or symlink. The capture/quarantine were retained.',
+        };
+      }
+    }
+
     const removed = [];
     const reverted = [];
-    for (const r of resolved) {
-      const relPath = await relativeLinkAwareAsync(ws.path, r.abs);
-      const tracked = await git(['cat-file', '-e', `HEAD:${relPath}`], { cwd: ws.path });
-      // A SYMLINK IS NEVER FOLLOWED. Reverting a tracked path writes its committed bytes back to
-      // the named path — and writing to a symlink writes THROUGH it. Reproduced: `holt discard
-      // link.txt` restored the committed content of link.txt's TARGET over the target, destroying
-      // the target's uncommitted work, while the symlink the user named was left in place. The
-      // link itself is content (a pointer), so it is captured and removed like any untracked
-      // entry; fs.rm on a symlink unlinks the link and never touches what it points at.
-      if (tracked.code === 0 && !r.isSymlink) {
-        // The blob is read with plumbing and written with fs, NOT with `git checkout`.
-        // `git checkout -- <path>` is refused by the classifier's FIRST gate, which cannot be
-        // opened even with allowMutation — deliberately, because that gate is what stopped a
-        // mutation test from running a live `reset --hard` in this repository. holt does not get
-        // an exception to its own destructive-command rule; it reaches the same result through
-        // a read (`cat-file`) plus an ordinary file write, after the content is already captured.
-        const blob = await git(['cat-file', 'blob', `HEAD:${relPath}`], { cwd: ws.path });
-        if (blob.code !== 0) {
+    for (const q of quarantines) {
+      const entries = headEntries.filter((entry) => isSelectedPath(entry.path, q.relPath));
+      if (entries.length) {
+        try {
+          await restoreHeadSelection(q.anchoredAbs, q.relPath, entries);
+        } catch (error) {
           return {
-            ok: false, ref: baseRef, commit,
-            error: `captured, but could not read '${relPath}' from HEAD: ${blob.stderr.trim()}`,
-            note: 'NOTHING WAS CHANGED. The content is safe in the ref above.',
+            ok: false, ref, commit: capturedCommit,
+            error: `captured, but could not restore '${q.relPath}' without overwriting concurrent work: ${error?.message ?? error}`,
+            discarded: removed,
+            reverted,
+            quarantine: quarantines.filter((held) => held.payload)
+              .map((held) => held.visiblePayload ?? held.payload),
+            note: 'The discarded version is safe in the ref/quarantine. No concurrent replacement was erased.',
           };
         }
-        await fs.writeFile(r.abs, blob.stdout, 'utf8');
-        reverted.push(r.input);
+        reverted.push(q.input);
       } else {
-        await fs.rm(r.abs, { recursive: true, force: true });
-        removed.push(r.input);
+        // The original untracked entry already left this path at the atomic rename. If another
+        // process recreated the name, that is new work and is deliberately left alone.
+        if (q.exists) removed.push(q.input);
+      }
+    }
+
+    // A final exact re-read catches open-handle writes that landed while HEAD was being restored.
+    // On mismatch the physical quarantine is retained even though the earlier version is in Git.
+    for (const q of quarantines) {
+      if (!q.payload) continue;
+      const now = await filesystemManifest(q.payload, q.relPath);
+      if (!sameManifest(q.manifest, now)) {
+        return {
+          ok: false, ref, commit: capturedCommit,
+          error: `'${q.input}' changed in quarantine before cleanup`,
+          quarantine: q.visiblePayload ?? q.payload,
+          note: 'The later bytes remain on disk; Holt refused physical cleanup.',
+        };
+      }
+    }
+
+    const activeHandles = await activeLinuxHandlesUnder(
+      quarantines.filter((q) => q.payload).map((q) => q.payload),
+    );
+    if (activeHandles.length) {
+      return {
+        ok: false, ref, commit: capturedCommit,
+        error: 'physical quarantine is still held by an active process',
+        activeHandles,
+        quarantine: quarantines.filter((q) => q.payload).map((q) => q.visiblePayload ?? q.payload),
+        note: 'The capture is durable, but Holt retained the quarantine so a writer with an open '
+          + 'descriptor cannot add bytes after the last manifest check and lose them during cleanup.',
+      };
+    }
+
+    const refCheck = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: ws.path });
+    if (refCheck.code !== 0 || refCheck.stdout.trim() !== capturedCommit) {
+      return {
+        ok: false, ref, commit: capturedCommit,
+        error: 'capture ref changed before quarantined bytes could be removed',
+        quarantine: quarantines.filter((q) => q.payload).map((q) => q.visiblePayload ?? q.payload),
+        note: 'Physical quarantine was retained.',
+      };
+    }
+
+    for (const q of quarantines) {
+      if (!q.payload) continue;
+      try {
+        await fs.rm(q.payload, { recursive: true, force: false });
+        await fs.rmdir(q.dir);
+      } catch (error) {
+        return {
+          ok: false, ref, commit: capturedCommit,
+          error: `capture is durable, but physical quarantine cleanup failed: ${error?.message ?? error}`,
+          quarantine: q.dir,
+          discarded: removed,
+          reverted,
+        };
       }
     }
 
@@ -997,6 +1786,11 @@ export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride
       ref, commit: capturedCommit, paths: rel, count: rel.length,
     }, journalFailures);
 
+    const literalPathspecs = rel.map((p) => `:(literal)${p}`);
+    const restoreArgv = ['git', 'restore', `--source=${capturedCommit}`, '--worktree', '--', ...literalPathspecs];
+    const diffArgv = head ? ['git', 'diff', head, capturedCommit, '--', ...literalPathspecs] : null;
+
+    const emptyDirectoriesOmitted = quarantines.flatMap((q) => q.emptyDirectories ?? []);
     return withJournalWarning({
       ok: true,
       worktree: ws.id,
@@ -1005,15 +1799,39 @@ export async function discard(cwd, paths, { dryRun = false, stamp: stampOverride
       discarded: removed,
       reverted,
       verified: true,
-      restore: `git checkout ${ref} -- .`,
+      restore: restoreArgv.map(shellQuote).join(' '),
+      restoreArgv,
+      reapplyDelta: diffArgv
+        ? `${diffArgv.map(shellQuote).join(' ')} | ${['git', 'apply'].map(shellQuote).join(' ')}` : null,
+      reapplyDeltaArgv: diffArgv ? { diff: diffArgv, apply: ['git', 'apply'] } : null,
       inspect: `git show ${capturedCommit} --stat`,
-      note: reverted.length
+      emptyDirectoriesOmitted,
+      note: emptyDirectoriesOmitted.length
+        ? `file content was captured and verified before removal; ${emptyDirectoriesOmitted.length} empty director${emptyDirectoriesOmitted.length === 1 ? 'y was' : 'ies were'} removed but cannot be represented or recreated by a Git ref.`
+        : reverted.length
         ? 'tracked path(s) were RESTORED from HEAD rather than deleted — the edits you threw away '
           + 'are captured in the ref above and recoverable. Untracked path(s), if any, were removed.'
         : 'content captured and verified before removal; it is recoverable from the ref above.',
     }, journalFailures);
+  } catch (error) {
+    const rollbackFailures = allocated ? [] : await rollbackQuarantines(quarantines);
+    return {
+      ok: false,
+      ref: allocated?.ok ? allocated.ref : null,
+      commit: allocated?.ok ? (allocated.commit ?? commit) : commit,
+      error: error?.message ?? String(error),
+      rollbackFailures,
+      quarantine: rollbackFailures.map((failure) => failure.quarantine),
+      note: allocated
+        ? 'The capture ref and physical quarantine were retained; no concurrent replacement was erased.'
+        : (rollbackFailures.length
+          ? 'Capture failed and some paths could not be rolled back safely; their quarantine paths are reported.'
+          : 'Capture failed before a durable ref was allocated; every quarantined path was restored.'),
+    };
   } finally {
     await fs.rm(tmpIndex, { force: true }).catch(() => {});
+    if (stageRoot) await fs.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
+    for (const r of resolved) await r.parentAnchor?.handle?.close().catch(() => {});
   }
 }
 
@@ -1042,124 +1860,1059 @@ export async function rescues(cwd) {
 
 /* ================================================================ CLEAN ==== */
 
+async function pathKind(p) {
+  try {
+    const st = await fs.lstat(p);
+    if (st.isDirectory()) return 'directory';
+    if (st.isSymbolicLink()) return 'symlink';
+    return 'other';
+  } catch (error) {
+    return error?.code === 'ENOENT' ? 'missing' : 'unknown';
+  }
+}
+
+/** Is `wtPath` still a registered Git worktree? Exact canonical path, no basename inference. */
+async function registeredWorktree(wtPath, cwd) {
+  const listed = await git(['worktree', 'list', '--porcelain'], { cwd }).catch(() => null);
+  if (!listed || listed.code !== 0) return false;
+  const target = await canonicalPath(wtPath);
+  for (const record of parseWorktreePorcelain(listed.stdout)) {
+    if (samePathSync(await canonicalPath(record.path), target)) return true;
+  }
+  return false;
+}
+
 /**
- * Remove provably-disposable worktrees, and their branches.
+ * Allocate an unpredictable destination on the SAME filesystem as the source.
  *
- * The documented everyday pain is not danger, it is friction: "add is one command, rm is two
- * more (worktree + branch), and almost no one runs both reliably across ten merged PRs." Holt
- * already knows exactly which worktrees hold nothing base lacks — it just never acted on it, and
- * a measured trial showed an agent reaching the right answer and then stalling for confirmation.
- *
- * DRY RUN BY DEFAULT. A cleanup tool whose first behaviour is deletion does not get a second use.
+ * Prefer the common Git directory: it is durable with the repository, hidden from the working
+ * tree, and discoverable from Git's own registration. A linked worktree may live on another
+ * volume, so compare device ids first and fall back to an exclusive hidden sibling. `mkdtemp`
+ * creates the parent itself; no attacker-chosen intermediate symlink can redirect the move.
  */
+async function allocateCleanQuarantine(cwd, wtPath) {
+  const sourceParent = path.dirname(wtPath);
+  let base = sourceParent;
+  const common = await git(['rev-parse', '--git-common-dir'], { cwd: wtPath }).catch(() => null);
+  if (common?.code === 0 && common.stdout.trim()) {
+    const raw = common.stdout.trim();
+    const commonDir = await canonicalPath(path.isAbsolute(raw) ? raw : path.resolve(wtPath, raw));
+    try {
+      const [a, b] = await Promise.all([fs.stat(sourceParent), fs.stat(commonDir)]);
+      const sameDevice = a.dev === b.dev;
+      const sameVolume = process.platform !== 'win32'
+        || path.parse(sourceParent).root.toLowerCase() === path.parse(commonDir).root.toLowerCase();
+      if (sameDevice && sameVolume) base = commonDir;
+    } catch {
+      // A failed device probe is not evidence that two paths share a filesystem. The existing
+      // source parent is the only conservative destination; rename within it cannot cross devices.
+      base = sourceParent;
+    }
+  }
+
+  let root;
+  try {
+    root = await fs.mkdtemp(path.join(base, '.holt-clean-quarantine-'));
+  } catch (error) {
+    if (samePathSync(base, sourceParent)) throw error;
+    root = await fs.mkdtemp(path.join(sourceParent, '.holt-clean-quarantine-'));
+  }
+  await fs.chmod(root, 0o700).catch(() => {});
+  return { root, path: path.join(root, 'worktree') };
+}
+
+async function removeEmptyQuarantineRoot(root) {
+  await fs.rmdir(root).catch(() => {});
+}
+
+async function cleanAdminDir(wtPath) {
+  const r = await git(['rev-parse', '--absolute-git-dir'], { cwd: wtPath }).catch(() => null);
+  const dir = r?.code === 0 ? r.stdout.trim() : '';
+  if (!dir || !path.isAbsolute(dir)) {
+    throw new Error('Git did not return an absolute private worktree admin directory');
+  }
+  return dir;
+}
+
+async function worktreeBinding(wtPath) {
+  const [adminDir, stat] = await Promise.all([cleanAdminDir(wtPath), fs.lstat(wtPath)]);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error('registered worktree root is not a physical directory');
+  }
+  return {
+    adminDir: await canonicalPath(adminDir),
+    device: String(stat.dev),
+    inode: String(stat.ino),
+  };
+}
+
+const sameWorktreeBinding = (a, b) => !!a && !!b
+  && samePathSync(a.adminDir, b.adminDir)
+  && a.device === b.device
+  && a.inode === b.inode;
+
+async function reportNodeAt(report, wtPath) {
+  const target = await canonicalPath(wtPath);
+  for (const node of report.graph.nodes) {
+    if (!node?.path) continue;
+    if (samePathSync(await canonicalPath(node.path), target)) return node;
+  }
+  return null;
+}
+
+async function syncDirectory(dir) {
+  let handle;
+  try {
+    handle = await fs.open(dir, 'r');
+    await handle.sync();
+  } catch {
+    // Directory fsync is unavailable on some Windows filesystems. The marker FILE is fsynced;
+    // failure here cannot turn an in-flight record into a completed one.
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function writeExclusiveMarker(markerPath, record) {
+  const handle = await fs.open(markerPath, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await syncDirectory(path.dirname(markerPath));
+}
+
+async function completeMarker(markerPath, token, record) {
+  const tmp = `${markerPath}.${token}.tmp`;
+  const handle = await fs.open(tmp, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(record)}\n`, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await fs.rename(tmp, markerPath);
+    await syncDirectory(path.dirname(markerPath));
+  } catch (error) {
+    await fs.unlink(tmp).catch(() => {});
+    throw error;
+  }
+}
+
 /**
- * @param {object}   opts
- * @param {boolean}  opts.apply     actually delete (default: dry run)
- * @param {boolean}  opts.branches  also delete the worktree's branch when merged
- * @param {Function|null} opts.onBeforeRemove  called with each candidate immediately before its
- *   re-verification. A destructive loop over N worktrees should be able to report progress, and
- *   it is also the seam that makes the TOCTOU re-check testable DETERMINISTICALLY rather than by
- *   racing a timer — a flaky test for this would be worse than none, because the behaviour it
- *   guards is "do not delete on a stale verdict".
+ * Atomically move one worktree into recoverable quarantine, then lock and verify it.
+ *
+ * The rename is the destructive-boundary fix: bytes or commits that arrive after the final scan
+ * move WITH the directory instead of falling into a scan→recursive-delete race. The destination
+ * is on the same filesystem, so Git's physical move is a rename rather than copy-then-delete.
+ * Nothing here removes a file, unregisters the moved worktree, or deletes its branch.
  */
-export async function clean(cwd, { apply = false, branches = true, onBeforeRemove = null, ...opts } = {}) {
-  /** @type {Function | null} */
-  const onBefore = onBeforeRemove;
-  const { report } = await assess(cwd, opts);
+async function quarantineWorktree(cwd, candidate) {
+  let bound;
+  try { bound = await worktreeBinding(candidate.path); } catch (error) {
+    return { ok: false, retained: false, why: `worktree identity could not be revalidated: ${error?.message ?? error}` };
+  }
+  if (!sameWorktreeBinding(bound, candidate.binding)) {
+    return { ok: false, retained: false, why: 'worktree identity changed after the final verdict' };
+  }
+
+  let q;
+  try {
+    q = await allocateCleanQuarantine(cwd, candidate.path);
+  } catch (error) {
+    return { ok: false, retained: false, why: `could not allocate quarantine: ${error?.message ?? error}` };
+  }
+
+  const token = randomUUID();
+  const adminDir = bound.adminDir;
+  const markerPath = path.join(adminDir, `${HOLT_CLEAN_QUARANTINE_MARKER_PREFIX}${token}.json`);
+  const transit = {
+    version: 1,
+    kind: 'holt-clean-quarantine',
+    state: 'transit',
+    token,
+    originalPath: candidate.path,
+    intendedPath: q.path,
+    actualPath: null,
+    startedAt: new Date().toISOString(),
+  };
+  try {
+    await writeExclusiveMarker(markerPath, transit);
+  } catch (error) {
+    await removeEmptyQuarantineRoot(q.root);
+    return { ok: false, retained: false, why: `could not write quarantine transition marker: ${error?.message ?? error}` };
+  }
+
+  // Lock BEFORE moving. Git requires two --force flags to move a locked worktree, and that move
+  // preserves the private admin lock file. An ordinary Holt risk lock stays continuously in
+  // place; an unlocked candidate receives a tokened quarantine lock. There is no unlock/relock
+  // interval in which a concurrent remover can reach the source.
+  const initialLock = await lockState(candidate.path, cwd);
+  let acquiredLock = false;
+  if (initialLock.locked && !isHoltLock(initialLock.reason)) {
+    await fs.unlink(markerPath).catch(() => {});
+    await removeEmptyQuarantineRoot(q.root);
+    return { ok: false, retained: false, why: `worktree acquired a foreign lock: ${initialLock.reason}` };
+  }
+  if (!initialLock.locked) {
+    const protectedMove = await git([
+      'worktree', 'lock', '--reason', `${HOLT_CLEAN_QUARANTINE_LOCK_PREFIX} transit ${token}`,
+      candidate.path,
+    ], { cwd, allowMutation: true }).catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+    const confirmed = await lockState(candidate.path, cwd);
+    if (protectedMove.code !== 0 || !confirmed.locked || !isHoltCleanQuarantineLock(confirmed.reason)) {
+      await fs.unlink(markerPath).catch(() => {});
+      await removeEmptyQuarantineRoot(q.root);
+      return {
+        ok: false, retained: false,
+        why: `could not lock worktree before quarantine: ${protectedMove.stderr?.trim() || 'lock verification failed'}`,
+      };
+    }
+    acquiredLock = true;
+  }
+
+  const moved = await git(['worktree', 'move', '-f', '-f', candidate.path, q.path],
+    { cwd, allowMutation: true }).catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+  const [sourceKind, quarantineKind] = await Promise.all([pathKind(candidate.path), pathKind(q.path)]);
+
+  // Git renames first and updates worktree metadata second. A nonzero exit can therefore mean the
+  // complete directory is already at quarantine. Inspect state; never interpret stderr as an
+  // atomic rollback guarantee.
+  const physicallyMoved = quarantineKind === 'directory' && sourceKind === 'missing';
+  if (moved.code !== 0 && !physicallyMoved) {
+    let restoredLock = true;
+    if (acquiredLock && sourceKind !== 'missing') {
+      const unlocked = await git(['worktree', 'unlock', candidate.path], { cwd, allowMutation: true })
+        .catch(() => ({ code: 1 }));
+      restoredLock = unlocked.code === 0;
+    }
+    if (restoredLock && quarantineKind === 'missing') {
+      await fs.unlink(markerPath).catch(() => {});
+    }
+    if (quarantineKind === 'missing') await removeEmptyQuarantineRoot(q.root);
+    return {
+      ok: false,
+      retained: quarantineKind !== 'missing' || !restoredLock,
+      quarantinePath: quarantineKind !== 'missing' ? q.path : null,
+      why: (moved.stderr?.trim() || 'git worktree move failed')
+        + (restoredLock ? '' : '; the pre-move quarantine lock could not be rolled back'),
+    };
+  }
+
+  if (!(await registeredWorktree(q.path, cwd))) {
+    const repaired = await git(['worktree', 'repair', q.path], { cwd, allowMutation: true })
+      .catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+    if (repaired.code !== 0 || !(await registeredWorktree(q.path, cwd))) {
+      return {
+        ok: false,
+        retained: quarantineKind !== 'missing',
+        quarantinePath: quarantineKind !== 'missing' ? q.path : null,
+        why: `worktree moved but Git registration could not be verified: ${repaired.stderr?.trim() || 'repair failed'}`,
+      };
+    }
+  }
+
+
+  let movedBinding;
+  try { movedBinding = await worktreeBinding(q.path); } catch (error) {
+    return {
+      ok: false,
+      retained: true,
+      quarantinePath: q.path,
+      why: `worktree retained in quarantine, but moved identity could not be verified: ${error?.message ?? error}`,
+    };
+  }
+  if (!sameWorktreeBinding(movedBinding, candidate.binding)) {
+    return {
+      ok: false,
+      retained: true,
+      quarantinePath: q.path,
+      why: 'worktree retained in quarantine, but its private admin or filesystem identity changed',
+    };
+  }
+
+  const lock = await lockState(q.path, cwd);
+  if (!lock.locked || !isHoltLock(lock.reason)) {
+    return {
+      ok: false,
+      retained: true,
+      quarantinePath: q.path,
+      why: 'worktree retained in quarantine, but the pre-move Git lock did not survive verification',
+    };
+  }
+
+  const actualHead = await git(['rev-parse', '--verify', 'HEAD^{commit}'], { cwd: q.path })
+    .catch(() => null);
+  const actualBranch = await git(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: q.path })
+    .catch(() => null);
+  if (!actualHead || actualHead.code !== 0 || !actualHead.stdout.trim()) {
+    return {
+      ok: false,
+      retained: true,
+      quarantinePath: q.path,
+      why: 'worktree retained and locked in quarantine, but its moved HEAD could not be verified',
+    };
+  }
+  const head = actualHead.stdout.trim();
+  const branch = actualBranch?.code === 0 ? actualBranch.stdout.trim() : null;
+
+  try {
+    await completeMarker(markerPath, token, {
+      ...transit,
+      state: 'quarantined',
+      actualPath: q.path,
+      completedAt: new Date().toISOString(),
+      lockReason: lock.reason,
+      lockWasAcquired: acquiredLock,
+      preExistingLockReason: acquiredLock ? null : initialLock.reason,
+      head,
+      branch,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      retained: true,
+      quarantinePath: q.path,
+      why: `worktree retained and locked in quarantine, but completion marker failed: ${error?.message ?? error}`,
+    };
+  }
+
+  const moveArgv = ['git', 'worktree', 'move', '-f', '-f', q.path, candidate.path];
+  const unlockArgv = ['git', 'worktree', 'unlock', candidate.path];
+  // Restore the authority state that existed before Holt moved the worktree. If this quarantine
+  // acquired its own transit lock, releasing that lock after the move is correct. If an ordinary
+  // Holt protection lock already existed, however, `worktree move -f -f` carries that exact lock
+  // through both moves and the restore recipe must NOT erase it. Returning an unconditional
+  // unlock silently weakened a protected worktree after an otherwise successful recovery.
+  const restoreArgv = acquiredLock ? [moveArgv, unlockArgv] : [moveArgv];
+  return {
+    ok: true,
+    quarantinePath: q.path,
+    head,
+    branch,
+    originalPathOccupied: (await pathKind(candidate.path)) !== 'missing',
+    restoreArgv,
+    restore: restoreArgv.map((argv) => argv.map(shellQuote).join(' ')).join(' && '),
+    restorePreservesExistingLock: !acquiredLock,
+    preExistingLockReason: acquiredLock ? null : initialLock.reason,
+  };
+}
+
+/**
+ * Move provably-disposable worktrees into a locked, recoverable local quarantine.
+ *
+ * There is no portable primitive that freezes every process with an open cwd/file descriptor
+ * between a final scan and recursive deletion. Therefore `clean --apply` does not physically
+ * delete. It atomically moves the whole worktree on the same filesystem and keeps it registered,
+ * locked, and branch-reachable. That closes the entire late-writer class rather than making the
+ * scan/delete interval merely smaller.
+ *
+ * DRY RUN BY DEFAULT.
+ *
+ * @param {object} opts
+ * @param {boolean} opts.apply actually quarantine (default: dry run)
+ * @param {Function|null} opts.onBeforeRemove backwards-compatible seam before re-verification
+ * @param {Function|null} opts.onAfterVerify deterministic seam after the final verdict and before
+ *   the atomic move; used to prove late files/commits move into quarantine instead of being lost
+ */
+export async function clean(cwd, {
+  apply = false, onBeforeRemove = null, onAfterVerify = null, ...opts
+} = {}) {
+  const { report, quarantined: existingQuarantines } = await assessForClean(cwd, opts);
 
   const disposable = report.safe.filter((s) => s.safe);
   const held = report.safe.filter((s) => !s.safe && s.confidence !== 'unknown');
   const unknown = report.safe.filter((s) => s.confidence === 'unknown');
 
   const plan = [];
+  const bindingFailures = [];
   for (const s of disposable) {
     const node = report.graph.nodes.find((n) => n.id === s.id);
     if (!node?.path) continue;
+    let binding;
+    try { binding = await worktreeBinding(node.path); } catch (error) {
+      bindingFailures.push({
+        id: s.id,
+        why: `disposable verdict was measured, but worktree identity could not be bound: ${error?.message ?? error}`,
+      });
+      continue;
+    }
     plan.push({
       id: s.id,
       path: node.path,
       branch: node.branch ?? null,
+      head: node.head ?? null,
       why: s.reasons[0],
+      binding,
     });
   }
 
   if (!apply) {
     return {
       dryRun: true,
-      wouldRemove: plan,
+      wouldQuarantine: plan.map(({ binding: _binding, ...candidate }) => candidate),
       keeping: held.map((h) => ({ id: h.id, why: h.reasons.join('; ') })),
-      unknown: unknown.map((u) => ({ id: u.id, why: u.reasons[0] })),
-      note: `${plan.length} worktree(s) hold nothing base lacks. Re-run with --apply to remove them`
-        + `${branches ? ' and their branches' : ''}.`,
+      unknown: unknown.map((u) => ({ id: u.id, why: u.reasons[0] })).concat(bindingFailures),
+      existingQuarantines: existingQuarantines.map((w) => ({ id: w.id, path: w.path })),
+      note: `${plan.length} active worktree(s) hold nothing base lacks. Re-run with --apply to `
+        + 'move them into locked, recoverable local quarantine. No files or branches are physically deleted.',
     };
   }
 
   const journalFailures = [];
   const done = [];
   for (const p of plan) {
-    if (onBefore) await /** @type {(p: any) => any} */ (onBefore)(p);
+    if (onBeforeRemove) await /** @type {(p: any) => any} */ (onBeforeRemove)(p);
 
-    // Re-verify immediately before deleting. The scan may be seconds old and a worktree can gain
-    // work in that window; for a destructive action, a stale verdict is not good enough.
-    const fresh = await assess(cwd, opts);
-    const still = fresh.report.safe.find((s) => s.id === p.id);
+    // The plan can already be seconds old. Recompute against ACTIVE worktrees only; previously
+    // quarantined recovery copies must not authorise draining the last live redundant sibling.
+    const fresh = await assessForClean(cwd, opts);
+    const freshNode = await reportNodeAt(fresh.report, p.path);
+    const still = freshNode
+      ? fresh.report.safe.find((s) => s.id === freshNode.id)
+      : null;
     if (!still?.safe) {
       done.push({ ...p, action: 'skipped', why: `no longer disposable: ${still?.reasons?.[0] ?? 'unknown'}` });
       continue;
     }
 
-    // A tree holt locked earlier can be genuinely disposable now — its lock is holt's own past
-    // verdict, not evidence (see safeToDelete). Release it here, immediately after the re-verify
-    // and immediately before the removal, so the window in which the guard is down is as short
-    // as it can be. `git worktree remove` refuses a locked tree, so without this the reclaim
-    // silently fails on every worktree protect ever touched.
-    //
-    // The foreign-lock check is a SECOND, structurally independent gate: a foreign lock already
-    // keeps the tree out of this plan by making the verdict unsafe, and it is repeated here
-    // because no single defect should be able to open both.
+    let freshBinding;
+    try { freshBinding = await worktreeBinding(p.path); } catch (error) {
+      done.push({ ...p, action: 'skipped', why: `worktree identity could not be revalidated: ${error?.message ?? error}` });
+      continue;
+    }
+    if (!sameWorktreeBinding(freshBinding, p.binding)) {
+      done.push({ ...p, action: 'skipped', why: 'worktree identity changed since the cleanup plan was measured' });
+      continue;
+    }
+    p.binding = freshBinding;
+
+    if (onAfterVerify) await /** @type {(p: any, verdict: any) => any} */ (onAfterVerify)(p, still);
+
+    // A foreign lock is independent authority and always wins. Holt's ordinary risk lock stays
+    // continuously in place: quarantine moves locked trees with Git's required double force.
     const lock = await lockState(p.path, cwd);
     if (lock.locked) {
-      if (!isHoltLock(lock.reason)) {
-        done.push({ ...p, action: 'skipped', why: `locked by something other than holt: ${lock.reason}` });
+      if (!isHoltLock(lock.reason) || isHoltCleanQuarantineLock(lock.reason)) {
+        done.push({ ...p, action: 'skipped', why: `locked by something other than an active Holt risk guard: ${lock.reason}` });
         continue;
       }
-      const ul = await git(['worktree', 'unlock', p.path], { cwd, allowMutation: true });
-      if (ul.code !== 0) {
-        done.push({ ...p, action: 'failed', why: `could not release holt's own lock: ${ul.stderr.trim()}` });
-        continue;
-      }
-      await journal(cwd, {
-        action: 'unprotect', id: p.id, path: p.path,
-        reason: lock.reason, stale: true, forced: false, foreignLock: false,
-      }, journalFailures);
     }
 
-    const rm = await git(['worktree', 'remove', p.path], { cwd, allowMutation: true });
-    if (rm.code !== 0) {
-      done.push({ ...p, action: 'failed', why: rm.stderr.trim() });
+    const moved = await quarantineWorktree(cwd, p);
+    if (!moved.ok) {
+      done.push({
+        ...p,
+        action: 'failed',
+        why: moved.why,
+        quarantinePath: moved.quarantinePath ?? null,
+        retained: moved.retained,
+        rolledBack: moved.rolledBack ?? false,
+      });
+      // A retained-but-unverified partial state is safe but not a basis for acting on siblings.
+      if (moved.retained) break;
       continue;
     }
 
-    let branchRemoved = false;
-    if (branches && p.branch) {
-      // -d, never -D: git refuses to delete an unmerged branch, and that refusal is a feature.
-      const br = await git(['branch', '-d', p.branch], { cwd, allowMutation: true });
-      branchRemoved = br.code === 0;
-    }
-    done.push({ ...p, action: 'removed', branchRemoved });
+    const action = {
+      ...p,
+      action: 'quarantined',
+      quarantinePath: moved.quarantinePath,
+      head: moved.head,
+      branch: moved.branch,
+      originalPathOccupied: moved.originalPathOccupied,
+      restoreArgv: moved.restoreArgv,
+      restore: moved.restore,
+      restorePreservesExistingLock: moved.restorePreservesExistingLock,
+      preExistingLockReason: moved.preExistingLockReason,
+    };
+    done.push(action);
     await journal(cwd, {
-      action: 'clean-remove', id: p.id, path: p.path, branch: p.branch ?? null, branchRemoved,
-      evidence: still.reasons?.length ? still.reasons : ['re-verified disposable at removal time'],
+      action: 'clean-quarantine', id: p.id,
+      path: p.path, quarantinePath: moved.quarantinePath,
+      branch: moved.branch, head: moved.head,
+      evidence: still.reasons?.length ? still.reasons : ['re-verified disposable immediately before quarantine'],
+      restoreArgv: moved.restoreArgv,
     }, journalFailures);
   }
 
+  const quarantines = done.filter((d) => d.action === 'quarantined');
+  const publicDone = done.map(({ binding: _binding, ...action }) => action);
+  const failures = publicDone.filter((d) => d.action === 'failed');
   return withJournalWarning({
     dryRun: false,
-    removed: done.filter((d) => d.action === 'removed').length,
-    branchesRemoved: done.filter((d) => d.branchRemoved).length,
-    skipped: done.filter((d) => d.action === 'skipped'),
-    failed: done.filter((d) => d.action === 'failed'),
-    actions: done,
-    unknown: unknown.map((u) => ({ id: u.id, why: u.reasons[0] })),
+    quarantined: quarantines.length,
+    quarantines: quarantines.map((d) => ({
+      id: d.id,
+      originalPath: d.path,
+      quarantinePath: d.quarantinePath,
+      restoreArgv: d.restoreArgv,
+      restore: d.restore,
+      originalPathOccupied: d.originalPathOccupied,
+      restorePreservesExistingLock: d.restorePreservesExistingLock,
+      preExistingLockReason: d.preExistingLockReason,
+    })),
+    // Explicit zeroes keep old automation from interpreting quarantine as physical deletion.
+    removed: 0,
+    branchesRemoved: 0,
+    skipped: publicDone.filter((d) => d.action === 'skipped'),
+    failures,
+    // Backward-compatible alias for pre-launch callers; `failures` + `failedCount` is canonical.
+    failed: failures,
+    failedCount: failures.length,
+    actions: publicDone,
+    existingQuarantines: existingQuarantines.map((w) => ({ id: w.id, path: w.path })),
+    unknown: unknown.map((u) => ({ id: u.id, why: u.reasons[0] })).concat(bindingFailures),
+    note: quarantines.length
+      ? `${quarantines.length} worktree(s) moved into locked local quarantine; no files or branches were deleted.`
+      : 'No worktrees were quarantined; no files or branches were deleted.',
+  }, journalFailures);
+}
+
+/* ======================================================= QUARANTINE RECOVERY ==== */
+
+function cleanRecoveryRows(workstreams, state) {
+  const candidates = workstreams
+    .filter((w) => w.quarantineState === state)
+    .map((w) => {
+      const originalPath = w.quarantineOriginalPath ?? null;
+      const identityPath = originalPath ?? w.path;
+      return {
+        id: path.basename(identityPath),
+        path: identityPath,
+        originalPath,
+        quarantinePath: w.path,
+        state,
+        head: w.head ?? null,
+        branch: w.branch ?? null,
+        locked: w.locked === true,
+        lockReason: w.lockReason ?? null,
+        lockWasAcquired: w.quarantineLockWasAcquired
+          ?? isHoltCleanQuarantineLock(w.lockReason),
+        preExistingLockReason: w.quarantinePreExistingLockReason ?? null,
+        _markerPath: w.quarantineMarkerPath ?? null,
+        _token: w.quarantineToken ?? null,
+        _recordedLockReason: w.quarantineRecordedLockReason ?? null,
+        _recordedHead: w.quarantineRecordedHead ?? null,
+        _recordedBranch: w.quarantineRecordedBranch ?? null,
+      };
+    });
+  return disambiguate(candidates);
+}
+
+const publicRecoveryRow = ({
+  path: _identityPath,
+  _markerPath,
+  _token,
+  _recordedLockReason,
+  _recordedHead,
+  _recordedBranch,
+  ...row
+}) => row;
+
+/** List every terminal or interrupted clean quarantine without rescanning it as deletion authority. */
+export async function quarantines(cwd, opts = {}) {
+  const disc = await discover(cwd, opts);
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
+  const completed = cleanRecoveryRows(disc.workstreams, 'quarantined');
+  const transitions = cleanRecoveryRows(disc.workstreams, 'transit');
+  return {
+    count: completed.length,
+    quarantines: completed.map(publicRecoveryRow),
+    transitions: transitions.map(publicRecoveryRow),
+    note: completed.length
+      ? `${completed.length} recoverable worktree quarantine(s). Restore one with: holt restore <id>`
+      : (transitions.length
+        ? 'No completed quarantines; interrupted transitions need inspection before recovery.'
+        : 'No clean quarantines found.'),
+  };
+}
+
+async function readCleanRecoveryMarker(markerPath) {
+  if (!markerPath || !path.isAbsolute(markerPath)) throw new Error('quarantine marker path is unavailable');
+  const st = await fs.lstat(markerPath);
+  if (!st.isFile() || st.isSymbolicLink() || st.size > 64 * 1024) {
+    throw new Error('quarantine marker is not a bounded physical file');
+  }
+  const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
+  if (marker?.version !== 1 || marker?.kind !== 'holt-clean-quarantine'
+      || marker?.state !== 'quarantined') {
+    throw new Error('quarantine marker no longer records a completed quarantine');
+  }
+  if (typeof marker.token !== 'string' || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(marker.token)) {
+    throw new Error('quarantine marker token is invalid');
+  }
+  return marker;
+}
+
+/**
+ * Restore one completed clean quarantine to the exact path recorded before its atomic move.
+ *
+ * This deliberately has no `--force`: an occupied destination, changed marker, changed lock,
+ * changed HEAD, cross-filesystem target, or ambiguous id refuses. Recovery must never turn into
+ * an overwrite primitive. The original lock authority is restored too: Holt releases only a
+ * transit lock it acquired itself and preserves a protection lock that predated quarantine.
+ */
+export async function restoreQuarantine(cwd, target, opts = {}) {
+  if (!target || typeof target !== 'string') {
+    return { ok: false, failedCount: 1, error: 'restore needs a quarantine id' };
+  }
+  const disc = await discover(cwd, opts);
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
+  const rows = cleanRecoveryRows(disc.workstreams, 'quarantined');
+  const idMatch = new Map(rows.map((row) => [row.id, row])).get(target) ?? null;
+  const resolvedTarget = path.isAbsolute(target) ? await canonicalPath(target) : null;
+  const pathMatches = rows.filter((row) => resolvedTarget
+    && (samePathSync(row.quarantinePath, resolvedTarget)
+      || (row.originalPath && samePathSync(row.originalPath, resolvedTarget))));
+  const matches = idMatch
+    ? [idMatch, ...pathMatches.filter((row) => row !== idMatch)]
+    : pathMatches;
+  if (matches.length !== 1) {
+    return {
+      ok: false,
+      failedCount: 1,
+      error: matches.length
+        ? `quarantine target '${target}' is ambiguous`
+        : `no completed clean quarantine matches '${target}'`,
+      available: rows.map(publicRecoveryRow),
+      note: 'nothing was moved or unlocked',
+    };
+  }
+
+  const row = matches[0];
+  let marker;
+  try {
+    marker = await readCleanRecoveryMarker(row._markerPath);
+  } catch (error) {
+    return { ok: false, failedCount: 1, id: row.id, error: error?.message ?? String(error), note: 'nothing was moved or unlocked' };
+  }
+  if (!path.isAbsolute(marker.originalPath ?? '') || !path.isAbsolute(marker.actualPath ?? '')) {
+    return { ok: false, failedCount: 1, id: row.id, error: 'quarantine marker paths are not absolute', note: 'nothing was moved or unlocked' };
+  }
+  const [actualPath, originalPath] = await Promise.all([
+    canonicalPath(marker.actualPath),
+    canonicalPath(marker.originalPath),
+  ]);
+  if (!samePathSync(actualPath, row.quarantinePath)
+      || !samePathSync(originalPath, row.originalPath)
+      || marker.token !== row._token) {
+    return { ok: false, failedCount: 1, id: row.id, error: 'quarantine marker changed after discovery', note: 'nothing was moved or unlocked' };
+  }
+  if (row._recordedHead && marker.head !== row._recordedHead) {
+    return { ok: false, failedCount: 1, id: row.id, error: 'quarantine HEAD record changed after discovery', note: 'nothing was moved or unlocked' };
+  }
+
+  let beforeBinding;
+  try { beforeBinding = await worktreeBinding(actualPath); } catch (error) {
+    return { ok: false, failedCount: 1, id: row.id, error: `quarantine identity could not be verified: ${error?.message ?? error}`, note: 'nothing was moved or unlocked' };
+  }
+  const lock = await lockState(actualPath, cwd);
+  if (!lock.locked || !isHoltLock(lock.reason)) {
+    return { ok: false, failedCount: 1, id: row.id, error: 'quarantine is no longer protected by a Holt lock', note: 'nothing was moved or unlocked' };
+  }
+  if (marker.lockReason && marker.lockReason !== lock.reason) {
+    return { ok: false, failedCount: 1, id: row.id, error: 'quarantine lock changed after it was recorded', note: 'nothing was moved or unlocked' };
+  }
+  const lockWasAcquired = typeof marker.lockWasAcquired === 'boolean'
+    ? marker.lockWasAcquired
+    : isHoltCleanQuarantineLock(lock.reason);
+  if (lockWasAcquired !== isHoltCleanQuarantineLock(lock.reason)) {
+    return { ok: false, failedCount: 1, id: row.id, error: 'quarantine lock provenance is inconsistent', note: 'nothing was moved or unlocked' };
+  }
+  if (marker.head && marker.head !== row.head) {
+    return { ok: false, failedCount: 1, id: row.id, error: 'quarantined worktree HEAD changed after completion', note: 'nothing was moved or unlocked' };
+  }
+
+  const destinationKind = await pathKind(originalPath);
+  if (destinationKind !== 'missing') {
+    return {
+      ok: false, failedCount: 1, id: row.id,
+      error: `original path is occupied by ${destinationKind}: ${originalPath}`,
+      quarantinePath: actualPath,
+      note: 'nothing was moved or unlocked; Holt never overwrites a restore destination',
+    };
+  }
+  try {
+    const [sourceParent, destinationParent] = await Promise.all([
+      fs.stat(path.dirname(actualPath)), fs.stat(path.dirname(originalPath)),
+    ]);
+    if (!sourceParent.isDirectory() || !destinationParent.isDirectory()
+        || sourceParent.dev !== destinationParent.dev) {
+      return { ok: false, failedCount: 1, id: row.id, error: 'restore destination is not an existing directory on the quarantine filesystem', note: 'nothing was moved or unlocked' };
+    }
+  } catch (error) {
+    return { ok: false, failedCount: 1, id: row.id, error: `restore destination could not be verified: ${error?.message ?? error}`, note: 'nothing was moved or unlocked' };
+  }
+
+  const moveArgv = ['git', 'worktree', 'move', '-f', '-f', actualPath, originalPath];
+  const moved = await git(moveArgv.slice(1), { cwd, allowMutation: true })
+    .catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+  const [sourceKind, restoredKind] = await Promise.all([pathKind(actualPath), pathKind(originalPath)]);
+  const physicallyRestored = sourceKind === 'missing' && restoredKind === 'directory';
+  if (moved.code !== 0 && !physicallyRestored) {
+    return {
+      ok: false, failedCount: 1, id: row.id,
+      error: moved.stderr?.trim() || 'git worktree move failed',
+      quarantinePath: actualPath,
+      note: 'the quarantine remains locked; no fallback copy, overwrite, or deletion was attempted',
+    };
+  }
+
+  if (!(await registeredWorktree(originalPath, cwd))) {
+    const repaired = await git(['worktree', 'repair', originalPath], { cwd, allowMutation: true })
+      .catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+    if (repaired.code !== 0 || !(await registeredWorktree(originalPath, cwd))) {
+      return {
+        ok: false, failedCount: 1, id: row.id, restored: true, retained: true,
+        error: `directory restored, but Git registration could not be verified: ${repaired.stderr?.trim() || 'repair failed'}`,
+        originalPath,
+        note: 'the restored directory and its lock were retained; no deletion was attempted',
+      };
+    }
+  }
+  let afterBinding;
+  try { afterBinding = await worktreeBinding(originalPath); } catch (error) {
+    return { ok: false, failedCount: 1, id: row.id, restored: true, retained: true, error: `directory restored, but identity could not be verified: ${error?.message ?? error}`, originalPath };
+  }
+  if (!sameWorktreeBinding(beforeBinding, afterBinding)) {
+    return { ok: false, failedCount: 1, id: row.id, restored: true, retained: true, error: 'directory restored, but its private admin or filesystem identity changed', originalPath };
+  }
+  const restoredHead = await git(['rev-parse', '--verify', 'HEAD^{commit}'], { cwd: originalPath })
+    .catch(() => null);
+  if (!restoredHead || restoredHead.code !== 0
+      || (marker.head && restoredHead.stdout.trim() !== marker.head)) {
+    return { ok: false, failedCount: 1, id: row.id, restored: true, retained: true, error: 'directory restored, but HEAD no longer matches the quarantine record', originalPath };
+  }
+
+  /** @type {string|null} */
+  let markerWarning = null;
+  try {
+    await completeMarker(row._markerPath, marker.token, {
+      ...marker,
+      state: 'restored',
+      restoredPath: originalPath,
+      restoredAt: new Date().toISOString(),
+      restoredHead: restoredHead.stdout.trim(),
+      preservedLock: !lockWasAcquired,
+    });
+  } catch (error) {
+    markerWarning = `restore completed, but its durable marker could not be updated: ${error?.message ?? error}`;
+  }
+
+  if (lockWasAcquired) {
+    const unlocked = await git(['worktree', 'unlock', originalPath], { cwd, allowMutation: true })
+      .catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+    if (unlocked.code !== 0) {
+      return {
+        ok: false, failedCount: 1, id: row.id, restored: true, retained: true,
+        error: `worktree restored but Holt's transit lock could not be released: ${unlocked.stderr?.trim() || 'unlock verification failed'}`,
+        originalPath,
+        unlockArgv: ['git', 'worktree', 'unlock', originalPath],
+        markerWarning,
+        note: 'the worktree is restored and still safely locked; no content was deleted',
+      };
+    }
+  }
+
+  await removeEmptyQuarantineRoot(path.dirname(actualPath));
+  const journalFailures = [];
+  await journal(cwd, {
+    action: 'clean-restore', id: row.id,
+    path: originalPath, quarantinePath: actualPath,
+    branch: marker.branch ?? null, head: restoredHead.stdout.trim(),
+    preservedLock: !lockWasAcquired,
+  }, journalFailures);
+  return withJournalWarning({
+    ok: true,
+    restored: true,
+    id: row.id,
+    originalPath,
+    quarantinePath: actualPath,
+    head: restoredHead.stdout.trim(),
+    branch: marker.branch ?? null,
+    preservedLock: !lockWasAcquired,
+    markerWarning,
+    actions: [{
+      id: row.id, action: 'restored', path: originalPath,
+      reason: !lockWasAcquired ? 'restored with its pre-existing Holt lock intact' : 'restored and Holt transit lock released',
+    }],
+    note: markerWarning
+      ? `The worktree is restored. WARNING: ${markerWarning}`
+      : 'The worktree is restored; no files or branches were deleted.',
+  }, journalFailures);
+}
+
+/* ========================================================== QUARANTINE PURGE ==== */
+
+/**
+ * Give the exact quarantined HEAD a durable, never-overwritten ref before removing its checkout.
+ *
+ * A branch normally already keeps the commit reachable, but a detached worktree does not. The
+ * purge path therefore anchors every HEAD, not just detached ones: one recovery contract, no
+ * branch-name inference, and an immutable commit oid in the result. The ref name uses a bounded
+ * digest of the workstream id plus the commit prefix so an attacker-controlled path cannot exceed
+ * a filesystem component limit or create a refs directory/file conflict through slashes.
+ */
+async function anchorPurgeHead(cwd, id, head) {
+  const idHash = createHash('sha256').update(String(id)).digest('hex').slice(0, 16);
+  const baseRef = `refs/holt/purge/${idHash}-${head.slice(0, 16)}`;
+  const MAX_CONTENTION_RETRIES = 24;
+
+  for (let suffix = 1; suffix < 1000; suffix++) {
+    const ref = suffix === 1 ? baseRef : `${baseRef}-${suffix}`;
+    for (let attempt = 0; attempt <= MAX_CONTENTION_RETRIES; attempt++) {
+      const wrote = await git(['update-ref', '--create-reflog', ref, head, ''], {
+        cwd, allowMutation: true,
+      }).catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+      if (wrote.code === 0) return { ok: true, ref, commit: head, idempotent: false };
+
+      const current = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd })
+        .catch(() => ({ code: 1, stdout: '' }));
+      if (current.code === 0) {
+        if (current.stdout.trim() === head) {
+          return { ok: true, ref, commit: head, idempotent: true };
+        }
+        break; // occupied by a different commit; allocate the next never-overwriting name
+      }
+      if (attempt === MAX_CONTENTION_RETRIES) {
+        return {
+          ok: false,
+          error: wrote.stderr?.trim() || `could not create exact purge recovery ref ${ref}`,
+        };
+      }
+      await new Promise((resolve) => { setTimeout(resolve, 2 + Math.random() * 25); });
+    }
+  }
+  return { ok: false, error: 'purge recovery ref namespace exhausted' };
+}
+
+/**
+ * Permanently remove one *clean* completed quarantine and reclaim its checkout storage.
+ *
+ * This is intentionally not part of `clean --apply`: quarantine is the reversible default and
+ * purge is a separately named, dry-run-first destructive decision. It refuses modified,
+ * untracked, ignored, unreadable, ambiguously identified, unlocked, tampered, or moved recovery
+ * copies. On apply it first anchors the exact HEAD to refs/holt/purge/*, then releases only the
+ * verified Holt lock and invokes `git worktree remove` WITHOUT --force. Git therefore performs a
+ * final independent dirtiness check at the destructive boundary. If removal refuses, Holt puts
+ * the exact recorded lock back and reports both outcomes.
+ *
+ * @param {string} cwd
+ * @param {string} target quarantine id or exact original/quarantine path
+ * @param {object} [opts]
+ * @param {boolean} [opts.apply] physically remove (default: preview)
+ * @param {Function|null} [opts.onBeforeRemove] deterministic race-test seam after preview evidence
+ */
+export async function purgeQuarantine(cwd, target, {
+  apply = false, onBeforeRemove = null, ...opts
+} = {}) {
+  if (!target || typeof target !== 'string') {
+    return { ok: false, dryRun: !apply, failedCount: 1, error: 'purge needs a quarantine id' };
+  }
+
+  const disc = await discover(cwd, opts);
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
+  const rows = cleanRecoveryRows(disc.workstreams, 'quarantined');
+  const idMatch = new Map(rows.map((row) => [row.id, row])).get(target) ?? null;
+  const resolvedTarget = path.isAbsolute(target) ? await canonicalPath(target) : null;
+  const pathMatches = rows.filter((row) => resolvedTarget
+    && (samePathSync(row.quarantinePath, resolvedTarget)
+      || (row.originalPath && samePathSync(row.originalPath, resolvedTarget))));
+  const matches = idMatch
+    ? [idMatch, ...pathMatches.filter((row) => row !== idMatch)]
+    : pathMatches;
+  if (matches.length !== 1) {
+    return {
+      ok: false,
+      dryRun: !apply,
+      failedCount: 1,
+      error: matches.length
+        ? `quarantine target '${target}' is ambiguous`
+        : `no completed clean quarantine matches '${target}'`,
+      available: rows.map(publicRecoveryRow),
+      note: 'nothing was unlocked or removed',
+    };
+  }
+
+  const row = matches[0];
+  let marker;
+  try {
+    marker = await readCleanRecoveryMarker(row._markerPath);
+  } catch (error) {
+    return {
+      ok: false, dryRun: !apply, failedCount: 1, id: row.id,
+      error: error?.message ?? String(error), note: 'nothing was unlocked or removed',
+    };
+  }
+  if (!path.isAbsolute(marker.originalPath ?? '') || !path.isAbsolute(marker.actualPath ?? '')) {
+    return { ok: false, dryRun: !apply, failedCount: 1, id: row.id, error: 'quarantine marker paths are not absolute', note: 'nothing was unlocked or removed' };
+  }
+  const [actualPath, originalPath] = await Promise.all([
+    canonicalPath(marker.actualPath), canonicalPath(marker.originalPath),
+  ]);
+  if (!samePathSync(actualPath, row.quarantinePath)
+      || !samePathSync(originalPath, row.originalPath)
+      || marker.token !== row._token) {
+    return { ok: false, dryRun: !apply, failedCount: 1, id: row.id, error: 'quarantine marker changed after discovery', note: 'nothing was unlocked or removed' };
+  }
+
+  let binding;
+  try { binding = await worktreeBinding(actualPath); } catch (error) {
+    return { ok: false, dryRun: !apply, failedCount: 1, id: row.id, error: `quarantine identity could not be verified: ${error?.message ?? error}`, note: 'nothing was unlocked or removed' };
+  }
+  const lock = await lockState(actualPath, cwd);
+  if (!lock.locked || !isHoltLock(lock.reason)) {
+    return { ok: false, dryRun: !apply, failedCount: 1, id: row.id, error: 'quarantine is no longer protected by a Holt lock', note: 'nothing was unlocked or removed' };
+  }
+  if (!marker.lockReason || marker.lockReason !== lock.reason) {
+    return { ok: false, dryRun: !apply, failedCount: 1, id: row.id, error: 'quarantine lock changed after it was recorded', note: 'nothing was unlocked or removed' };
+  }
+
+  const headResult = await git(['rev-parse', '--verify', 'HEAD^{commit}'], { cwd: actualPath })
+    .catch(() => null);
+  const head = headResult?.code === 0 ? headResult.stdout.trim() : '';
+  if (!head || !marker.head || head !== marker.head || (row._recordedHead && head !== row._recordedHead)) {
+    return { ok: false, dryRun: !apply, failedCount: 1, id: row.id, error: 'quarantined worktree HEAD changed after completion', note: 'nothing was unlocked or removed' };
+  }
+
+  // Include ignored paths explicitly. `git worktree remove` is the final independent clean check,
+  // but its treatment of ignored files has varied; Holt never delegates those sole-copy bytes to
+  // an implementation detail or version-dependent default.
+  const status = await git([
+    'status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching',
+  ], { cwd: actualPath }).catch((error) => ({ code: 1, stdout: '', stderr: String(error?.message ?? error) }));
+  if (status.code !== 0) {
+    return {
+      ok: false, dryRun: !apply, failedCount: 1, id: row.id,
+      error: `quarantine cleanliness could not be verified: ${status.stderr?.trim() || 'git status failed'}`,
+      note: 'nothing was unlocked or removed',
+    };
+  }
+  if (status.stdout.length > 0) {
+    const entryCount = status.stdout.split('\0').filter(Boolean).length;
+    return {
+      ok: false, dryRun: !apply, failedCount: 1, blocked: true, id: row.id,
+      originalPath, quarantinePath: actualPath, head, dirtyEntries: entryCount,
+      error: `quarantine contains ${entryCount} modified, untracked, or ignored entr${entryCount === 1 ? 'y' : 'ies'}`,
+      next: `restore with 'holt restore ${row.id}', or make a verified capture and clean the worktree before purging`,
+      note: 'nothing was unlocked or removed',
+    };
+  }
+
+  const plannedRef = `refs/holt/purge/${createHash('sha256').update(String(row.id)).digest('hex').slice(0, 16)}-${head.slice(0, 16)}`;
+  if (!apply) {
+    return {
+      ok: true,
+      dryRun: true,
+      id: row.id,
+      originalPath,
+      quarantinePath: actualPath,
+      head,
+      branch: marker.branch ?? null,
+      wouldAnchor: plannedRef,
+      wouldRemove: [{
+        id: row.id,
+        path: actualPath,
+        action: 'remove',
+        why: 'completed quarantine is clean; exact HEAD will be anchored first and branch retained',
+      }],
+      removed: 0,
+      note: `This completed quarantine is clean. Re-run 'holt purge ${row.id} --apply' to anchor its exact HEAD and permanently remove the checkout; its branch is not deleted.`,
+    };
+  }
+
+  // Rebind immediately before the irreversible half; a path swapped since the checks above is
+  // not the object the user authorised.
+  let finalBinding;
+  try { finalBinding = await worktreeBinding(actualPath); } catch (error) {
+    return { ok: false, dryRun: false, failedCount: 1, id: row.id, error: `quarantine identity could not be revalidated: ${error?.message ?? error}`, note: 'nothing was unlocked or removed' };
+  }
+  if (!sameWorktreeBinding(binding, finalBinding)) {
+    return { ok: false, dryRun: false, failedCount: 1, id: row.id, error: 'quarantine identity changed after verification', note: 'nothing was unlocked or removed' };
+  }
+
+  const anchored = await anchorPurgeHead(actualPath, row.id, head);
+  if (!anchored.ok) {
+    return {
+      ok: false, dryRun: false, failedCount: 1, id: row.id,
+      error: `exact purge recovery ref could not be written: ${anchored.error}`,
+      note: 'the quarantine remains locked; nothing was removed',
+    };
+  }
+
+  if (onBeforeRemove) await /** @type {(row: any) => any} */ (onBeforeRemove)({
+    id: row.id, originalPath, quarantinePath: actualPath, head, recoveryRef: anchored.ref,
+  });
+
+  const unlocked = await git(['worktree', 'unlock', actualPath], { cwd, allowMutation: true })
+    .catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+  if (unlocked.code !== 0) {
+    return {
+      ok: false, dryRun: false, failedCount: 1, id: row.id,
+      error: `quarantine lock could not be released: ${unlocked.stderr?.trim() || 'git worktree unlock failed'}`,
+      recoveryRef: anchored.ref, commit: head,
+      note: 'the exact HEAD is anchored and the quarantine remains in place',
+    };
+  }
+
+  const removed = await git(['worktree', 'remove', actualPath], { cwd, allowMutation: true })
+    .catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+  const [pathAfter, registeredAfter] = await Promise.all([
+    pathKind(actualPath), registeredWorktree(actualPath, cwd),
+  ]);
+  const fullyRemoved = removed.code === 0 && pathAfter === 'missing' && !registeredAfter;
+  if (!fullyRemoved) {
+    let relocked = false;
+    let relockError = '';
+    if (pathAfter === 'directory' && registeredAfter) {
+      const relock = await git(['worktree', 'lock', '--reason', marker.lockReason, actualPath], {
+        cwd, allowMutation: true,
+      }).catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
+      const lockAfter = await lockState(actualPath, cwd);
+      relocked = relock.code === 0 && lockAfter.locked && lockAfter.reason === marker.lockReason;
+      relockError = relock.stderr?.trim() || (relocked ? '' : 'lock verification failed');
+    }
+    return {
+      ok: false, dryRun: false, failedCount: 1, id: row.id,
+      error: removed.stderr?.trim() || 'git worktree remove did not complete cleanly',
+      recoveryRef: anchored.ref, commit: head,
+      quarantinePath: pathAfter === 'missing' ? null : actualPath,
+      registered: registeredAfter, relocked, relockError: relockError || null,
+      note: relocked
+        ? 'Git refused the non-forced removal; the exact HEAD remains anchored and the quarantine lock was restored.'
+        : 'Removal did not complete; the exact HEAD remains anchored. Inspect the reported path and registration before retrying.',
+    };
+  }
+
+  await removeEmptyQuarantineRoot(path.dirname(actualPath));
+  const journalFailures = [];
+  await journal(cwd, {
+    action: 'clean-purge', id: row.id,
+    path: originalPath, quarantinePath: actualPath,
+    branch: marker.branch ?? null, head,
+    ref: anchored.ref, commit: head,
+    evidence: ['completed quarantine marker verified', 'identity and lock unchanged', 'worktree clean including ignored paths', 'git non-forced removal succeeded'],
+  }, journalFailures);
+  return withJournalWarning({
+    ok: true,
+    dryRun: false,
+    purged: true,
+    id: row.id,
+    originalPath,
+    quarantinePath: actualPath,
+    head,
+    branch: marker.branch ?? null,
+    recoveryRef: anchored.ref,
+    commit: head,
+    removed: 1,
+    branchesRemoved: 0,
+    restoreArgv: ['git', 'worktree', 'add', originalPath, head],
+    restore: ['git', 'worktree', 'add', originalPath, head].map(shellQuote).join(' '),
+    actions: [{ id: row.id, path: actualPath, action: 'purged', reason: 'clean quarantine removed without force after exact HEAD anchoring' }],
+    note: `The clean quarantined checkout was removed and its exact HEAD remains reachable at ${anchored.ref}; no branch was deleted.`,
   }, journalFailures);
 }

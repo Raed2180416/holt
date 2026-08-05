@@ -31,18 +31,30 @@
  *     produces the same silence as a repo where nothing happened. Those are different facts.
  */
 
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { git } from './git.mjs';
 import { discover } from './discover.mjs';
 import { scan } from './scan.mjs';
 import { analyze } from './analyze.mjs';
-import { readJournal } from './journal.mjs';
+import { readVerifiedJournal } from './journal.mjs';
 import { actorLabel, actorKey, UNKNOWN } from './actor.mjs';
 
-/** Actions that took something away, versus actions that were refused, versus everything else. */
-const DESTRUCTIVE_ACTIONS = new Set(['clean-remove', 'removed', 'branch-delete']);
+/** Historical actions that took something away, versus reversible quarantine, refused, or other. */
+const DESTRUCTIVE_ACTIONS = new Set(['clean-purge', 'clean-remove', 'removed', 'branch-delete']);
+const QUARANTINE_ACTIONS = new Set(['clean-quarantine']);
 const REFUSED_ACTIONS = new Set(['blocked', 'unverified']);
 const PROTECTIVE_ACTIONS = new Set(['protect', 'rescue']);
+
+/** A timeline may never attribute an unverified journal record. */
+export class ForensicsIntegrityError extends Error {
+  constructor(verification) {
+    super(`forensics refused journal-derived attribution: integrity is ${verification.code} — ${verification.reason}`);
+    this.name = 'ForensicsIntegrityError';
+    this.code = 'EJOURNAL_UNTRUSTED';
+    this.verification = verification;
+  }
+}
 
 /**
  * Does this journal event concern workstream `id`?
@@ -164,8 +176,18 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
   }
   const root = disc.root;
 
-  const [events, refs] = await Promise.all([readJournal(root), rescueRefs(root)]);
-
+  // Attribution is a stronger claim than a raw log view.  Verify before reading a single event:
+  // a modified/tail-truncated/legacy record must not become an apparently confirmed statement
+  // about who performed a destructive action.  A missing journal is represented explicitly as
+  // no evidence; there are no entries to attribute in that case.
+  const [{ verification, entries: events }, refs] = await Promise.all([
+    readVerifiedJournal(root),
+    rescueRefs(root),
+  ]);
+  if (!verification.ok || (verification.legacy ?? 0) > 0) throw new ForensicsIntegrityError(verification);
+  const journalState = verification.code === 'empty'
+    ? 'no-journal'
+    : ((verification.entries ?? 0) === 0 ? 'empty-valid' : 'valid-populated');
   const sinceMs = since ? Date.parse(since) : null;
   if (since && Number.isNaN(sinceMs)) {
     const e = Object.assign(new Error(`--since is not a date holt can parse: ${since}`), { code: 'EBADDATE' });
@@ -181,7 +203,7 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
   });
 
   // Live state. The scan is what makes "what survived" a verified claim rather than a guess:
-  // the journal says a worktree was removed, the scan says whether one by that id exists now,
+  // the journal says a worktree was removed or quarantined, the scan says whether one by that id exists now,
   // and a disagreement between them is itself a finding.
   /** @type {any} */
   let report = null;
@@ -215,13 +237,14 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
       agentVersion: e.actor?.agentVersion ?? null,
       session: e.actor?.session ?? null,
       confidence: e.actor?.confidence ?? 'unknown',
-      events: 0, blocked: 0, unverified: 0, destroyed: 0, protected: 0,
+      events: 0, blocked: 0, unverified: 0, destroyed: 0, quarantined: 0, protected: 0,
       first: e.at, last: e.at,
     };
     row.events++;
     if (e.action === 'blocked') row.blocked++;
     if (e.action === 'unverified') row.unverified++;
     if (DESTRUCTIVE_ACTIONS.has(e.action)) row.destroyed++;
+    if (QUARANTINE_ACTIONS.has(e.action)) row.quarantined++;
     if (PROTECTIVE_ACTIONS.has(e.action)) row.protected++;
     if (!row.first || e.at < row.first) row.first = e.at;
     if (!row.last || e.at > row.last) row.last = e.at;
@@ -238,20 +261,42 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
     subject: e.id ?? e.name ?? (Array.isArray(e.targets) && e.targets.length ? e.targets.join(', ') : null),
     outcome: REFUSED_ACTIONS.has(e.action)
       ? (e.action === 'blocked' ? 'REFUSED' : 'COULD-NOT-VERIFY — the host decided')
-      : (DESTRUCTIVE_ACTIONS.has(e.action) ? 'removed' : 'recorded'),
-    detail: e.command ?? e.ref ?? (Array.isArray(e.evidence) ? e.evidence.join('; ') : e.evidence) ?? e.reason ?? null,
+      : (DESTRUCTIVE_ACTIONS.has(e.action) ? 'removed'
+        : QUARANTINE_ACTIONS.has(e.action) ? 'quarantined (recoverable)'
+          : 'recorded'),
+    quarantinePath: e.quarantinePath ?? null,
+    restoreArgv: e.restoreArgv ?? null,
+    detail: e.command ?? e.ref ?? e.quarantinePath
+      ?? (Array.isArray(e.evidence) ? e.evidence.join('; ') : e.evidence) ?? e.reason ?? null,
   }));
 
   const blocked = relevant.filter((e) => e.action === 'blocked');
   const unverifiedAttempts = relevant.filter((e) => e.action === 'unverified');
   const removals = relevant.filter((e) => DESTRUCTIVE_ACTIONS.has(e.action));
+  const quarantines = relevant.filter((e) => QUARANTINE_ACTIONS.has(e.action));
   const captures = refs.filter((r) => !id || r.id === id);
+  const lastQuarantine = quarantines.at(-1);
+  const quarantinePresent = typeof lastQuarantine?.quarantinePath === 'string'
+    ? await fs.lstat(lastQuarantine.quarantinePath).then((st) => st.isDirectory(), () => false)
+    : false;
 
   /* ---- what survived ------------------------------------------------------------- */
 
   let survived;
   if (!id) {
     survived = null;
+  } else if (live?.quarantined || quarantinePresent) {
+    survived = {
+      status: live && !live.quarantined ? 'present-with-quarantined-copy' : 'quarantined',
+      path: lastQuarantine?.quarantinePath ?? live?.path ?? null,
+      activePath: live && !live.quarantined ? live.path : null,
+      holdsUniqueWork: false,
+      restoreArgv: lastQuarantine?.restoreArgv ?? null,
+      evidence: [
+        'the whole worktree is retained locally, registered and locked; no files or branch were deleted',
+        ...(live?.reasons ?? []),
+      ],
+    };
   } else if (live) {
     survived = {
       status: 'present',
@@ -278,6 +323,13 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
     workstream: id,
     generatedAt: new Date().toISOString(),
     filters: { since: since ?? null, agent: agent ?? null },
+    journalIntegrity: {
+      state: journalState,
+      verified: journalState === 'valid-populated',
+      code: verification.code,
+      reason: verification.reason,
+      entries: verification.entries ?? 0,
+    },
     created: origin,
     gitAuthors: authors,
     wrote: uniqueNow
@@ -294,6 +346,7 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
       blocked: blocked.length,
       couldNotVerify: unverifiedAttempts.length,
       removals: removals.length,
+      quarantines: quarantines.length,
       note: relevant.length === 0
         ? 'holt has no record for this subject. That is not evidence nothing happened: holt only '
           + 'sees commands routed through its hook, so an uninstalled hook and a quiet repository '
@@ -305,11 +358,16 @@ export async function forensics(cwd, { id = null, since = null, agent = null, ..
     unattributedEvents: unattributed,
     timeline,
     scanError,
-    note: unattributed
-      ? `${unattributed} event(s) carry no agent identity and are counted separately — they are `
+    note: [
+      journalState !== 'valid-populated'
+        ? `this repository has ${journalState === 'no-journal' ? 'no Holt journal yet' : 'an empty verified Holt journal'}, so this timeline contains no journal-derived attribution; that is not evidence no action occurred.`
+        : null,
+      unattributed
+        ? `${unattributed} event(s) carry no agent identity and are counted separately — they are `
         + 'NOT attributed to any actor above. An event predating identity capture, or a host that '
         + 'passes no session, lands here.'
-      : 'every recorded event carries an actor',
+        : (journalState === 'valid-populated' ? 'every recorded event carries an actor' : null),
+    ].filter(Boolean).join(' '),
   };
 }
 
@@ -337,6 +395,10 @@ export function renderForensics(f, paint = (_c, s) => s) {
     for (const a of f.gitAuthors.slice(0, 4)) lines.push(c('grey', `      ${a.author}  ${a.commits} commit(s)`));
   }
 
+  lines.push('', c('bold', '  JOURNAL'));
+  lines.push(`    ${f.journalIntegrity.verified ? c('green', 'verified populated chain') : c('yellow', 'no journal evidence')} ${c('grey', `(${f.journalIntegrity.code})`)}`);
+  if (!f.journalIntegrity.verified) lines.push(c('grey', `    ${f.journalIntegrity.reason}`));
+
   if (f.wrote) {
     lines.push('', c('bold', '  WROTE'));
     lines.push(`    ${f.wrote.uniqueSymbols} unique symbol(s) · ${f.wrote.uncommittedFiles} uncommitted file(s) · ${f.wrote.committedFiles} committed file(s)`);
@@ -347,7 +409,8 @@ export function renderForensics(f, paint = (_c, s) => s) {
   const a = f.attempts;
   lines.push(`    ${c(a.blocked ? 'red' : 'grey', String(a.blocked).padStart(4))}  destructive command(s) REFUSED`);
   lines.push(`    ${c(a.couldNotVerify ? 'yellow' : 'grey', String(a.couldNotVerify).padStart(4))}  could not be verified — holt handed the decision back to the host`);
-  lines.push(`    ${c(a.removals ? 'yellow' : 'grey', String(a.removals).padStart(4))}  removal(s) holt performed itself`);
+  lines.push(`    ${c(a.quarantines ? 'green' : 'grey', String(a.quarantines).padStart(4))}  recoverable quarantine move(s) — no files or branches deleted`);
+  lines.push(`    ${c(a.removals ? 'yellow' : 'grey', String(a.removals).padStart(4))}  historical physical removal event(s)`);
   if (a.note) lines.push(c('grey', `    ${a.note}`));
 
   if (f.survived) {
@@ -355,24 +418,29 @@ export function renderForensics(f, paint = (_c, s) => s) {
     lines.push(`    ${f.survived.status}${f.survived.path ? `  ${c('grey', f.survived.path)}` : ''}`);
     for (const e of (f.survived.evidence ?? []).slice(0, 4)) lines.push(c('grey', `      ${e}`));
     if (f.survived.capturedAs?.length) lines.push(c('green', `      captured as: ${f.survived.capturedAs.join(', ')}`));
+    if (f.survived.restoreArgv) lines.push(c('green', `      restore argv: ${JSON.stringify(f.survived.restoreArgv)}`));
   }
 
   lines.push('', c('bold', `  WHO  (${f.actors.length} identified actor(s), ${f.unattributedEvents} unattributed event(s))`));
   if (!f.actors.length) lines.push(c('grey', '    no event carried an agent identity'));
   for (const act of f.actors) {
     lines.push(`    ${c('bold', act.agent)}${act.agentVersion ? c('grey', ` ${act.agentVersion}`) : ''} ${c('grey', `session ${String(act.session).slice(0, 16)}`)}`);
-    lines.push(c('grey', `      ${act.events} event(s) · ${act.blocked} refused · ${act.destroyed} removed · ${act.protected} protected · identity ${act.confidence}`));
+    lines.push(c('grey', `      ${act.events} event(s) · ${act.blocked} refused · ${act.quarantined} quarantined · ${act.destroyed} historically removed · ${act.protected} protected · identity ${act.confidence}`));
   }
 
   lines.push('', c('bold', `  TIMELINE  (${f.timeline.length} event(s))`));
   for (const t of f.timeline) {
-    const mark = t.outcome === 'REFUSED' ? c('red', 'REFUSED') : t.outcome === 'removed' ? c('yellow', 'removed') : c('grey', t.outcome);
+    const mark = t.outcome === 'REFUSED' ? c('red', 'REFUSED')
+      : t.outcome === 'removed' ? c('yellow', 'removed')
+        : t.outcome.startsWith('quarantined') ? c('green', t.outcome)
+          : c('grey', t.outcome);
     lines.push(`    ${c('grey', String(t.at).slice(0, 19))}  ${c('bold', t.action.padEnd(12))} ${t.actor}  ${mark}`);
     if (t.detail) lines.push(c('grey', `        ${String(t.detail).slice(0, 110)}`));
+    if (t.restoreArgv) lines.push(c('grey', `        restore argv: ${JSON.stringify(t.restoreArgv)}`));
   }
   if (f.scanError) lines.push('', c('red', `  the live scan FAILED (${f.scanError}) — "survived" is unknown, not clean`));
   lines.push('', c('grey', `  ${f.note}`), '');
   return lines.join('\n');
 }
 
-export const __test = { eventConcerns, DESTRUCTIVE_ACTIONS, REFUSED_ACTIONS };
+export const __test = { eventConcerns, DESTRUCTIVE_ACTIONS, QUARANTINE_ACTIONS, REFUSED_ACTIONS };

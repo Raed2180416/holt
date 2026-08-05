@@ -103,17 +103,19 @@ export function portableTarget() {
 let _pathEnsured = false;
 
 /**
- * Put holt's own bin directory on PATH for this process, so every `execFile('ctags', …)` finds a
- * portable install without a single call site changing. Idempotent and cheap.
+ * Put holt's own bin directory on PATH for this process, so `execFile('ctags', …)` and
+ * `execFile('enry', …)` find private installs without every call site knowing where they live.
+ * Idempotent and cheap.
  */
 export async function ensureOnPath({ force = false } = {}) {
   if (_pathEnsured && !force) return false;
   _pathEnsured = true;
   const dir = holtBinDir();
-  const exe = path.join(dir, process.platform === 'win32' ? 'ctags.exe' : 'ctags');
-  try {
-    await fs.access(exe);
-  } catch {
+  const suffix = process.platform === 'win32' ? '.exe' : '';
+  const present = await Promise.all(['ctags', 'enry'].map(async (name) => {
+    try { await fs.access(path.join(dir, `${name}${suffix}`)); return true; } catch { return false; }
+  }));
+  if (!present.some(Boolean)) {
     return false; // nothing installed here — leave PATH alone
   }
   const sep = process.platform === 'win32' ? ';' : ':';

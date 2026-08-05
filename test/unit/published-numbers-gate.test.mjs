@@ -9,8 +9,8 @@
  * context-shaped patterns as published-numbers.test.mjs) actually closes that hole, using the
  * three things a "we tightened it" claim needs and a bare assertion does not:
  *
- *   1. it still passes on the real, current files (tightening it did not just make it refuse
- *      everything — see CLAUDE.md's "conservative is not correct");
+ *   1. it still passes on the real, current files, including the explicit no-current-count state
+ *      (tightening it did not just make it refuse everything);
  *   2. it fails when a real claim is wrong, on a scratch copy, not asserted from memory;
  *   3. it does NOT fail (as the old `grep -q` implementation did) merely from a wrong claim
  *      sitting near a coincidentally-matching decoy number — proving the fix is about SHAPE, not
@@ -31,6 +31,7 @@ import { checkAll } from '../../scripts/check-published-numbers.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const SURFACES = ['README.md', 'BENCHMARKS.md', 'site/index.html'];
+const WITHHELD_MARKER = /No current test count or mutation score is\s+published\./i;
 
 async function readAll() {
   const out = [];
@@ -38,11 +39,10 @@ async function readAll() {
   return out;
 }
 
-/** The number every surface currently agrees on — derived, never hardcoded, so this file does
- *  not need editing every time the suite grows. published-numbers.test.mjs already proves all
- *  surfaces agree; this reuses that same fact rather than re-deriving a different way to be wrong
- *  twice. */
-async function currentAgreedNumbers() {
+/** Inputs for the current public state. Published figures are derived from the surfaces; an
+ * explicit withholding state uses conspicuously synthetic measured inputs because no public
+ * claim should be compared with them. */
+async function currentGateInputs() {
   const entries = await readAll();
   const testCounts = new Set();
   const mutationScores = new Set();
@@ -52,20 +52,26 @@ async function currentAgreedNumbers() {
       if (c !== MUTATION_HISTORICAL_EXCEPTION) mutationScores.add(c);
     }
   }
+  if (testCounts.size === 0 && mutationScores.size === 0) {
+    for (const [file, text] of entries) {
+      assert.match(text, WITHHELD_MARKER, `${file} must make the no-current-count state explicit`);
+    }
+    return { actualTests: '987654321', actualMutation: '987654321/987654321' };
+  }
   assert.equal(testCounts.size, 1, `expected the surfaces to already agree on a test count: ${[...testCounts]}`);
   assert.equal(mutationScores.size, 1, `expected the surfaces to already agree on a mutation score: ${[...mutationScores]}`);
   return { actualTests: [...testCounts][0], actualMutation: [...mutationScores][0] };
 }
 
-test('gate: the tightened checker PASSES on the real files against the currently agreed numbers', async () => {
+test('gate: the checker PASSES on the real synchronized claim-or-withholding state', async () => {
   const entries = await readAll();
-  const actual = await currentAgreedNumbers();
+  const actual = await currentGateInputs();
   const failures = checkAll(entries, actual);
-  assert.deepEqual(failures, [], `tightened checker should pass on real, current, agreeing surfaces: ${JSON.stringify(failures)}`);
+  assert.deepEqual(failures, [], `checker should pass on real, synchronized surfaces: ${JSON.stringify(failures)}`);
 });
 
 test('gate: the tightened checker FAILS when a real claim is wrong (scratch copy, not asserted)', async () => {
-  const { actualTests } = await currentAgreedNumbers();
+  const actualTests = '474';
   const wrong = String(Number(actualTests) + 1);
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-pubnum-gate-'));
@@ -80,12 +86,12 @@ test('gate: the tightened checker FAILS when a real claim is wrong (scratch copy
   const text = await fs.readFile(file, 'utf8');
   const failures = checkAll([[file, text]], { actualTests: wrong, actualMutation: '39/39' });
   assert.ok(failures.length > 0, 'checker should have reported the stale badge as a failure, but reported none');
-  assert.match(failures[0], new RegExp(`do not match the measured count ${wrong}`));
+  assert.match(failures[0], new RegExp(`do not match the measured value ${wrong}`));
 });
 
 test('gate: a coincidental decoy number (SVG coordinate / hex colour) does NOT fool the checker, ' +
      'even though the old `grep -q "$N" file` substring check WOULD be fooled by it', async () => {
-  const { actualMutation } = await currentAgreedNumbers();
+  const actualMutation = '39/39';
   const staleCount = '474'; // the badge's real (stale) claim, deliberately never updated below
   const measuredCount = '475'; // what the suite "actually reports" this run — one more than published
 
@@ -115,4 +121,29 @@ test('gate: a coincidental decoy number (SVG coordinate / hex colour) does NOT f
   assert.ok(failures.length > 0,
     'tightened checker must fail here — the old grep-based gate would have silently passed a stale badge');
   assert.match(failures[0], /\["474"\]/, `expected the checker to report the real (stale) claim "474", not the decoy: ${JSON.stringify(failures)}`);
+});
+
+test('gate: explicit withholding is not vacuous — every surface must carry the exact public sentence', () => {
+  const sentence = 'No current test count or mutation score is published.';
+  const entries = [
+    ['README.md', sentence],
+    ['BENCHMARKS.md', sentence],
+    ['site/index.html', '<p>Documentation intentionally contains no numeric headline.</p>'],
+  ];
+  const failures = checkAll(entries, { actualTests: '999', actualMutation: '99/99' });
+  assert.ok(failures.some((line) => line.startsWith('site/index.html:')),
+    `partial withholding must fail and name the surface missing the sentence: ${JSON.stringify(failures)}`);
+});
+
+test('gate: a surface cannot publish a measured claim while retaining the withholding sentence', () => {
+  const sentence = 'No current test count or mutation score is published.';
+  const claims = '<p>474 tests passing</p><p>39/39 mutations killed</p>';
+  const entries = [
+    ['README.md', `${sentence}\n${claims}`],
+    ['BENCHMARKS.md', claims],
+    ['site/index.html', claims],
+  ];
+  const failures = checkAll(entries, { actualTests: '474', actualMutation: '39/39' });
+  assert.ok(failures.some((line) => /README\.md: both publishes/.test(line)),
+    `mixed claim/withholding state must fail: ${JSON.stringify(failures)}`);
 });

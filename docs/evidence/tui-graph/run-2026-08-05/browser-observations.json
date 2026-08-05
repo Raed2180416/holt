@@ -1,0 +1,96 @@
+{
+  "observedAt": "2026-08-04T21:35:30Z",
+  "browser": "Chromium 150.0.7871.186 (Arch Linux)",
+  "viewport": {
+    "width": 1440,
+    "height": 900
+  },
+  "controlledGraph": {
+    "url": "http://127.0.0.1:8765/docs/evidence/tui-graph/run-2026-08-05/controlled-graph.html",
+    "offlineResources": [],
+    "initial": {
+      "nodes": 10,
+      "visibleEdges": 1,
+      "visibleLabels": 10,
+      "checkedEdgeClasses": [
+        "proven",
+        "semantic-overlap",
+        "predicted"
+      ]
+    },
+    "duplicateToggle": {
+      "checked": true,
+      "visibleEdges": 3,
+      "expectedAddedEdges": 2
+    },
+    "search": {
+      "query": "collision-payments",
+      "opaqueNodes": [
+        "03-collision-payments-a",
+        "04-collision-payments-b"
+      ],
+      "dimmedNodes": 8,
+      "visibleLabels": [
+        "03-collision-payments-a",
+        "04-collision-payments-b"
+      ],
+      "slashFocusedSearch": true,
+      "escapeRestoredAllLabels": true
+    },
+    "selection": {
+      "hovered": "03-collision-payments-a",
+      "detailNamedExactBranch": "audit/03-collision-payments-a",
+      "detailNamedProvenConflictPeer": "04-collision-payments-b",
+      "clickPinPersistedAfterPointerMovedAway": true
+    },
+    "zoom": {
+      "before": "translate(0.00,0.00) scale(1.000)",
+      "afterOneWheelStep": "translate(-60.00,-48.30) scale(1.120)"
+    },
+    "keyboard": {
+      "tabOrder": [
+        "search",
+        "edge:proven",
+        "edge:semantic-overlap",
+        "edge:predicted",
+        "edge:duplicate",
+        "edge:sibling",
+        "body"
+      ],
+      "focusableGraphNodes": 0,
+      "nodeCount": 10
+    }
+  },
+  "liveGroveGraph": {
+    "url": "http://127.0.0.1:8765/docs/evidence/tui-graph/run-2026-08-05/live-grove-graph.html",
+    "nodes": 9,
+    "allRelationships": 67,
+    "defaultVisibleProvenConflictEdges": 27,
+    "hovered": "dupfix-isolation-check/wt",
+    "reportedDetailEdges": 15,
+    "renderedDetailEdges": 14,
+    "hiddenDetailRemainderWasDisclosed": false
+  },
+  "interactiveTui": {
+    "fixture": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05/repo",
+    "keysPressed": [
+      "j",
+      "f",
+      "q"
+    ],
+    "navigationChangedSelection": true,
+    "filterChangedFrom": "all",
+    "filterChangedTo": "atRisk",
+    "quitRestoredMainScreenAndCursor": true,
+    "mutatingKeysPressed": []
+  },
+  "existingAutomatedTests": {
+    "command": "node --test test/e2e/tui.test.mjs test/e2e/graph-html.test.mjs test/unit/ascii-graph.test.mjs",
+    "tests": 26,
+    "passed": 26,
+    "failed": 0,
+    "skipped": 0,
+    "todos": 0,
+    "durationMs": 4277.581673
+  }
+}

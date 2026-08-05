@@ -1,222 +1,516 @@
 name: release artifact
 
-# THE ONE THING A USER ACTUALLY RECEIVES WAS THE ONLY THING NOTHING CHECKED.
-#
-# The published v0.2.0 tarball — the file the README's headline install command points at — was
-# built by hand and attached by hand. Nothing tied it to the repository state, so it drifted 74
-# commits behind main while still being the advertised install, and it shipped without
-# src/paths.mjs, src/toolchain.mjs, bin/install-ctags.mjs and 12 of the 14 language gap packs.
-# Every test in the suite runs against the SOURCE TREE, where those files are present.
-#
-# `release body` (release.yml) checks the release TEXT. This job checks the BINARY: it is built
-# from the tagged commit by CI, installed globally on Linux, macOS and Windows, and driven against
-# a real git repository with planted work before it may be attached. A tarball that installs and
-# prints its version is not evidence that it works; a tarball that finds the work that was planted
-# is.
-#
-# Nothing is uploaded unless all three platforms pass, so an artifact that cannot do the job
-# cannot become the advertised download.
-
+# A release is a promotion of evidence from one exact tag commit. Repository code is exercised
+# only in unprivileged jobs; the signing secret is scoped to one inline Node step; publishing is
+# the final job and is transitively blocked on quality, installed-artifact, and attestation proof.
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Existing tag to build and verify, e.g. v0.3.0'
-        required: true
 
-# READ AT THE TOP, WRITE ONLY WHERE IT IS EARNED. `build` and `verify` compile and drive the
-# tarball and need nothing but the code; only `attach` creates a release and uploads assets, and it
-# raises itself to `contents: write` at the job level. That split is the point of declaring
-# permissions per job rather than once at the top: the two jobs that run untrusted-ish work (npm
-# install, a global install of a freshly built tarball, on three operating systems) cannot publish.
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-
-  build:
-    name: build the tarball from the tag
+  preflight:
+    name: live immutable-release and stable-tag gate
     runs-on: ubuntu-latest
+    environment: release
     outputs:
-      tarball: ${{ steps.pack.outputs.name }}
-      sha256: ${{ steps.pack.outputs.sha256 }}
+      tag: ${{ steps.gate.outputs.tag }}
+      sha: ${{ steps.gate.outputs.sha }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
-      - run: npm ci
-
-      # The packaged file list is asserted at COMMIT time by test/unit/package-contents.test.mjs
-      # (every module the shipped code imports must be inside the tarball, and every language pack
-      # must ship). Running it here as well means a release cannot be cut from a commit where that
-      # guard was failing.
-      - name: what ships must be able to run
-        run: node --test test/unit/package-contents.test.mjs
-
-      - name: pack
-        id: pack
+      # This job intentionally checks the live repository setting before checkout, setup, npm, or
+      # any repository-controlled code. The endpoint requires Administration: read, which the
+      # ephemeral GITHUB_TOKEN cannot request, so the protected release environment must provide
+      # a narrowly scoped read-only token or GitHub App token.
+      - name: prove live immutability before any repository code executes
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.HOLT_RELEASE_ADMIN_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          NAME=$(npm pack --silent)
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
-          SHA=$(sha256sum "$NAME" | cut -d' ' -f1)
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          # The checksum is published so a user can verify the download they were told to install.
-          printf '%s  %s\n' "$SHA" "$NAME" > SHA256SUMS
-          cat SHA256SUMS
+          if [ "$GITHUB_EVENT_NAME" != "push" ] || [[ ! "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::releases run only for a pushed stable vX.Y.Z tag"
+            exit 1
+          fi
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::the protected release environment must provide HOLT_RELEASE_ADMIN_TOKEN with Administration: read"
+            exit 1
+          fi
+          if ! IMMUTABLE=$(gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled'); then
+            echo "::error::could not prove live repository release immutability; API failure or insufficient authority fails closed"
+            exit 1
+          fi
+          if [ "$IMMUTABLE" != "true" ]; then
+            echo "::error::GitHub reports release immutability disabled"
+            exit 1
+          fi
+          set +e
+          gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/release-existence.txt" 2>&1
+          RELEASE_QUERY_RC=$?
+          set -e
+          HTTP_STATUS=$(awk 'NR == 1 { print $2 }' "$RUNNER_TEMP/release-existence.txt")
+          case "$HTTP_STATUS" in
+            200)
+              echo "::error::release $TAG already exists; assets are never clobbered or replaced"
+              exit 1
+              ;;
+            404) ;;
+            *)
+              echo "::error::could not prove release $TAG is absent (HTTP ${HTTP_STATUS:-unknown}, gh exit $RELEASE_QUERY_RC)"
+              exit 1
+              ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$EVENT_SHA" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+  quality:
+    name: exact tag and complete clean quality evidence
+    needs: preflight
+    runs-on: ubuntu-latest
+    env:
+      HOLT_REAL_REPOS: ${{ github.workspace }}/.holt-fixtures
+    outputs:
+      tag: ${{ steps.identity.outputs.tag }}
+      sha: ${{ steps.identity.outputs.sha }}
+      version: ${{ steps.identity.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: tarball
-          path: |
-            ${{ steps.pack.outputs.name }}
-            SHA256SUMS
+          ref: ${{ needs.preflight.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
+
+      - name: bind this run to one existing tag commit
+        id: identity
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          EVENT_SHA: ${{ needs.preflight.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          TAG_SHA=$(git rev-parse "$TAG^{commit}")
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::requested tag $TAG resolves to $TAG_SHA but checkout HEAD is $HEAD_SHA"
+            exit 1
+          fi
+          if [ "$EVENT_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::tag event SHA $EVENT_SHA differs from checked-out tag commit $HEAD_SHA"
+            exit 1
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "::error::package version $VERSION does not match tag $TAG"
+            exit 1
+          fi
+          BODY=".github/releases/$TAG.md"
+          test -f "$BODY" || { echo "::error::missing release body $BODY"; exit 1; }
+          node scripts/check-release-body.mjs --tag "$TAG" --body-file "$BODY"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: install the measured parser and agent backends
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y universal-ctags
+          go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          cargo install --locked jj-cli --version 0.43.0 --root "$HOME/.local"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          test "$(npm view opencode-ai@1.18.13 dist.integrity)" = "sha512-HYmBizm5vyAqqYuKzhpleRdEKwh7TeFSeA4f/Edl0F8OSPnbLi3DaXNMtmtsL13e2/994M9JoIz11yrVNdoAfA=="
+          npm install -g opencode-ai@1.18.13
+
+      - name: install the reviewed dependency tree
+        run: npm ci
+      - name: no known shipped dependency advisory
+        run: npm audit --omit=dev --audit-level=moderate
+      - name: committed dependency-complete GitHub Action is reproducible
+        run: npm run action:check
+      - name: clone the exact four-repository product corpus
+        run: bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"
+      - name: bounded feature proof with complete denominators
+        run: node scripts/run-feature-proof.mjs --out "$RUNNER_TEMP/feature-proof.json"
+      - name: retain the feature-proof artifact, including an invalid completed run
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feature-proof-${{ needs.preflight.outputs.tag }}
           if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ runner.temp }}/feature-proof.json
+            ${{ runner.temp }}/feature-proof.json.sha256
+      - name: complete test suite
+        run: npm test
+      - name: mutation suite, with anchor drift counted as failure
+        run: npm run test:mutation
+      - name: type safety ratchet
+        run: npm run typecheck
+      - name: generated host documentation is current
+        run: npm run hosts:check
+      - name: native paths are portable
+        run: npm run lint:paths
+      - name: CI hardening rules and their positive controls
+        run: node scripts/check-ci-hardening.mjs --self-test
+      - name: release rules and their positive controls
+        run: node scripts/check-release-contract.mjs --self-test
+      - name: package manifest is current
+        run: node scripts/gen-manifest.mjs --check
+      - name: source tree passes its own capability and integrity audit
+        run: node bin/holt.mjs audit
+      - name: quality evidence left the exact tag checkout clean
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- .
+          STATUS=$(git status --porcelain --untracked-files=all)
+          if [ -n "$STATUS" ]; then
+            echo "::error::quality commands changed the tag checkout"
+            printf '%s\n' "$STATUS"
+            exit 1
+          fi
+
+  build:
+    name: sign and build the release assets once
+    needs: quality
+    runs-on: ubuntu-latest
+    environment: release
+    outputs:
+      tarball: ${{ steps.assets.outputs.tarball }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.quality.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
+
+      - name: re-check the evidence source before privileged signing (no repository code runs)
+        env:
+          TAG: ${{ needs.quality.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.quality.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          TAG_SHA=$(git rev-parse "$TAG^{commit}")
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$TAG_SHA" != "$HEAD_SHA" ] || [ "$HEAD_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::tag, checkout, and quality evidence no longer name one commit"
+            exit 1
+          fi
+          git diff --exit-code -- .
+
+      # Only this step receives the long-lived key. It executes literal workflow code, not a
+      # repository script, and proves the private key matches the public key pinned by holt.
+      - name: sign the exact in-package manifest or fail closed
+        env:
+          HOLT_RELEASE_SIGNING_KEY: ${{ secrets.HOLT_RELEASE_SIGNING_KEY }}
+          EXPECTED_RELEASE_PUBLIC_KEY_B64: MCowBQYDK2VwAyEABB2PDDowEa2PYmjsYI94KCl2QPjan6xkgdPvze7h8ok=
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { createPrivateKey, createPublicKey, sign, verify } = require('node:crypto');
+          const pem = process.env.HOLT_RELEASE_SIGNING_KEY;
+          if (!pem) throw new Error('HOLT_RELEASE_SIGNING_KEY is required');
+          const privateKey = createPrivateKey(pem);
+          if (privateKey.asymmetricKeyType !== 'ed25519') throw new Error('release signing key must be Ed25519');
+          const publicKey = createPublicKey(privateKey);
+          const actualPublic = publicKey.export({ format: 'der', type: 'spki' }).toString('base64');
+          if (actualPublic !== process.env.EXPECTED_RELEASE_PUBLIC_KEY_B64) {
+            throw new Error('release signing secret does not match the public key pinned by holt');
+          }
+          const manifest = fs.readFileSync('MANIFEST.sha256');
+          const signature = sign(null, manifest, privateKey);
+          if (!verify(null, manifest, publicKey, signature)) throw new Error('generated signature does not verify');
+          fs.writeFileSync('MANIFEST.sha256.sig', `${signature.toString('base64')}\n`, { mode: 0o600 });
+          NODE
+
+      - name: create, audit, and checksum all release assets
+        id: assets
+        run: |
+          set -euo pipefail
+          node bin/holt.mjs audit --require-signature
+          NAME=$(npm pack --ignore-scripts --silent)
+          case "$NAME" in holt-[0-9]*.tgz) ;; *) echo "::error::unexpected npm pack name '$NAME'"; exit 1;; esac
+          cp "$NAME" holt.tgz
+          SBOM_DIR=$(mktemp -d)
+          node scripts/gen-sbom.mjs --out "$SBOM_DIR"
+          cp "$SBOM_DIR/holt.cdx.json" holt.cdx.json
+          cp "$SBOM_DIR/holt.spdx.json" holt.spdx.json
+          sha256sum "$NAME" holt.tgz MANIFEST.sha256 MANIFEST.sha256.sig holt.cdx.json holt.spdx.json > SHA256SUMS
+          UNPACK=$(mktemp -d)
+          tar -xzf "$NAME" -C "$UNPACK"
+          test -f "$UNPACK/package/npm-shrinkwrap.json"
+          test -s "$UNPACK/package/MANIFEST.sha256.sig"
+          node "$UNPACK/package/bin/holt.mjs" audit --require-signature
+          cmp "$NAME" holt.tgz
+          sha256sum -c SHA256SUMS
+          echo "tarball=$NAME" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ steps.assets.outputs.tarball }}
+            holt.tgz
+            SHA256SUMS
+            MANIFEST.sha256
+            MANIFEST.sha256.sig
+            holt.cdx.json
+            holt.spdx.json
 
   verify:
-    name: the tarball installs and WORKS on ${{ matrix.os }}
-    needs: build
+    name: installed artifact works on ${{ matrix.os }} / Node ${{ matrix.node }}
+    needs: [quality, build]
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - { os: ubuntu-latest, node: '22.23.2' }
+          - { os: ubuntu-latest, node: '24.19.0' }
+          - { os: ubuntu-latest, node: '26.6.0' }
+          - { os: macos-latest, node: '24.19.0' }
+          - { os: windows-latest, node: '24.19.0' }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with: { name: tarball }
-
-      - name: the checksum must match what was built
+          ref: ${{ needs.quality.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+      - name: verify every downloaded byte against the build checksum
         shell: bash
         run: |
           set -euo pipefail
-          if command -v sha256sum >/dev/null; then sha256sum -c SHA256SUMS
-          else shasum -a 256 -c SHA256SUMS; fi
-
-      # Installed GLOBALLY, exactly as the README tells a user to. On Windows this exercises the
-      # npm-generated .cmd/.ps1 shim rather than the script itself, which is the path a real user
-      # takes and the one the suite never touched.
-      - name: install it the way the README says to
+          node <<'NODE'
+          const fs = require('node:fs');
+          const { createHash } = require('node:crypto');
+          for (const line of fs.readFileSync('SHA256SUMS', 'utf8').trim().split('\n')) {
+            const m = /^([0-9a-f]{64})  (.+)$/.exec(line);
+            if (!m) throw new Error(`invalid checksum line: ${line}`);
+            const got = createHash('sha256').update(fs.readFileSync(m[2])).digest('hex');
+            if (got !== m[1]) throw new Error(`checksum mismatch: ${m[2]}`);
+          }
+          NODE
+      - name: install the exact artifact a user receives
         shell: bash
-        run: npm install -g "./${{ needs.build.outputs.tarball }}"
-
-      - name: it must actually do the job, not merely start
+        env:
+          TARBALL: ${{ needs.build.outputs.tarball }}
+        run: npm install -g "./$TARBALL"
+      - name: installed bytes and publisher signature are valid
+        shell: bash
+        run: holt audit --require-signature
+      - name: installed artifact answers correctly on a real repository
         shell: bash
         run: node scripts/smoke-installed.mjs --bin holt
-
-      # Degradation is a published promise: without ctags/enry/jscpd holt must fall back LOUDLY
-      # rather than silently returning nothing. Checked on the shipped artifact, not the source.
-      - name: it reports its own environment honestly
+      - name: installed artifact reports its environment honestly
         shell: bash
         run: holt doctor --json
+      - name: omit-optional installation still retains the safety core
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '24.19.0'
+        shell: bash
+        env:
+          TARBALL: ${{ needs.build.outputs.tarball }}
+          OPTIONAL_PREFIX: ${{ runner.temp }}/holt-no-optional
+        run: |
+          set -euo pipefail
+          npm install --ignore-scripts --omit=optional --prefix "$OPTIONAL_PREFIX" "$GITHUB_WORKSPACE/$TARBALL"
+          NODE_PATH= node scripts/check-omit-optional-install.mjs --prefix "$OPTIONAL_PREFIX"
+          HOLT_BIN="$OPTIONAL_PREFIX/node_modules/holt/bin/holt.mjs"
+          NODE_PATH= node "$HOLT_BIN" audit --require-signature
+          NODE_PATH= node scripts/smoke-installed.mjs --bin "$HOLT_BIN"
 
-  attach:
-    name: attach the verified artifact to the release
-    needs: [build, verify]
+  attest:
+    name: GitHub build provenance and SBOM attestation
+    needs: [quality, build, verify]
     runs-on: ubuntu-latest
+    environment: release
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with: { ref: '${{ github.event.inputs.tag || github.ref_name }}' }
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with: { name: tarball }
-
-      # PUSHING A TAG DOES NOT CREATE A RELEASE. `gh release upload` on a tag with no release
-      # fails with "release not found", so the entire verified artifact would be built, proven on
-      # three platforms, and then dropped on the floor — the one step nothing here had ever
-      # exercised, because this workflow had never run at all.
-      #
-      # The body is the file checked into this repository, which the release-body gate already
-      # refuses to let drift from the README. Created as a draft would hide it; created here it is
-      # immediately visible and immediately checked by release.yml's `published` trigger.
-      - name: ensure the release exists
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+      - name: attest every checksummed release asset
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-checksums: SHA256SUMS
+      - name: bind the CycloneDX SBOM to the versioned tarball
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ needs.build.outputs.tarball }}
+          sbom-path: holt.cdx.json
+      - name: verify the attestations from GitHub before publication
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+          TAG: ${{ needs.quality.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.quality.outputs.sha }}
         run: |
           set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $TAG already exists — attaching to it"
-            exit 0
+          COMMON=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release-artifact.yml"
+            --source-ref "refs/tags/$TAG"
+            --source-digest "$EXPECTED_SHA"
+          )
+          for ASSET in "$TARBALL" holt.tgz MANIFEST.sha256 MANIFEST.sha256.sig holt.cdx.json holt.spdx.json; do
+            gh attestation verify "$ASSET" "${COMMON[@]}"
+          done
+          gh attestation verify "$TARBALL" "${COMMON[@]}" \
+            --predicate-type https://cyclonedx.org/bom
+
+  publish:
+    name: create assets once, then publish the immutable release
+    needs: [quality, build, verify, attest]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.quality.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+      - name: refuse a moved tag or changed artifact immediately before publication
+        env:
+          TAG: ${{ needs.quality.outputs.tag }}
+          EXPECTED_SHA: ${{ needs.quality.outputs.sha }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
+          TAG_SHA=$(git rev-parse "$TAG^{commit}")
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [ "$TAG_SHA" != "$HEAD_SHA" ]; then
+            echo "::error::tag moved after verification: $TAG_SHA != $HEAD_SHA"
+            exit 1
           fi
+          if [ "$HEAD_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::error::publish checkout differs from quality evidence: $HEAD_SHA != $EXPECTED_SHA"
+            exit 1
+          fi
+          sha256sum -c SHA256SUMS
+          cmp "$TARBALL" holt.tgz
+
+      - name: re-prove live repository immutability immediately before publication
+        env:
+          GH_TOKEN: ${{ secrets.HOLT_RELEASE_ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::HOLT_RELEASE_ADMIN_TOKEN is unavailable in the protected release environment"
+            exit 1
+          fi
+          if ! IMMUTABLE=$(gh api --method GET \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/immutable-releases" --jq '.enabled'); then
+            echo "::error::could not re-prove live release immutability immediately before publication"
+            exit 1
+          fi
+          test "$IMMUTABLE" = "true" || { echo "::error::release immutability was disabled after preflight"; exit 1; }
+
+      - name: create one draft with the already-attested assets, then publish last
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.quality.outputs.tag }}
+          VERSION: ${{ needs.quality.outputs.version }}
+          TARBALL: ${{ needs.build.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          set +e
+          gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/release-existence.txt" 2>&1
+          RELEASE_QUERY_RC=$?
+          set -e
+          HTTP_STATUS=$(awk 'NR == 1 { print $2 }' "$RUNNER_TEMP/release-existence.txt")
+          case "$HTTP_STATUS" in
+            200)
+              echo "::error::release $TAG already exists; refusing to replace any asset"
+              exit 1
+              ;;
+            404) ;;
+            *)
+              echo "::error::could not prove release $TAG is absent (HTTP ${HTTP_STATUS:-unknown}, gh exit $RELEASE_QUERY_RC)"
+              exit 1
+              ;;
+          esac
           BODY=".github/releases/$TAG.md"
-          test -f "$BODY" || { echo "::error::no release body at $BODY — refusing to publish a release with no install instructions"; exit 1; }
-          node scripts/check-release-body.mjs --tag "$TAG" --body-file "$BODY"
-          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "holt ${TAG#v}" --notes-file "$BODY" --verify-tag
-
-      - name: upload
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          # A SECOND COPY UNDER A STABLE NAME, so one install command works forever.
-          #
-          # The versioned asset is holt-<version>.tgz, which means the documented install URL has
-          # the version baked into it and `releases/latest/download/holt.tgz` — the obvious,
-          # clean, never-goes-stale URL — 404s. Caught by actually running the command from the
-          # website rather than reading it: the page shipped an install line that did not resolve,
-          # which is the first thing a new user would ever type.
-          #
-          # Uploading the same bytes twice costs nothing and makes
-          #   npm install -g https://github.com/<repo>/releases/latest/download/holt.tgz
-          # correct for every future release without anyone remembering to update a page.
-          cp "${{ needs.build.outputs.tarball }}" holt.tgz
-          # --clobber so re-running after a fix replaces the asset rather than failing, and so the
-          # attached file is always the one this run verified.
-          gh release upload "$TAG" \
-            "${{ needs.build.outputs.tarball }}" holt.tgz SHA256SUMS \
-            --repo "$GITHUB_REPOSITORY" --clobber
-          echo "attached ${{ needs.build.outputs.tarball }} + holt.tgz (sha256 ${{ needs.build.outputs.sha256 }})"
-
-      # SLSA Build L2: generate a provenance attestation for the tarball. This ties the artifact
-      # to the exact workflow run that built it, so a user can verify the tarball they downloaded
-      # was produced by this repository's CI and not swapped. Requires `id-token: write` and
-      # `attestations: write` permissions, both declared above on this job.
-      - name: generate provenance attestation
-        env:
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          gh attestation verify "holt.tgz" --repo "$GITHUB_REPOSITORY" 2>/dev/null \
-            && echo "attestation already exists" && exit 0
-          echo "Generating SLSA Build L2 provenance attestation for holt.tgz"
-          gh attestation create "holt.tgz" --repo "$GITHUB_REPOSITORY" \
-            --predicate-type "https://slsa.dev/provenance/v1" \
-            --predicate-path - <<'EOF'
-          {"builder":{"id":"https://github.com/Raed2180416/holt/.github/workflows/release-artifact.yml@refs/tags/${TAG}"},"buildType":"https://slsa.dev/github-actions-workflow/v1","subject":[{"name":"holt.tgz","digest":{"sha256":"${{ needs.build.outputs.sha256 }}"}}]}
-          EOF
-
-      # Detached manifest signature: sign the SHA256SUMS file with the release signing key so
-      # `holt audit --require-signature` can verify the installed tree against a known key. The
-      # secret is a PKCS#8 PEM private key; the matching public key is in RELEASE_PUBLIC_KEYS_B64
-      # in src/supply-chain.mjs. Hoisted to job-level env so the step runs unconditionally and
-      # degrades gracefully when the secret is absent (empty string → skip signing, warn).
-      - name: sign the manifest
-        env:
-          HOLT_RELEASE_SIGNING_KEY: ${{ secrets.HOLT_RELEASE_SIGNING_KEY }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [ -z "$HOLT_RELEASE_SIGNING_KEY" ]; then
-            echo "::warning::HOLT_RELEASE_SIGNING_KEY is not set — the manifest will be unsigned"
-            echo "  Set it as a repository secret (PKCS#8 PEM) to enable detached signatures."
-            exit 0
+          ASSETS=("$TARBALL" holt.tgz SHA256SUMS MANIFEST.sha256 MANIFEST.sha256.sig holt.cdx.json holt.spdx.json)
+          gh release create "$TAG" \
+            "${ASSETS[@]}" \
+            --repo "$GITHUB_REPOSITORY" --title "holt $VERSION" --notes-file "$BODY" --verify-tag --draft
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > "$RUNNER_TEMP/release.json"
+          node - "$RUNNER_TEMP/release.json" "${ASSETS[@]}" <<'NODE'
+          const fs = require('node:fs');
+          const { createHash } = require('node:crypto');
+          const [json, ...expected] = process.argv.slice(2);
+          const release = JSON.parse(fs.readFileSync(json, 'utf8'));
+          const actual = release.assets.map((x) => x.name);
+          if (JSON.stringify([...actual].sort()) !== JSON.stringify([...expected].sort())) {
+            throw new Error(`draft assets differ: ${JSON.stringify(actual)} != ${JSON.stringify(expected)}`);
+          }
+          for (const asset of release.assets) {
+            const local = fs.readFileSync(asset.name);
+            const digest = `sha256:${createHash('sha256').update(local).digest('hex')}`;
+            if (asset.state !== 'uploaded') throw new Error(`asset state is not uploaded: ${asset.name}`);
+            if (asset.size !== local.length) throw new Error(`asset size differs: ${asset.name}`);
+            if (asset.digest !== digest) {
+              throw new Error(`asset digest differs: ${asset.name} ${asset.digest} != ${digest}`);
+            }
+          }
+          NODE
+          gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+          IMMUTABLE=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.immutable')
+          if [ "$IMMUTABLE" != "true" ]; then
+            echo "::error::release published without GitHub immutability; enable the repository setting before any future release"
+            exit 1
           fi
-          printf '%s' "$HOLT_RELEASE_SIGNING_KEY" > /tmp/signing-key.pem
-          openssl pkeyutl -sign -inkey /tmp/signing-key.pem -in SHA256SUMS -out SHA256SUMS.sig
-          rm /tmp/signing-key.pem
-          gh release upload "$TAG" SHA256SUMS.sig --repo "$GITHUB_REPOSITORY" --clobber
-          echo "signed SHA256SUMS and uploaded SHA256SUMS.sig"
+          gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+          for ASSET in "${ASSETS[@]}"; do
+            gh release verify-asset "$TAG" "$ASSET" --repo "$GITHUB_REPOSITORY"
+          done

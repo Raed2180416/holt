@@ -13,19 +13,24 @@
  *
  * TOOL SAFETY — read this before writing an auto-approval policy.
  *
- * MOST tools here are read-only and are annotated `readOnlyHint: true`. THREE ARE NOT:
- *   holt_clean    REMOVES worktrees and merged branches   (destructiveHint: true)
+ * MOST tools here are read-only and are annotated `readOnlyHint: true`. FOUR ARE NOT:
+ *   holt_clean    previews, quarantines, inventories, or restores without deleting/overwriting
+ *                 (mutating, destructiveHint: false; branch + restore argv retained)
+ *   holt_purge    permanently removes one verified clean quarantine after anchoring exact HEAD
+ *                 (mutating and destructive; dry-run unless apply:true; branch retained)
  *   holt_rescue   writes a ref capturing a worktree's work
  *   holt_protect  places git worktree locks
- * Each carries honest annotations, because a host that auto-approves read-only tools must never
- * auto-approve a deletion. Do not grant blanket approval on the basis of this file shipping
+ * Each carries honest annotations, because a host that auto-approves read-only tools must still
+ * distinguish a local path move from analysis and from deletion. Do not grant blanket approval
+ * on the basis of this file shipping
  * "diagnostics" — check the per-tool annotations, which are the contract.
  *
  * The ANALYSIS path cannot modify a repository: mutating git verbs are unreachable without an
- * explicit opt-in that only the three tools above pass — see src/git.mjs and
+ * explicit opt-in that only the four tools above pass — see src/git.mjs and
  * test/unit/safety.test.mjs, which proves a full scan changes nothing byte-for-byte.
  */
 
+import packageJson from '../../package.json' with { type: 'json' };
 import { discover, repoAbsenceError } from '../discover.mjs';
 import { scan } from '../scan.mjs';
 import { analyze, contextDigest } from '../analyze.mjs';
@@ -132,7 +137,7 @@ async function getReport(cwd, opts = {}, { fresh = false } = {}) {
  * Fold a journal-write warning into a curated tool response, WITHOUT it the caller only sees a
  * hand-picked subset of protect()/rescue()/clean()'s result — and journalWarning/journalFailures
  * were exactly the fields missing from that subset. A journal failure never blocks a mutating
- * tool's own success (the worktree lock/capture/removal already happened); it only adds a field
+ * tool's own success (the worktree lock/capture/quarantine already happened); it only adds a field
  * an agent reading the response can act on — e.g. tell the human the audit trail has a gap.
  */
 function withJournal(payload, r) {
@@ -155,7 +160,7 @@ const MAX_LIMIT = 100;
 const DEFAULT_DUPLICATE_LIMIT = 25;
 
 const REPO_ARG = {
-  repo: { type: 'string', maxLength: 4096, description: 'Path inside THIS repository (its root, or any of its worktrees). Defaults to the server cwd. A path in a different repository is refused.' },
+  repo: { type: 'string', maxLength: 4096, description: 'Path in this repository; defaults to server cwd. Other repositories are refused.' },
 };
 
 const TOOLS = [
@@ -287,15 +292,34 @@ const TOOLS = [
    */
   {
     name: 'holt_clean',
-    title: 'Remove provably-disposable worktrees',
+    title: 'Safely manage disposable worktrees and their recovery copies',
     description:
-      'Removes worktrees that hold nothing base lacks, and their merged branches. DRY RUN unless apply:true. Re-verifies each worktree immediately before removing it, never touches one holding work found nowhere else, and never touches one it could not assess. Use this instead of deciding which worktrees are disposable yourself.',
+      'Preview or move disposable worktrees into recoverable local quarantine, list copies, or restore one without overwriting or weakening prior protection. Returns restore argv; defaults to preview and never deletes files or branches.',
     inputSchema: {
       type: 'object',
       properties: {
         ...REPO_ARG,
-        apply: { type: 'boolean', description: 'Actually remove. Omit or false for a dry run.' },
+        apply: { type: 'boolean', description: 'Move into quarantine; omit or false to preview.' },
+        operation: { type: 'string', maxLength: 16, enum: ['preview', 'quarantine', 'list', 'restore'], description: 'Operation; restore also needs id.' },
+        id: { type: 'string', maxLength: 512, description: 'Quarantine id for operation:restore.' },
       },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  {
+    name: 'holt_purge',
+    title: 'Purge one clean quarantine',
+    description:
+      'Dry-run by default. Apply anchors a re-verified HEAD, then uses non-forced Git removal. Dirty state is refused; it keeps the branch.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...REPO_ARG,
+        id: { type: 'string', maxLength: 512, description: 'Quarantine id.' },
+        apply: { type: 'boolean', description: 'Remove it; false previews.' },
+      },
+      required: ['id'],
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -496,7 +520,7 @@ export function sanitizeForModel(result) {
  *
  * Booleans are never coerced from strings even though numbers are: `limit` off by a factor is a
  * row count, while `apply` off by one interpretation is the difference between a dry run and
- * removing worktrees. Coercion is allowed only where being wrong is harmless.
+ * moving worktrees. Coercion is allowed only where being wrong is harmless.
  */
 export class ToolArgumentError extends Error {
   constructor(message) {
@@ -549,9 +573,12 @@ function validateArgs(tool, rawArgs) {
         throw new ToolArgumentError(`${tool.name}: '${name}' must be a string, got ${v === null ? 'null' : Array.isArray(v) ? 'an array' : typeof v}`);
       }
       if (v.includes('\0')) throw new ToolArgumentError(`${tool.name}: '${name}' contains a NUL byte`);
-      const max = MAX_STR[name] ?? 4096;
+      const max = typeof spec.maxLength === 'number' ? spec.maxLength : (MAX_STR[name] ?? 4096);
       if (v.length > max) {
         throw new ToolArgumentError(`${tool.name}: '${name}' is ${v.length} characters; the maximum is ${max}`);
+      }
+      if (Array.isArray(spec.enum) && !spec.enum.includes(v)) {
+        throw new ToolArgumentError(`${tool.name}: '${name}' must be one of ${spec.enum.join(', ')}, got ${JSON.stringify(v)}`);
       }
       out[name] = v;
       continue;
@@ -581,7 +608,7 @@ function validateArgs(tool, rawArgs) {
 
     if (spec.type === 'boolean') {
       if (typeof v !== 'boolean') {
-        throw new ToolArgumentError(`${tool.name}: '${name}' must be true or false, got ${typeof v === 'string' ? `the string "${v}"` : typeof v}. It is not coerced: on a tool that can remove worktrees, guessing what a non-boolean meant is not a safe default.`);
+        throw new ToolArgumentError(`${tool.name}: '${name}' must be true or false, got ${typeof v === 'string' ? `the string "${v}"` : typeof v}. It is not coerced: on a tool that can move worktrees, guessing what a non-boolean meant is not a safe default.`);
       }
       out[name] = v;
       continue;
@@ -601,9 +628,9 @@ function validateArgs(tool, rawArgs) {
  * MEASURED: an MCP server launched in repository VICTIM (which is how every host starts it — cwd
  * is the project the user opened) answered `holt_status {repo: <an unrelated repository>}` with
  * that other repository's symbol names, branch names and base commit, and `holt_clean` planned
- * removals in it. Repository content is the attacker here: a poisoned brief only has to persuade
+ * quarantine moves in it. Repository content is the attacker here: a poisoned brief only has to persuade
  * the agent to pass a different path, and holt becomes the deputy that reads — or with
- * `apply: true`, PRUNES WORKTREES IN — a repository the user never pointed it at. That is the
+ * `apply: true`, MOVES WORKTREES IN — a repository the user never pointed it at. That is the
  * confused-deputy shape the MCP security guidance names.
  *
  * CONTAINMENT IS BY REPOSITORY IDENTITY, NOT BY DIRECTORY PREFIX, in both directions:
@@ -796,7 +823,7 @@ async function dispatch(name, args, cwd, limit) {
         // "Disposable" spans two materially different situations, and an agent deciding what to
         // delete must be able to tell them apart: a worktree holding NOTHING, and a worktree
         // whose content a LIVING SIBLING also holds. The second is safe only while the sibling
-        // lives — `clean --apply` re-verifies before each removal so a redundant set drains to
+        // lives — `clean --apply` re-verifies before each quarantine move so a redundant set drains to
         // exactly one survivor. Collapsing the two into one number invites "delete all N".
         disposableRedundant: report.safe.filter((s) => s.safe && s.redundantWith?.length).length || undefined,
         reviewQueue: `${r.total} workstreams -> drop ${r.dropped}, collapse ${r.collapsed} -> ${r.toReview} to review`,
@@ -993,26 +1020,108 @@ async function dispatch(name, args, cwd, limit) {
     }
 
     case 'holt_clean': {
-      const { clean } = await import('../actions.mjs');
+      const { clean, quarantines, restoreQuarantine } = await import('../actions.mjs');
+      const operation = args?.operation ?? (args?.apply === true ? 'quarantine' : 'preview');
+      if (args?.operation && args?.apply !== undefined) {
+        throw new ToolArgumentError('holt_clean: use operation or apply, not both');
+      }
+      if (operation === 'list') {
+        const r = await quarantines(cwd);
+        return { count: r.count, quarantines: r.quarantines, transitions: r.transitions, note: r.note };
+      }
+      if (operation === 'restore') {
+        if (!args?.id) throw new ToolArgumentError("holt_clean: operation 'restore' requires argument 'id'");
+        cache.clear();
+        const r = await restoreQuarantine(cwd, args.id);
+        return withJournal({
+          ok: r.ok, restored: r.restored ?? false, id: r.id ?? args.id,
+          originalPath: r.originalPath ?? null, quarantinePath: r.quarantinePath ?? null,
+          head: r.head ?? null, branch: r.branch ?? null,
+          preservedLock: r.preservedLock ?? null, error: r.error ?? null,
+          available: r.available ?? undefined, note: r.note ?? null,
+        }, r);
+      }
+      if (args?.id !== undefined) {
+        throw new ToolArgumentError("holt_clean: argument 'id' is only valid with operation 'restore'");
+      }
       // Any mutation invalidates the cached scan.
       cache.clear();
-      const r = await clean(cwd, { apply: args?.apply === true });
+      const r = await clean(cwd, { apply: operation === 'quarantine' });
       return r.dryRun
         ? {
             dryRun: true,
-            wouldRemove: r.wouldRemove.map((w) => ({ id: w.id, why: w.why })),
+            wouldQuarantine: r.wouldQuarantine.map((w) => ({
+              id: w.id, path: w.path, branch: w.branch, why: w.why,
+            })),
             keeping: r.keeping.slice(0, 20),
             unknown: r.unknown,
-            next: 'call again with apply:true to remove them',
+            existingQuarantines: r.existingQuarantines ?? [],
+            next: 'call again with apply:true to move them into locked local quarantine; no files or branches will be deleted',
           }
-        : withJournal({
-            removed: r.removed,
-            branchesRemoved: r.branchesRemoved,
+        : (() => {
+          const failures = Array.isArray(r.failures)
+            ? r.failures
+            : (Array.isArray(r.failed) ? r.failed : []);
+          return withJournal({
+            quarantined: r.quarantined ?? 0,
+            quarantines: (r.quarantines ?? []).map((q) => ({
+              id: q.id,
+              originalPath: q.originalPath,
+              quarantinePath: q.quarantinePath,
+              restoreArgv: q.restoreArgv,
+              restore: q.restore,
+              originalPathOccupied: q.originalPathOccupied,
+            })),
+            // Explicit compatibility zeroes: quarantine is not physical deletion or reclamation.
+            removed: r.removed ?? 0,
+            branchesRemoved: r.branchesRemoved ?? 0,
             skipped: r.skipped.map((s) => ({ id: s.id, why: s.why })),
-            failed: r.failed.map((f) => ({ id: f.id, why: f.why })),
+            failures: failures.map((f) => ({
+              id: f.id, why: f.why, quarantinePath: f.quarantinePath ?? null,
+              retained: f.retained ?? false, rolledBack: f.rolledBack ?? false,
+            })),
+            failedCount: r.failedCount
+              ?? (typeof r.failed === 'number' ? r.failed : failures.length),
             unknown: r.unknown,
-            note: 'each removal was re-verified immediately beforehand; anything that gained work in the meantime was skipped',
+            existingQuarantines: r.existingQuarantines ?? [],
+            note: r.note,
           }, r);
+        })();
+    }
+
+    case 'holt_purge': {
+      const { purgeQuarantine } = await import('../actions.mjs');
+      cache.clear();
+      const r = await purgeQuarantine(cwd, args.id, { apply: args?.apply === true });
+      if (r.dryRun) {
+        return {
+          ok: r.ok, dryRun: true, id: r.id,
+          originalPath: r.originalPath, quarantinePath: r.quarantinePath,
+          head: r.head, branch: r.branch,
+          wouldAnchor: r.wouldAnchor,
+          wouldRemove: r.wouldRemove,
+          removed: 0,
+          error: r.error ?? null, note: r.note,
+        };
+      }
+      return withJournal({
+        ok: r.ok, purged: r.purged ?? false, id: r.id ?? args.id,
+        originalPath: r.originalPath ?? null,
+        quarantinePath: r.quarantinePath ?? null,
+        head: r.head ?? r.commit ?? null,
+        branch: r.branch ?? null,
+        recoveryRef: r.recoveryRef ?? null,
+        commit: r.commit ?? null,
+        removed: r.removed ?? 0,
+        branchesRemoved: r.branchesRemoved ?? 0,
+        restoreArgv: r.restoreArgv ?? null,
+        restore: r.restore ?? null,
+        blocked: r.blocked ?? false,
+        dirtyEntries: r.dirtyEntries ?? null,
+        relocked: r.relocked ?? null,
+        error: r.error ?? null,
+        note: r.note ?? null,
+      }, r);
     }
 
     case 'holt_rescue': {
@@ -1109,7 +1218,7 @@ export async function createServer(opts = {}) {
   const { Server } = mcp.server;
   const { CallToolRequestSchema, ListToolsRequestSchema } = mcp.types;
   const server = new Server(
-    { name: 'holt', version: '0.2.0' },
+    { name: 'holt', version: packageJson.version },
     { capabilities: { tools: {} } },
   );
   const boundary = repoBoundary(opts?.cwd ?? process.cwd());
@@ -1121,7 +1230,7 @@ export async function createServer(opts = {}) {
       description: t.description,
       inputSchema: t.inputSchema,
       // Per-tool annotations, defaulting to read-only for the diagnostic majority. A blanket
-      // readOnlyHint:true would now be a LIE for holt_clean, and a host that auto-approves
+      // readOnlyHint:true would now be a LIE for holt_clean and holt_purge, and a host that auto-approves
       // read-only tools would auto-approve a deletion. The annotation is a safety contract, so
       // it has to be per-tool and true.
       annotations: t.annotations
@@ -1132,8 +1241,8 @@ export async function createServer(opts = {}) {
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
 
-    // WHO IS CALLING. Three of these tools mutate the repository, and until now they recorded a
-    // journal line with no caller at all — an MCP-driven `holt_clean` was indistinguishable from
+    // WHO IS CALLING. Four of these tools mutate the repository, and without this they would
+    // write a journal line with no caller at all — an MCP-driven `holt_clean` was indistinguishable from
     // a human typing it.
     //
     // MEASURED (SDK 1.30.0): `initialize` carries `clientInfo {name, version}`, which
@@ -1224,7 +1333,7 @@ export async function printMcpConfig(opts = {}) {
     return { format: 'amp', content: JSON.stringify({ 'amp.mcpServers': { holt: entry } }, null, 2) };
   }
   // generic / claude / cursor / continue / gemini-cli / copilot / roo / amazon-q / factory /
-  // junie / warp / devin-desktop — all use the standard { mcpServers: { holt: {...} } } shape.
+  // junie / warp / devin-cli / cascade — all use the standard { mcpServers: { holt: {...} } } shape.
   return { format: host, content: JSON.stringify({ mcpServers: { holt: entry } }, null, 2) };
 }
 

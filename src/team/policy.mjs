@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-holt-Commercial
 // Commercial license — see src/team/LICENSE. NOT covered by the repository FSL-1.1-MIT grant.
 /**
- * holt Team — policy as code.  (Commercial license: see src/team/LICENSE-TEAM.md)
+ * holt Team — policy as code.  (Commercial license: see src/team/LICENSE)
  *
  * Inline CI flags answer "fail this build if anything is abandoned", and that stays free.
  * A team needs something flags cannot express: rules that live in the repository, are reviewed
@@ -86,11 +86,9 @@ import path from 'node:path';
 import { git } from '../git.mjs';
 
 /**
- * jsonc-parser is an OPTIONAL dependency (see package.json optionalDependencies). A static import
- * would throw ERR_MODULE_NOT_FOUND on an install that omits optionals, killing the CLI before it
- * prints anything. It is loaded dynamically, cached, and preloaded once at module init so the
- * synchronous parsePolicy() below can read the cache. A missing install is reported as a clear
- * error when a policy file is actually parsed, not at module load.
+ * jsonc-parser is an exact required runtime dependency. It remains dynamically loaded and cached
+ * so a damaged installation reaches an actionable reinstall error instead of dying inside Node's
+ * module loader before Holt can explain what is missing.
  */
 /** @type {any} */
 let _jsonc = null;
@@ -107,32 +105,142 @@ async function loadJsonc() {
 await loadJsonc();
 function missingJsonc() {
   throw new Error(
-    "holt requires the optional 'jsonc-parser' dependency to parse policy files, " +
-    "and it is not installed. Install it with: npm install jsonc-parser",
+    "holt requires its exact 'jsonc-parser' runtime dependency to parse policy files; " +
+    'reinstall Holt from an intact release',
   );
 }
-const jsoncParse = (text, errors, options) => { if (!_jsonc) missingJsonc(); return _jsonc.parse(text, errors, options); };
-
 export const POLICY_PATHS = ['.holt/policy.json', '.holt/policy.jsonc'];
 
 const RULE_TYPES = new Set(['no-unlanded', 'max-branch-age', 'protected-paths', 'require-classified']);
 const SEVERITIES = new Set(['error', 'warn']);
+const MAX_POLICY_BYTES = 1024 * 1024;
+const MAX_POLICY_DEPTH = 32;
+const MAX_POLICY_NODES = 20_000;
+const MAX_POLICY_RULES = 512;
+const MAX_GLOBS_PER_FIELD = 128;
+const MAX_GLOB_LENGTH = 512;
+const MAX_DESCRIPTION_LENGTH = 4096;
+const MAX_GLOB_MATCH_STEPS = 10_000_000;
+const MAX_GLOB_SUBJECT_LENGTH = 64 * 1024;
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/u;
 
-/** Minimal glob: `*` within a segment, `**` across segments. Anchored, no backtracking blowup. */
-export function globToRegExp(glob) {
-  let out = '^';
+/**
+ * Compile Holt's deliberately small glob language into tokens, not a regular expression.
+ *
+ * The previous translator emitted chains such as `.*a.*a.*a…b`. JavaScript's backtracking
+ * engine took seconds to reject a 31-byte subject against a 46-byte policy glob. This matcher is
+ * a bounded dynamic program: every pattern/input state is visited at most once, and each policy
+ * evaluation carries a total work budget. Literal prefix/suffix checks make ordinary repository
+ * globs such as a recursive infrastructure directory or a JavaScript suffix fast without
+ * weakening the worst-case bound.
+ */
+function compileGlob(glob) {
+  const tokens = [];
+  let hasWildcard = false;
   for (let i = 0; i < glob.length; i++) {
-    const c = glob[i];
-    if (c === '*') {
-      if (glob[i + 1] === '*') { out += '.*'; i++; if (glob[i + 1] === '/') i++; }
-      else out += '[^/]*';
-    } else if (c === '?') out += '[^/]';
-    else out += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    const char = glob[i];
+    if (char === '*') {
+      hasWildcard = true;
+      if (glob[i + 1] === '*') {
+        tokens.push({ type: 'globstar' });
+        i++;
+        // Preserve the legacy double-star-then-slash spelling: the slash is part of the
+        // cross-segment wildcard, so that pattern before `x` matches both `x` and `a/x`.
+        if (glob[i + 1] === '/') i++;
+      } else tokens.push({ type: 'star' });
+    } else if (char === '?') {
+      hasWildcard = true;
+      tokens.push({ type: 'one' });
+    } else tokens.push({ type: 'literal', value: char });
   }
-  return new RegExp(`${out}$`);
+
+  let prefix = '';
+  for (const token of tokens) {
+    if (token.type !== 'literal') break;
+    prefix += token.value;
+  }
+  let suffix = '';
+  for (let i = tokens.length - 1; i >= 0 && tokens[i].type === 'literal'; i--) {
+    suffix = tokens[i].value + suffix;
+  }
+  return Object.freeze({ glob, tokens: Object.freeze(tokens), hasWildcard, prefix, suffix });
 }
 
-const matchesAny = (value, globs) => (globs ?? []).some((g) => globToRegExp(g).test(value));
+function safeGlobTest(compiled, rawValue, budget) {
+  const value = String(rawValue);
+  if (value.length > MAX_GLOB_SUBJECT_LENGTH) {
+    refuse('POLICY_COMPLEXITY', `glob subject exceeds ${MAX_GLOB_SUBJECT_LENGTH} characters`);
+  }
+  // Even a prefix/suffix rejection consumes work. Otherwise an attacker could submit millions
+  // of deliberately mismatching subjects and stay outside the deterministic budget entirely.
+  const guardSteps = 1 + compiled.prefix.length + compiled.suffix.length;
+  if (!Number.isSafeInteger(guardSteps) || guardSteps > budget.remaining) {
+    refuse(
+      'POLICY_COMPLEXITY',
+      `glob evaluation exceeds the ${MAX_GLOB_MATCH_STEPS}-state deterministic work budget`,
+    );
+  }
+  budget.remaining -= guardSteps;
+  if (!compiled.hasWildcard) return value === compiled.glob;
+  if (compiled.prefix && !value.startsWith(compiled.prefix)) return false;
+  if (compiled.suffix && !value.endsWith(compiled.suffix)) return false;
+
+  const steps = (compiled.tokens.length + 1) * (value.length + 1);
+  if (!Number.isSafeInteger(steps) || steps > budget.remaining) {
+    refuse(
+      'POLICY_COMPLEXITY',
+      `glob evaluation exceeds the ${MAX_GLOB_MATCH_STEPS}-state deterministic work budget`,
+    );
+  }
+  budget.remaining -= steps;
+
+  let current = new Uint8Array(value.length + 1);
+  current[0] = 1;
+  for (const token of compiled.tokens) {
+    const next = new Uint8Array(value.length + 1);
+    if (token.type === 'star' || token.type === 'globstar') next[0] = current[0];
+    for (let index = 1; index <= value.length; index++) {
+      const char = value[index - 1];
+      if (token.type === 'literal') next[index] = current[index - 1] && char === token.value ? 1 : 0;
+      else if (token.type === 'one') next[index] = current[index - 1] && char !== '/' ? 1 : 0;
+      else {
+        const mayConsume = token.type === 'globstar' || char !== '/';
+        next[index] = current[index] || (mayConsume && next[index - 1]) ? 1 : 0;
+      }
+    }
+    current = next;
+  }
+  return current[value.length] === 1;
+}
+
+/**
+ * Compatibility name retained for internal/tests callers. The returned object intentionally has
+ * only the RegExp-like `.test()` surface; it is a deterministic matcher, never a backtracking
+ * regular expression.
+ */
+export function globToRegExp(glob) {
+  const compiled = compileGlob(glob);
+  return Object.freeze({
+    source: `holt-safe-glob:${glob}`,
+    flags: '',
+    test: (value) => safeGlobTest(compiled, value, { remaining: MAX_GLOB_MATCH_STEPS }),
+  });
+}
+
+function matchesAny(value, globs, budget) {
+  return (globs ?? []).some((glob) => {
+    let compiled = budget.compiled.get(glob);
+    if (!compiled) {
+      compiled = compileGlob(glob);
+      budget.compiled.set(glob, compiled);
+    }
+    return safeGlobTest(compiled, value, budget);
+  });
+}
+
+function newGlobBudget() {
+  return { remaining: MAX_GLOB_MATCH_STEPS, compiled: new Map() };
+}
 
 /**
  * THE PATHS A WORKSTREAM IS CARRYING — the input every path-shaped rule must read.
@@ -154,16 +262,41 @@ const matchesAny = (value, globs) => (globs ?? []).some((g) => globToRegExp(g).t
 function pathsCarriedBy(u, layers) {
   const out = new Set();
   for (const layer of layers) {
-    for (const p of u?.pathsByLayer?.[layer] ?? []) {
-      if (typeof p === 'string' && p) out.add(p);
+    const pathRows = u?.pathsByLayer?.[layer];
+    const symbolRows = u?.byLayer?.[layer];
+    if (pathRows !== undefined && !Array.isArray(pathRows)) return null;
+    if (symbolRows !== undefined && !Array.isArray(symbolRows)) return null;
+    for (const p of pathRows ?? []) {
+      if (typeof p !== 'string' || !p || p.includes('\0')) return null;
+      out.add(p);
     }
-    for (const s of u?.byLayer?.[layer] ?? []) {
+    for (const s of symbolRows ?? []) {
       const p = typeof s === 'string' ? s : (s?.file ?? s?.path);
-      if (typeof p === 'string' && p) out.add(p);
+      if (typeof p !== 'string' || !p || p.includes('\0')) return null;
+      out.add(p);
     }
   }
   // Sorted, so the evidence a reviewer is shown is the same on every run and across machines.
   return [...out].sort();
+}
+
+/**
+ * The complete authoritative path set from branchAudit(), never its UI sample.
+ *
+ * `branch.files` is capped for terminal/JSON readability.  A policy that checks only that
+ * sample can pass a branch which changes its 26th file under a protected path.  Older callers
+ * may not yet supply `carriedPaths`; their `files` are acceptable only when the declared count
+ * proves that the list is complete.  Otherwise the policy must fail closed rather than turn a
+ * truncated display into an authorization decision.
+ */
+function authoritativeBranchPaths(branch) {
+  if (!Number.isSafeInteger(branch?.fileCount) || branch.fileCount < 0) return null;
+  const inventory = Array.isArray(branch?.carriedPaths) ? branch.carriedPaths : branch?.files;
+  if (!Array.isArray(inventory)) return null;
+  if (inventory.some((p) => typeof p !== 'string' || !p || p.includes('\0'))) return null;
+  const unique = new Set(inventory);
+  if (unique.size !== inventory.length || inventory.length !== branch.fileCount) return null;
+  return [...unique].sort();
 }
 
 /* ============================================================== VALIDATION ==== */
@@ -178,8 +311,12 @@ const TYPE_RULE_KEYS = {
 };
 const TOP_LEVEL_KEYS = new Set(['version', 'rules', 'description']);
 
-/** A glob that matches every possible subject. A rule exempting one of these exempts everything. */
-const UNIVERSAL_GLOBS = new Set(['*', '**', '**/*', '*/**']);
+/** Does this glob's actual compiler match empty, slash-only, flat and nested subjects? */
+function universalGlob(glob) {
+  const compiled = compileGlob(glob);
+  const budget = newGlobBudget();
+  return ['', '/', 'plain', 'a/b'].every((subject) => safeGlobTest(compiled, subject, budget));
+}
 
 const refuse = (code, message) => { throw Object.assign(new Error(message), { code }); };
 
@@ -188,9 +325,15 @@ const refuse = (code, message) => { throw Object.assign(new Error(message), { co
  * `globToRegExp`, where `glob.length` on `null` threw a TypeError from the middle of evaluation.
  */
 function checkGlobs(list, { label, ruleId, field }) {
+  if (list.length > MAX_GLOBS_PER_FIELD) {
+    refuse('POLICY_LIMIT', `${label}: rule '${ruleId}' ${field} exceeds ${MAX_GLOBS_PER_FIELD} globs`);
+  }
   list.forEach((g, i) => {
     if (typeof g !== 'string' || !g.trim()) {
       refuse('POLICY_RULE', `${label}: rule '${ruleId}' ${field}[${i}] must be a non-empty string glob, got ${JSON.stringify(g)}`);
+    }
+    if (g.length > MAX_GLOB_LENGTH || CONTROL_RE.test(g)) {
+      refuse('POLICY_LIMIT', `${label}: rule '${ruleId}' ${field}[${i}] must be at most ${MAX_GLOB_LENGTH} control-free characters`);
     }
   });
 }
@@ -213,16 +356,9 @@ function checkGlobs(list, { label, ruleId, field }) {
  *
  *   NON-STRING GLOBS REFUSE, at load time, instead of crashing the evaluator mid-run.
  */
-export function parsePolicy(raw, label) {
-  let doc;
-  {
-    // jsonc-parser understands both comments and string context, so a path glob like
-    // "docs/a // b.md" is not truncated at the //.
-    const errors = [];
-    doc = jsoncParse(String(raw), errors, { allowTrailingComma: true, disallowComments: false });
-    if (errors.length || doc === undefined) {
-      refuse('POLICY_PARSE', `${label} is not valid JSON/JSONC (${errors.length} parse error(s)) — refusing to run with a policy nobody can read`);
-    }
+export function validatePolicyObject(doc, label = 'policy') {
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) {
+    refuse('POLICY_SCHEMA', `${label} must be a policy object`);
   }
   if (doc?.version !== 1) {
     refuse('POLICY_VERSION', `${label}: unsupported policy version ${JSON.stringify(doc?.version)} — upgrade holt rather than run an unenforced policy`);
@@ -232,8 +368,16 @@ export function parsePolicy(raw, label) {
       refuse('POLICY_SCHEMA', `${label}: unknown top-level key '${k}'. Known: ${[...TOP_LEVEL_KEYS].join(', ')}. holt refuses rather than ignore it — a key holt does not act on is a rule you believe you have and do not.`);
     }
   }
+  if (doc.description !== undefined
+    && (typeof doc.description !== 'string' || doc.description.length > MAX_DESCRIPTION_LENGTH
+      || CONTROL_RE.test(doc.description))) {
+    refuse('POLICY_LIMIT', `${label}: description must be a control-free string no longer than ${MAX_DESCRIPTION_LENGTH} characters`);
+  }
   if (!Array.isArray(doc.rules) || doc.rules.length === 0) {
     refuse('POLICY_EMPTY', `${label}: no rules defined — an empty policy would pass everything silently`);
+  }
+  if (doc.rules.length > MAX_POLICY_RULES) {
+    refuse('POLICY_LIMIT', `${label}: rules exceeds the ${MAX_POLICY_RULES}-entry policy limit`);
   }
 
   const seen = new Set();
@@ -241,7 +385,9 @@ export function parsePolicy(raw, label) {
     if (!r || typeof r !== 'object' || Array.isArray(r)) {
       refuse('POLICY_RULE', `${label}: every entry of 'rules' must be an object, got ${JSON.stringify(r)}`);
     }
-    if (!r.id || typeof r.id !== 'string') refuse('POLICY_RULE', `${label}: every rule needs a string id`);
+    if (typeof r.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(r.id)) {
+      refuse('POLICY_RULE', `${label}: every rule needs a 1-128 character canonical id (letters, digits, dot, underscore or hyphen)`);
+    }
     if (seen.has(r.id)) refuse('POLICY_RULE', `${label}: duplicate rule id '${r.id}'`);
     seen.add(r.id);
     if (!RULE_TYPES.has(r.type)) {
@@ -254,6 +400,11 @@ export function parsePolicy(raw, label) {
         refuse('POLICY_SCHEMA', `${label}: rule '${r.id}' has unknown key '${k}'. A rule of type '${r.type}' accepts: ${[...allowed].sort().join(', ')}`);
       }
     }
+    if (r.description !== undefined
+      && (typeof r.description !== 'string' || r.description.length > MAX_DESCRIPTION_LENGTH
+        || CONTROL_RE.test(r.description))) {
+      refuse('POLICY_LIMIT', `${label}: rule '${r.id}' description must be a control-free string no longer than ${MAX_DESCRIPTION_LENGTH} characters`);
+    }
     if (r.severity !== undefined && !SEVERITIES.has(r.severity)) {
       refuse('POLICY_RULE', `${label}: rule '${r.id}' has unknown severity '${r.severity}'`);
     }
@@ -265,8 +416,9 @@ export function parsePolicy(raw, label) {
     }
     if (Array.isArray(r.exempt)) checkGlobs(r.exempt, { label, ruleId: r.id, field: 'exempt' });
 
-    if (r.type === 'max-branch-age' && !(Number(r.days) > 0)) {
-      refuse('POLICY_RULE', `${label}: rule '${r.id}' needs a positive 'days'`);
+    if (r.type === 'max-branch-age'
+      && (typeof r.days !== 'number' || !Number.isFinite(r.days) || r.days <= 0 || r.days > 365_000)) {
+      refuse('POLICY_RULE', `${label}: rule '${r.id}' needs a positive 'days' that is a finite number no greater than 365000`);
     }
     if (r.type === 'protected-paths') {
       if (!Array.isArray(r.paths)) refuse('POLICY_RULE', `${label}: rule '${r.id}' needs a 'paths' array`);
@@ -278,11 +430,69 @@ export function parsePolicy(raw, label) {
     if (r.type === 'protected-paths' && r.paths.length === 0) {
       refuse('POLICY_VACUOUS', `${label}: rule '${r.id}' protects an EMPTY list of paths, so it can never fire — a rule that cannot fail is a green build nobody earned. Give it paths, or set "enabled": false to turn it off deliberately.`);
     }
-    if (Array.isArray(r.exempt) && r.exempt.some((g) => UNIVERSAL_GLOBS.has(g.trim()))) {
+    if (Array.isArray(r.exempt) && r.exempt.some((g) => universalGlob(g.trim()))) {
       refuse('POLICY_VACUOUS', `${label}: rule '${r.id}' exempts every possible subject (${r.exempt.join(', ')}), so it can never fire. Narrow the exemption, or set "enabled": false to turn it off deliberately.`);
     }
   }
   return doc;
+}
+
+function policyTreeValue(raw, label) {
+  const text = String(raw);
+  const bytes = Buffer.byteLength(text, 'utf8');
+  if (bytes > MAX_POLICY_BYTES) {
+    refuse('POLICY_LIMIT', `${label} is ${bytes} bytes; policy files are limited to ${MAX_POLICY_BYTES}`);
+  }
+
+  if (!_jsonc) missingJsonc();
+  const errors = [];
+  const root = _jsonc.parseTree(text, errors, { allowTrailingComma: true, disallowComments: false });
+  if (errors.length || !root) {
+    refuse('POLICY_PARSE', `${label} is not valid JSON/JSONC (${errors.length} parse error(s)) — refusing to run with a policy nobody can read`);
+  }
+
+  let nodes = 0;
+  const stack = [{ node: root, depth: 0, path: '$' }];
+  while (stack.length) {
+    const frame = stack.pop();
+    if (!frame) break; // narrowed for static analysis; the loop condition makes this unreachable.
+    const { node, depth, path: jsonPath } = frame;
+    nodes++;
+    if (nodes > MAX_POLICY_NODES) {
+      refuse('POLICY_LIMIT', `${label} exceeds the ${MAX_POLICY_NODES}-node structural limit`);
+    }
+    if (depth > MAX_POLICY_DEPTH) {
+      refuse('POLICY_LIMIT', `${label} exceeds the ${MAX_POLICY_DEPTH}-level nesting limit at ${jsonPath}`);
+    }
+    if (node.type === 'object') {
+      const seen = new Set();
+      for (const property of node.children ?? []) {
+        const keyNode = property.children?.[0];
+        const valueNode = property.children?.[1];
+        const key = keyNode?.value;
+        if (typeof key !== 'string' || !valueNode) {
+          refuse('POLICY_PARSE', `${label} contains a malformed object member at ${jsonPath}`);
+        }
+        if (seen.has(key)) {
+          refuse('POLICY_DUPLICATE_KEY', `${label} repeats key '${key}' at ${jsonPath}; duplicate JSON members are ambiguous and refuse`);
+        }
+        seen.add(key);
+        stack.push({ node: valueNode, depth: depth + 1, path: `${jsonPath}.${key}` });
+      }
+    } else if (node.type === 'array') {
+      for (let index = 0; index < (node.children ?? []).length; index++) {
+        stack.push({ node: node.children[index], depth: depth + 1, path: `${jsonPath}[${index}]` });
+      }
+    }
+  }
+  return _jsonc.getNodeValue(root);
+}
+
+export function parsePolicy(raw, label) {
+  // Parse the syntax tree first. Materialising an object directly discards duplicate keys, so a
+  // reviewed `"enabled": true, "enabled": false` document previously ran as disabled while
+  // still looking enabled to a human. Tree inspection also gives one bounded structural gate.
+  return validatePolicyObject(policyTreeValue(raw, label), label);
 }
 
 /** Internal alias for callers that still use the old name. */
@@ -641,9 +851,14 @@ export function ciPolicyOutcome({ loaded, policyResult, flagFailures = [], entit
  * Pure function: all I/O happened upstream, so this is exhaustively testable.
  *
  * @param {any} policy
- * @param {{audit?: any, report?: any, ignore?: any[]}} [opts]
+ * @param {{audit?: any, report?: any, ignore?: any[]}} opts
+ * @param {{remaining: number, compiled: Map<string, any>}} matchBudget
  */
-export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {}) {
+function evaluatePolicyWithBudget(
+  policy,
+  { audit, report = null, ignore = [] },
+  matchBudget,
+) {
   const violations = [];
   const exempted = [];
 
@@ -663,7 +878,7 @@ export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {
 
     if (rule.type === 'no-unlanded') {
       for (const b of unlanded) {
-        if (matchesAny(b.name, rule.exempt)) { exempted.push({ rule: rule.id, subject: b.name }); continue; }
+        if (matchesAny(b.name, rule.exempt, matchBudget)) { exempted.push({ rule: rule.id, subject: b.name }); continue; }
         violations.push({
           rule: rule.id, severity: sev, subject: b.name,
           message: `branch '${b.name}' holds ${b.fileCount} file(s) of unlanded content`,
@@ -674,8 +889,14 @@ export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {
 
     if (rule.type === 'max-branch-age') {
       for (const b of unlanded) {
-        if (matchesAny(b.name, rule.exempt)) { exempted.push({ rule: rule.id, subject: b.name }); continue; }
-        if (b.ageDays != null && b.ageDays > Number(rule.days)) {
+        if (matchesAny(b.name, rule.exempt, matchBudget)) { exempted.push({ rule: rule.id, subject: b.name }); continue; }
+        if (typeof b.ageDays !== 'number' || !Number.isFinite(b.ageDays) || b.ageDays < 0) {
+          violations.push({
+            rule: rule.id, severity: 'error', subject: b.name,
+            message: `branch '${b.name}' has no finite non-negative age evidence — refusing to pass max-branch-age policy`,
+            evidence: ['ageDays missing or invalid'],
+          });
+        } else if (b.ageDays > rule.days) {
           violations.push({
             rule: rule.id, severity: sev, subject: b.name,
             message: `branch '${b.name}' holds unlanded work and is ${b.ageDays} days old (limit ${rule.days})`,
@@ -687,7 +908,16 @@ export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {
 
     if (rule.type === 'protected-paths') {
       for (const b of unlanded) {
-        const hits = (b.files ?? []).filter((f) => matchesAny(f, rule.paths));
+        const carried = authoritativeBranchPaths(b);
+        if (carried === null) {
+          violations.push({
+            rule: rule.id, severity: 'error', subject: b.name,
+            message: `branch '${b.name}' has a truncated carried-path inventory — refusing to pass protected-path policy without complete evidence`,
+            evidence: [`declared ${b.fileCount ?? 'unknown'} carried path(s); supplied inventory is missing, invalid, duplicate, or has a different cardinality`],
+          });
+          continue;
+        }
+        const hits = carried.filter((f) => matchesAny(f, rule.paths, matchBudget));
         if (hits.length) {
           violations.push({
             rule: rule.id, severity: sev, subject: b.name,
@@ -699,7 +929,15 @@ export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {
       // Worktrees count too: uncommitted work under a protected path is the riskiest of all.
       for (const u of report?.unique ?? []) {
         const files = pathsCarriedBy(u, ['uncommitted', 'untracked']);
-        const hits = files.filter((f) => matchesAny(f, rule.paths));
+        if (files === null) {
+          violations.push({
+            rule: rule.id, severity: 'error', subject: u?.id ?? 'unknown-workstream',
+            message: 'workstream carried-path evidence is invalid — refusing to pass protected-path policy',
+            evidence: ['uncommitted/untracked path or symbol inventories are not valid arrays of paths'],
+          });
+          continue;
+        }
+        const hits = files.filter((f) => matchesAny(f, rule.paths, matchBudget));
         if (hits.length) {
           violations.push({
             rule: rule.id, severity: sev, subject: u.id,
@@ -730,5 +968,148 @@ export function evaluatePolicy(policy, { audit, report = null, ignore = [] } = {
     exempted,
     rulesEvaluated: enabled.map((r) => r.id),
     disabledRules,
+  };
+}
+
+export function evaluatePolicy(policy, opts = {}) {
+  return evaluatePolicyWithBudget(policy, opts, newGlobBudget());
+}
+
+/**
+ * Evaluate independent policy sources additively and namespace every result.
+ *
+ * A central managed policy, a reviewed base policy, and a candidate policy are separate
+ * authorities. None is allowed to replace another: every enabled rule runs and every error is
+ * retained. This is deliberately different from the legacy single-policy gate, whose trusted
+ * base policy may supersede inline flags for backwards compatibility.
+ *
+ * @param {{namespace: string, policy: any}[]} sources
+ * @param {{audit?: any, report?: any, ignore?: any[], inlineFailures?: any[]}} opts
+ * @param {{remaining: number, compiled: Map<string, any>}} matchBudget
+ */
+function evaluatePolicySourcesWithBudget(
+  sources,
+  { audit, report = null, ignore = [], inlineFailures = [] },
+  matchBudget,
+) {
+  if (!Array.isArray(sources)) refuse('POLICY_SOURCES', 'policy sources must be an array');
+  if (!Array.isArray(inlineFailures)) refuse('POLICY_SOURCES', 'inline failures must be an array');
+
+  const seen = new Set();
+  const sourceResults = [];
+  const violations = [];
+  const exempted = [];
+  const disabledRules = [];
+  const rulesEvaluated = [];
+  for (let i = 0; i < sources.length; i++) {
+    const source = sources[i];
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+      refuse('POLICY_SOURCES', `policy source ${i} must be an object`);
+    }
+    const unknown = Object.keys(source).filter((key) => key !== 'namespace' && key !== 'policy');
+    if (unknown.length) refuse('POLICY_SOURCES', `policy source ${i} has unknown key '${unknown[0]}'`);
+    if (typeof source.namespace !== 'string'
+      || !/^[a-z][a-z0-9._:-]{0,191}$/u.test(source.namespace)) {
+      refuse('POLICY_SOURCES', `policy source ${i} needs a canonical lowercase namespace`);
+    }
+    if (seen.has(source.namespace)) {
+      refuse('POLICY_SOURCES', `duplicate policy source namespace '${source.namespace}'`);
+    }
+    seen.add(source.namespace);
+    validatePolicyObject(source.policy, `${source.namespace} policy`);
+
+    const result = evaluatePolicyWithBudget(source.policy, { audit, report, ignore }, matchBudget);
+    const qualify = (rule) => `${source.namespace}:${rule}`;
+    const qualifiedViolations = result.violations.map((violation) => ({
+      ...violation,
+      source: source.namespace,
+      ruleId: violation.rule,
+      rule: qualify(violation.rule),
+    }));
+    const qualifiedExempted = result.exempted.map((entry) => ({
+      ...entry,
+      source: source.namespace,
+      ruleId: entry.rule,
+      rule: qualify(entry.rule),
+    }));
+    violations.push(...qualifiedViolations);
+    exempted.push(...qualifiedExempted);
+    disabledRules.push(...result.disabledRules.map(qualify));
+    rulesEvaluated.push(...result.rulesEvaluated.map(qualify));
+    sourceResults.push({
+      namespace: source.namespace,
+      ok: result.ok,
+      errors: result.errors,
+      warnings: result.warnings,
+      rulesEvaluated: result.rulesEvaluated.map(qualify),
+      disabledRules: result.disabledRules.map(qualify),
+    });
+  }
+
+  for (let i = 0; i < inlineFailures.length; i++) {
+    const failure = inlineFailures[i];
+    const message = typeof failure === 'string' ? failure : failure?.message;
+    if (typeof message !== 'string' || !message.trim()) {
+      refuse('POLICY_SOURCES', `inline failure ${i} needs a non-empty message`);
+    }
+    violations.push({
+      source: 'inline',
+      rule: `inline:failure-${i + 1}`,
+      ruleId: `failure-${i + 1}`,
+      severity: 'error',
+      subject: failure?.subject ?? null,
+      message,
+      evidence: Array.isArray(failure?.evidence) ? failure.evidence : [],
+    });
+  }
+
+  const errors = violations.filter((violation) => violation.severity === 'error').length;
+  return {
+    ok: errors === 0,
+    violations,
+    errors,
+    warnings: violations.length - errors,
+    exempted,
+    rulesEvaluated,
+    disabledRules,
+    sourceResults,
+    additive: true,
+  };
+}
+
+export function evaluatePolicySources(sources, opts = {}) {
+  return evaluatePolicySourcesWithBudget(sources, opts, newGlobBudget());
+}
+
+/**
+ * The managed-policy gate has two different ignore semantics: centrally assigned rules ignore a
+ * repository's exemption list, while reviewed/candidate rules retain the existing CLI behavior.
+ * They still constitute ONE verdict and therefore share ONE work budget. Keeping this composition
+ * here prevents a caller from multiplying the complexity allowance by evaluating each authority
+ * independently.
+ *
+ * @param {{managedSources?: any[], lowerSources?: any[], audit?: any, report?: any,
+ *   lowerIgnore?: any[], inlineFailures?: any[]}} [opts]
+ */
+export function evaluatePolicyAuthoritySources({
+  managedSources = [],
+  lowerSources = [],
+  audit,
+  report = null,
+  lowerIgnore = [],
+  inlineFailures = [],
+} = {}) {
+  const matchBudget = newGlobBudget();
+  return {
+    managedResult: evaluatePolicySourcesWithBudget(
+      managedSources,
+      { audit, report, ignore: [], inlineFailures: [] },
+      matchBudget,
+    ),
+    lowerResult: evaluatePolicySourcesWithBudget(
+      lowerSources,
+      { audit, report, ignore: lowerIgnore, inlineFailures },
+      matchBudget,
+    ),
   };
 }

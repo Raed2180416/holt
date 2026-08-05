@@ -7,7 +7,8 @@
  * full command verification. See BENCHMARKS.md for results.
  *
  * Usage:
- *   node eval/enterprise-bench.mjs [repo-name] [--worktrees N] [--noise-level L] [--runs N]
+ *   node eval/enterprise-bench.mjs [repo-name] [--worktrees N] [--noise-level L]
+ *     [--runs N] [--warmups N] [--work DIR] [--out FILE] [--keep]
  *
  * THIS HARNESS PUBLISHED FALSE NUMBERS ONCE. Every defect below was live in the version whose
  * output reached BENCHMARKS.md, and each one is the same shape as the bug holt itself exists to
@@ -40,14 +41,33 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { discover } from '../src/discover.mjs';
 import { scan } from '../src/scan.mjs';
 import { analyze } from '../src/analyze.mjs';
 
-const WORK = path.join(os.homedir(), '.holt-work', 'enterprise-bench');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SOURCE_ROOT = path.resolve(HERE, '..');
+// Git for Windows is an MSYS program and accepts /dev/null. The benchmark controller owns no
+// deadline; only the outer operator may cancel a slow run.
+const NULL_DEVICE = '/dev/null';
+const args = process.argv.slice(2);
+const argValue = (name, fallback) => {
+  const at = args.indexOf(`--${name}`);
+  return at === -1 ? fallback : args[at + 1];
+};
+const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+const WORK = path.resolve(argValue('work', process.env.HOLT_ENTERPRISE_BENCH_WORK
+  ?? path.join(os.homedir(), '.cache', 'holt-enterprise-benchmark')));
 const CACHE = path.join(WORK, 'cache');
 const HOLT_BIN = path.resolve(path.join(import.meta.dirname, '..', 'bin/holt.mjs'));
+const OUT = path.resolve(argValue('out', path.join(
+  os.homedir(), '.cache', 'holt-benchmark-evidence', `enterprise-${stamp}.json`,
+)));
+const KEEP = args.includes('--keep');
+const WORK_MARKER = '.holt-enterprise-benchmark-sandbox';
+const WORK_MARKER_BODY = 'holt enterprise benchmark scratch v2\n';
 
 export function localRepoPath(env = process.env, moduleDir = import.meta.dirname) {
   return path.resolve(env.HOLT_SELF_REPO || path.join(moduleDir, '..'));
@@ -60,40 +80,198 @@ export const REPOS = {
   },
   'redis': {
     url: 'https://github.com/redis/redis.git',
+    commit: 'bf49481ad7cf93d136e7520d321448d9ef65b03a',
     desc: 'Redis — ~1,858 C files, the benchmark from BENCHMARKS.md',
   },
   'postgres': {
     url: 'https://github.com/postgres/postgres.git',
+    commit: '589eb4c3b309f5eaa7c16592ff4edbbf780671fe',
     desc: 'PostgreSQL — large C codebase, diverse file types',
   },
 };
 
-const args = process.argv.slice(2);
 let repoName = 'holt-self';
 let worktreeCount = 50;
 let noiseLevel = 1;
 let runs = 3;
+let warmups = Number(argValue('warmups', 1));
+let listOnly = false;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--worktrees') worktreeCount = Number(args[++i]);
   else if (args[i] === '--noise-level') noiseLevel = Number(args[++i]);
   else if (args[i] === '--runs') runs = Number(args[++i]);
+  else if (args[i] === '--warmups') i++;
+  else if (args[i] === '--work' || args[i] === '--out') i++;
+  else if (args[i] === '--keep') { /* parsed above */ }
   else if (args[i] === '--all') repoName = 'all';
-  else if (args[i] === '--list') { console.log('Available repos:', Object.keys(REPOS).join(', ')); process.exit(0); }
+  else if (args[i] === '--list') listOnly = true;
   else if (!args[i].startsWith('-')) repoName = args[i];
 }
 
-function sh(cmd, args, cwd, timeout = 300_000) {
+function sh(cmd, args, cwd) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, {
-      cwd, timeout, maxBuffer: 256 * 1024 * 1024,
+      cwd, maxBuffer: 256 * 1024 * 1024,
       env: { ...process.env, GIT_AUTHOR_NAME: 'bench', GIT_AUTHOR_EMAIL: 'b@b',
         GIT_COMMITTER_NAME: 'bench', GIT_COMMITTER_EMAIL: 'b@b',
-        GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
+        GIT_CONFIG_GLOBAL: NULL_DEVICE, GIT_CONFIG_SYSTEM: NULL_DEVICE,
+        GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' },
     }, (err, stdout, stderr) => {
       if (err) reject(new Error(`${cmd} ${args.slice(0, 5).join(' ')}: ${stderr || err.message}`));
       else resolve(String(stdout));
     });
   });
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function inside(child, parent) {
+  const rel = path.relative(parent, child);
+  return rel === '' || (!path.isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${path.sep}`));
+}
+
+async function canonicalFuturePath(target) {
+  let ancestor = path.resolve(target);
+  const tail = [];
+  while (true) {
+    try {
+      const real = await fs.realpath(ancestor);
+      return path.resolve(real, ...tail.reverse());
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) throw error;
+      tail.push(path.basename(ancestor));
+      ancestor = parent;
+    }
+  }
+}
+
+async function assertFreshEvidencePath(out = OUT) {
+  for (const candidate of [out, `${out}.sha256`]) {
+    if (await fs.lstat(candidate).then(() => true, () => false)) {
+      throw new Error(`refusing to overwrite existing benchmark evidence: ${candidate}`);
+    }
+  }
+}
+
+/** A run may recursively replace only this exact marker-owned scratch root. */
+export async function prepareEnterpriseScratch(root = WORK, out = OUT) {
+  const resolved = path.resolve(root);
+  const st = await fs.lstat(resolved).catch(() => null);
+  if (st?.isSymbolicLink()) throw new Error(`refusing symlink benchmark root: ${resolved}`);
+  const [canonicalRoot, canonicalOut, canonicalHome, canonicalSource, canonicalCwd] = await Promise.all([
+    canonicalFuturePath(resolved), canonicalFuturePath(out), canonicalFuturePath(os.homedir()),
+    canonicalFuturePath(SOURCE_ROOT), canonicalFuturePath(process.cwd()),
+  ]);
+  const forbidden = new Set([
+    path.parse(canonicalRoot).root, canonicalHome, canonicalSource, canonicalCwd,
+  ]);
+  const overlapsLiveTree = inside(canonicalRoot, canonicalSource) || inside(canonicalSource, canonicalRoot)
+    || inside(canonicalRoot, canonicalCwd) || inside(canonicalCwd, canonicalRoot);
+  if (forbidden.has(canonicalRoot) || overlapsLiveTree) {
+    throw new Error(`refusing unsafe benchmark root: ${resolved}`);
+  }
+  if (inside(canonicalOut, canonicalRoot)) {
+    throw new Error(`--out must be outside --work; cleanup would erase the only evidence (${out})`);
+  }
+  if (st) {
+    if (!st.isDirectory()) throw new Error(`refusing non-directory benchmark root: ${resolved}`);
+    const marker = await fs.readFile(path.join(resolved, WORK_MARKER), 'utf8').catch(() => null);
+    if (marker !== WORK_MARKER_BODY) {
+      throw new Error(`refusing to replace ${resolved}: it lacks Holt's exact ${WORK_MARKER} ownership marker`);
+    }
+    await fs.rm(resolved, { recursive: true, force: true });
+  }
+  await fs.mkdir(resolved, { recursive: true });
+  await fs.writeFile(path.join(resolved, WORK_MARKER), WORK_MARKER_BODY, { encoding: 'utf8', flag: 'wx' });
+}
+
+async function cleanEnterpriseScratch(root = WORK) {
+  if (KEEP) return;
+  const marker = await fs.readFile(path.join(root, WORK_MARKER), 'utf8').catch(() => null);
+  if (marker !== WORK_MARKER_BODY) {
+    throw new Error(`refusing cleanup: ${root} no longer has Holt's exact ownership marker`);
+  }
+  await fs.rm(root, { recursive: true, force: true });
+}
+
+async function commandVersion(cmd, argv = ['--version']) {
+  return new Promise((resolve) => {
+    execFile(cmd, argv, { maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      resolve(error
+        ? { available: false, error: String(stderr || error.message).trim() }
+        : { available: true, version: String(stdout || stderr).trim().split(/\r?\n/)[0] });
+    });
+  });
+}
+
+async function untrackedManifest(root) {
+  const names = (await sh('git', ['ls-files', '--others', '--exclude-standard', '-z'], root))
+    .split('\0').filter(Boolean).sort();
+  const entries = [];
+  for (const name of names) {
+    const abs = path.join(root, name);
+    const st = await fs.lstat(abs);
+    let type = 'other'; let content = Buffer.alloc(0);
+    if (st.isFile()) { type = 'file'; content = await fs.readFile(abs); }
+    else if (st.isSymbolicLink()) { type = 'symlink'; content = Buffer.from(await fs.readlink(abs)); }
+    else if (st.isDirectory()) type = 'directory';
+    entries.push({
+      path: name, type, mode: (st.mode & 0o777777).toString(8), size: st.size,
+      sha256: sha256(content),
+    });
+  }
+  return entries;
+}
+
+async function sourceState() {
+  const [commit, status, diff, untracked] = await Promise.all([
+    sh('git', ['rev-parse', '--verify', 'HEAD^{commit}'], SOURCE_ROOT).then((s) => s.trim()),
+    sh('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], SOURCE_ROOT),
+    sh('git', ['diff', '--binary', '--no-ext-diff', 'HEAD', '--', '.'], SOURCE_ROOT),
+    untrackedManifest(SOURCE_ROOT),
+  ]);
+  const dirtyState = {
+    statusSha256: sha256(status),
+    trackedDiffSha256: sha256(diff),
+    untracked,
+  };
+  return {
+    commit,
+    dirty: status.length > 0,
+    dirtyStateSha256: sha256(JSON.stringify(dirtyState)),
+    dirtyState,
+  };
+}
+
+async function runtimeMetadata() {
+  const cpus = os.cpus();
+  const [git, ctags, enry, jj, holt] = await Promise.all([
+    commandVersion('git'), commandVersion('ctags'), commandVersion('enry'), commandVersion('jj'),
+    commandVersion(process.execPath, [HOLT_BIN, '--version']),
+  ]);
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    os: { type: os.type(), release: os.release(), version: os.version(), kernel: `${os.type()} ${os.release()}` },
+    cpu: { logicalCount: cpus.length, models: [...new Set(cpus.map((cpu) => cpu.model))], speedsMHz: cpus.map((cpu) => cpu.speed) },
+    memory: { totalBytes: os.totalmem(), freeBytesAtStart: os.freemem() },
+    node: { version: process.version, execPath: process.execPath, versions: process.versions },
+    tools: { git, ctags, enry, jj, holt },
+    loadAverageAtStart: os.loadavg(),
+  };
+}
+
+async function writeEvidence(evidence, out = OUT) {
+  await fs.mkdir(path.dirname(out), { recursive: true });
+  const encoded = `${JSON.stringify(evidence, null, 2)}\n`;
+  await fs.writeFile(out, encoded, { encoding: 'utf8', flag: 'wx' });
+  const digest = sha256(encoded);
+  await fs.writeFile(`${out}.sha256`, `${digest}  ${path.basename(out)}\n`, { encoding: 'utf8', flag: 'wx' });
+  return digest;
 }
 
 /**
@@ -142,24 +320,63 @@ export function percentile(xs, p) {
   return s[Math.min(s.length - 1, Math.max(0, Math.ceil((p / 100) * s.length) - 1))];
 }
 
-/** The upstream copy. Fetched once, then treated as read-only for the life of the machine. */
+/** Keep missing measurements visible instead of silently filtering them out of a denominator. */
+export function sampleStats(values, expected = values.length) {
+  const numeric = values.filter((value) => typeof value === 'number' && Number.isFinite(value));
+  return {
+    expected,
+    observed: values.length,
+    numeric: numeric.length,
+    missing: values.length - numeric.length,
+    min: percentile(numeric, 0),
+    p50: percentile(numeric, 50),
+    p90: percentile(numeric, 90),
+    p99: percentile(numeric, 99),
+    max: percentile(numeric, 100),
+    mean: numeric.length ? numeric.reduce((sum, value) => sum + value, 0) / numeric.length : null,
+  };
+}
+
+/**
+ * Materialize one exact source commit. Remote repositories are never cloned from a moving HEAD:
+ * the requested 40-hex commit is fetched directly, checked out detached, and verified again.
+ */
 async function prepareCache(name, spec) {
-  const cacheDir = path.join(CACHE, name);
+  const expectedCommit = spec.local
+    ? (await sh('git', ['rev-parse', '--verify', 'HEAD^{commit}'], spec.local)).trim()
+    : spec.commit;
+  if (!/^[0-9a-f]{40}$/.test(expectedCommit ?? '')) {
+    throw new Error(`${name}: benchmark fixture requires an exact 40-hex commit, got ${expectedCommit ?? '<none>'}`);
+  }
+  const cacheDir = path.join(CACHE, `${name}-${expectedCommit}`);
   if (await exists(path.join(cacheDir, '.git'))) {
-    console.log(`  using cached clone: ${cacheDir}`);
-    return cacheDir;
+    const actual = (await sh('git', ['rev-parse', '--verify', 'HEAD^{commit}'], cacheDir)).trim();
+    if (actual !== expectedCommit) {
+      throw new Error(`${name}: cached fixture drifted: expected ${expectedCommit}, got ${actual}`);
+    }
+    console.log(`  using exact cached clone: ${cacheDir} @ ${expectedCommit}`);
+    return { cacheDir, requestedCommit: expectedCommit, verifiedCommit: actual };
   }
   await fs.mkdir(CACHE, { recursive: true });
   if (spec.local) {
-    console.log(`  cloning local repo ${spec.local}...`);
-    await sh('git', ['clone', spec.local, cacheDir], CACHE, 300_000);
+    console.log(`  cloning local repo ${spec.local} at ${expectedCommit}...`);
+    await sh('git', ['clone', '--no-hardlinks', '--no-checkout', spec.local, cacheDir], CACHE);
+    await sh('git', ['checkout', '--detach', expectedCommit], cacheDir);
   } else {
-    console.log(`  shallow-cloning ${name} from ${spec.url}...`);
+    console.log(`  fetching ${name} at pinned commit ${expectedCommit} from ${spec.url}...`);
     const t0 = Date.now();
-    await sh('git', ['clone', '--depth', '1', spec.url, cacheDir], CACHE, 900_000);
-    console.log(`  clone took ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+    await fs.mkdir(cacheDir);
+    await sh('git', ['init', '-q', '.'], cacheDir);
+    await sh('git', ['remote', 'add', 'origin', spec.url], cacheDir);
+    await sh('git', ['fetch', '--depth', '1', 'origin', expectedCommit], cacheDir);
+    await sh('git', ['checkout', '--detach', expectedCommit], cacheDir);
+    console.log(`  exact fetch took ${((Date.now() - t0) / 1000).toFixed(1)}s`);
   }
-  return cacheDir;
+  const actual = (await sh('git', ['rev-parse', '--verify', 'HEAD^{commit}'], cacheDir)).trim();
+  if (actual !== expectedCommit) {
+    throw new Error(`${name}: fixture checkout drifted: expected ${expectedCommit}, got ${actual}`);
+  }
+  return { cacheDir, requestedCommit: expectedCommit, verifiedCommit: actual };
 }
 
 /**
@@ -174,20 +391,26 @@ async function prepareCache(name, spec) {
  *
  * `git clone --local` hardlinks the object store, so this costs a checkout and almost no disk.
  */
-async function freshWorkingCopy(cacheDir, tag) {
+async function freshWorkingCopy(cache, tag) {
   const dest = path.join(WORK, `run-${tag}`);
-  await fs.rm(dest, { recursive: true, force: true }).catch(() => {});
+  if (!inside(dest, WORK)) throw new Error(`refusing run path outside marked scratch root: ${dest}`);
+  if (await exists(dest)) throw new Error(`refusing to replace unexpected existing run path: ${dest}`);
   await fs.mkdir(WORK, { recursive: true });
-  await sh('git', ['clone', '--local', '--no-hardlinks', cacheDir, dest], WORK, 600_000);
+  await sh('git', ['clone', '--local', '--no-hardlinks', cache.cacheDir, dest], WORK);
+  const actual = (await sh('git', ['rev-parse', '--verify', 'HEAD^{commit}'], dest)).trim();
+  if (actual !== cache.verifiedCommit) {
+    throw new Error(`working copy drifted: expected ${cache.verifiedCommit}, got ${actual}`);
+  }
   // The bench commits to this copy; give it an identity that does not depend on the machine.
   await sh('git', ['config', 'user.email', 'bench@holt.invalid'], dest);
   await sh('git', ['config', 'user.name', 'holt bench'], dest);
   return dest;
 }
 
-async function createWorktrees(root, count, noise) {
-  const wtRoot = path.join(WORK, 'wt');
-  await fs.rm(wtRoot, { recursive: true, force: true }).catch(() => {});
+async function createWorktrees(root, count, noise, tag = 'current') {
+  const wtRoot = path.join(WORK, 'worktrees', tag);
+  if (!inside(wtRoot, WORK)) throw new Error(`refusing worktree path outside marked scratch root: ${wtRoot}`);
+  if (await exists(wtRoot)) throw new Error(`refusing to replace unexpected worktree path: ${wtRoot}`);
   // Prune stale worktree registrations from previous runs
   await sh('git', ['worktree', 'prune'], root).catch(() => {});
   await fs.mkdir(wtRoot, { recursive: true });
@@ -304,11 +527,12 @@ async function runPipeline(root) {
 
 async function testCommands(root) {
   const results = {};
+  const graphArtifact = path.join(WORK, 'graph-test.html');
   const commands = [
     ['status', ['status', '--json']],
     ['risk', ['risk', '--json']],
     ['collisions', ['collisions', '--json']],
-    ['graph', ['graph', '--html', path.join(WORK, 'graph-test.html')]],
+    ['graph', ['graph', '--html', graphArtifact]],
     ['clean', ['clean']],
     ['doctor', ['doctor']],
     ['stash', ['stash', '--json']],
@@ -316,16 +540,37 @@ async function testCommands(root) {
   for (const [name, cmd] of commands) {
     const t0 = Date.now();
     try {
-      const out = await new Promise((resolve, reject) => {
-        execFile('node', [HOLT_BIN, ...cmd], {
-          cwd: root, timeout: 120_000, maxBuffer: 256 * 1024 * 1024,
+      const commandOutput = await new Promise((resolve, reject) => {
+        execFile(process.execPath, [HOLT_BIN, ...cmd], {
+          cwd: root, maxBuffer: 256 * 1024 * 1024,
           env: { ...process.env, HOME: os.homedir() },
         }, (err, stdout, stderr) => { if (err) reject({ err, stderr, stdout }); else resolve({ stdout, stderr }); });
       });
-      results[name] = { ok: true, ms: Date.now() - t0, stdoutLen: out.stdout.length, stderrLen: out.stderr.length, stderr: out.stderr.slice(0, 500) };
-      if (cmd.includes('--json')) { try { JSON.parse(out.stdout); results[name].validJson = true; } catch { results[name].validJson = false; results[name].error = 'invalid JSON'; } }
+      results[name] = {
+        ok: true, ms: Date.now() - t0,
+        stdoutLen: commandOutput.stdout.length, stderrLen: commandOutput.stderr.length,
+        stdout: commandOutput.stdout, stderr: commandOutput.stderr,
+      };
+      if (cmd.includes('--json')) {
+        try {
+          const parsed = JSON.parse(commandOutput.stdout);
+          results[name].validJson = true;
+          results[name].jsonTopLevelType = Array.isArray(parsed) ? 'array' : typeof parsed;
+        } catch {
+          results[name].validJson = false;
+          results[name].error = 'invalid JSON';
+        }
+      }
+      if (name === 'graph') {
+        const html = await fs.readFile(graphArtifact, 'utf8');
+        if (!/<html[\s>]/i.test(html)) throw new Error('graph command exited zero but produced no HTML document');
+        results[name].artifact = { path: graphArtifact, bytes: Buffer.byteLength(html), sha256: sha256(html) };
+      }
     } catch (e) {
-      results[name] = { ok: false, ms: Date.now() - t0, error: e.err?.message || e.message, stderr: (e.stderr || '').slice(0, 500), exitCode: e.err?.code };
+      results[name] = {
+        ok: false, ms: Date.now() - t0, error: e.err?.message || e.message,
+        stdout: String(e.stdout ?? ''), stderr: String(e.stderr ?? ''), exitCode: e.err?.code,
+      };
     }
   }
   return results;
@@ -349,12 +594,17 @@ async function testCommands(root) {
  */
 export function verifyCorrectness(report, planted) {
   const errors = [], warnings = [];
+  const observations = [];
   const rows = report?.safe ?? [];
   const find = (id) => rows.find((x) => x.id === id || x.id?.endsWith(id));
 
   // ANTI-VACUITY, FIRST: if holt reported on nothing, say so once and loudly rather than
   // reporting four categories of silence as four categories of correctness.
-  const planted_all = [...planted.atRisk, ...planted.hold, ...planted.disposable, ...planted.gitignored];
+  const protectedBuckets = ['atRisk', 'hold', 'gitignored', 'binary', 'huge'];
+  const planted_all = [
+    ...protectedBuckets.flatMap((bucket) => planted[bucket] ?? []),
+    ...(planted.disposable ?? []),
+  ];
   const missing = planted_all.filter((id) => !find(id));
   if (missing.length) {
     errors.push(
@@ -362,14 +612,20 @@ export function verifyCorrectness(report, planted) {
       + `(e.g. ${missing.slice(0, 3).join(', ')}) — an ungraded workstream is not a correct one`);
   }
 
-  const graded = { atRisk: 0, hold: 0, disposable: 0, gitignored: 0 };
+  const graded = Object.fromEntries([...protectedBuckets, 'disposable'].map((bucket) => [bucket, 0]));
   for (const [bucket, why] of [
     ['atRisk', 'has uncommitted-only content'],
     ['hold', 'has committed-ahead content'],
     ['gitignored', 'has gitignored-only content'],
+    ['binary', 'has uncommitted binary content'],
+    ['huge', 'has uncommitted large-file content'],
   ]) {
-    for (const id of planted[bucket]) {
+    for (const id of planted[bucket] ?? []) {
       const s = find(id);
+      observations.push({
+        id, expected: bucket, found: !!s, observedSafe: s ? !!s.safe : null,
+        reasons: s?.reasons ?? [],
+      });
       if (!s) continue;                    // already counted in `missing` above
       graded[bucket]++;
       if (s.safe) errors.push(`${bucket} ${id}: called SAFE but ${why}`);
@@ -377,169 +633,371 @@ export function verifyCorrectness(report, planted) {
   }
 
   let disposableRight = 0;
-  for (const id of planted.disposable) {
+  for (const id of planted.disposable ?? []) {
     const s = find(id);
+    observations.push({
+      id, expected: 'disposable', found: !!s, observedSafe: s ? !!s.safe : null,
+      reasons: s?.reasons ?? [],
+    });
     if (!s) continue;
     graded.disposable++;
     if (s.safe) disposableRight++;
-    else warnings.push(`disposable ${id}: not called safe (${(s.reasons ?? []).join('; ') || 'no reason given'})`);
+    else errors.push(`disposable ${id}: not called safe (${(s.reasons ?? []).join('; ') || 'no reason given'})`);
   }
 
   return {
     errors,
     warnings,
+    observations,
     disposableRight,
     // Denominators over what was actually GRADED, so a rate can never be inflated by workstreams
     // that were never seen. `plantedTotal` is kept beside it so the gap is visible rather than
     // divided away.
     disposableTotal: graded.disposable,
-    disposablePlanted: planted.disposable.length,
+    disposablePlanted: planted.disposable?.length ?? 0,
     graded,
     plantedTotal: planted_all.length,
     gradedTotal: Object.values(graded).reduce((a, b) => a + b, 0),
   };
 }
 
+async function removeRunFixture(root, wtRoot) {
+  if (KEEP) return;
+  if (wtRoot) {
+    if (!inside(wtRoot, WORK)) throw new Error(`refusing cleanup outside marked scratch root: ${wtRoot}`);
+    await fs.rm(wtRoot, { recursive: true, force: true });
+  }
+  if (root) {
+    if (!inside(root, WORK)) throw new Error(`refusing cleanup outside marked scratch root: ${root}`);
+    await sh('git', ['worktree', 'prune'], root).catch(() => {});
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
 async function benchmarkRepo(name, spec) {
   console.log(`\n${'═'.repeat(70)}\n  REPO: ${name} — ${spec.desc}\n  worktrees: ${worktreeCount}, noise: ${noiseLevel}\n${'═'.repeat(70)}\n`);
   const issues = [];
-  console.log('  [1/5] Preparing repository...');
+  const samples = [];
+  console.log('  [1/5] Preparing exact repository revision...');
   let cache;
   try { cache = await prepareCache(name, spec); }
-  catch (e) { return { name, ok: false, error: `prepare: ${e.message}`, issues }; }
-
-  // A WARMUP RUN, DISCARDED, THEN `runs` MEASURED ONES. The first pass over a freshly cloned tree
-  // pays for a cold page cache on every object git touches; publishing that as the figure a user
-  // will see is not honest, and publishing only the warm figure is not honest either — so the
-  // cold number is reported separately rather than averaged in.
-  const samples = [];
-  let lastVerify = null, lastPipe = null, lastRoot = null, fileCount = null, coldTotal = null;
-
-  for (let attempt = 0; attempt < runs + 1; attempt++) {
-    const warmup = attempt === 0;
-    const root = await freshWorkingCopy(cache, `${name}-${attempt}`);
-    lastRoot = root;
-    if (fileCount === null) {
-      try { fileCount = (await sh('git', ['ls-files', '--', '.'], root)).split('\n').filter(Boolean).length; } catch {}
-      console.log(`  tracked files: ${fileCount}`);
-    }
-    if (warmup) console.log('  [2/5] Creating messy worktrees (warmup run, discarded)...');
-    else if (attempt === 1) console.log('  [2/5] Creating messy worktrees...');
-
-    const t0 = Date.now();
-    let wtInfo;
-    try { wtInfo = await createWorktrees(root, worktreeCount, noiseLevel); }
-    catch (e) { return { name, ok: false, error: `worktrees: ${e.message}`, issues }; }
-    if (attempt <= 1) console.log(`  created in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
-
-    // THE FIXTURE'S OWN FAILURES ARE REPORTED AS THE FIXTURE'S, not as the product's. A planting
-    // failure used to be swallowed and the case counted anyway, so the grader then held holt to
-    // the standard of a case that did not exist.
-    for (const f of wtInfo.failures ?? []) {
-      console.log(`  ⚠ FIXTURE: ${f}`);
-      issues.push({ phase: 'fixture', severity: 'high', msg: f });
-    }
-
-    if (attempt === 1) console.log('  [3/5] Running holt pipeline...');
-    const pipe = await runPipeline(root);
-    if (warmup) {
-      coldTotal = pipe.total ?? null;
-      await fs.rm(root, { recursive: true, force: true }).catch(() => {});
-      continue;
-    }
-    lastVerify = verifyCorrectness(pipe.report, wtInfo.planted);
-    lastPipe = pipe;
-    // DROP THE REPORT BEFORE KEEPING THE SAMPLE. Retaining one full report per run is exactly the
-    // memory this harness used to attribute to holt: with three runs plus a warmup it held four
-    // complete analyses of the repository alive while sampling RSS and calling the total holt's.
-    samples.push({ total: pipe.total, phases: pipe.phases, mem: pipe.mem });
-    if (attempt < runs) await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+  catch (error) {
+    issues.push({ phase: 'fixture-source', severity: 'critical', msg: error.message });
+    return {
+      name, ok: false, error: `prepare: ${error.message}`, issues, samples,
+      fixtureSource: { url: spec.url, requestedCommit: spec.commit ?? null, verifiedCommit: null },
+      denominators: { expectedWarmups: warmups, observedWarmups: 0, expectedMeasured: runs, observedMeasured: 0 },
+    };
   }
 
-  const root = lastRoot;
-  const pipe = lastPipe ?? { phases: {}, errors: ['no measured run completed'] };
-  const wtInfo = { wtRoot: path.join(WORK, 'wt'), planted: { atRisk: [], hold: [], disposable: [], gitignored: [] } };
-  const totals = samples.map((s) => s.total).filter((x) => typeof x === 'number');
-  const scans = samples.map((s) => s.phases?.scan).filter((x) => typeof x === 'number');
-  const rssAbs = samples.map((s) => s.mem?.peakMB).filter((x) => typeof x === 'number');
-  const rssOwn = samples.map((s) => s.mem?.pipelineMB).filter((x) => typeof x === 'number');
+  let lastRoot = null; let lastWtRoot = null; let fileCount = null;
+  const totalAttempts = warmups + runs;
+  for (let attempt = 0; attempt < totalAttempts; attempt++) {
+    const warmup = attempt < warmups;
+    let root = null; let wtInfo = null;
+    const sample = {
+      index: attempt,
+      warmup,
+      fixture: {
+        requestedCommit: cache.requestedCommit,
+        verifiedCommit: cache.verifiedCommit,
+        worktreesRequested: worktreeCount,
+        noiseLevel,
+        createMs: null,
+        planted: null,
+        failures: [],
+      },
+      pipeline: null,
+      correctness: null,
+      valid: false,
+      fatalError: null,
+    };
+    try {
+      root = await freshWorkingCopy(cache, `${name}-${attempt}`);
+      lastRoot = root;
+      if (fileCount === null) {
+        fileCount = (await sh('git', ['ls-files', '--', '.'], root)).split('\n').filter(Boolean).length;
+        console.log(`  tracked files: ${fileCount}`);
+      }
+      if (attempt === 0) console.log(`  [2/5] Creating fixtures (${warmups} warmup, ${runs} measured; none discarded)...`);
+      const t0 = Date.now();
+      wtInfo = await createWorktrees(root, worktreeCount, noiseLevel, `${name}-${attempt}`);
+      lastWtRoot = wtInfo.wtRoot;
+      sample.fixture.createMs = Date.now() - t0;
+      sample.fixture.planted = wtInfo.planted;
+      sample.fixture.failures = wtInfo.failures ?? [];
+      for (const failure of sample.fixture.failures) {
+        issues.push({ sample: attempt, warmup, phase: 'fixture', severity: 'critical', msg: failure });
+      }
+
+      if (attempt === 0) console.log('  [3/5] Running holt pipeline and grading every planted case...');
+      const pipe = await runPipeline(root);
+      const verify = verifyCorrectness(pipe.report, wtInfo.planted);
+      const { report: _report, ...rawPipeline } = pipe;
+      sample.pipeline = rawPipeline;
+      sample.correctness = verify;
+      for (const error of pipe.errors ?? []) {
+        issues.push({ sample: attempt, warmup, phase: 'pipeline', severity: 'critical', msg: error });
+      }
+      if ((pipe.skippedCount ?? 0) > 0) {
+        issues.push({
+          sample: attempt, warmup, phase: 'pipeline', severity: 'critical',
+          msg: `${pipe.skippedCount} workstream(s) skipped — a partial scan is not benchmark evidence`,
+        });
+      }
+      for (const error of verify.errors) {
+        issues.push({ sample: attempt, warmup, phase: 'correctness', severity: 'critical', msg: error });
+      }
+      for (const warning of verify.warnings) {
+        issues.push({ sample: attempt, warmup, phase: 'correctness', severity: 'critical', msg: warning });
+      }
+      sample.valid = sample.fixture.failures.length === 0
+        && (pipe.errors?.length ?? 0) === 0
+        && (pipe.skippedCount ?? 0) === 0
+        && verify.errors.length === 0
+        && verify.warnings.length === 0
+        && verify.gradedTotal === verify.plantedTotal;
+    } catch (error) {
+      sample.fatalError = { message: error?.message ?? String(error), stack: error?.stack ?? null };
+      issues.push({ sample: attempt, warmup, phase: 'harness', severity: 'critical', msg: sample.fatalError.message });
+    }
+    samples.push(sample);
+
+    if (attempt < totalAttempts - 1) {
+      try {
+        await removeRunFixture(root, wtInfo?.wtRoot);
+        if (!KEEP) { lastRoot = null; lastWtRoot = null; }
+      } catch (error) {
+        sample.valid = false;
+        issues.push({
+          sample: attempt, warmup, phase: 'fixture-cleanup', severity: 'critical',
+          msg: error?.message ?? String(error),
+        });
+      }
+    }
+  }
+
+  const measured = samples.filter((sample) => !sample.warmup);
+  const warmupSamples = samples.filter((sample) => sample.warmup);
+  const value = (sample, selector) => selector(sample);
   const dist = {
-    runs: samples.length,
-    coldTotal,
-    totalP50: percentile(totals, 50), totalP90: percentile(totals, 90),
-    totalMin: percentile(totals, 0), totalMax: percentile(totals, 100),
-    scanP50: percentile(scans, 50), scanP90: percentile(scans, 90),
-    rssP50: percentile(rssAbs, 50), rssMax: percentile(rssAbs, 100),
-    ownRssP50: percentile(rssOwn, 50), ownRssMax: percentile(rssOwn, 100),
-    samples: totals,
+    warmupTotalMs: sampleStats(warmupSamples.map((sample) => value(sample, (s) => s.pipeline?.total)), warmups),
+    totalMs: sampleStats(measured.map((sample) => value(sample, (s) => s.pipeline?.total)), runs),
+    discoverMs: sampleStats(measured.map((sample) => value(sample, (s) => s.pipeline?.phases?.discover)), runs),
+    scanMs: sampleStats(measured.map((sample) => value(sample, (s) => s.pipeline?.phases?.scan)), runs),
+    analyzeMs: sampleStats(measured.map((sample) => value(sample, (s) => s.pipeline?.phases?.analyze)), runs),
+    pipelineRssMB: sampleStats(measured.map((sample) => value(sample, (s) => s.pipeline?.mem?.pipelineMB)), runs),
+    processRssMB: sampleStats(measured.map((sample) => value(sample, (s) => s.pipeline?.mem?.peakMB)), runs),
+  };
+  const denominators = {
+    expectedWarmups: warmups,
+    observedWarmups: warmupSamples.length,
+    validWarmups: warmupSamples.filter((sample) => sample.valid).length,
+    expectedMeasured: runs,
+    observedMeasured: measured.length,
+    validMeasured: measured.filter((sample) => sample.valid).length,
+    planted: samples.reduce((sum, sample) => sum + (sample.correctness?.plantedTotal ?? 0), 0),
+    graded: samples.reduce((sum, sample) => sum + (sample.correctness?.gradedTotal ?? 0), 0),
+    correctnessFailures: issues.filter((issue) => issue.severity === 'critical').length,
   };
 
-  for (const e of pipe.errors) { console.log(`  ✗ PIPELINE: ${e}`); issues.push({ phase: 'pipeline', severity: 'critical', msg: e }); }
-  console.log(`  cold(discarded): ${coldTotal ?? '?'}ms | warm total p50 ${dist.totalP50 ?? '?'}ms p90 ${dist.totalP90 ?? '?'}ms (n=${dist.runs}, ${JSON.stringify(totals)})`);
-  console.log(`  scan p50 ${dist.scanP50 ?? '?'}ms p90 ${dist.scanP90 ?? '?'}ms`);
-  console.log(`  memory: holt's pipeline p50 ${dist.ownRssP50 ?? '?'}MB max ${dist.ownRssMax ?? '?'}MB `
-    + `(bench process absolute p50 ${dist.rssP50 ?? '?'}MB — includes the harness's own fixtures and reports)`);
-  console.log(`  verdicts: ${pipe.safeCount} safe, ${pipe.atRiskCount} at-risk, ${pipe.skippedCount} skipped, ${pipe.workstreamCount} workstreams discovered`);
-  console.log('  [4/5] Verifying correctness...');
-  const verify = lastVerify ?? { errors: ['no measured run completed'], warnings: [], disposableRight: 0, disposableTotal: 0, gradedTotal: 0, plantedTotal: 0 };
-  console.log(`  graded ${verify.gradedTotal}/${verify.plantedTotal} planted workstream(s)`);
-  for (const e of verify.errors) { console.log(`  ✗ ${e}`); issues.push({ phase: 'correctness', severity: 'critical', msg: e }); }
-  for (const w of verify.warnings) { console.log(`  ⚠ ${w}`); issues.push({ phase: 'correctness', severity: 'medium', msg: w }); }
-  console.log(`  disposable: ${verify.disposableRight}/${verify.disposableTotal} correct`);
-  console.log('  [5/5] Testing commands...');
-  const cmds = await testCommands(root);
-  for (const [name, r] of Object.entries(cmds)) {
-    if (!r.ok) { console.log(`  ✗ holt ${name}: ${r.error}`); issues.push({ phase: 'command', severity: 'critical', cmd: name, msg: r.error }); }
-    else if (r.validJson === false) { console.log(`  ✗ holt ${name}: invalid JSON`); issues.push({ phase: 'command', severity: 'high', cmd: name, msg: 'invalid JSON' }); }
-    // Writing to stderr is not a defect. holt deliberately puts advisory text there so that
-    // `holt status --json | jq` stays clean, and flagging it as an issue trained the reader to
-    // scroll past a list of non-problems — which is how the real ones got missed.
-    else { console.log(`  ✓ holt ${name}: ${r.ms}ms${r.validJson ? ', valid JSON' : ''}${r.stderrLen ? `, ${r.stderrLen}b stderr` : ''}`); }
+  console.log(`  warmup total samples ${JSON.stringify(warmupSamples.map((sample) => sample.pipeline?.total ?? null))}`);
+  console.log(`  measured total p50 ${dist.totalMs.p50 ?? '?'}ms p90 ${dist.totalMs.p90 ?? '?'}ms `
+    + `(n=${dist.totalMs.numeric}/${runs}, ${JSON.stringify(measured.map((sample) => sample.pipeline?.total ?? null))})`);
+  console.log(`  scan p50 ${dist.scanMs.p50 ?? '?'}ms p90 ${dist.scanMs.p90 ?? '?'}ms`);
+  console.log(`  memory: pipeline p50 ${dist.pipelineRssMB.p50 ?? '?'}MB; process p50 ${dist.processRssMB.p50 ?? '?'}MB`);
+  console.log(`  graded ${denominators.graded}/${denominators.planted} planted verdicts across every raw sample`);
+
+  console.log('  [4/5] Correctness failures are retained beside their samples...');
+  for (const issue of issues) console.log(`  ✗ [sample ${issue.sample ?? '-'}] ${issue.phase}: ${issue.msg}`);
+
+  console.log('  [5/5] Testing commands on the final measured fixture...');
+  let commands;
+  if (lastRoot) {
+    commands = await testCommands(lastRoot);
+    for (const [commandName, result] of Object.entries(commands)) {
+      if (!result.ok) {
+        issues.push({ phase: 'command', severity: 'critical', cmd: commandName, msg: result.error });
+        console.log(`  ✗ holt ${commandName}: ${result.error}`);
+      } else if (result.validJson === false) {
+        issues.push({ phase: 'command', severity: 'critical', cmd: commandName, msg: 'invalid JSON' });
+        console.log(`  ✗ holt ${commandName}: invalid JSON`);
+      } else {
+        console.log(`  ✓ holt ${commandName}: ${result.ms}ms${result.validJson ? ', valid JSON' : ''}`);
+      }
+    }
+  } else {
+    commands = { skipped: true, reason: 'no final measured fixture survived' };
+    issues.push({ phase: 'command', severity: 'critical', msg: commands.reason });
   }
-  try { await sh('git', ['worktree', 'prune'], root); await fs.rm(wtInfo.wtRoot, { recursive: true, force: true }).catch(() => {}); } catch {}
-  await fs.rm(root, { recursive: true, force: true }).catch(() => {});
-  return { name, ok: issues.filter((i) => i.severity === 'critical').length === 0, issues,
+
+  try {
+    await removeRunFixture(lastRoot, lastWtRoot);
+  } catch (error) {
+    issues.push({ phase: 'fixture-cleanup', severity: 'critical', msg: error?.message ?? String(error) });
+  }
+  denominators.correctnessFailures = issues.filter((issue) => issue.severity === 'critical').length;
+  const ok = issues.every((issue) => issue.severity !== 'critical')
+    && denominators.observedWarmups === warmups
+    && denominators.validWarmups === warmups
+    && denominators.observedMeasured === runs
+    && denominators.validMeasured === runs
+    && denominators.graded === denominators.planted;
+  const lastMeasured = measured.at(-1);
+  const verify = lastMeasured?.correctness ?? {};
+  const pipe = lastMeasured?.pipeline ?? { phases: {} };
+  return {
+    name,
+    ok,
+    fixtureSource: { url: spec.url, ...cache },
+    issues,
     trackedFiles: fileCount,
+    protocol: { warmups, measuredRuns: runs, worktrees: worktreeCount, noiseLevel },
+    denominators,
+    samples,
+    commands,
     dist,
-    metrics: { total: dist.totalP50, totalP90: dist.totalP90, coldTotal, discover: pipe.phases.discover, scan: dist.scanP50, scanP90: dist.scanP90, analyze: pipe.phases.analyze, peakRSS: dist.ownRssP50, peakRSSMax: dist.ownRssMax, processRSS: dist.rssP50, workstreams: pipe.workstreamCount, collisions: pipe.collisions, duplicates: pipe.duplicates, safe: pipe.safeCount, atRisk: pipe.atRiskCount, skipped: pipe.skippedCount, disposableRight: verify.disposableRight, disposableTotal: verify.disposableTotal, graded: verify.gradedTotal, planted: verify.plantedTotal } };
+    metrics: {
+      total: dist.totalMs.p50, totalP90: dist.totalMs.p90,
+      warmupTotal: dist.warmupTotalMs.p50,
+      discover: dist.discoverMs.p50, scan: dist.scanMs.p50, scanP90: dist.scanMs.p90,
+      analyze: dist.analyzeMs.p50,
+      peakRSS: dist.pipelineRssMB.p50, peakRSSMax: dist.pipelineRssMB.max,
+      processRSS: dist.processRssMB.p50,
+      workstreams: pipe.workstreamCount, collisions: pipe.collisions, duplicates: pipe.duplicates,
+      safe: pipe.safeCount, atRisk: pipe.atRiskCount, skipped: pipe.skippedCount,
+      disposableRight: verify.disposableRight, disposableTotal: verify.disposableTotal,
+      graded: verify.gradedTotal, planted: verify.plantedTotal,
+    },
+  };
 }
 
 async function main() {
+  if (listOnly) {
+    console.log('Available repos:', Object.entries(REPOS)
+      .map(([name, spec]) => `${name}${spec.commit ? `@${spec.commit}` : '@local-HEAD'}`).join(', '));
+    return;
+  }
+  if (!Number.isInteger(worktreeCount) || worktreeCount < 1) throw new Error('--worktrees must be an integer >= 1');
+  if (!Number.isInteger(noiseLevel) || noiseLevel < 0 || noiseLevel > 2) throw new Error('--noise-level must be 0, 1, or 2');
+  if (!Number.isInteger(runs) || runs < 2) {
+    throw new Error('--runs must be an integer >= 2; a single-sample enterprise summary is not evidence');
+  }
+  if (!Number.isInteger(warmups) || warmups < 1) throw new Error('--warmups must be an integer >= 1');
+
+  await assertFreshEvidencePath(OUT);
+  await prepareEnterpriseScratch(WORK, OUT);
+  let artifactWritten = false;
+  const targets = repoName === 'all' ? Object.entries(REPOS) : [[repoName, REPOS[repoName]]];
+  const evidence = {
+    schemaVersion: 1,
+    benchmark: 'holt-enterprise-real-repositories',
+    generatedAt: new Date().toISOString(),
+    command: { executable: process.execPath, argv: [fileURLToPath(import.meta.url), ...args], cwd: process.cwd() },
+    protocol: {
+      requestedRepositories: targets.map(([name]) => name),
+      measuredRunsPerRepository: runs,
+      warmupsPerRepository: warmups,
+      worktreesPerRun: worktreeCount,
+      noiseLevel,
+    },
+    source: { before: await sourceState(), after: null, stable: false },
+    runtime: await runtimeMetadata(),
+    repositories: [],
+    correctnessFailures: [],
+    summary: null,
+    fatalError: null,
+    valid: false,
+  };
+
   console.log('╔════════════════════════════════════════════════════════════════════╗');
   console.log('║  holt enterprise benchmark — real repos, real mess, real scale    ║');
   console.log('╚════════════════════════════════════════════════════════════════════╝');
   console.log(`  date: ${new Date().toISOString()}`);
   console.log(`  platform: ${process.platform} ${process.arch}, Node ${process.version}`);
-  const repos = repoName === 'all' ? Object.entries(REPOS) : [[repoName, REPOS[repoName]]];
-  const allResults = [];
-  for (const [name, spec] of repos) {
-    if (!spec) { console.log(`  unknown repo: ${name}`); continue; }
-    try { allResults.push(await benchmarkRepo(name, spec)); }
-    catch (e) { console.log(`  FATAL: ${e.message}`); allResults.push({ name, ok: false, error: e.message, issues: [] }); }
+  for (const [name, spec] of targets) {
+    if (!spec) {
+      const failure = { phase: 'configuration', severity: 'critical', msg: `unknown repo: ${name}` };
+      evidence.repositories.push({ name, ok: false, issues: [failure], samples: [], denominators: {
+        expectedWarmups: warmups, observedWarmups: 0, expectedMeasured: runs, observedMeasured: 0,
+      } });
+      continue;
+    }
+    try {
+      evidence.repositories.push(await benchmarkRepo(name, spec));
+    } catch (error) {
+      console.log(`  FATAL: ${error.message}`);
+      evidence.repositories.push({
+        name, ok: false, error: error.message,
+        issues: [{ phase: 'harness', severity: 'critical', msg: error.message }],
+        samples: [],
+        denominators: { expectedWarmups: warmups, observedWarmups: 0, expectedMeasured: runs, observedMeasured: 0 },
+      });
+    }
   }
   console.log(`\n${'═'.repeat(70)}\n  SUMMARY\n${'═'.repeat(70)}\n`);
-  console.log('  | repo | files | wt | total p50 | p90 | cold | scan p50 | holt RSS p50 | proc RSS | graded | disposable | issues |');
+  console.log('  | repo | files | wt | total p50 | p90 | warmup p50 | scan p50 | holt RSS p50 | proc RSS | graded | disposable | issues |');
   console.log('  |---|---|---|---|---|---|---|---|---|---|---|---|');
-  for (const r of allResults) {
+  for (const r of evidence.repositories) {
     const m = r.metrics || {};
     const crit = r.issues?.filter((i) => i.severity === 'critical').length ?? 0;
     console.log(
       `  | ${r.name} | ${r.trackedFiles ?? '?'} | ${m.workstreams ?? '?'} | ${m.total ?? '?'}ms | ${m.totalP90 ?? '?'}ms `
-      + `| ${m.coldTotal ?? '?'}ms | ${m.scan ?? '?'}ms | ${m.peakRSS ?? '?'}MB | ${m.processRSS ?? '?'}MB `
+      + `| ${m.warmupTotal ?? '?'}ms | ${m.scan ?? '?'}ms | ${m.peakRSS ?? '?'}MB | ${m.processRSS ?? '?'}MB `
       + `| ${m.graded ?? '?'}/${m.planted ?? '?'} | ${m.disposableRight ?? '?'}/${m.disposableTotal ?? '?'} `
       + `| ${crit}c, ${r.issues?.length ?? 0}t |`);
   }
-  const allIssues = allResults.flatMap((r) => r.issues?.map((i) => ({ ...i, repo: r.name })) ?? []);
+  evidence.source.after = await sourceState().catch((error) => ({ error: error?.message ?? String(error) }));
+  evidence.source.stable = evidence.source.before.commit === evidence.source.after?.commit
+    && evidence.source.before.dirtyStateSha256 === evidence.source.after?.dirtyStateSha256;
+  const allIssues = evidence.repositories.flatMap((result) => result.issues?.map((issue) => ({
+    ...issue, repo: result.name,
+  })) ?? []);
+  if (!evidence.source.stable) {
+    allIssues.push({
+      repo: 'holt-source', phase: 'source', severity: 'critical',
+      msg: 'source commit or dirty-state hash changed while the benchmark ran',
+    });
+  }
+  evidence.correctnessFailures = allIssues.filter((issue) => issue.severity === 'critical');
+  evidence.summary = {
+    expectedRepositories: targets.length,
+    observedRepositories: evidence.repositories.length,
+    validRepositories: evidence.repositories.filter((result) => result.ok).length,
+    expectedWarmups: targets.length * warmups,
+    observedWarmups: evidence.repositories.reduce((sum, result) => sum + (result.denominators?.observedWarmups ?? 0), 0),
+    expectedMeasuredRuns: targets.length * runs,
+    observedMeasuredRuns: evidence.repositories.reduce((sum, result) => sum + (result.denominators?.observedMeasured ?? 0), 0),
+    plantedVerdicts: evidence.repositories.reduce((sum, result) => sum + (result.denominators?.planted ?? 0), 0),
+    gradedVerdicts: evidence.repositories.reduce((sum, result) => sum + (result.denominators?.graded ?? 0), 0),
+    correctnessFailures: evidence.correctnessFailures.length,
+  };
   if (allIssues.length) { console.log(`\n  ISSUES (${allIssues.length}):`); for (const i of allIssues) console.log(`  [${i.severity}] ${i.repo}/${i.phase}: ${i.msg}`); }
   // "NO ISSUES FOUND" IS A CLAIM ABOUT SOMETHING THAT WAS GRADED. Printing it for a run in which
   // nothing was graded is the exact sentence this harness produced against thirty missing
   // worktrees, and it is what put wrong numbers in BENCHMARKS.md.
-  else if (allResults.every((r) => (r.metrics?.graded ?? 0) > 0)) console.log('\n  ✓ NO ISSUES FOUND');
+  else if (evidence.repositories.every((r) => (r.metrics?.graded ?? 0) > 0)) console.log('\n  ✓ NO ISSUES FOUND');
   else console.log('\n  ✗ NOTHING WAS GRADED — this run measured nothing and proves nothing');
-  await fs.mkdir(WORK, { recursive: true });
-  await fs.writeFile(path.join(WORK, 'enterprise-bench-results.json'), JSON.stringify(allResults, null, 2));
-  const ungraded = allResults.some((r) => (r.metrics?.graded ?? 0) === 0);
-  process.exitCode = (allIssues.filter((i) => i.severity === 'critical').length > 0 || ungraded) ? 1 : 0;
+  evidence.runtime.loadAverageAtEnd = os.loadavg();
+  evidence.valid = evidence.source.stable
+    && evidence.repositories.length === targets.length
+    && evidence.repositories.every((result) => result.ok)
+    && evidence.summary.observedWarmups === evidence.summary.expectedWarmups
+    && evidence.summary.observedMeasuredRuns === evidence.summary.expectedMeasuredRuns
+    && evidence.summary.gradedVerdicts === evidence.summary.plantedVerdicts
+    && evidence.correctnessFailures.length === 0;
+
+  try {
+    const digest = await writeEvidence(evidence, OUT);
+    artifactWritten = true;
+    console.log(`\n  raw evidence  ${OUT}`);
+    console.log(`  sha256       ${digest}`);
+  } finally {
+    // A failed artifact write leaves the marked scratch tree intact. Deleting it at that point
+    // could erase the only surviving diagnostic state from an interrupted run.
+    if (artifactWritten) await cleanEnterpriseScratch(WORK);
+  }
+  if (!evidence.valid) process.exitCode = 1;
 }
 
 // pathToFileURL, not a raw comparison: on Windows argv[1] is a backslash path with no scheme, and

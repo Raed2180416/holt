@@ -26,10 +26,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { standardFixture, newRepo } from '../fixtures.mjs';
-import { BRIEF_REFRESH_AFTER, evictCacheFiles } from '../../src/agent.mjs';
+import { BRIEF_REFRESH_AFTER, buildBrief, evictCacheFiles } from '../../src/agent.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -40,6 +40,21 @@ function sh(cmd, args, cwd) {
       env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
     }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? -1) : 0, stdout: String(stdout ?? ''), stderr: String(stderr ?? '') }));
     child.stdin?.end();
+  });
+}
+
+function hookWithPayload(event, host, cwd, payload) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [BIN, 'hook', event, '--host', host, '--cwd', cwd], {
+      cwd,
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (data) => { stdout += data; });
+    child.stderr.on('data', (data) => { stderr += data; });
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+    child.stdin.end(JSON.stringify(payload));
   });
 }
 
@@ -88,6 +103,22 @@ test('BRIEF: a repository with nothing to report says NOTHING, not the word "nul
   }
 });
 
+test('BRIEF: redundant uncommitted holders are unsafe without falsely claiming one deletion loses the bytes',
+  async (t) => {
+    const fx = await newRepo('brief-no-durable-copy');
+    t.after(() => fx.cleanup());
+    const a = await fx.worktree('holder-a');
+    const b = await fx.worktree('holder-b');
+    await fx.write('same-only.txt', 'same uncommitted bytes\n', a);
+    await fx.write('same-only.txt', 'same uncommitted bytes\n', b);
+
+    const brief = await buildBrief(fx.root);
+    assert.match(brief ?? '', /no durable copy proven.*automatic deletion is unsafe/i,
+      `the brief must state the actual authority boundary: ${brief}`);
+    assert.doesNotMatch(brief ?? '', /deleting them loses it/i,
+      'deleting either one leaves the identical bytes in its sibling; the brief must not overclaim immediate loss');
+  });
+
 test('BRIEF: the per-prompt hook speaks once, then stays quiet until something changes', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
@@ -119,6 +150,28 @@ test('BRIEF: the per-prompt hook speaks once, then stays quiet until something c
   assert.ok(thirdCtx && thirdCtx !== firstCtx,
     'the repository changed and the brief stayed silent — suppression is hiding new information');
 });
+
+test('CODEX BRIEF: UserPromptSubmit uses additionalContext once, then emits no unchanged prompt noise',
+  async (t) => {
+    const { fx } = await standardFixture();
+    t.after(() => fx.cleanup());
+
+    const prompt = () => sh(process.execPath,
+      [BIN, 'hook', 'user-prompt-submit', '--host', 'codex', '--cwd', fx.root], fx.root);
+
+    const first = await prompt();
+    assert.equal(first.code, 0, `Codex prompt hook must succeed: ${first.stderr}`);
+    const parsed = JSON.parse(first.stdout);
+    assert.equal(parsed.hookSpecificOutput?.hookEventName, 'UserPromptSubmit');
+    assert.ok(parsed.hookSpecificOutput?.additionalContext?.includes('holt'),
+      `Codex must receive proactive sibling context in its documented field: ${first.stdout}`);
+    assert.ok(!('context' in parsed), 'Codex does not consume Holt\'s generic context envelope');
+
+    const unchanged = await prompt();
+    assert.equal(unchanged.code, 0, `unchanged Codex prompt hook must remain successful: ${unchanged.stderr}`);
+    assert.equal(unchanged.stdout.trim(), '',
+      'a repeated unchanged user prompt must not receive the same sibling briefing again');
+  });
 
 test('BRIEF: silence is bounded — an unchanged repository is re-briefed, never abandoned', async (t) => {
   const { fx } = await standardFixture();
@@ -155,82 +208,63 @@ test('BRIEF: SessionStart is never suppressed — a new session has seen nothing
 
 /* --------------------------------------------------- Stop / SessionEnd hooks ---- */
 //
-// The Stop hook closes the "biggest cadence hole": an agent creates something irreplaceable
-// and then stops, with no warning that the worktree holds the only copy.
-//
-// DESIGN: ADVISORY, NOT BLOCKING. The stop hook injects context (like session-start) ONLY
-// when the brief CHANGED during the response. If nothing changed, holt stays silent — the
-// agent already saw the brief at session start and on prompt submit, and repeating it on
-// every stop is noise that teaches the agent to skip holt's output.
+// Claude Stop has no non-blocking model-context channel. Cursor Stop does, but its documented
+// `followup_message` starts another loop rather than passively injecting context. The contract is
+// therefore host-specific and bounded: completed loop zero + changed brief, once.
 //
 // SessionEnd is advisory-only — it cannot block, but it warns on stderr.
 
-test('STOP: a clean repo produces no output (silent, non-blocking, exit 0)', async (t) => {
+test('CLAUDE STOP: a stale/manual invocation cannot relabel continuation feedback as passive context',
+  async (t) => {
+    const { fx } = await standardFixture();
+    t.after(() => fx.cleanup());
+
+    const result = await hookWithPayload('stop', 'claude-code', fx.root, {
+      cwd: fx.root, stop_hook_active: false,
+    });
+    assert.equal(result.code, 0, `retired Claude Stop must remain non-disruptive: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), '',
+      'Claude Stop context continues the conversation; a stale hook must not force that continuation');
+  });
+
+test('CURSOR STOP: a clean repo returns the documented empty response', async (t) => {
   const fx = await newRepo();
   t.after(() => fx.cleanup());
 
-  const r = await sh(process.execPath,
-    [BIN, 'hook', 'stop', '--host', 'claude-code', '--cwd', fx.root], fx.root);
-  assert.equal(r.code, 0, `stop on a clean repo must exit 0, got exit ${r.code}. stderr: ${r.stderr}`);
-  // Nothing changed → nothing to say. No context injection.
-  assert.equal(r.stdout.trim(), '', 'stop on a clean repo should produce no stdout');
-});
-
-test('STOP: at-risk work injects context (advisory, non-blocking, exit 0)', async (t) => {
-  const { fx } = await standardFixture();
-  t.after(() => fx.cleanup());
-
-  // The standard fixture has worktrees with unique work. The stop hook should inject context
-  // (advisory) — NOT block the agent from stopping.
-  const { spawn } = await import('node:child_process');
-  const result = await new Promise((resolve) => {
-    const child = spawn(process.execPath, [BIN, 'hook', 'stop', '--host', 'claude-code', '--cwd', fx.root], {
-      cwd: fx.root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
-    });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', (d) => stdout += d);
-    child.stderr.on('data', (d) => stderr += d);
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
-    child.stdin.write(JSON.stringify({ cwd: fx.root }));
-    child.stdin.end();
+  const result = await hookWithPayload('stop', 'cursor', fx.root, {
+    cwd: fx.root, status: 'completed', loop_count: 0,
   });
-
-  // Advisory: exit 0 (does not block the agent from stopping).
-  assert.equal(result.code, 0, `stop must not block (advisory), got exit ${result.code}. stderr: ${result.stderr}`);
-  // Context should be injected — the brief mentions at-risk work.
-  const ctx = contextOf(result.stdout);
-  assert.ok(ctx, 'stop should inject context when there is at-risk work');
-  assert.match(ctx, /holt/i, 'injected context should be a holt brief');
+  assert.equal(result.code, 0, `Cursor Stop must exit 0: ${result.stderr}`);
+  assert.deepEqual(JSON.parse(result.stdout), {}, 'no actionable brief means no follow-up prompt');
 });
 
-test('STOP: does not disrupt the agent on every turn (onlyIfChanged)', async (t) => {
-  const { fx } = await standardFixture();
-  t.after(() => fx.cleanup());
+test('CURSOR STOP: followup_message is completed-only, one-loop-bounded, and change-suppressed',
+  async (t) => {
+    const { fx } = await standardFixture();
+    t.after(() => fx.cleanup());
 
-  // First stop: injects context (first time seeing this state).
-  const { spawn } = await import('node:child_process');
-  const stop = () => new Promise((resolve) => {
-    const child = spawn(process.execPath, [BIN, 'hook', 'stop', '--host', 'claude-code', '--cwd', fx.root], {
-      cwd: fx.root, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C' },
-    });
-    let stdout = '', stderr = '';
-    child.stdout.on('data', (d) => stdout += d);
-    child.stderr.on('data', (d) => stderr += d);
-    child.on('close', (code) => resolve({ code, stdout, stderr }));
-    child.stdin.write(JSON.stringify({ cwd: fx.root }));
-    child.stdin.end();
+    const stop = (payload) => hookWithPayload('stop', 'cursor', fx.root, { cwd: fx.root, ...payload });
+
+    // These controls run before the eligible case. If either consumed the brief cache, the
+    // eligible call below would be silent and expose the mistake.
+    const aborted = await stop({ status: 'aborted', loop_count: 0 });
+    assert.deepEqual(JSON.parse(aborted.stdout), {}, 'aborted turns must never restart the agent');
+    const followupLoop = await stop({ status: 'completed', loop_count: 1 });
+    assert.deepEqual(JSON.parse(followupLoop.stdout), {},
+      'the Stop caused by Holt\'s own follow-up must not cause another follow-up');
+
+    const eligible = await stop({ status: 'completed', loop_count: 0 });
+    assert.equal(eligible.code, 0, `eligible Cursor Stop must succeed: ${eligible.stderr}`);
+    const body = JSON.parse(eligible.stdout);
+    assert.match(body.followup_message ?? '', /holt/i,
+      `changed at-risk state must use Cursor's documented followup_message: ${eligible.stdout}`);
+    assert.ok(!('context' in body) && !('additionalContext' in body),
+      'Cursor does not consume Claude/generic context envelopes at Stop');
+
+    const unchanged = await stop({ status: 'completed', loop_count: 0 });
+    assert.deepEqual(JSON.parse(unchanged.stdout), {},
+      'an identical brief must not restart the agent on every completed response');
   });
-
-  const first = await stop();
-  const ctx1 = contextOf(first.stdout);
-  assert.ok(ctx1, 'first stop should inject context');
-
-  // Second stop: nothing changed → silent. This is the key: holt does not repeat itself
-  // on every stop, which would teach the agent to skip its output.
-  const second = await stop();
-  const ctx2 = contextOf(second.stdout);
-  assert.equal(ctx2, null, 'second stop with no changes should be silent');
-});
 
 test('SESSION-END: at-risk work produces a warning on stderr (advisory, non-blocking)', async (t) => {
   const { fx } = await standardFixture();

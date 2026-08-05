@@ -331,7 +331,7 @@ test('BYPASS 3: a rule that is structurally incapable of firing is REFUSED, not 
     ['{"version":1,"rules":[{"id":"p","type":"protected-paths","paths":[]}]}', 'POLICY_VACUOUS'],
     ['{"version":1,"rules":[{"id":"p","type":"protected-paths","paths":["  "]}]}', 'POLICY_RULE'],
     ['{"version":1,"rules":[{"id":"n","type":"no-unlanded","exempt":["**"]}]}', 'POLICY_VACUOUS'],
-    ['{"version":1,"rules":[{"id":"n","type":"no-unlanded","exempt":["*","spike/*"]}]}', 'POLICY_VACUOUS'],
+    ['{"version":1,"rules":[{"id":"n","type":"no-unlanded","exempt":["**/*","spike/*"]}]}', 'POLICY_VACUOUS'],
   ];
   for (const [text, code] of cases) {
     assert.throws(() => parsePolicy(text, 'x'), (e) => {

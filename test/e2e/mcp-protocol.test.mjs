@@ -21,6 +21,7 @@ import { standardFixture } from '../fixtures.mjs';
 import { __test } from '../../src/mcp/server.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
+const PACKAGE_VERSION = JSON.parse(await fs.readFile(path.join(path.dirname(BIN), '..', 'package.json'), 'utf8')).version;
 
 /** Minimal stdio JSON-RPC client. Content-Length framing is NOT used by MCP stdio: it is
  *  newline-delimited JSON, one message per line. Getting this wrong is a real failure mode. */
@@ -101,6 +102,8 @@ test('MCP PROTOCOL: server initialises and identifies itself', async (t) => {
   assert.equal(init.jsonrpc, '2.0');
   assert.ok(init.result, `initialize failed: ${JSON.stringify(init.error ?? init)}`);
   assert.equal(init.result.serverInfo.name, 'holt');
+  assert.equal(init.result.serverInfo.version, PACKAGE_VERSION,
+    'MCP identity must come from the package being run, not a stale hand-written version');
   assert.ok(init.result.capabilities.tools, 'server must advertise tool capability');
 });
 
@@ -126,27 +129,28 @@ test('MCP PROTOCOL: tools/list returns the full, well-formed tool set', async (t
   // The ACTING tools must be present too. An agent that can only diagnose freezes holding the
   // right answer — measured: two trials chose `holt clean` correctly and were then blocked by
   // the host's Bash permission classifier, because MCP had no way to act.
-  for (const expected of ['holt_clean', 'holt_rescue', 'holt_protect']) {
+  for (const expected of ['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect']) {
     assert.ok(names.includes(expected), `missing acting tool ${expected}`);
   }
 
-  const MUTATING = new Set(['holt_clean', 'holt_rescue', 'holt_protect']);
-  const DESTRUCTIVE = new Set(['holt_clean']);
+  const MUTATING = new Set(['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect']);
+  const DESTRUCTIVE = new Set(['holt_purge']);
 
   for (const tool of tools) {
     assert.ok(tool.description?.length > 40, `${tool.name}: description too thin`);
     assert.equal(tool.inputSchema.type, 'object', `${tool.name}: schema must be an object`);
 
     // The annotation is a SAFETY CONTRACT: a host may auto-approve anything marked read-only.
-    // Claiming readOnlyHint on a tool that deletes worktrees would turn that convenience into a
-    // silent destruction, so each tool's annotation must match what it actually does.
+    // Claiming readOnlyHint on a tool that moves worktrees would let a host silently change local
+    // paths. Conversely, clean-quarantine retains the registered tree and branch, so labelling it
+    // destructive would misstate the permission prompt. Each annotation must match the action.
     const ro = tool.annotations?.readOnlyHint;
     const destructive = tool.annotations?.destructiveHint;
 
     if (MUTATING.has(tool.name)) {
       assert.equal(ro, false, `${tool.name} MUTATES and must not claim readOnlyHint`);
       assert.equal(destructive, DESTRUCTIVE.has(tool.name),
-        `${tool.name}: destructiveHint must reflect whether it can remove work`);
+        `${tool.name}: destructiveHint must reflect whether it can destroy work`);
     } else {
       assert.equal(ro, true, `${tool.name} is diagnostic and must be annotated read-only`);
       assert.equal(destructive, false, `${tool.name} must be non-destructive`);
@@ -236,18 +240,63 @@ test('MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over 
   const protPayload = JSON.parse(prot.result.content[0].text);
   assert.ok(protPayload.protected >= 1, `protect should lock something: ${prot.result.content[0].text.slice(0, 200)}`);
 
-  // 2. clean without apply: a DRY RUN, nothing removed.
+  // 2. clean without apply: a DRY RUN, nothing moved.
   const dry = await client.send('tools/call', { name: 'holt_clean', arguments: { repo: fx.root } });
   const dryPayload = JSON.parse(dry.result.content[0].text);
   assert.equal(dryPayload.dryRun, true, 'clean must be dry-run unless apply:true — over MCP too');
-  assert.ok(dryPayload.wouldRemove.length >= 1, 'the fixture has disposable worktrees');
+  assert.ok(dryPayload.wouldQuarantine.length >= 1, 'the fixture has disposable worktrees');
 
-  // 3. clean with apply: actually removes the disposable ones, and ONLY those.
+  // 3. clean with apply: moves disposable worktrees into locked, recoverable local quarantine.
   const applied = await client.send('tools/call', {
     name: 'holt_clean', arguments: { repo: fx.root, apply: true },
   });
   const appliedPayload = JSON.parse(applied.result.content[0].text);
-  assert.ok(appliedPayload.removed >= 1, `apply:true must actually remove: ${applied.result.content[0].text.slice(0, 300)}`);
+  assert.ok(appliedPayload.quarantined >= 1, `apply:true must quarantine: ${applied.result.content[0].text.slice(0, 500)}`);
+  assert.equal(appliedPayload.removed, 0, 'quarantine must never be reported as physical deletion');
+  assert.equal(appliedPayload.branchesRemoved, 0, 'clean retains every branch');
+  assert.equal(appliedPayload.failedCount, appliedPayload.failures.length);
+  assert.ok(appliedPayload.quarantines.every((q) => q.quarantinePath && Array.isArray(q.restoreArgv)),
+    'every moved worktree must carry its path and exact restore argv over MCP');
+
+  // 4. the recovery route is reachable through the same agent-native surface — it is not just
+  // an argv string a shell permission classifier may refuse to run.
+  const inventory = await client.send('tools/call', {
+    name: 'holt_clean', arguments: { repo: fx.root, operation: 'list' },
+  });
+  const inventoryPayload = JSON.parse(inventory.result.content[0].text);
+  assert.equal(inventoryPayload.count, appliedPayload.quarantined);
+  const recoverable = inventoryPayload.quarantines[0];
+  assert.ok(recoverable?.id && recoverable?.originalPath, JSON.stringify(inventoryPayload));
+  const purgeable = inventoryPayload.quarantines[1];
+  assert.ok(purgeable?.id && purgeable?.quarantinePath,
+    `the fixture needs a separate clean quarantine for destructive-path proof: ${JSON.stringify(inventoryPayload)}`);
+
+  // 4a. physical reclamation is separately named and remains a dry run until apply:true.
+  const purgeDry = await client.send('tools/call', {
+    name: 'holt_purge', arguments: { repo: fx.root, id: purgeable.id },
+  });
+  const purgeDryPayload = JSON.parse(purgeDry.result.content[0].text);
+  assert.equal(purgeDryPayload.dryRun, true);
+  assert.equal(purgeDryPayload.removed, 0);
+  assert.equal(purgeDryPayload.wouldRemove[0].path, purgeable.quarantinePath);
+  const purged = await client.send('tools/call', {
+    name: 'holt_purge', arguments: { repo: fx.root, id: purgeable.id, apply: true },
+  });
+  const purgedPayload = JSON.parse(purged.result.content[0].text);
+  assert.equal(purgedPayload.ok, true, purged.result.content[0].text);
+  assert.equal(purgedPayload.purged, true);
+  assert.equal(purgedPayload.removed, 1);
+  assert.equal(purgedPayload.branchesRemoved, 0);
+  assert.match(purgedPayload.recoveryRef, /^refs\/holt\/purge\//);
+
+  // 4b. the other quarantine remains recoverable through the agent-native route.
+  const restored = await client.send('tools/call', {
+    name: 'holt_clean', arguments: { repo: fx.root, operation: 'restore', id: recoverable.id },
+  });
+  const restoredPayload = JSON.parse(restored.result.content[0].text);
+  assert.equal(restoredPayload.ok, true, restored.result.content[0].text);
+  assert.equal(restoredPayload.restored, true);
+  assert.equal(restoredPayload.originalPath, recoverable.originalPath);
 
   // The valuable workstream must have survived the applied clean.
   const check = await client.send('tools/call', {
@@ -256,7 +305,7 @@ test('MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over 
   const checkPayload = JSON.parse(check.result.content[0].text);
   assert.equal(checkPayload.safeToDelete, false, 'the work-holding worktree must survive holt_clean');
 
-  // 4. rescue --release: capture the survivor's work, verified, then unlock it.
+  // 5. rescue --release: capture the survivor's work, verified, then unlock it.
   const resc = await client.send('tools/call', {
     name: 'holt_rescue', arguments: { repo: fx.root, id: 'uniqueUncommitted', release: true },
   });

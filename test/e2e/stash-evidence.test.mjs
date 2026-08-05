@@ -24,7 +24,7 @@
  * is reachable from a ref holds nothing unique, and dropping it must go back to a silent allow.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -47,6 +47,73 @@ const gitIn = (args, cwd) => new Promise((res) => {
     },
   }, (e, so, se) => res({ code: e?.code ?? 0, out: String(so ?? ''), err: String(se ?? '') }));
 });
+
+async function withGitSubcommandFailure(t, subcommand, run) {
+  const resolver = process.platform === 'win32' ? 'where' : 'which';
+  const realGit = execFileSync(resolver, ['git'], { encoding: 'utf8' })
+    .split(/\r?\n/).find(Boolean);
+  assert.ok(realGit, 'premise: real git must be resolvable before interposition');
+  const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-stash-git-shim-'));
+  const shimScript = path.join(shimDir, 'git-wrapper.mjs');
+  await fs.writeFile(shimScript, `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+const args = process.argv.slice(2);
+if (args[0] === ${JSON.stringify(subcommand)}) {
+  process.stderr.write('planted ${subcommand} failure\\n');
+  process.exit(73);
+}
+const r = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit', env: process.env });
+process.exit(r.status ?? 74);
+`);
+  if (process.platform === 'win32') {
+    await fs.writeFile(path.join(shimDir, 'git.cmd'),
+      `@echo off\r\n"${process.execPath}" "${shimScript}" %*\r\n`);
+  } else {
+    await fs.chmod(shimScript, 0o755);
+    await fs.symlink('git-wrapper.mjs', path.join(shimDir, 'git'));
+  }
+  t.after(() => fs.rm(shimDir, { recursive: true, force: true }));
+
+  const prior = process.env.PATH;
+  process.env.PATH = `${shimDir}${path.delimiter}${prior ?? ''}`;
+  try { return await run(); } finally {
+    if (prior === undefined) delete process.env.PATH;
+    else process.env.PATH = prior;
+  }
+}
+
+async function withGitCommandLog(t, run) {
+  const resolver = process.platform === 'win32' ? 'where' : 'which';
+  const realGit = execFileSync(resolver, ['git'], { encoding: 'utf8' })
+    .split(/\r?\n/).find(Boolean);
+  assert.ok(realGit, 'premise: real git must be resolvable before interposition');
+  const shimDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-stash-git-log-'));
+  const logPath = path.join(shimDir, 'commands.jsonl');
+  const shimScript = path.join(shimDir, 'git-wrapper.mjs');
+  await fs.writeFile(shimScript, `#!/usr/bin/env node
+import fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + '\\n');
+const r = spawnSync(${JSON.stringify(realGit)}, args, { stdio: 'inherit', env: process.env });
+process.exit(r.status ?? 74);
+`);
+  if (process.platform === 'win32') {
+    await fs.writeFile(path.join(shimDir, 'git.cmd'),
+      `@echo off\r\n"${process.execPath}" "${shimScript}" %*\r\n`);
+  } else {
+    await fs.chmod(shimScript, 0o755);
+    await fs.symlink('git-wrapper.mjs', path.join(shimDir, 'git'));
+  }
+  t.after(() => fs.rm(shimDir, { recursive: true, force: true }));
+
+  const prior = process.env.PATH;
+  process.env.PATH = `${shimDir}${path.delimiter}${prior ?? ''}`;
+  try { return await run(logPath); } finally {
+    if (prior === undefined) delete process.env.PATH;
+    else process.env.PATH = prior;
+  }
+}
 
 /** The word that must appear in the stash and nowhere else. */
 const ONLY_HERE = 'RESCUE_ME_ONLY_IN_THE_STASH';
@@ -98,7 +165,7 @@ async function sweptFixture(t) {
 
 /* ------------------------------------------------- THE REFUTATION ITSELF ---- */
 
-test('REFUTATION: drop/clear DENY and pop ASKS when the stash holds the only copy', async (t) => {
+test('REFUTATION: drop/clear DENY while pop safely restores the only copy', async (t) => {
   const fx = await sweptFixture(t);
 
   for (const cmd of ['git stash drop', 'git stash clear', 'git stash drop stash@{0}']) {
@@ -114,12 +181,61 @@ test('REFUTATION: drop/clear DENY and pop ASKS when the stash holds the only cop
   }
 
   const pop = await assessCommand('git stash pop', fx.root);
-  assert.equal(pop.decision, 'ask',
-    `pop is the RECOVERY action — it must ask, never block the only way back: ${JSON.stringify(pop)}`);
-  assert.match(pop.reason, /stash@\{0\}/, `naming the entry: ${pop.reason}`);
-  assert.match(pop.reason, /git stash apply/, `and the entry-preserving equivalent: ${pop.reason}`);
-  assert.match(pop.reason, /survives only if|only if the apply succeeds|applying it succeeds/i,
-    `pop's specific risk is that the entry is dropped whether or not the apply worked: ${pop.reason}`);
+  assert.equal(pop.decision, 'allow',
+    `pop applies the bytes before dropping and keeps the entry on conflict: ${JSON.stringify(pop)}`);
+  const restored = await gitIn(['stash', 'pop'], fx.root);
+  assert.equal(restored.code, 0, `the real recovery must succeed: ${restored.err}`);
+  assert.match(await fs.readFile(path.join(fx.root, 'src/rescue_me.js'), 'utf8'), new RegExp(ONLY_HERE),
+    'the only copy must be back in the worktree before the stash entry disappears');
+  assert.equal((await gitIn(['stash', 'list'], fx.root)).out, '',
+    'a successful pop removes the entry only after restoring its content');
+});
+
+test('REFUTATION: a conflicted pop keeps the stash entry and both versions on disk', async (t) => {
+  const fx = await newRepo('stash-pop-conflict');
+  t.after(() => fx.cleanup());
+  await fx.write('conflict.txt', 'base\n');
+  await fx.commit('tracked conflict base');
+  await fx.write('conflict.txt', 'stashed-only-version\n');
+  assert.equal((await gitIn(['stash', 'push', '-m', 'conflicting recovery'], fx.root)).code, 0);
+  await fx.write('conflict.txt', 'working-only-version\n');
+  await fx.commit('divergent current version');
+
+  assert.equal((await assessCommand('git stash pop', fx.root)).decision, 'allow');
+  const popped = await gitIn(['stash', 'pop'], fx.root);
+  assert.notEqual(popped.code, 0, 'the premise requires a real merge conflict');
+  assert.match(`${popped.out}\n${popped.err}`, /stash entry is kept/i,
+    'Git must state that the failed pop retained the recovery entry');
+  assert.match((await gitIn(['stash', 'list'], fx.root)).out, /stash@\{0\}/,
+    'the entry remains reachable after a conflict');
+  const conflicted = await fs.readFile(path.join(fx.root, 'conflict.txt'), 'utf8');
+  assert.match(conflicted, /stashed-only-version/);
+  assert.match(conflicted, /working-only-version/);
+});
+
+test('FAIL CLOSED: a stash reflog probe failure is unknown, never an empty all-clear', async (t) => {
+  const fx = await sweptFixture(t);
+  await withGitSubcommandFailure(t, 'log', async () => {
+    const state = await stashState(fx.root);
+    assert.equal(state.checked, false, JSON.stringify(state));
+    assert.equal(state.total, 0, 'the failed probe did not invent entries');
+    const verdict = await assessCommand('git stash drop', fx.root);
+    assert.equal(verdict.decision, 'ask', JSON.stringify(verdict));
+    assert.match(verdict.reason, /could not read.*stash|cannot say/i);
+  });
+});
+
+test('FAIL CLOSED: an entry diff failure cannot turn an existing stash into a safe drop', async (t) => {
+  const fx = await sweptFixture(t);
+  await withGitSubcommandFailure(t, 'diff', async () => {
+    const state = await stashState(fx.root);
+    assert.equal(state.total, 1, JSON.stringify(state));
+    assert.equal(state.checked, false, JSON.stringify(state));
+    assert.equal(state.entries[0].checked, false, JSON.stringify(state.entries[0]));
+    const verdict = await assessCommand('git stash drop', fx.root);
+    assert.equal(verdict.decision, 'ask', JSON.stringify(verdict));
+    assert.match(verdict.reason, /could not complete|cannot say/i);
+  });
 });
 
 test('REFUTATION: `git fsck` agrees with holt about what dropping the entry makes unreachable', async (t) => {
@@ -180,6 +296,242 @@ test('NEVER-WORSE: `git stash apply` + commit RELAXES the same verbs to a silent
   }
 });
 
+/* ------------------------------------------ EXACT GIT TREE-ENTRY AUTHORITY ---- */
+
+const parseTreeEntry = (raw, expectedPath) => {
+  const line = raw.endsWith('\n') ? raw.slice(0, -1) : raw;
+  const m = /^(\d+)\s+(\w+)\s+([0-9a-f]+)\t([\s\S]+)$/.exec(line);
+  assert.ok(m, `premise: git ls-tree must return one parseable entry, got ${JSON.stringify(raw)}`);
+  assert.equal(m[4], expectedPath, `premise: git returned the wrong path: ${JSON.stringify(raw)}`);
+  return { mode: m[1], type: m[2], sha: m[3], path: m[4] };
+};
+
+async function modeOnlyStash(t, name) {
+  const fx = await newRepo(name);
+  t.after(() => fx.cleanup());
+  const file = 'bin/deploy.sh';
+  await fx.write(file, '#!/bin/sh\necho deploy\n');
+  await fx.commit('plain deploy script');
+
+  const base = parseTreeEntry((await gitIn(['ls-tree', 'HEAD', '--', file], fx.root)).out, file);
+  assert.equal(base.mode, '100644', `premise: base must be non-executable: ${JSON.stringify(base)}`);
+  assert.equal(base.type, 'blob');
+
+  assert.equal((await gitIn(['update-index', '--chmod=+x', '--', file], fx.root)).code, 0,
+    'premise: Git must accept the index-only executable-bit change');
+  const staged = (await gitIn(['ls-files', '--stage', '--', file], fx.root)).out;
+  assert.match(staged, new RegExp(`^100755 ${base.sha} 0\\t${file.replace('.', '\\.')}`),
+    `premise: the index must hold the same blob under mode 100755: ${JSON.stringify(staged)}`);
+
+  const pushed = await gitIn(['stash', 'push', '-m', 'mode-only authority'], fx.root);
+  assert.equal(pushed.code, 0, `premise: mode-only stash must succeed: ${pushed.err}`);
+  const stashed = parseTreeEntry(
+    (await gitIn(['ls-tree', 'stash@{0}^2', '--', file], fx.root)).out,
+    file,
+  );
+  assert.deepEqual(stashed, { ...base, mode: '100755' },
+    `premise: stash index parent must carry only the mode change: ${JSON.stringify({ base, stashed })}`);
+  return { fx, file, base, stashed };
+}
+
+test('TREE ENTRY AUTHORITY: identical bytes at a different path do not authorise a stash drop', async (t) => {
+  const fx = await newRepo('stash-path-identity');
+  t.after(() => fx.cleanup());
+  const durablePath = 'docs/deploy.sh';
+  const stashedPath = 'bin/deploy.sh';
+  const bytes = '#!/bin/sh\necho deploy\n';
+  await fx.write(durablePath, bytes);
+  await fx.commit('keep documentation example');
+  const durable = parseTreeEntry(
+    (await gitIn(['ls-tree', 'HEAD', '--', durablePath], fx.root)).out,
+    durablePath,
+  );
+
+  await fx.write(stashedPath, bytes);
+  const pushed = await gitIn(['stash', 'push', '-u', '-m', 'same bytes, operative path'], fx.root);
+  assert.equal(pushed.code, 0, `premise: untracked stash must succeed: ${pushed.err}`);
+  const stashed = parseTreeEntry(
+    (await gitIn(['ls-tree', 'stash@{0}^3', '--', stashedPath], fx.root)).out,
+    stashedPath,
+  );
+  assert.equal(stashed.sha, durable.sha, 'premise: both paths must use the exact same Git object');
+  assert.equal(stashed.mode, durable.mode);
+  assert.equal(stashed.type, durable.type);
+  assert.notEqual(stashed.path, durable.path, 'premise: path must be the only identity difference');
+
+  const state = await stashState(fx.root);
+  assert.ok(state.entries[0]?.unique.some((u) => u.path === stashedPath),
+    `the documentation path cannot preserve the operative path: ${JSON.stringify(state)}`);
+  assert.equal((await assessCommand('git stash drop', fx.root)).decision, 'deny');
+});
+
+test('TREE ENTRY AUTHORITY: mode-only stash stays unique and drop/clear are denied', async (t) => {
+  const { fx, file, stashed } = await modeOnlyStash(t, 'stash-mode-only');
+
+  const state = await stashState(fx.root);
+  const candidate = state.entries[0]?.unique.find((u) => u.path === file);
+  assert.deepEqual(candidate && {
+    path: candidate.path, mode: candidate.mode, type: candidate.type, sha: candidate.sha,
+  }, stashed,
+  `the reachable 100644 entry has the same path/blob but cannot authorise deleting 100755: ${JSON.stringify(state)}`);
+
+  for (const cmd of ['git stash drop', 'git stash clear']) {
+    const verdict = await assessCommand(cmd, fx.root);
+    assert.equal(verdict.decision, 'deny',
+      `${cmd} would erase the only executable entry and must be denied: ${JSON.stringify(verdict)}`);
+    assert.match(verdict.reason, /stash@\{0\}/);
+    assert.match(verdict.reason, new RegExp(file.replace('.', '\\.')));
+  }
+});
+
+test('TREE ENTRY AUTHORITY: regular-file to symlink change stays unique even with the same blob OID', async (t) => {
+  const fx = await newRepo('stash-symlink-type');
+  t.after(() => fx.cleanup());
+  const file = 'config/active';
+  await fx.write(file, 'deploy-v2');
+  await fx.commit('regular file whose bytes are a link target');
+  const base = parseTreeEntry((await gitIn(['ls-tree', 'HEAD', '--', file], fx.root)).out, file);
+  assert.equal(base.mode, '100644');
+
+  const stagedLink = await gitIn([
+    'update-index', '--cacheinfo', `120000,${base.sha},${file}`,
+  ], fx.root);
+  assert.equal(stagedLink.code, 0, `premise: Git must accept the staged symlink entry: ${stagedLink.err}`);
+  assert.match((await gitIn(['ls-files', '--stage', '--', file], fx.root)).out,
+    new RegExp(`^120000 ${base.sha} 0\\t${file}`),
+    'premise: mode changed to symlink while the object ID stayed byte-identical');
+
+  const pushed = await gitIn(['stash', 'push', '-m', 'same oid, different entry type'], fx.root);
+  assert.equal(pushed.code, 0, `premise: type-only stash must succeed: ${pushed.err}`);
+  const stashed = parseTreeEntry(
+    (await gitIn(['ls-tree', 'stash@{0}^2', '--', file], fx.root)).out,
+    file,
+  );
+  assert.deepEqual(stashed, { ...base, mode: '120000' });
+
+  const state = await stashState(fx.root);
+  const candidate = state.entries[0]?.unique.find((u) => u.path === file);
+  assert.deepEqual(candidate && {
+    path: candidate.path, mode: candidate.mode, type: candidate.type, sha: candidate.sha,
+  }, stashed,
+  `a regular file with this blob cannot authorise deleting the symlink entry: ${JSON.stringify(state)}`);
+  assert.equal((await assessCommand('git stash drop', fx.root)).decision, 'deny');
+});
+
+test('TREE ENTRY AUTHORITY: an exact reachable path/mode/type/object relaxes drop and clear', async (t) => {
+  const { fx, file, stashed } = await modeOnlyStash(t, 'stash-mode-exact-control');
+
+  assert.equal((await gitIn(['update-index', '--chmod=+x', '--', file], fx.root)).code, 0,
+    'premise: recreate the exact executable entry outside the stash');
+  const committed = await gitIn(['commit', '-m', 'durably keep exact executable entry', '--no-verify'], fx.root);
+  assert.equal(committed.code, 0, `premise: exact entry must become reachable from HEAD: ${committed.err}`);
+  const reachable = parseTreeEntry((await gitIn(['ls-tree', 'HEAD', '--', file], fx.root)).out, file);
+  assert.deepEqual(reachable, stashed,
+    `premise: path, mode, type and object must all match: ${JSON.stringify({ reachable, stashed })}`);
+
+  const state = await stashState(fx.root);
+  assert.equal(state.entries[0]?.uniqueCount, 0,
+    `the exact entry is durably reachable, so the stash holds nothing unique: ${JSON.stringify(state)}`);
+  for (const cmd of ['git stash drop', 'git stash clear']) {
+    const verdict = await assessCommand(cmd, fx.root);
+    assert.equal(verdict.decision, 'allow',
+      `${cmd} must relax only after the exact entry is reachable: ${JSON.stringify(verdict)}`);
+    assert.equal(verdict.reason, null);
+  }
+});
+
+test('TREE CHANGE AUTHORITY: a deletion-only stash is work and relaxes only after that deletion is committed', async (t) => {
+  const fx = await newRepo('stash-deletion-intent');
+  t.after(() => fx.cleanup());
+  const file = 'src/obsolete.js';
+  await fx.write(file, 'export const obsolete = true;\n');
+  await fx.commit('add the file that will be removed');
+  const original = parseTreeEntry((await gitIn(['ls-tree', 'HEAD', '--', file], fx.root)).out, file);
+
+  await fs.rm(path.join(fx.root, file));
+  const pushed = await gitIn(['stash', 'push', '-m', 'remove obsolete module'], fx.root);
+  assert.equal(pushed.code, 0, `premise: deletion-only stash must succeed: ${pushed.err}`);
+  assert.equal(await fs.readFile(path.join(fx.root, file), 'utf8'), 'export const obsolete = true;\n',
+    'premise: stash push restored the base file, so only the stash remembers its deletion');
+
+  const before = await stashState(fx.root);
+  const tombstone = before.entries[0]?.unique.find((u) => u.path === file && u.operation === 'delete');
+  assert.deepEqual(tombstone && {
+    operation: tombstone.operation, path: tombstone.path, mode: tombstone.mode,
+    type: tombstone.type, sha: tombstone.sha,
+  }, { operation: 'delete', ...original },
+  `the stash must retain an exact tombstone rather than treating "no destination blob" as no work: ${JSON.stringify(before)}`);
+  assert.equal((await assessCommand('git stash drop', fx.root)).decision, 'deny',
+    'dropping the only durable record of the deletion must be denied');
+
+  const applied = await gitIn(['stash', 'apply'], fx.root);
+  assert.equal(applied.code, 0, `premise: applying the deletion must succeed: ${applied.err}`);
+  assert.equal(await fs.stat(path.join(fx.root, file)).then(() => true, () => false), false,
+    'premise: the applied work is absence at the operative path');
+  await gitIn(['add', '-A'], fx.root);
+  const committed = await gitIn(['commit', '-m', 'remove obsolete module', '--no-verify'], fx.root);
+  assert.equal(committed.code, 0, `premise: the deletion must become durable: ${committed.err}`);
+
+  const after = await stashState(fx.root);
+  assert.equal(after.entries[0]?.uniqueCount, 0,
+    `the exact deletion is now reachable and must relax: ${JSON.stringify(after)}`);
+  assert.equal((await assessCommand('git stash drop', fx.root)).decision, 'allow');
+});
+
+test('TREE CHANGE AUTHORITY: deleting different prior bytes at the same path is not the same work', async (t) => {
+  const fx = await newRepo('stash-deletion-source-identity');
+  t.after(() => fx.cleanup());
+  const file = 'src/replaceable.js';
+
+  await fx.write(file, 'export const generation = "A";\n');
+  await fx.commit('generation A');
+  await fs.rm(path.join(fx.root, file));
+  await gitIn(['add', '-A'], fx.root);
+  await fx.commit('delete generation A');
+  await fx.write(file, 'export const generation = "B";\n');
+  await fx.commit('generation B');
+  const generationB = parseTreeEntry((await gitIn(['ls-tree', 'HEAD', '--', file], fx.root)).out, file);
+
+  await fs.rm(path.join(fx.root, file));
+  assert.equal((await gitIn(['stash', 'push', '-m', 'delete generation B'], fx.root)).code, 0);
+  const state = await stashState(fx.root);
+  const tombstone = state.entries[0]?.unique.find((u) => u.operation === 'delete' && u.path === file);
+  assert.equal(tombstone?.sha, generationB.sha,
+    `the reachable deletion of generation A cannot preserve the stashed deletion of B: ${JSON.stringify(state)}`);
+  assert.equal((await assessCommand('git stash drop', fx.root)).decision, 'deny');
+});
+
+test('TREE CHANGE AUTHORITY: a reachable rename destination does not erase unique source-deletion intent', async (t) => {
+  const fx = await newRepo('stash-rename-both-halves');
+  t.after(() => fx.cleanup());
+  const source = 'src/old-name.js';
+  const destination = 'src/new-name.js';
+  const bytes = 'export const renamed = true;\n';
+  await fx.write(source, bytes);
+  await fx.commit('old path');
+  const sourceEntry = parseTreeEntry((await gitIn(['ls-tree', 'HEAD', '--', source], fx.root)).out, source);
+
+  await fs.rename(path.join(fx.root, source), path.join(fx.root, destination));
+  assert.equal((await gitIn(['stash', 'push', '-u', '-m', 'rename the module'], fx.root)).code, 0);
+
+  // Preserve only the destination half in a ref. The old path deliberately remains, so no
+  // reachable commit records the removal the stash would lose.
+  await fx.write(destination, bytes);
+  await gitIn(['add', destination], fx.root);
+  assert.equal((await gitIn(['commit', '-m', 'copy at new path only', '--no-verify'], fx.root)).code, 0);
+  const destinationEntry = parseTreeEntry(
+    (await gitIn(['ls-tree', 'HEAD', '--', destination], fx.root)).out,
+    destination,
+  );
+  assert.equal(destinationEntry.sha, sourceEntry.sha, 'premise: destination entry is exactly reachable');
+
+  const state = await stashState(fx.root);
+  assert.ok(state.entries[0]?.unique.some((u) => u.operation === 'delete'
+    && u.path === source && u.sha === sourceEntry.sha),
+  `a rename is destination presence PLUS source absence; the copy preserves only one half: ${JSON.stringify(state)}`);
+  assert.equal((await assessCommand('git stash drop', fx.root)).decision, 'deny');
+});
+
 test('NEVER-WORSE: an empty stash makes every stash verb a silent allow', async (t) => {
   const fx = await newRepo('stash-empty');
   t.after(() => fx.cleanup());
@@ -227,7 +579,15 @@ test('PRECISION: a drop is judged on the entry IT destroys, not on the riskiest 
 
   // A bare drop/pop takes stash@{0} — which loses nothing. Refusing it because a DIFFERENT entry
   // is precious is a refusal about work the command cannot touch.
-  for (const cmd of ['git stash drop', 'git stash pop', 'git stash drop stash@{0}']) {
+  for (const cmd of [
+    'git stash drop',
+    'git stash pop',
+    'git stash drop stash@{0}',
+    // Reflog date selectors are valid Git selectors too. Holt must resolve the selector to its
+    // exact commit rather than treating every non-numeric spelling as "all entries" and denying
+    // this harmless top entry because the older stash is precious.
+    'git stash drop stash@{now}',
+  ]) {
     const v = await assessCommand(cmd, fx.root);
     assert.equal(v.decision, 'allow',
       `${cmd} destroys stash@{0}, which holds nothing unique: ${JSON.stringify(v)}`);
@@ -391,30 +751,27 @@ test('EFFICIENCY: the hot path pays nothing, and a stash verb pays no full scan'
   await gitIn(['add', '-A'], fx.root);
   assert.equal((await gitIn(['stash', 'push', '-u'], fx.root)).code, 0, 'setup');
 
-  const trace = path.join(os.tmpdir(), `holt-stash-trace-${process.pid}-${Date.now()}`);
-  const runWithTrace = async (cmd) => {
-    await fs.rm(trace, { force: true });
-    const saved = process.env.GIT_TRACE;
-    process.env.GIT_TRACE = trace;
-    try { await assessCommand(cmd, fx.root); } finally {
-      if (saved === undefined) delete process.env.GIT_TRACE; else process.env.GIT_TRACE = saved;
+  await withGitCommandLog(t, async (trace) => {
+    const runWithTrace = async (cmd) => {
+      await fs.rm(trace, { force: true });
+      await assessCommand(cmd, fx.root);
+      const log = await fs.readFile(trace, 'utf8').catch(() => '');
+      await fs.rm(trace, { force: true });
+      return log;
+    };
+
+    const stashVerb = await runWithTrace('git stash drop');
+    assert.match(stashVerb, /refs\/stash/,
+      'premise: a stash verb DOES read refs/stash — otherwise this test proves nothing');
+    assert.doesNotMatch(stashVerb, /merge-tree/,
+      'a stash verb is answered from the reflog and must not pay for a repository scan');
+
+    for (const cmd of ['rm -rf dist', 'npm test', 'ls -la']) {
+      const log = await runWithTrace(cmd);
+      assert.doesNotMatch(log, /refs\/stash/,
+        `${cmd} resolves without a scan and must never pay for a stash read`);
     }
-    const log = await fs.readFile(trace, 'utf8').catch(() => '');
-    await fs.rm(trace, { force: true });
-    return log;
-  };
-
-  const stashVerb = await runWithTrace('git stash drop');
-  assert.match(stashVerb, /refs\/stash/,
-    'premise: a stash verb DOES read refs/stash — otherwise this test proves nothing');
-  assert.doesNotMatch(stashVerb, /merge-tree/,
-    'a stash verb is answered from the reflog and must not pay for a repository scan');
-
-  for (const cmd of ['rm -rf dist', 'npm test', 'ls -la']) {
-    const log = await runWithTrace(cmd);
-    assert.doesNotMatch(log, /refs\/stash/,
-      `${cmd} resolves without a scan and must never pay for a stash read`);
-  }
+  });
 });
 
 /* ----------------------------------------------------- MAX_ENTRIES loud break ---- */
@@ -527,6 +884,38 @@ test('STASH: past the cap, a drop holt CAN account for stays allowed', async (t)
     assert.equal(v.decision, 'allow',
       `${cmd} targets a scanned, provably safe entry and must not be refused (got ${v.decision})`);
   }
+});
+
+test('STASH PRECISION: an unscanned selector is ASK, never DENY on a different risky entry', async (t) => {
+  const fx = await newRepo('stash-cap-scoping');
+  t.after(() => fx.cleanup());
+
+  // Oldest entry: provably safe because its exact path/mode/blob remains in HEAD~1.
+  await fx.write('safe.js', 'export const version = "A";\n');
+  await fx.commit('safe version A');
+  await fx.write('safe.js', 'export const version = "B";\n');
+  await fx.commit('safe version B');
+  assert.equal((await gitIn(['checkout', 'HEAD~1', '--', 'safe.js'], fx.root)).code, 0);
+  assert.equal((await gitIn(['stash', 'push', '-m', 'safe beyond cap'], fx.root)).code, 0);
+
+  // Newer entries: each holds unique content, so a broken implementation that falls back to
+  // `state.entries` will DENY and falsely name one of these instead of admitting the target was
+  // not scanned.
+  for (let i = 0; i < MAX_ENTRIES; i++) {
+    await fs.writeFile(path.join(fx.root, `unique-${i}.txt`), `only copy ${i}\n`);
+    assert.equal((await gitIn(['stash', 'push', '-u', '-m', `unique ${i}`], fx.root)).code, 0);
+  }
+  const selector = `stash@{${MAX_ENTRIES}}`;
+  const state = await stashState(fx.root);
+  assert.equal(state.truncated, true);
+  assert.ok(state.entries[0].uniqueCount > 0, 'premise: an unrelated scanned entry is risky');
+
+  const verdict = await assessCommand(`git stash drop ${selector}`, fx.root);
+  assert.equal(verdict.decision, 'ask', JSON.stringify(verdict));
+  assert.deepEqual(verdict.targets, [selector], 'the answer must stay scoped to the selected entry');
+  assert.match(verdict.reason, /beyond that evidence|scanned only the first/i);
+  assert.doesNotMatch(verdict.reason, /stash@\{0\}/,
+    'an unrelated scanned entry cannot become the reason to deny this selector');
 });
 
 test('STASH: exactly MAX_ENTRIES entries is a COMPLETE scan, not a truncated one', async (t) => {

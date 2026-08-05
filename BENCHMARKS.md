@@ -1,461 +1,201 @@
-# holt — published benchmarks
+# Holt evidence and benchmark contract
 
-Every number on this page is reproducible from this repository with the command shown beside it.
-No number is published without its conditions. Each section states what was measured, how the
-fixture was constructed, the exact command to reproduce it, and one sentence on what the result
-does and does not establish. Runtime for the figures below: Linux, Node v24.18.0, holt v0.3.1.
+**Last reviewed: 2026-08-05.**
 
-## 1 · Correctness at scale
+This document defines what Holt's evaluation harnesses measure and what must accompany a public
+claim. It is not a scrapbook of one machine's output. A result belongs here only when a reader can
+identify the corpus, denominator, command, runtime, source state and immutable artifact that
+produced it.
 
-**What this measures:** whether verdict correctness holds, and how wall-clock scan time grows, as
-the number of worktrees increases from 100 to 1000.
+## Current public result status
 
-**Fixture:** `eval/bench.mjs` builds one repository (a 50-file base) with N worktrees in a fixed,
-deterministic composition per 10 worktrees — 3 committed-ahead (unique function each; must be
-flagged, not disposable), 2 uncommitted-only (unique file each; must be flagged at-risk), 3 landed
-decoys (base independently has the same content; must be disposable), 2 empty (must be disposable)
-— then scans, analyzes, and **re-grades every verdict** against the planted ground truth. A scanner
-that got faster by skipping work fails the run outright, which would void the speed number.
+- There is **no launch-grade agent A/B result**. The retained six-trial run is a historical pilot
+  and qualitative failure corpus. Its rates and lift must not be used in the website, README,
+  release notes or sales material.
+- The 2026-08-05 Codex/Luna active-hook smoke is also **diagnostic, not comparative product
+  evidence**. Its treated cell omitted the installed Holt CLI required by the hook's own
+  remediation, and one trial per cell is below the 20-valid-trial publication floor. Its value is
+  the refusal corpus and deterministic reproductions, not a rate or lift.
+- No universal latency, scale or correctness rate is claimed. Synthetic and real-repository runs
+  answer different questions and may not be extrapolated into one another.
+- Host configuration and payload fixtures are contract evidence, not proof that a real host
+  process refused a destructive command.
+- No current test count or mutation score is published. No complete current green release
+  artifact is checked in. A future release may add those figures only from a complete green test
+  run and a complete mutation run with no survivors.
+  Editing a count by hand is not measurement.
 
-| N | total | per worktree | verdicts |
-|---|---|---|---|
-| 100 | 715 ms | 7.2 ms | 100/100 correct |
-| 300 | 2.15 s | 7.2 ms | 300/300 correct |
-| 1000 | 7.97 s | 8.0 ms | **1000/1000 correct** |
+## Publication rules
 
-Reproduce: `node eval/bench.mjs 1000` (first argument is N).
+A benchmark result is public evidence only when all applicable fields are present:
 
-**Machine load moves these figures by ~1.5×, and the correctness column does not move at all.**
-Treat the wall clock as an order of magnitude and the verdicts as the measurement.
-
-### The same measurement on a real repository (redis)
-
-Measured on redis (1,858 files per worktree), with peak RSS captured alongside wall clock:
-
-| N worktrees | wall clock | peak RSS | verdicts |
-|---|---|---|---|
-| 50 | 1.9 s | 240 MB | 50/50 correct |
-| 100 | 5.0 s | 254 MB | 100/100 correct |
-| 200 | 5.8 s | 270 MB | 200/200 correct |
-| 400 | 22.1 s | 307 MB | 400/400 correct |
-| 800 | 71.8 s | 346 MB | **800/800 correct** |
-
-16× the worktrees costs 37× the time. That is **super-linear**, and `--no-symbols` recovers only
-2.6× of it at N=800 (71.8 s → 27.4 s), so symbol extraction is not the majority of the cost —
-something scaling with registered worktree COUNT is, and the exact mechanism is not yet identified.
-
-**File count is the harder wall.** The Linux kernel (94,852 files) with a full-repo diff took
-**16 min 26 s and 1.75 GB RSS**, against 886 ms for the identical diff with `--no-symbols` — a
-1113× cost attributable entirely to ctags at that file count. 50,000 uncommitted small files in an
-otherwise trivial repository took 87.8 s versus 0.3 s. Reproduce: shallow-clone the repository,
-touch every tracked file, and run `holt status --json --include-primary`.
-
-**Means:** verdict correctness does NOT degrade at real scale — 800/800 correct on a real
-repository with real file counts, which is the property that matters most. **Does not mean:** the
-timings scale linearly. They do not, on either axis, and a repository of Linux's size is not
-usable with symbol extraction on today. `--no-symbols` is the working answer there and the
-super-linear worktree-count growth is an open defect, recorded here rather than omitted.
-
-## 2 · The monster round (worst-case composition)
-
-**What this measures:** verdict correctness, byte-level content survival through the full
-destructive loop (`protect` → `clean --apply` → `rescue`), and detection by the symbol layer —
-all inside one repository engineered to contain every hazard holt is designed to handle, at once.
-
-**Fixture:** `eval/monster.mjs` builds a single repository containing junk heaps, buried gold (one
-real file among heaps of junk), lying names in both directions (`DELETEME` holding gold, `KEEP` and
-`IMPORTANT` empty), unicode names and symbols, names with spaces, a worktree literally named
-`x.lock`, nested git repos, foreign locks, broken registrations (backing directory deleted out from
-under git), gitignored-only trees, landed decoys with rich multi-commit history, work duplicated
-across exactly two trees, and valuable work buried in each of the 50 supported languages.
-
-| Trees | gold50 symbol detections | verdicts | bytes after destructive loop |
-|---|---|---|---|
-| 121 | 41/41 | all correct | all intact |
-| 151 (pre-gold50 composition) | — | all correct | all intact |
-
-Reproduce: `node eval/monster.mjs 120` · a 40-tree round is pinned in CI (`test/e2e/monster.test.mjs`).
-
-**Means:** the scan, verdict, and destructive-action pipeline hold up under a deliberately
-worst-case, adversarially-composed repository, not only clean fixtures. **Does not mean:** the
-monster is exhaustive — it encodes the hazards its authors thought to plant; §3's randomized
-fuzzer exists specifically for the states nobody thought to hand-write.
-
-## 3 · Randomized invariant fuzzing (independent oracle)
-
-**What this measures:** whether holt ever violates its single core safety invariant — *if the
-oracle finds recoverable content holt could lose, holt must not call the worktree safe, and
-`clean --apply` must not remove it* — under randomly generated, not hand-imagined, worktree states.
-
-**Fixture:** 8 seeded rounds × 6 worktrees, each a random composition across every dimension holt
-reasons about (committed-ahead / committed-but-landed / uncommitted-tracked / untracked / deleted
-files / renames / detached vs. branched / nested junk). Ground truth comes from an oracle that
-shares no code with holt: raw `git status` plus direct file-content comparison against a pristine
-base checkout. The seed is logged in the assertion message, so any failure reproduces exactly
-rather than being reported as a one-off flake.
-
-**48/48 states, zero violations.** Reproduce: `node --test test/e2e/fuzz-invariant.test.mjs`
-
-**Means:** across 48 independently-checked, randomly generated states, holt never called unsafe
-content safe and never removed it. **Does not mean:** seeded random sampling is exhaustive proof
-over all possible git states — it is evidence against the blind spots of the hand-written tests,
-which is a narrower claim than universal safety.
-
-## 4 · Clean-room degradation (controlled environment)
-
-**What this measures:** whether holt degrades loudly rather than silently when the optional
-analysis backends it normally shells out to are entirely absent, and whether its safety, detection,
-CLI, and invariant-fuzzer tests still pass in that state.
-
-**Fixture:** a `node:22-slim` container with git only on `PATH` — no `ctags`, no `enry`, no
-`jscpd`, no `jj`.
-
-| | |
+| Field | Requirement |
 |---|---|
-| backend reported | `regex fallback (ctags-not-found)` — loud, not silent |
-| safety + detection + CLI + invariant fuzzer | **47/47 pass** |
+| Corpus | Name the repository or fixture and whether it is synthetic, planted or naturally occurring |
+| Source identity | Commit IDs for external repositories; Holt commit and dirty-state digest before and after the run |
+| Denominator | Expected and observed repositories, worktrees, warmups, measured runs, planted states and graded states |
+| Runtime | OS, architecture, Node version, CPU, memory and load context |
+| Command | Exact executable and arguments, including bounds and optional backends |
+| Distribution | Warmups separated from measured samples; publish p50/p90 or the complete sample set, not one convenient run |
+| Correctness | Every planted object must first be found, then graded; missing evidence invalidates the run |
+| Artifact | Dated JSON output plus SHA-256 stored outside the scratch directory |
+| Interpretation | State what the result does and does not support; do not turn a named corpus into a universal claim |
 
-Reproduce: run the same suites inside a minimal container with the optional tooling stripped, e.g.
-`docker run --rm -v "$PWD":/holt -w /holt node:22-slim bash -c "apt-get update -qq && apt-get
-install -y -qq git && npm ci --omit=optional && node --test test/unit/safety.test.mjs
-test/e2e/detection.test.mjs test/e2e/cli.test.mjs test/e2e/fuzz-invariant.test.mjs"`
+## Exact evidence versus advisory evidence
 
-**Means:** losing the optional backends degrades analysis capability (symbol-level lookups fall
-back to regex) without degrading safety or correctness on the suites named above. **Does not mean:**
-every code path was exercised in this configuration — only those four suites were run against it.
+The two must remain separate in benchmark claims as well as product copy.
 
-## 5 · Agent A/B (pilot — n stated, never dropped)
-
-**What this measures:** whether an autonomous coding agent, given identical prompts that never
-mention holt, avoids destroying irreplaceable work in a repository where every surface-level signal
-(file and directory names, timestamps) is built to mislead it — with and without holt available as
-an acting tool.
-
-**Fixture:** Claude Haiku 4.5 subagents against the **cleanup scenario**, graded solely from the
-resulting filesystem state — the agent is never shown what "correct" looks like. Recomputes from
-`eval/results-cleanup-haiku.json` (`"scenario": "cleanup"`), which is in this repository.
-
-| Arm | Irreplaceable survived (safety) | Cleanup (utility, mean) |
+| Surface | What may be measured | What must not be inferred |
 |---|---|---|
-| naked | 4/6 (one trial destroyed all 5) | 43% |
-| holt, shipped (MCP acting tools + routed AGENTS.md + protect) | **6/6 — never lost work** | **73%** |
+| Destructive authority | Exact path, operation, mode, object type and object ID; durable copies; dirty, untracked and ignored-path risk; fail-closed unknowns | Semantic equivalence or universal safety outside the graded corpus |
+| Collisions | Merge-tree-proven conflicts and separately labelled predicted file/symbol overlap | That every predicted overlap will conflict |
+| Duplicates | Symbol/body overlap candidates; exact durable twins as a separate class | That two tasks are semantically identical |
+| Impact | Define/reference and textual dependency hints | A conflict or runtime behaviour change |
+| Order and partition | A heuristic plan over the observed relationship graph | A compatibility certificate or knowledge of the agents' intended tasks |
+| Verify | Combination-only failures observed by the supplied test command | Compatibility when the supplied suite is incomplete |
 
-**The two columns are different measurements.** Safety is holt's guarantee and it was perfect
-(6/6; the naked agent lost the only copy of a file in 2 of 6 trials). Utility measures what a
-small model (Haiku 4.5) *chose* to clean — holt agents cleaned more on average, but a cheap model
-is variable and one trial per arm cleaned almost nothing (the naked arm hit 0/5 twice). That
-variance belongs to the model, not holt: `holt clean --apply` removes every provably-disposable
-worktree deterministically, with no model in the loop, so utility has a 100% path that does not
-depend on agent judgment at all.
+## 1. Synthetic scale and correctness
 
-Two shipped-config trials ran the full loop (protect → clean → rescue) autonomously, with rescue
-refs verifiable in-trial. Reproduce: `node eval/prep.mjs build cleanup 6` → drive any agent against
-the generated repos while writing one `{arm, trial, ok, ms, timedOut, stdout, stderr}` record per
-run → `node eval/prep.mjs grade <manifest.json> <agent-record.json>`. Omitting the record refuses to
-grade rather than treating untouched fixtures as safe.
+```bash
+node eval/bench.mjs 1000 --runs 5 --warmups 1 --out evidence.json
+```
 
-Small sample (6 trials per arm). The safety result is the product's promise and held in every trial.
+`eval/bench.mjs` creates a deterministic composition of committed-ahead, uncommitted-only,
+landed-decoy and empty worktrees. Every planted worktree must be discovered before its verdict is
+graded. The run fails on a wrong or missing verdict and records every timing sample, phase split,
+runtime field, source-state digest and artifact checksum.
 
-**Means:** in this small sample, making holt available as an acting tool did not cause the agent to
-destroy irreplaceable work. **Does not mean:** 6 trials per arm supports a general safety or
-utility claim.
+This harness supports claims about the exact requested synthetic composition. It does not support
+real-repository latency or asymptotic extrapolation.
 
-## 6 · Test-suite integrity
+## 2. Real-repository scale
 
-**What this measures:** whether the test suite is meaningful — passing, and demonstrably able to
-catch real defects, not merely green.
+```bash
+node eval/enterprise-bench.mjs --list
+node eval/enterprise-bench.mjs redis --worktrees 50 --noise-level 1 \
+  --runs 3 --warmups 1 --out evidence.json
+```
 
-**Fixture:** the mutation harness (`test/mutation.mjs`) deliberately breaks specific, high-stakes
-behaviors in the source — the ones where being wrong is dangerous, such as authorizing deletion of
-work or running a command that was promised never to run — then asserts the covering tests go red.
-Mutations run against a disposable copy of the repository; a tripwire fingerprints the live repo
-after every mutation and exits 2 on any drift, and that tripwire was itself proven able to fire by
-deliberate sabotage.
+The harness uses pinned external repository commits where configured, creates a disposable clone
+for each run and refuses a single measured sample. Its artifact records expected versus observed
+warmups/runs, planted versus graded verdicts, source stability and correctness failures. A missing
+worktree is a failed measurement, not a clean result.
 
-| Instrument | Result |
-|---|---|
-| tests | 1283 passing (`npm test`) — the count that EXECUTES on a clean CI runner |
-| deliberate-defect mutations | 85/85 killed (`npm run test:mutation`) |
-| mutation isolation | mutations run in a disposable repo copy; a tripwire fingerprints the live repo after every mutation, exits 2 on any drift, and was proven able to fire by deliberate sabotage |
-| languages asserted by symbol name | 50 (`test/unit/languages.test.mjs`) |
+Results from one repository describe that repository, commit, planted composition and runtime.
+They do not establish that the same latency or file-growth curve applies to other codebases.
 
-CI compares the published number against tests that actually PASSED, never against the total
-defined, and prints every skip — because a skipped test prints `ok` while never running, and
-counting it would inflate the claim.
+## 3. Adversarial composition and invariant fuzzing
 
-CI installs all optional dependencies, so the published count reflects every test running: **1283 defined, 1283 passing, 0 skipped.**
+```bash
+node eval/monster.mjs 120
+node --test test/e2e/fuzz-invariant.test.mjs
+```
 
-**Means:** the suite was checked to fail when the exact high-stakes behavior it claims to cover is
-broken, not merely observed to be green. **Does not mean:** mutations target the highest-stakes
-behaviors by design, not exhaustive coverage.
+The monster fixture combines hazards that isolated tests can miss: misleading names and histories,
+untracked and ignored paths, Unicode paths, nested Git repositories, foreign locks, duplicates and
+multi-language symbol extraction. It grades detection, verdicts and byte survival through the
+protect/clean/rescue loop.
 
-## 7 · Independent 50-language oracle (bench50) — the `unique` question
+`monster.mjs` currently prints to the terminal and does not emit the runtime/source identity,
+planted denominator and checksum-bearing JSON artifact required by this document. Its CI fixture is
+useful regression coverage, but no monster result or language-coverage headline is publication-
+eligible until that artifact path exists and accounts for every planted case.
 
-**What this measures:** whether `risk --json`'s `unique[]` verdict — the answer to "what would be
-LOST if this worktree vanished", the finding the product exists to give — agrees with an
-independent, content-hashing oracle that shares no code with holt, across 900 worktrees spanning
-every language holt publishes coverage for.
+The invariant fuzzer uses replayable seeded state compositions and an independent filesystem/Git
+oracle. A green run is evidence for the recorded seeds and states, not exhaustive proof over every
+possible Git state.
 
-**Fixture:** `bench50`, a measurement apparatus that lives outside this repository on purpose (see
-its own README for why). 50 repositories, one per supported language, each carrying the same 18
-worktree shapes — including `wt-unique` (committed work found nowhere else), `wt-ignored`
-(gitignored-only content, invisible to `git status`), `wt-symbol-dup` (declares `wt-unique`'s exact
-symbol names in a different file with different content — the one shape designed to make a
-symbol-based and a content-based witness disagree), and `wt-nul` (unique work in a file containing
-a literal NUL byte). The oracle answers from git plumbing and raw content hashing only.
+## 4. Agent evaluation
 
-**Before:** precision 1.00, recall 0.76 (tp 494, fp 0, tn 250, **fn 156** / n 900). Precision was
-never the problem — holt never wrongly claimed uniqueness. It stayed silent about 156 worktrees
-that DID hold irreplaceable content, which is the specific failure mode this product exists to
-prevent: worse than a false "disposable", because nothing downstream ever raises it as a concern
-in the first place.
+The current contract is in [eval/README.md](eval/README.md). A publishable comparison requires:
 
-Every one of the 156 was one of four causes, and every one was **holt being wrong**, not the
-oracle asking a different question:
+- at least 20 valid trials per treatment;
+- a fully decontaminated control environment;
+- exact agent, model, host and version;
+- identical prompts and complete transcripts;
+- independent filesystem and Git grading;
+- safety and utility reported together;
+- invalid/backend-failure trials excluded from rates and named;
+- a full-product treatment whose installed CLI, proactive context, MCP/config, blocking hook and
+  Git integration all come from the same pinned runtime and are all proven reachable/live.
 
-| cause | count | root cause | fix |
-|---|---|---|---|
-| `wt-unique` + `wt-symbol-dup` name collision | 100 | A symbol was judged "unique to W" purely by NAME — a `Handler` class in one worktree and an unrelated `Handler` class in a sibling zeroed BOTH worktrees' unique-symbol count, even though their files' actual bytes were completely different | a name collision now downgrades a symbol from "unique" only when the FILE it lives in also has a content-identity twin (raw or whitespace/line-ending-normalised hash, `src/content-identity.mjs`) in the colliding worktree — a name match that is not also a content match is not the same work |
-| `wt-ignored` | 50 | the at-risk file count was built from the uncommitted/untracked layers only; the gitignored layer was invisible to it entirely, so a worktree whose ONLY content was gitignored came back `nothing-unique` — while `safeToDelete` already refused to call the SAME worktree disposable | gitignored file count now feeds the same at-risk calculation the uncommitted/untracked layers already did, so `unique` and `safeToDelete` can no longer disagree about whether the identical content is "nothing" or "unverifiable" |
-| `wt-nul` | 6 (of 50 languages: C#, R, D, Objective-C, MATLAB, F#) | enry's binary-content sniff (a NUL byte anywhere near the start of a file) misclassified real, compiling source as `{"language":"","type":"Binary"}` whenever the file's only unusual content was a NUL byte inside a comment — and holt trusted that verdict as "not code", skipping symbol extraction entirely, even though ctags parses the identical bytes cleanly | ambiguous-extension files (`.cs`, `.r`, `.d`, `.m`, `.fs`, …) that enry flags `Binary` are reclassified from a NUL-stripped COPY used for classification only; ctags always reads the real on-disk bytes |
+Mechanism-isolation cells remain useful for diagnosis, but they cannot be presented as the
+product. In particular, a blocking hook without the installed CLI it tells the agent to run is an
+invalid product arm. The publishable product comparison is `no-holt` versus `integrate-only`, where
+`integrate-only` now means the actual pinned `holt integrate` result plus a reachable private
+executable named `holt`. The isolated `destructive-authority` cell is diagnostic-only and forces
+publication refusal.
 
-The count above is exact, not sampled: every `unique` disagreement in the corpus was one of these
-four worktree shapes, confirmed by bucketing all 156 misses by worktree name (100 + 50 + 6 = 156).
-None of them is the documented content-vs-symbol divergence bench50's own scorer names for the
-`duplicate` question (`wt-unique`/`wt-symbol-dup` legitimately disagreeing on "did these two build
-the same thing") — that divergence is real, it is a different question, and it is scored and
-reported separately (`duplicateSymbolSideChannel` in `score-holt.mjs`'s output), never folded into
-the numbers below.
+The current `eval/prep.mjs` and `eval/run.mjs` implementations enforce this machinery contract.
+They keep `no-holt`, `context-only`, `integrate-only`, `protect-only` and
+`destructive-authority` as separate diagnostic identities; reject a generic `holt` arm; suppress
+rates and lifts when the control, integration or live activation is contaminated or unproven; and
+retain complete stdout/stderr transcripts with treatment-specific denominators and evidence
+hashes. For Codex, a publishable `integrate-only` row additionally requires observed
+`SessionStart`, `UserPromptSubmit` and `PreToolUse` calls, a stable pinned CLI, exact benchmark hook
+payload retention, and the expected AGENTS, MCP, hook and Git surfaces. That makes a qualifying run
+possible—it does not manufacture one. Until at least 20 valid, isolated trials per publishable
+treatment have been run and their artifacts retained, there is still no publication-eligible rate
+or lift.
 
-**After:** precision 1.00, recall **1.00** (tp 650, fp 0, tn 250, fn 0 / n 900). Zero `unique`
-disagreements against the oracle, and the scorer's own `knownGaps.symbolVsContentUnique` and
-`nulByteSymbolBlindSpot.languages` counters — its running tally of documented, un-fixed gaps —
-both read zero.
+### 2026-08-05 diagnostic smoke and resolved product defects
 
-Reproduce (from the bench50 apparatus, sibling to this repository):
-`node generate.mjs && node oracle-run.mjs && node score-holt.mjs`, then read
-`byQuestion.unique` in the resulting `score-holt.json`.
+The corrected active-hook smoke artifact is
+[`eval/results-codex-luna-gauntlet-smoke-trusted-hook-v2-20260805.json`](eval/results-codex-luna-gauntlet-smoke-trusted-hook-v2-20260805.json).
+Its live PreToolUse wrapper recorded 42 complete invocations, but the treated trial produced ten
+refusals and completed only 7/9 planted disposable removals. The control completed 9/9. Because
+this is one trial and the treated cell was not the full product, no causal rate or lift may be
+reported.
 
-**Means:** across every supported language and all four adversarial worktree shapes this corpus
-plants against the `unique` question, holt's answer now matches an independent, content-hashing
-oracle exactly. **Does not mean:** the `duplicate` question is equally clean — see the next
-section for the exact number and why it is not moving further.
+The refusal-by-refusal evidence is in
+[`eval/codex-luna-hook-smoke-causal-analysis-20260805.md`](eval/codex-luna-hook-smoke-causal-analysis-20260805.md)
+and its adjacent checksum-bearing JSON. It found zero proven saved-loss events, nine proven
+task-level false positives and one unresolved shell-variable batch whose truncated suffix prevents
+a verdict. The two utility misses were never attempted or blocked; the agent trusted adversarial
+worktree names even after Holt labelled both worktrees disposable.
 
-## 8 · Independent 50-language oracle (bench50) — the `duplicate` question
+[`eval/reproduce-codex-empty-ignored-dir.mjs`](eval/reproduce-codex-empty-ignored-dir.mjs)
+preserves the original pinned-runtime failure: one clean linked worktree containing an empty
+ignored `dist/` directory triggered a remediation loop, and a common two-variable target chain was
+over-refused. That artifact is historical defect evidence, not the current-product verdict.
 
-**What this measures:** whether `duplicates --json`'s pairs agree with the same oracle's
-content-identity verdict for "did these two workstreams build the same thing", across all 153
-pairs of the 18 worktrees in each of the 50 language repositories (7,650 pairs total).
+The current source accepts and honestly handles the empty-directory case and resolves the bounded
+variable chain. The deterministic corrected-runtime check is retained in
+[`eval/results-corrected-overrefusal-matrix-20260805.json`](eval/results-corrected-overrefusal-matrix-20260805.json)
+with its adjacent SHA-256 file. It is explicitly a local reproducer, not an agent A/B result. A new
+paired smoke remains blocked until the final release tarball is npm-installed in an ambient-masked
+runtime and passes MCP protocol/version preflight. Only a clean final-artifact smoke may authorize
+the repeated 20-valid-trial run; no rate or lift is published from the diagnostic runs.
 
-**Measured:** precision 0.75, recall 1.00 (tp 150, **fp 50**, tn 7450, fn 0 / n 7650). Every one
-of the 50 false positives is the *same* planted case, once per language: `wt-unique` and
-`wt-symbol-dup` declare identical symbol names with identical bodies, in two different files,
-where the second file also carries two trailing comment lines the first does not. Symbol-identity
-(and a declared-body comparison — see below) correctly says "these built the same thing"; the
-oracle's content-identity check correctly says "these files are not byte-identical". Both are
-right, about different questions — this is bench50's own documented, deliberately unresolvable
-case (see its README, "What this apparatus does NOT prove", #1 and #2), not a fresh defect, and it
-is why the number above does not read 1.00: closing it would mean holt stopping believing its own
-correct, hand-verified answer in favour of the oracle's, on the one shape built to make them
-disagree. The harder, hand-labelled `duplicate-symbol` side channel bench50 raises for exactly
-this case — "do the two sides' declared symbols and bodies actually agree" — holt answers
-correctly on all 850 instances (`duplicateSymbolSideChannel.holtAgreesWithHandLabel`), confirming
-this is the oracle's known limitation, not holt's.
+## 5. Host and MCP evidence
 
-**How the comparison works.** A symbol name is only counted as shared evidence for a given PAIR
-once the two sides' actual declared bodies agree (whitespace- and comment-insensitive, across the
-single-line and block comment styles of every language in this corpus) — read once per
-(workstream, symbol), cached, and never invoked when either side is unreadable, so it can only
-REMOVE a name from "shared" on positive evidence of disagreement, never add one symbol-identity
-did not already find. A discriminative-symbol filter removes names common across a LARGE fraction
-of workstreams (boilerplate), but that filter has a floor: a name shared by as few as two or three
-workstreams never crosses it, so two agents independently naming an unrelated helper `process`,
-`handler` or `validate` would read as duplicate work under a name-only check. Verified directly: a
-controlled fixture with two workstreams that each declare a function named `process` with
-unrelated bodies is reported as nothing (`test/e2e/detection.test.mjs`, "P3 PRECISION"; the same
-class is also covered adversarially in `test/e2e/break-it.test.mjs`, "ATTACK: coincidental common
-names must not fabricate duplicates"). That is why bench50's `duplicate` precision and recall are
-0.75/1.00 (`duplicateSymbolSideChannel` 850/850): the false positive this check targets does not
-occur anywhere in this corpus, by the corpus's own design (see above) — it targets a real, separate,
-small-fan-out risk this apparatus does not plant, and the regression test proves it directly
-instead.
+The MCP protocol test starts the real stdio server, initializes it, enumerates the executable tool
+schema and calls tools against disposable repositories. Host integration tests generate and parse
+the current project configuration and exercise documented payload/output contracts.
 
-**The recall half, and why this corpus cannot grade it.** Text equality answers "did they type
-the same bytes", not "did they build the same thing" — a genuine duplicate almost never types the
-same bytes (one wraps the signature, the other keeps it on one line; one indents with tabs, the
-other with four spaces). bench50 structurally cannot grade recall, because `wt-symbol-dup` plants
-bodies that are byte-identical to `wt-unique`'s — the one input shape on which textual and
-token-stream equality can never disagree. The comparison is over a whitespace-normalised,
-string-literal-aware token stream: outside a literal a whitespace run collapses (to nothing beside
-a delimiter, so re-wrapping an argument list is the same code); inside a literal whitespace is
-data and stays byte-significant; and when the lexer cannot be sure it tracked the literals — an
-unterminated quote, which is what a Rust lifetime, a Lisp quote, an apostrophe in a trailing
-comment and a window truncated mid-string all look like — it bails and the strict textual verdict
-stands, so being unsure can only cost recall, never precision. For declared-body comparison of the
-*same* symbol name this is sound even in off-side-rule languages: the caller already per-line
-trimmed away every indent, and two valid Python bodies cannot differ in only a line boundary
-(splitting or joining statements needs a `;` or a `\`, both kept and compared). Pinned in
-`test/e2e/detection.test.mjs` ("P3 RECALL: the same function reformatted in two worktrees is still
-duplicate work", and "P3 PRECISION: whitespace inside a string literal is content, not layout" for
-the boundary), and at the granularity no worktree fixture reaches in
-`test/unit/declared-body-tokens.test.mjs`, whose five contract clauses are each shown to be
-load-bearing by seven mutants of the lexer, 0 survivors.
+That evidence supports the labels in [HOSTS.md](HOSTS.md): blocking contract-tested, MCP plus
+advisory, or advisory. It does not support "verified live" until a real host process is driven
+through a destructive command and observed refusing it.
 
-Reproduce: `node score-holt.mjs`, then read `byQuestion.duplicate` and
-`duplicateSymbolSideChannel` in the resulting `score-holt.json`. On the full 50-language corpus:
-`duplicate` precision **0.75**, recall **1.00** (tp 150, fp 50, tn 7450, fn 0 / n 7650), all 50
-false positives the single `wt-unique + wt-symbol-dup` shape
-(`knownGaps.symbolVsContentDuplicate` 50), side channel 850/850.
+## 6. Test-suite integrity
 
-**Means:** the 0.75 precision on this question is fully accounted for by one documented,
-hand-verified case bench50 itself says should not be used to grade symbol-level precision, and a
-real, different false-positive class (small-fan-out name coincidences) is closed and covered
-by a regression test. **Does not mean:** duplicate detection is content-aware in general — outside
-the specific declared-body check above, it is still a name match; `holt duplicates --deep` (jscpd
-token-clone detection) is the tool for the same logic written twice under different names.
+```bash
+npm test
+npm run test:mutation
+```
 
-## 9 · Independent 50-language oracle (bench50) — `disposable`, `conflict`, `refuse`, and the oracle's own proof of independence
+The ordinary suite covers unit, end-to-end, protocol, action and invariant behaviour. The mutation
+harness deliberately weakens high-stakes mechanisms and requires the relevant tests to fail. It
+runs in a disposable repository copy and fingerprints the live source tree after each mutation.
 
-**What this measures:** the same 900-worktree, 50-language bench50 corpus and the same independent
-oracle as §§7–8, scored on the three remaining questions `risk`/`clean`/`collisions`/`gate` answer
-— `disposable` (safe to delete), `conflict` (two worktrees' uncommitted state cannot both land),
-and `refuse` (holt correctly declines to certify a worktree it cannot verify) — plus the
-apparatus-wide agreement rate across all five questions, and the one number that would void every
-other one in this document if it were nonzero: how often holt ever called a worktree "safe to
-delete" that the oracle says holds content found nowhere else.
+A partial run, a run with skipped/invalid cases, or a mutation run with any survivor is not eligible
+for a public headline. The permanent historical `10/12` record documents an early falsification
+that exposed two real holes; it is not a competing current score.
 
-**Oracle independence is checked, not asserted.** Every number in §§7–9 rests on the oracle in
-`bench50/oracle/` sharing no code with holt. `node independence-check.mjs` proves that three ways,
-in increasing strength: **(1)** a static walk of every import reachable from the oracle's entry
-points, plus a comment-and-string-stripped scan for escape hatches (`require`, `createRequire`, a
-literal path into this repository) — measured: 6 reachable files, 0 violations, 0 escape hatches;
-**(2)** the real oracle run under a Node module-resolution hook that aborts the process the instant
-any specifier resolves inside `/home/raed/grove`; **(3)** the hook proven to actually fire —
-`probe-imports-holt.mjs` deliberately imports holt and must succeed with the hook absent and fail
-with it present, because a clean run under a hook that is not watching looks identical to a clean
-run under one that is. Measured: exit 0 without the hook, exit 1 with it, the abort message
-present. All three passed on the run this section reports (`independence-proof.json`,
-`"independent": true`) — reproduce with `node independence-check.mjs --corpus <the corpus dir>`.
+## Evidence storage
 
-**Fixture:** identical to §7 — 50 repositories (one per supported language), 18 worktrees each, all
-153 worktree pairs per repository, ground truth from an oracle that answers strictly from git
-plumbing and raw content hashing, never from holt.
-
-**Measured:**
-
-| question | precision | recall | tp | fp | tn | fn | n |
-|---|---|---|---|---|---|---|---|
-| disposable | 1.00 | 1.00 | 250 | 0 | 650 | 0 | 900 |
-| conflict | 1.00 | 0.96 | 48 | 0 | 7600 | 2 | 7650 |
-| refuse | 1.00 | 1.00 | 50 | 0 | 850 | 0 | 900 |
-
-**The catastrophic-failure check.** Across all 900 worktrees, holt called disposable **zero** that
-the oracle says held content found nowhere else — the specific failure mode that destroys
-irreplaceable work. 0 events in 900 trials bounds the true rate at **≤0.33%** (95% one-sided
-exact), stated as a bound rather than as 0%, on purpose: the corpus is finite and "never observed"
-is not the same claim as "cannot happen".
-
-**The two `conflict` misses:** `r03-a-ts` and `r06-a-java`, each the planted
-`wt-conflict-a`/`wt-conflict-b` pair, 2 of the corpus's 50 (one designed conflict pair per
-repository — the set of which 2 repositories miss has moved between scoring runs taken minutes
-apart, most recently `r12-a-kt` alone). The oracle's `git merge-tree` snapshot comparison says
-these collide; `holt collisions --json --all` did not surface either pair
-(`absent-from-holt-report` in the scorer's disagreement log). Recorded here rather than rounded
-away — the specific repositories are named so the next run confirms or refutes this exact claim,
-not a vaguer one.
-
-**Overall, all five questions, all 18,000 claims** (the 850 `duplicate-symbol` claims the oracle
-abstains on are excluded exactly as §8 excludes them — scoring against a question nobody answered
-is not measurement): holt agreed with the oracle on **17,948 of 18,000 — 99.71%**. Every
-disagreement is accounted for: 50 are §8's documented `duplicate` false positive (the one
-content-vs-symbol case bench50 deliberately cannot resolve), and 2 are the `conflict` misses above.
-None is a silent, unexplained gap.
-
-Reproduce: `node generate.mjs && node oracle-run.mjs && node score-holt.mjs`, then read
-`byQuestion.disposable`, `byQuestion.conflict`, `byQuestion.refuse`, `headline.agreement`, and
-`catastrophic` in the resulting `score-holt.json`.
-
-**Means:** on this corpus, holt never once authorised deleting irreplaceable work, never once
-wrongly refused to certify a worktree it could in fact verify, and matched an independent oracle on
-99.71% of 18,000 claims spanning 50 languages — with the oracle proven independent by static
-analysis, a runtime hook, and a probe proving the hook fires, not merely by the comment saying so.
-**Does not mean:** the corpus is real-world messiness (§8's own limitations list — synthetic,
-shallow, one file per shape — applies here too), or that a `conflict` miss whose specific repository
-moves run to run is a stable, closed defect just because its magnitude (2 of 50) looks small.
-99.71% is not a synonym for "correct": it is exactly the number of claims checked, with every
-disagreement named rather than averaged away.
-
-## 10 · What the guard costs an agent, per tool call
-
-**What this measures:** the thing that decides whether holt survives contact with a real agent
-session. The PreToolUse hook runs *before every Bash command an agent issues*. If it is slow, it
-does not matter how correct it is — it gets uninstalled, and an uninstalled guard protects nothing.
-
-**Fixture:** redis (1,861 tracked files) with 31 worktrees, each holding uncommitted work. The
-ordinary-command sample is an ordinary build invocation; the destructive sample is an `rm -rf` of
-a sibling worktree. The
-real binary is driven over stdin exactly as a host drives it, and the wall clock is measured
-around the whole process — spawn, scan, verdict, exit.
-
-| what the agent runs | p50 | p90 |
-|---|---|---|
-| an ordinary command — anything that cannot destroy work | **65 ms** | 73 ms |
-| a command that could destroy work (`rm -rf <worktree>`) | 993 ms | 1.89 s |
-
-**The ordinary-command cost does not grow with the repository.** 65 ms on a 60-file fixture with
-12 worktrees; 65 ms on redis with 31. That is the cheap gate doing its job: a command that cannot
-destroy anything is answered from `git worktree list` plus one `git status`, and never pays for a
-scan. Only a command that *could* lose work buys the evidence to say so.
-
-Under an ACTIVE FAN-OUT — a sibling worktree writing a file between every single call, so the
-cache is cold every time — ordinary commands went from 64 ms to 72 ms p50 and destructive ones
-from 165 ms to 346 ms on the 12-worktree fixture. The cache helps; it is not what makes the
-common path fast.
-
-Reproduce: `node eval/hook-latency.mjs <worktrees> <calls>`
-
-**Means:** the protection is affordable on the path agents actually spend their time on, and the
-cost of certainty is paid only where work is at stake. **Does not mean:** every host invokes hooks
-the same way — a host that spawns the hook with a cold Node process per call pays Node's own
-startup (~40 ms of the 65) regardless of what holt does.
-
-## 11 · Enterprise benchmark — real repos, real mess, real scale
-
-**What this measures:** holt's full pipeline (discover → scan → analyze) and every CLI command
-against REAL repositories with messy worktrees containing uncommitted files, gitignored secrets,
-binary files, huge files (>2MiB), and landed duplicates. Unlike §1's synthetic fixture, this tests
-against real codebases with real file types, real symbol extraction, and real git operations.
-
-**Fixture:** `eval/enterprise-bench.mjs` fetches a real repo once into a read-only cache, then
-takes a DISPOSABLE local clone per run, creates N worktrees with noise-level 2 (the maximum:
-binary files, huge files, gitignored content, and landed duplicates), runs the full pipeline,
-grades every verdict against planted ground truth, and drives every CLI command (`status`, `risk`,
-`collisions`, `graph`, `clean`, `doctor`, `stash`) for valid output and correct exit codes. One
-warmup run is discarded and reported separately; the figures below are the median and p90 of three
-measured runs.
-
-| repo | files | wt | **total p50** | p90 | cold | **scan p50** | **holt's memory** | graded | disposable |
-|---|---|---|---|---|---|---|---|---|---|
-| redis | 1,861 | 31 | **2.22 s** | 3.10 s | 0.73 s | **1.63 s** | **~11 MB** | 30/30 | 15/15 |
-| postgres | 7,680 | 31 | **5.01 s** | 5.39 s | 3.71 s | **3.67 s** | ~20 MB | 30/30 | 15/15 |
-| holt-self† | 20,176 | 31 | **10.1 s** | 17.1 s | 19.3 s | **7.05 s** | ~45 MB | 30/30 | 15/15 |
-
-† `holt-self` includes 20,000 one-line fixture files. Read the redis and postgres rows for the realistic picture.
-
-Memory figures measure holt's pipeline cost, not the benchmark harness overhead.
-
-**Verdict:** 30 of 30 planted workstreams are *found and graded* in every repo, with zero wrong
-verdicts and 15/15 disposables correctly identified, at a memory cost that fits comfortably in any
-CI container. Wall-clock grows sublinearly in file count (4.1× the files costs 2.3× the time from
-redis to postgres); the memory and correctness figures are stable.
-
-Reproduce: `node eval/enterprise-bench.mjs all --worktrees 30 --noise-level 2 --runs 3`
-
-**Does not mean:** 30 worktrees is the ceiling (§1 tests up to 1000), the repos represent every
-ecosystem (C and JavaScript only — Rust, Go, Python, Java, and monorepos are future work), or that
-"zero issues" means holt is bug-free — it means the planted ground truth was correctly identified
-at this scale, with this noise level, on these repos. The measurements were taken on a loaded
-14 GiB developer machine; the redis samples spanned 0.73–3.10 s, so treat p50 as an order of
-magnitude, not a precise figure.
-
-If you find a number on this page you cannot reproduce, that is a bug — file it.
+Benchmark scratch space is disposable. Artifacts are not. For harnesses that implement `--out`,
+write outside the marked work directory, retain the printed SHA-256 beside the JSON and link that
+exact artifact from any public number. A console-only harness such as the current `monster.mjs` is
+not artifact-capable merely because this document asks for one. If there is no stable artifact,
+publish the method and the gap—not the number.

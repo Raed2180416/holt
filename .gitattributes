@@ -15,3 +15,10 @@
 *.ico binary
 *.tgz binary
 *.zip binary
+
+# These are byte-for-byte terminal snapshots: padded spaces are frame geometry, not style.
+docs/evidence/tui-graph/**/*.ansi.txt whitespace=-trailing-space
+docs/evidence/tui-graph/**/*.html whitespace=-trailing-space
+
+# Generated action bundle preserves source string literals verbatim.
+dist/holt-action.mjs whitespace=-trailing-space

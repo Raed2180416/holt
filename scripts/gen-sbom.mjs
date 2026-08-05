@@ -22,6 +22,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -31,7 +32,55 @@ const outIdx = process.argv.indexOf('--out');
 const OUT = outIdx === -1 ? ROOT : path.resolve(process.argv[outIdx + 1]);
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 
-const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+/**
+ * Resolve npm's JavaScript entrypoint and execute it with this exact Node binary. `execFile` does
+ * not launch `.cmd` wrappers on Windows without a shell; enabling a shell would make arguments
+ * part of a command string. Official Node distributions place npm in one of the two locations
+ * below, while npm-run scripts also expose the exact JS path through npm_execpath.
+ */
+export function resolveNpmCli({ execPath = process.execPath, env = process.env } = {}) {
+  const execDir = path.dirname(execPath);
+  const candidates = [
+    env.npm_execpath,
+    path.join(execDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.resolve(execDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    path.resolve(execDir, '..', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ].filter(Boolean);
+
+  // POSIX package managers often expose npm as a symlink to npm-cli.js somewhere on PATH.
+  if (process.platform !== 'win32') {
+    for (const dir of String(env.PATH ?? '').split(path.delimiter).filter(Boolean)) {
+      try {
+        const resolved = fs.realpathSync(path.join(dir, 'npm'));
+        if (resolved.endsWith('.js')) candidates.push(resolved);
+      } catch { /* this PATH entry has no npm executable */ }
+    }
+  }
+
+  const npmCli = candidates.find((candidate) => candidate.endsWith('.js') && fs.existsSync(candidate));
+  if (!npmCli) {
+    throw new Error(`cannot locate npm-cli.js beside ${execPath}; refusing to invoke a shell wrapper`);
+  }
+  return npmCli;
+}
+
+const npmCli = resolveNpmCli();
+
+// npm 10.9 names an application SBOM's root component after cwd's basename even while its
+// bom-ref and purl correctly use package.json. Running in `/home/runner/work/holt/holt` happens to
+// hide that bug; this checkout is `/home/raed/grove`, where the same command emitted a component
+// named "grove" for `pkg:npm/holt@0.3.1`. Stage only the reviewed manifests under a directory
+// whose basename is the package name, so the resulting document is correct on every checkout
+// path. `--package-lock-only` means no source or node_modules is read from the staging directory.
+const stageParent = fs.mkdtempSync(path.join(os.tmpdir(), 'holt-sbom-'));
+const stageLeaf = String(pkg.name ?? '').replace(/^@/, '').replace(/[\\/]/g, '-');
+if (!stageLeaf || stageLeaf === '.' || stageLeaf === '..') throw new Error('invalid package name for SBOM staging');
+const SBOM_ROOT = path.join(stageParent, stageLeaf);
+fs.mkdirSync(SBOM_ROOT);
+for (const name of ['package.json', 'package-lock.json', 'npm-shrinkwrap.json']) {
+  const source = path.join(ROOT, name);
+  if (fs.existsSync(source)) fs.copyFileSync(source, path.join(SBOM_ROOT, name));
+}
 
 function sbom(format) {
   // --package-lock-only: resolve from package-lock.json, not from whatever happens to be in
@@ -39,14 +88,20 @@ function sbom(format) {
   // --omit dev: the published package contains no devDependency, so neither may its SBOM.
   // Optional dependencies are KEPT, because `npm i -g holt` installs them by default and a
   // buyer's scanner will see them on disk. Omitting them would be the flattering lie.
-  return execFileSync(npmBin, [
+  return execFileSync(process.execPath, [npmCli,
     'sbom', '--sbom-format', format, '--sbom-type', 'application',
     '--package-lock-only', '--omit', 'dev',
-  ], { cwd: ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  ], { cwd: SBOM_ROOT, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
 }
 
-const cdx = JSON.parse(sbom('cyclonedx'));
-const spdx = JSON.parse(sbom('spdx'));
+let cdx;
+let spdx;
+try {
+  cdx = JSON.parse(sbom('cyclonedx'));
+  spdx = JSON.parse(sbom('spdx'));
+} finally {
+  fs.rmSync(stageParent, { recursive: true, force: true });
+}
 
 /* ---- assertions: an SBOM that describes the wrong thing must fail the build ---- */
 const fail = (m) => { process.stderr.write(`gen-sbom: ${m}\n`); process.exitCode = 1; };
@@ -61,6 +116,21 @@ if (devLeak.length) fail(`dev-only packages leaked into the SBOM: ${devLeak.map(
 
 const noPurl = (cdx.components ?? []).filter((c) => !c.purl);
 if (noPurl.length) fail(`${noPurl.length} component(s) have no purl, so no scanner can match them`);
+
+const described = new Set(spdx.documentDescribes ?? []);
+const spdxRoot = (spdx.packages ?? []).find((p) => described.has(p.SPDXID));
+if (!spdxRoot) {
+  fail('SPDX document does not identify a root package in documentDescribes');
+} else {
+  if (spdxRoot.name !== pkg.name) fail('SPDX package name does not match package.json');
+  if (spdxRoot.versionInfo !== pkg.version) {
+    fail(`SPDX says version ${spdxRoot.versionInfo}, package.json says ${pkg.version}`);
+  }
+}
+const spdxDevLeak = (spdx.packages ?? []).filter((p) => /stryker|babel|typescript|@types\/node/i.test(p.name ?? ''));
+if (spdxDevLeak.length) {
+  fail(`dev-only packages leaked into the SPDX SBOM: ${spdxDevLeak.map((p) => p.name).join(', ')}`);
+}
 
 const required = (cdx.components ?? []).filter((c) => c.scope !== 'optional');
 const optional = (cdx.components ?? []).filter((c) => c.scope === 'optional');

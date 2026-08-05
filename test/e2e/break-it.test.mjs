@@ -371,6 +371,15 @@ test('ATTACK: destructive commands disguised to slip past the classifier', async
     `git worktree remove '${wt}'`,
     `git worktree remove "${wt}"`,
   ];
+  if (process.platform === 'win32') {
+    // Git reports the canonical long path while os.tmpdir()/the fixture can retain an 8.3 name.
+    // Add the other two aliases Windows accepts at the same time: case and slash direction. A
+    // textual comparator misses this spelling even if it happens to handle the fixture's original
+    // short name, while the filesystem still removes the exact same valuable worktree.
+    const caseAndSlashAlias = wt.replace(/[A-Za-z]/g, (c) =>
+      c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()).replace(/\\/g, '/');
+    disguises.push(`git worktree remove "${caseAndSlashAlias}"`);
+  }
 
   const holes = [];
   for (const cmd of disguises) {
@@ -443,7 +452,7 @@ test('ATTACK: a gitignored DIRECTORY hides the only copy of a credentials file',
     'a worktree whose only unique content sits under a gitignored DIRECTORY must not be disposable');
 });
 
-test('NEVER-WORSE: ordinary build output under a gitignored directory stays disposable', async (t) => {
+test('AUTHORITY: ignored build output is visible and direct cleanup asks for confirmation', async (t) => {
   // The other half, and the one that keeps the fix usable. If every ignored directory blocked
   // deletion, `clean` would refuse on every repository that has ever run `npm install` — a tool
   // that never cleans anything is not safer, it is uninstalled.
@@ -462,8 +471,10 @@ test('NEVER-WORSE: ordinary build output under a gitignored directory stays disp
   await fs.writeFile(path.join(wt, 'dist/bundle.js'), 'console.log(1);\n');
 
   const report = await inspect(fx.root);
-  assert.equal(verdict(report, 'build').safe, true,
-    'node_modules/ and dist/ are recognised as generated and must not block cleanup');
+  assert.equal(verdict(report, 'build').safe, false,
+    'a name and manifest do not prove these exact bytes are reproducible');
+  const gate = await assessCommand('rm -rf node_modules dist', wt);
+  assert.equal(gate.decision, 'ask', JSON.stringify(gate));
 });
 
 test('ATTACK: a symbol extraction that FAILED must not read as "no symbols"', async (t) => {
@@ -588,7 +599,7 @@ test('ATTACK: `holt risk`\'s uniqueSymbolCount must not claim to be a measuremen
     'and it must name the file, the same way safeToDelete already does');
 });
 
-test('ATTACK: an oversized file with a PROVEN byte twin must not veto redundancy', async (t) => {
+test('AUTHORITY: an oversized byte twin at a different path does not license deletion', async (t) => {
   // THE COLLISION OF TWO CORRECT FIXES. Marking oversized files as unmeasured (the test above) is
   // right: a policy skip must never read as "no symbols". Refusing disposal on unmeasured files
   // (two tests above) is also right: holt could not look. But compose them over a file whose
@@ -623,15 +634,11 @@ test('ATTACK: an oversized file with a PROVEN byte twin must not veto redundancy
   const vb = verdict(report, 'big-b');
   assert.ok(va && vb, 'sanity: both worktrees produced verdicts');
 
-  for (const [v, sibling] of [[va, 'big-b'], [vb, 'big-a']]) {
-    assert.equal(v.safe, true,
-      `byte-identical content in a living sibling must make this disposable, got: ${JSON.stringify(v)}`);
-    assert.ok((v.redundantWith ?? []).some((id) => id.endsWith(sibling)),
-      `the verdict must NAME the sibling holding the twin: ${JSON.stringify(v.redundantWith)}`);
-    assert.equal(v.confidence, 'measured',
-      `content identity IS a measurement — 'unverifiable' here is the over-refusal this test exists to catch: ${JSON.stringify(v)}`);
-    assert.doesNotMatch(JSON.stringify(v.reasons), /could not read symbols/,
-      'a proven byte twin must not be reported as a symbol-measurement gap');
+  for (const v of [va, vb]) {
+    assert.equal(v.safe, false,
+      `a different path is different Git work even when bytes match: ${JSON.stringify(v)}`);
+    assert.equal(v.redundantWith, undefined, JSON.stringify(v));
+    assert.match(JSON.stringify(v.reasons), /could not read symbols|base lacks/);
   }
 
   // AND THE REFUSAL MUST SURVIVE where content identity does NOT cover the file: the same
@@ -651,10 +658,9 @@ test('ATTACK: an oversized file with a PROVEN byte twin must not veto redundancy
  *
  * Two instruments answer "does a living sibling already hold this committed work?":
  *
- *   per-file content identity  — path-blind, reindent-blind, but it needs to READ each file's
- *                                bytes, and it declines files over a 16 MiB cap, files that are
- *                                not on disk at all (a committed DELETE, a rename's source path)
- *                                and files whose read fails for any reason.
+ *   per-entry identity         — exact path + mode + type + object id. It can prove partial
+ *                                committed coverage, but a committed DELETE or rename source may
+ *                                have no resulting entry to key.
  *   whole merged-tree identity — git's own oid. Narrower question (identical tree, same paths),
  *                                answered with total reliability: no cap, no reads, no failure
  *                                modes, and the tree it compares is a COMMITTED one by
@@ -792,7 +798,11 @@ test('ATTACK: an unreadable fingerprint must not be counted as evidence the work
       const added = [{ file, kind: 'function', name: sym }];
       return {
         id, path: `/tmp/${id}`, ok: true, family: id,
-        committed: { files: [file], count: 1, how: 'merge-tree', mergedTree: tree, lineEndingOnlyVsBase: false },
+        committed: {
+          files: [file], count: 1, how: 'merge-tree', mergedTree: tree,
+          lineEndingOnlyVsBase: false,
+          identities: key ? { [file]: `100644:blob:${key}` } : {},
+        },
         uncommitted: { files: [], untracked: [], count: 0, how: 'status' },
         ignored: { files: [], count: 0, how: 'ignored' },
         touched: [file],
@@ -837,7 +847,7 @@ test('ATTACK: an unreadable fingerprint must not be counted as evidence the work
     const realDuplicate = {
       workstreams: [
         ws('d1', 'a/thing.js', 'n:same', 'tree-one', 'Handler'),
-        ws('d2', 'b/thing.js', 'n:same', 'tree-two', 'Handler'),
+        ws('d2', 'a/thing.js', 'n:same', 'tree-two', 'Handler'),
       ],
     };
     const d1 = uniqueWork(realDuplicate).find((u) => u.id === 'd1');
@@ -884,8 +894,7 @@ test('ATTACK: a generated-NAMED dir is only disposable when the repo carries the
   assert.equal(v.safe, false,
     `untracked dist/ content with no build system is at-risk work, not noise: ${JSON.stringify(v)}`);
 
-  // CONTROL — the never-worse half: the SAME content with the manifest present stays disposable,
-  // because `npm run build`/`npm ci` genuinely recreates it. Refusing here would freeze the tool.
+  // CONTROL: the manifest makes confirmation cheaper, but is not a byte-level proof.
   const fx2 = await newRepo('generated-with-evidence');
   t.after(() => fx2.cleanup());
   await fx2.write('.gitignore', 'build/\nnode_modules/\n');
@@ -896,6 +905,8 @@ test('ATTACK: a generated-NAMED dir is only disposable when the repo carries the
   await fx2.write('node_modules/dep/index.js', 'module.exports=1;\n', wt3);
   const report2 = await inspect(fx2.root);
   const v3 = verdict(report2, 'wt-build-ok');
-  assert.equal(v3.safe, true,
-    `build output WITH its manifest is reproducible and must stay reclaimable: ${JSON.stringify(v3)}`);
+  assert.equal(v3.safe, false,
+    `manifest-backed output still requires explicit confirmation: ${JSON.stringify(v3)}`);
+  const buildDelete = await assessCommand('rm -rf build node_modules', wt3);
+  assert.equal(buildDelete.decision, 'ask', JSON.stringify(buildDelete));
 });

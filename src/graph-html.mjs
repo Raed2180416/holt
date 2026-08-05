@@ -116,14 +116,17 @@ export function renderHtml(report) {
     :root { --bg:#fbfcfd; --panel:#fff; --line:#e3e7ee; --fg:#1a1f2b; --muted:#66708a; --sibling:#d7dde8; }
   }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg); overflow:hidden;
+  html { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); height:100vh; height:100dvh;
+    display:grid; grid-template-rows:auto minmax(0,1fr); overflow:hidden;
     font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif; }
   header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex;
-    gap:18px; align-items:baseline; flex-wrap:wrap; }
+    gap:18px; align-items:baseline; flex-wrap:wrap; min-width:0; }
   h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:-.01em; }
-  .meta { color:var(--muted); font-size:12px; font-family:ui-monospace,monospace; }
-  .wrap { display:flex; height:calc(100vh - 50px); }
-  #stage { flex:1; overflow:hidden; position:relative; cursor:grab; }
+  .meta { color:var(--muted); font-size:12px; font-family:ui-monospace,monospace;
+    min-width:0; max-width:100%; overflow-wrap:anywhere; }
+  .wrap { display:flex; min-width:0; min-height:0; }
+  #stage { flex:1 1 auto; min-width:0; min-height:0; overflow:hidden; position:relative; cursor:grab; }
   #stage.panning { cursor:grabbing; }
   aside { width:340px; border-left:1px solid var(--line); background:var(--panel);
     overflow-y:auto; padding:14px; flex-shrink:0; }
@@ -134,7 +137,7 @@ export function renderHtml(report) {
     font-size:12.5px; border-bottom:1px solid var(--line); }
   .row b { font-weight:600; font-variant-numeric:tabular-nums; }
   .row.clickable { cursor:pointer; }
-  .row.clickable:hover { background:var(--line); }
+  .row.clickable:hover, .row.clickable:focus-visible { background:var(--line); outline:2px solid var(--accent); outline-offset:2px; }
   #search { width:100%; padding:7px 9px; background:var(--bg); color:var(--fg);
     border:1px solid var(--line); border-radius:6px; font-size:12.5px;
     font-family:ui-monospace,monospace; }
@@ -151,7 +154,18 @@ export function renderHtml(report) {
   #hint { position:absolute; left:12px; bottom:10px; font-size:11px; color:var(--muted);
     font-family:ui-monospace,monospace; pointer-events:none; opacity:.75; }
   circle.node { cursor:pointer; }
+  circle.node:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
   svg { display:block; }
+  @media (max-width:700px) {
+    body { height:auto; min-height:100vh; min-height:100dvh; display:block;
+      overflow-x:hidden; overflow-y:auto; }
+    header { padding:10px 12px; gap:5px 12px; }
+    .wrap { width:100%; height:auto; flex-direction:column; }
+    #stage { flex:none; width:100%; height:52vh; height:clamp(300px,52svh,440px); min-height:300px; }
+    aside { width:100%; height:auto; overflow:visible; flex:none;
+      border-left:0; border-top:1px solid var(--line); }
+    #hint { right:12px; bottom:8px; line-height:1.35; }
+  }
 </style>
 </head>
 <body>
@@ -162,15 +176,15 @@ export function renderHtml(report) {
   <span class="meta">${esc(report.counts.scanned)}/${esc(report.counts.workstreams)} workstreams &middot; ${esc(report.counts.families)} families</span>
 </header>
 <div class="wrap">
-  <div id="stage"><div id="hint">drag to pan &middot; scroll to zoom &middot; drag a node to pin it &middot; double-click to release &middot; / to search</div></div>
+  <div id="stage"><div id="hint">drag to pan &middot; scroll to zoom &middot; Tab/arrow keys select &middot; Enter pins &middot; / searches</div></div>
   <aside>
     <h2>Find</h2>
     <input id="search" type="search" placeholder="filter workstreams..." autocomplete="off" spellcheck="false">
     <h2>Decisions</h2>
-    <div class="row clickable" data-focus="risk"><span>At risk (uncommitted only)</span><b style="color:var(--risk)">${esc(report.counts.atRisk)}</b></div>
+    <div class="row clickable" data-focus="risk" role="button" tabindex="0"><span>At risk (uncommitted only)</span><b style="color:var(--risk)">${esc(report.counts.atRisk)}</b></div>
     <div class="row"><span>Collisions</span><b style="color:var(--risk)">${esc(report.counts.collisions)}</b></div>
     <div class="row"><span>Duplicate pairs</span><b style="color:var(--dup)">${esc(report.counts.duplicatePairs)}</b></div>
-    <div class="row clickable" data-focus="safe"><span>Disposable</span><b style="color:var(--safe)">${esc(report.counts.safeToDelete)}</b></div>
+    <div class="row clickable" data-focus="safe" role="button" tabindex="0"><span>Disposable</span><b style="color:var(--safe)">${esc(report.counts.safeToDelete)}</b></div>
     <div class="row"><span>To review</span><b>${esc(report.plan.reviewReduction.toReview)}</b></div>
     <h2>Show relationships</h2>
     <div class="filters">
@@ -230,8 +244,8 @@ const W = () => stage.clientWidth, H = () => stage.clientHeight;
 
 const colorOf = n =>
   n.uncommittedOnly > 0 ? 'var(--risk)'
-  : n.uniqueSymbols  > 0 ? 'var(--hold)'
   : n.safeToDelete       ? 'var(--safe)'
+  : (n.uniqueSymbols > 0 || n.committedFiles > 0) ? 'var(--hold)'
   : 'var(--muted)';
 
 // "Safe" is true for two different reasons and drawing them identically is dangerous: one node
@@ -372,7 +386,7 @@ stage.addEventListener('wheel', ev => {
 }, { passive: false });
 
 let dragNode = null, panning = false, last = null, moved = false;
-let hovered = -1, pinned = -1;
+let hovered = -1, pinned = -1, keyboardFocused = -1, pendingFocus = -1;
 
 stage.addEventListener('pointerdown', ev => {
   const rect = stage.getBoundingClientRect();
@@ -444,15 +458,22 @@ let query = '';
 search.addEventListener('input', () => { query = search.value.trim().toLowerCase(); draw(); });
 addEventListener('keydown', ev => {
   if (ev.key === '/' && document.activeElement !== search) { ev.preventDefault(); search.focus(); }
-  if (ev.key === 'Escape') { search.value = ''; query = ''; pinned = -1; draw(); }
+  if (ev.key === 'Escape') {
+    search.value = ''; query = ''; pinned = -1; keyboardFocused = -1; pendingFocus = -1; draw();
+  }
 });
 document.querySelectorAll('[data-focus]').forEach(row => {
-  row.addEventListener('click', () => {
+  const activate = () => {
     // Clicking a count filters to the nodes it counted - the number becomes navigable rather
     // than decorative.
     query = row.dataset.focus === 'risk' ? 'risk' : 'safe';
     search.value = '';
+    hovered = -1; pinned = -1; keyboardFocused = -1; pendingFocus = -1;
     draw();
+  };
+  row.addEventListener('click', activate);
+  row.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); activate(); }
   });
 });
 const matches = n => {
@@ -476,7 +497,15 @@ function svgEl(name, attrs) {
 }
 
 function draw() {
-  const focus = pinned !== -1 ? pinned : hovered;
+  // The SVG is replaced while the force layout settles. Capture the focused node before that
+  // replacement and restore it afterwards; otherwise Tab works for one frame and then throws
+  // the user back to the document body on the next animation tick.
+  const activeNodeAttr = document.activeElement?.getAttribute?.('data-node-index');
+  const activeNode = activeNodeAttr == null ? -1 : Number(activeNodeAttr);
+  const restoreFocus = pendingFocus !== -1
+    ? pendingFocus
+    : (Number.isInteger(activeNode) && activeNode >= 0 ? activeNode : -1);
+  const focus = keyboardFocused !== -1 ? keyboardFocused : pinned !== -1 ? pinned : hovered;
   const near = focus === -1 ? null : neighbours[focus];
   const lit = i => focus === -1 ? matches(nodes[i]) : (i === focus || near.has(i));
 
@@ -503,9 +532,50 @@ function draw() {
       class: 'node', cx: n.x.toFixed(1), cy: n.y.toFixed(1), r: n.r.toFixed(1),
       fill: colorOf(n), stroke: i === focus ? 'var(--fg)' : redundant ? 'var(--dup)' : 'var(--bg)',
       'stroke-width': i === focus ? 2.5 : redundant ? 2 : 1.5, opacity: on ? 1 : 0.12,
+      tabindex: 0, role: 'button', 'data-node-index': i,
+      'aria-pressed': pinned === i ? 'true' : 'false',
+      'aria-label': 'Workstream ' + String(n.id).replace(/\\s+/g, ' ') +
+        '. Verdict ' + String(n.verdict || 'unknown').replace(/\\s+/g, ' ') +
+        '. ' + n.committedFiles + ' committed file(s), ' + n.uncommittedOnly + ' uncommitted-only file(s).',
     };
     if (redundant) attrs['stroke-dasharray'] = '3 2';
     const circle = svgEl('circle', attrs);
+    circle.addEventListener('focus', () => {
+      keyboardFocused = i;
+      describe(i);
+    });
+    circle.addEventListener('click', ev => {
+      ev.stopPropagation?.();
+      keyboardFocused = i;
+      pinned = pinned === i ? -1 : i;
+      pendingFocus = i;
+      describe(i);
+      draw();
+    });
+    circle.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        pinned = pinned === i ? -1 : i;
+        keyboardFocused = i;
+        pendingFocus = i;
+        describe(i);
+        draw();
+        return;
+      }
+      const delta = ev.key === 'ArrowRight' || ev.key === 'ArrowDown' ? 1
+        : ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' ? -1 : 0;
+      if (!delta) return;
+      ev.preventDefault();
+      let next = i;
+      for (let tries = 0; tries < nodes.length; tries++) {
+        next = (next + delta + nodes.length) % nodes.length;
+        if (matches(nodes[next])) break;
+      }
+      keyboardFocused = next;
+      pendingFocus = next;
+      describe(next);
+      draw();
+    });
     const tip = svgEl('title', {});
     tip.textContent = n.id + (isRedundant(n) ? ' (redundant with ' + n.redundantWith.join(', ') + ')' : '');
     circle.appendChild(tip);
@@ -559,11 +629,19 @@ function draw() {
   svg.appendChild(g);
   stage.replaceChildren(svg);
   stage.appendChild(hint);
+  if (restoreFocus !== -1) {
+    const target = svg.querySelector?.('[data-node-index="' + restoreFocus + '"]');
+    target?.focus?.({ preventScroll: true });
+  }
+  pendingFocus = -1;
 }
 
 function describe(i) {
   const n = nodes[i];
   const rel = DATA.edges.filter(e => e.source === n.id || e.target === n.id);
+  const EDGE_DETAIL_LIMIT = 100;
+  const shownRel = rel.slice(0, EDGE_DETAIL_LIMIT);
+  const omitted = rel.length - shownRel.length;
   detail.textContent =
     n.id + '\\n' +
     '─'.repeat(Math.min(34, n.id.length)) + '\\n' +
@@ -581,9 +659,12 @@ function describe(i) {
         ? '  (ONLY because: ' + n.redundantWith.join(', ') + ' — do not remove all of these together)'
         : '') + '\\n\\n' +
     'edges (' + rel.length + ')\\n' +
-    rel.slice(0, 14).map(e =>
+    shownRel.map(e =>
       '  ' + String(e.kind || e.type).padEnd(18) + (e.source === n.id ? e.target : e.source) +
-      (e.why ? '\\n     ' + e.why : '')).join('\\n');
+      (e.why ? '\\n     ' + e.why : '')).join('\\n') +
+    (omitted > 0
+      ? '\\n  … and ' + omitted + ' more; run holt context ' + JSON.stringify(n.id) + ' --json for the complete evidence'
+      : '');
 }
 
 /* ------------------------------------------------------------------------- loop ---- */

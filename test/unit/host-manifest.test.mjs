@@ -135,7 +135,9 @@ test('cursor: the deny hook is written in Cursor\'s own schema, and denies in Cu
 
   const deny = formatVerdict({ decision: 'deny', reason: 'holt: would destroy the only copy of X' }, { host: 'cursor' });
   assert.equal(deny.permission, 'deny', 'Cursor blocks on permission:deny, not on an exit code alone');
-  assert.match(deny.agentMessage, /holt/, 'the AGENT must be told why, or it retries with another verb');
+  assert.match(deny.agent_message, /holt/, 'the AGENT must be told why, or it retries with another verb');
+  assert.equal(cfg.hooks.beforeShellExecution[0].failClosed, false,
+    'Cursor hook failures are documented fail-open and the generated schema must say so explicitly');
 
   assert.equal(formatVerdict({ decision: 'allow' }, { host: 'cursor' }).permission, 'allow');
 
@@ -176,7 +178,11 @@ const FIXTURES = [
   { host: 'vscode', scope: 'project', file: path.join('.vscode', 'mcp.json'), key: 'servers' },
   // Cline: cline/cline#11671 — the CLI has NO project file, and the real global path is nested
   // under data/settings/, not the ~/.cline/mcp.json its own docs (wrongly) advertise.
-  { host: 'cline', scope: 'user', file: path.join('.cline', 'data', 'settings', 'cline_mcp_settings.json'), key: 'mcpServers' },
+  { host: 'cline-cli', scope: 'user', file: path.join('.cline', 'data', 'settings', 'cline_mcp_settings.json'), key: 'mcpServers' },
+  { host: 'continue', scope: 'project', file: path.join('.continue', 'mcpServers', 'holt.json'), key: 'mcpServers' },
+  { host: 'devin-cli', scope: 'project', file: path.join('.devin', 'mcp_config.json'), key: 'mcpServers' },
+  { host: 'devin-cli', scope: 'user', file: path.join('.config', 'devin', 'mcp_config.json'), key: 'mcpServers' },
+  { host: 'cascade', scope: 'user', file: path.join('.codeium', 'windsurf', 'mcp_config.json'), key: 'mcpServers' },
   // Amazon Q Developer CLI: docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/mcp-ide.html — legacy
   // but enabled-by-default mcp.json, both scopes.
   { host: 'amazon-q', scope: 'project', file: path.join('.amazonq', 'mcp.json'), key: 'mcpServers' },
@@ -212,10 +218,10 @@ test('cline: no project-scope MCP file is fabricated, and the user-scope path is
   // cline/cline#11671: Cline's own maintainers confirm the CLI has exactly one MCP config file,
   // global, and that their docs (and a prior revision of holt's code) pointed at the wrong path.
   const rows = targets();
-  const project = rows.filter((r) => r.host === 'cline' && r.scope === 'project');
+  const project = rows.filter((r) => r.host === 'cline-cli' && r.scope === 'project');
   assert.deepEqual(project, [], 'Cline CLI has no project-scope MCP file — writing one would be dead config');
 
-  const user = rows.find((r) => r.host === 'cline' && r.scope === 'user');
+  const user = rows.find((r) => r.host === 'cline-cli' && r.scope === 'user');
   assert.ok(user, 'Cline needs its (only) global config row');
   assert.ok(user.file.endsWith(path.join('.cline', 'data', 'settings', 'cline_mcp_settings.json')),
     `wrong Cline path: ${user.file} — must be data/settings/cline_mcp_settings.json, not the bare .cline/mcp.json Cline's own docs wrongly advertise`);
@@ -252,34 +258,20 @@ test('amazon-q: reclassified local+mcp, and the manifest agrees with the writer'
   }
 });
 
-test('strengthLabel: verified-live blocking and docs-only blocking read as different claims', async () => {
-  // Cursor is strength:'block' with verifiedLive:false — a real host, a real deny signal, taken
-  // from Cursor's own published hook docs, but never actually driven against a live Cursor
-  // process. Claude Code and OpenCode HAVE been driven live. The e2e manifest test already asserts
-  // this distinction exists in the DATA (`verifiedLive` boolean); this asserts the human-facing
-  // LABEL — what `holt hosts` and HOSTS.md actually print — does not paper back over it by
-  // printing the identical string for both grades, which is what it did before this fix.
+test('strengthLabel: config/source validation is never relabelled as a live host run', async () => {
   const { HOSTS, strengthLabel } = await import('../../src/integrate/hosts.mjs');
-  const live = HOSTS.find((h) => h.strength === 'block' && h.verifiedLive === true);
-  const docsOnly = HOSTS.find((h) => h.strength === 'block' && h.verifiedLive === false);
-  assert.ok(live, 'need at least one verified-live blocking host to compare against');
-  assert.ok(docsOnly, 'need at least one docs-only (not yet driven live) blocking host to compare against');
-  assert.notEqual(strengthLabel(live), strengthLabel(docsOnly),
-    'a verified-live deny hook and a docs-derived-but-unfired one must not read as the same claim');
-  assert.match(strengthLabel(live), /verified live/i);
-  assert.match(strengthLabel(docsOnly), /not yet driven live|not.*verified live/i);
+  const blocking = HOSTS.filter((h) => h.strength === 'block');
+  assert.ok(blocking.length >= 5, 'the implemented project-hook surfaces disappeared from the manifest');
+  assert.deepEqual(blocking.filter((h) => h.verifiedLive === true), [],
+    'a config parse/discovery smoke is not a real host enforcement run');
+  for (const h of blocking) assert.match(strengthLabel(h), /not driven live/i, `${h.id} overstates its evidence`);
 });
 
-test('goose: the honest "add by hand" instructions use Goose\'s REAL field names', async () => {
-  // goose-docs.ai/docs/guides/config-files: the command field is `cmd`, not `command`, and a
-  // working entry needs `type: stdio` and `enabled: true`. A prior revision of this exact note
-  // told a user to write `command: holt` — copying it verbatim would produce an extension Goose
-  // silently ignores, which is worse than the honest "we don't write this" the note is FOR.
+test('goose: project plugin hook is blocking while MCP remains honestly unsupported', async () => {
   const { HOSTS } = await import('../../src/integrate/hosts.mjs');
   const h = HOSTS.find((x) => x.id === 'goose');
-  assert.equal(h.mcp, false, 'holt still does not write YAML for Goose');
-  assert.match(h.note, /cmd:\s*holt/, 'must use the real field name `cmd`');
-  assert.doesNotMatch(h.note, /\bcommand:\s*holt\b/, 'must NOT use the wrong field name `command`');
-  assert.match(h.note, /type:\s*stdio/, 'stdio extensions need an explicit type');
-  assert.match(h.note, /enabled:\s*true/, 'an extension with no enabled field defaults differently across versions');
+  assert.equal(h.strength, 'block');
+  assert.equal(h.mcp, false, 'holt still does not rewrite Goose YAML containing user secrets');
+  assert.match(h.note, /\.agents\/plugins\/holt/);
+  assert.match(h.note, /fail open/i, 'Goose documents broken hooks as fail-open');
 });

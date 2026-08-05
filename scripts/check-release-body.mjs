@@ -30,6 +30,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const BODIES_DIR = path.join(ROOT, '.github', 'releases');
+export const CHANGELOG_PATH = path.join(ROOT, 'CHANGELOG.md');
 
 /** owner/name, from package.json, so a fork does not have to edit this script. */
 export async function repoSlug(root = ROOT) {
@@ -54,6 +55,46 @@ function isPlaceholder(target) {
 }
 
 const clean = (t) => t.replace(/^[`'"(]+|[`'".,)]+$/g, '');
+
+// Performance/rate claims in release prose must point at the exact retained evidence, not merely
+// at a methods page. Version numbers and install URLs do not match because a unit/rate is required.
+const MEASURED_CLAIM = /\b\d+(?:\.\d+)?(?:\s*(?:ms|milliseconds?|seconds?|kb|mb|gb|%)|\s+s\b|\s*\/\s*\d+)\b/gi;
+const EVIDENCE_LINK = /\[[^\]]+\]\((?:https:\/\/github\.com\/[^)]+\/(?:blob|tree)\/[^)]+\/(?:docs\/evidence|eval\/results)[^)]+|(?:\.\.\/)*?(?:docs\/evidence|eval\/results)[^)]+)\)/i;
+const LIVE_HOST_CLAIM = /(?:host coverage[^.\n]*verified end[- ]to[- ]end|real[- ]host[^.\n]*(?:verified|proven|passed)|hosts? ci (?:actually )?drives)/i;
+
+/** Evidence-bearing claims shared by release bodies and the current changelog entry. */
+export function checkEvidenceClaims(text) {
+  const problems = [];
+  const source = String(text ?? '');
+  // Commands, literal program output and URLs can contain ratios/status-like tokens (for example
+  // `scanned 0/0` or an HTTP 404) without making a result claim. Gate prose claims, not quoted
+  // evidence of the bug being fixed.
+  const claimProse = source
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/https?:\/\/\S+/g, ' ');
+  const measured = [...claimProse.matchAll(MEASURED_CLAIM)].map((m) => m[0]);
+  if (measured.length > 0 && !EVIDENCE_LINK.test(source)) {
+    problems.push(
+      `measured value(s) lack a link to an exact retained evidence artifact: ${[...new Set(measured)].join(', ')}. `
+      + 'A methods page such as BENCHMARKS.md is not the result artifact.');
+  }
+  if (LIVE_HOST_CLAIM.test(claimProse) && !EVIDENCE_LINK.test(source)) {
+    problems.push(
+      'the body claims real/end-to-end host proof without an exact retained host-run artifact. '
+      + 'Config and payload contract tests are not live-host enforcement evidence.');
+  }
+  return problems;
+}
+
+/** Only the candidate version's changelog entry is a current release claim. */
+export function changelogSection(text, version) {
+  const escaped = String(version).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = String(text ?? '').match(
+    new RegExp(`(?:^|\\n)##\\s+${escaped}\\s*\\r?\\n([\\s\\S]*?)(?=\\n##\\s|$)`),
+  );
+  return match?.[1] ?? '';
+}
 
 /**
  * @param {string} body   the release body markdown
@@ -98,6 +139,8 @@ export function checkReleaseBody(body, tag, slug) {
     problems.push(`the body never mentions ${tag} — it would read identically for any release`);
   }
 
+  problems.push(...checkEvidenceClaims(text));
+
   return problems;
 }
 
@@ -140,6 +183,20 @@ async function main() {
     for (const f of bodies) {
       jobs.push({ label: f, tag: path.basename(f, '.md'), body: await fs.readFile(path.join(BODIES_DIR, f), 'utf8') });
     }
+
+    const pkg = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
+    const changelog = await fs.readFile(CHANGELOG_PATH, 'utf8');
+    const current = changelogSection(changelog, pkg.version);
+    if (!current.trim()) {
+      console.error(`::error::CHANGELOG.md: no current ## ${pkg.version} entry to evidence-check`);
+      process.exit(1);
+    }
+    const changelogProblems = checkEvidenceClaims(current);
+    if (changelogProblems.length) {
+      for (const p of changelogProblems) console.error(`::error::CHANGELOG.md (${pkg.version}): ${p}`);
+      process.exit(1);
+    }
+    console.log(`ok  CHANGELOG.md current entry (${pkg.version})`);
   } else {
     const body = opts.stdin ? await readStdin() : await fs.readFile(opts.bodyFile, 'utf8');
     jobs.push({ label: opts.bodyFile ?? 'stdin', tag: opts.tag, body });

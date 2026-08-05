@@ -3,12 +3,12 @@
  * holt — the number a champion shows a VP at renewal.
  *
  * A safety product churns without a countable outcome: "nothing bad happened" is invisible. The
- * append-only journal already records every prevented loss and every reclaim; this turns it into
- * a plain-English tally. Pure over the events array, so it is exhaustively testable and needs no
- * repository.
+ * append-only journal already records every prevented loss, recoverable quarantine and historical
+ * physical cleanup; this turns it into a plain-English tally. Pure over the events array, so it is
+ * exhaustively testable and needs no repository.
  *
  * The headline is DELIBERATELY conservative: it counts only events that actually happened
- * (blocks that fired, rescues that verified, worktrees reclaimed) — never a hypothetical. An
+ * (blocks that fired, rescues that verified, worktrees quarantined) — never a hypothetical. An
  * inflated safety number is worse than none, because the one time it is wrong destroys the trust
  * the whole product runs on.
  */
@@ -33,7 +33,10 @@ export function summarizeJournal(events, { now = null } = {}) {
   const unverified = count('unverified');
   const protectedWt = count('protect');             // worktrees locked because they held unique work
   const rescued = count('rescue');                  // unique work captured to a verifiable ref
-  const cleaned = count('clean-remove') + count('removed'); // disposable worktrees reclaimed
+  const quarantined = count('clean-quarantine');    // reversible moves; no bytes or branches removed
+  // Current explicit purge plus reader compatibility for pre-quarantine journals. Physical
+  // removals must never be folded into the quarantine count or described as still recoverable.
+  const cleaned = count('clean-purge') + count('clean-remove') + count('removed');
   const branchesDeleted = count('branch-delete');
   // Protections RELEASED, reported beside protections applied. A safety tally that shows only
   // the guards it put up, never the ones taken down, overstates the standing protection — the
@@ -60,6 +63,7 @@ export function summarizeJournal(events, { now = null } = {}) {
       attemptsHoltCouldNotVerify: unverified,
       workstreamsProtected: protectedWt,
       workstreamsRescued: rescued,
+      worktreesQuarantined: quarantined,
       worktreesReclaimed: cleaned,
       branchesDeleted,
       protectionsReleased: released,
@@ -72,6 +76,9 @@ export function summarizeJournal(events, { now = null } = {}) {
     note: 'Every figure here is a count of events that actually fired, taken from the journal. '
       + 'preventedLosses counts events that actually fired, and EXCLUDES '
       + 'attemptsHoltCouldNotVerify — holt did not prevent those, it declined to judge them. '
+      + 'worktreesQuarantined counts reversible local moves with branches retained; '
+      + 'worktreesReclaimed counts explicit clean-purge events plus historical physical-removal '
+      + 'evidence from older journal actions. '
       + 'Audit them with `holt journal --export json`.',
   };
 }

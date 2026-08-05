@@ -1,11 +1,14 @@
 {
-    "version": "0.3.1",
-    "description": "Know what your agents made, and don't lose any of it — git-worktree safety for AI coding agents.",
+    "version": "0.3.0",
+    "description": "Coordinate, preserve, and safely clean parallel agent worktrees.",
     "homepage": "https://raed2180416.github.io/holt/",
-    "license": "FSL-1.1-MIT",
+    "license": {
+        "identifier": "Proprietary,FSL-1.1-MIT",
+        "url": "https://github.com/Raed2180416/holt/blob/main/LICENSE-NOTICE.md"
+    },
     "depends": "nodejs-lts",
-    "url": "https://github.com/Raed2180416/holt/releases/download/v0.3.1/holt.tgz",
-    "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "url": "https://github.com/Raed2180416/holt/releases/download/v0.3.0/holt.tgz",
+    "hash": "097af7ad10b52e44fd8bd5ca86f7e2efb584b0071ec3574edc1c62adcf15a663",
     "script": [
         "npm install -g \"$dir\\holt.tgz\""
     ],
@@ -22,7 +25,7 @@
         "url": "https://github.com/Raed2180416/holt/releases/download/v$version/holt.tgz",
         "hash": {
             "url": "$baseurl/SHA256SUMS",
-            "regex": "holt\\.tgz\\s+([a-f0-9]{64})"
+            "regex": "([a-f0-9]{64})\\s+holt\\.tgz"
         },
         "script": [
             "npm install -g \"$dir\\holt.tgz\""

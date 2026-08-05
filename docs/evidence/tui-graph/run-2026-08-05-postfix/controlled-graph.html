@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>holt — repo</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --line:#252a35; --fg:#e6e9ef; --muted:#8b93a7;
+    --risk:#ff5f56; --hold:#ffbd2e; --dup:#c678dd; --safe:#3fb950; --sibling:#2f3846;
+    --overlap:#58a6ff; --accent:#e2a154;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#fbfcfd; --panel:#fff; --line:#e3e7ee; --fg:#1a1f2b; --muted:#66708a; --sibling:#d7dde8; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); overflow:hidden;
+    font:14px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex;
+    gap:18px; align-items:baseline; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:650; letter-spacing:-.01em; }
+  .meta { color:var(--muted); font-size:12px; font-family:ui-monospace,monospace; }
+  .wrap { display:flex; height:calc(100vh - 50px); }
+  #stage { flex:1; overflow:hidden; position:relative; cursor:grab; }
+  #stage.panning { cursor:grabbing; }
+  aside { width:340px; border-left:1px solid var(--line); background:var(--panel);
+    overflow-y:auto; padding:14px; flex-shrink:0; }
+  aside h2 { font-size:11px; text-transform:uppercase; letter-spacing:.07em;
+    color:var(--muted); margin:18px 0 8px; font-weight:600; }
+  aside h2:first-child { margin-top:0; }
+  .row { display:flex; justify-content:space-between; gap:10px; padding:4px 0;
+    font-size:12.5px; border-bottom:1px solid var(--line); }
+  .row b { font-weight:600; font-variant-numeric:tabular-nums; }
+  .row.clickable { cursor:pointer; }
+  .row.clickable:hover, .row.clickable:focus-visible { background:var(--line); outline:2px solid var(--accent); outline-offset:2px; }
+  #search { width:100%; padding:7px 9px; background:var(--bg); color:var(--fg);
+    border:1px solid var(--line); border-radius:6px; font-size:12.5px;
+    font-family:ui-monospace,monospace; }
+  #search:focus { outline:none; border-color:var(--accent); }
+  .filters label { display:flex; align-items:center; gap:7px; font-size:12.5px;
+    padding:3px 0; cursor:pointer; color:var(--muted); }
+  .filters input { accent-color:var(--accent); cursor:pointer; }
+  .swatch { display:inline-block; width:16px; height:0; border-top-width:2px;
+    border-top-style:solid; }
+  .legend { display:flex; gap:12px; flex-wrap:wrap; font-size:12px; color:var(--muted); }
+  .legend i { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:5px; }
+  #detail { font-family:ui-monospace,monospace; font-size:11.5px; color:var(--muted);
+    white-space:pre-wrap; word-break:break-word; }
+  #hint { position:absolute; left:12px; bottom:10px; font-size:11px; color:var(--muted);
+    font-family:ui-monospace,monospace; pointer-events:none; opacity:.75; }
+  circle.node { cursor:pointer; }
+  circle.node:focus-visible { outline:3px solid var(--accent); outline-offset:3px; }
+  svg { display:block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>holt</h1>
+  <span class="meta">/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/repo</span>
+  <span class="meta">base main @ e50fea3d</span>
+  <span class="meta">10/10 workstreams &middot; 3 families</span>
+</header>
+<div class="wrap">
+  <div id="stage"><div id="hint">drag to pan &middot; scroll to zoom &middot; Tab/arrow keys select &middot; Enter pins &middot; / searches</div></div>
+  <aside>
+    <h2>Find</h2>
+    <input id="search" type="search" placeholder="filter workstreams..." autocomplete="off" spellcheck="false">
+    <h2>Decisions</h2>
+    <div class="row clickable" data-focus="risk" role="button" tabindex="0"><span>At risk (uncommitted only)</span><b style="color:var(--risk)">2</b></div>
+    <div class="row"><span>Collisions</span><b style="color:var(--risk)">1</b></div>
+    <div class="row"><span>Duplicate pairs</span><b style="color:var(--dup)">2</b></div>
+    <div class="row clickable" data-focus="safe" role="button" tabindex="0"><span>Disposable</span><b style="color:var(--safe)">3</b></div>
+    <div class="row"><span>To review</span><b>8</b></div>
+    <h2>Show relationships</h2>
+    <div class="filters">
+      <label><input type="checkbox" data-edge="proven" checked><span class="swatch" style="border-color:var(--risk)"></span>proven conflict</label>
+      <label><input type="checkbox" data-edge="semantic-overlap" checked><span class="swatch" style="border-color:var(--overlap)"></span>same symbol, merges clean</label>
+      <label><input type="checkbox" data-edge="predicted" checked><span class="swatch" style="border-color:var(--hold)"></span>predicted conflict</label>
+      <label><input type="checkbox" data-edge="duplicate"><span class="swatch" style="border-color:var(--dup);border-top-style:dashed"></span>duplicate work</label>
+      <label><input type="checkbox" data-edge="sibling"><span class="swatch" style="border-color:var(--sibling)"></span>same family (same dispatch — see node detail for how holt knows)</label>
+    </div>
+    <h2>Legend</h2>
+    <div class="legend">
+      <span><i style="background:var(--risk)"></i>at risk</span>
+      <span><i style="background:var(--hold)"></i>unique committed</span>
+      <span><i style="background:var(--safe)"></i>disposable</span>
+      <span><i style="background:var(--safe);border:2px dashed var(--dup)"></i>disposable, redundant — a sibling holds the same content, don't remove both at once</span>
+      <span><i style="background:var(--muted)"></i>other</span>
+    </div>
+    <h2>Selection</h2>
+    <div id="detail">Hover a node to trace it. Click to pin the details here.</div>
+  </aside>
+</div>
+<script>
+const DATA = {"nodes":[{"id":"01-unique-uncommitted-critical","family":"burst:2026-08-04T215049404Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/01-unique-uncommitted-critical","head":"e50fea3d","branch":"audit/01-unique-uncommitted-critical","committedFiles":0,"uncommittedFiles":1,"addedSymbols":24,"uniqueSymbols":24,"uncommittedOnly":24,"safeToDelete":false,"verdict":"unique-work-uncommitted"},{"id":"02-unique-committed-feature","family":"burst:2026-08-04T215049404Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/02-unique-committed-feature","head":"8884d3b3","branch":"audit/02-unique-committed-feature","committedFiles":1,"uncommittedFiles":0,"addedSymbols":1,"uniqueSymbols":1,"uncommittedOnly":0,"safeToDelete":false,"verdict":"unique-work-committed"},{"id":"03-collision-payments-a","family":"burst:2026-08-04T215049404Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/03-collision-payments-a","head":"3177d3be","branch":"audit/03-collision-payments-a","committedFiles":1,"uncommittedFiles":0,"addedSymbols":0,"uniqueSymbols":0,"uncommittedOnly":0,"safeToDelete":false,"verdict":"committed-delta-no-unique-symbols"},{"id":"04-collision-payments-b","family":"burst:2026-08-04T215049404Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/04-collision-payments-b","head":"8836cd3f","branch":"audit/04-collision-payments-b","committedFiles":1,"uncommittedFiles":0,"addedSymbols":0,"uniqueSymbols":0,"uncommittedOnly":0,"safeToDelete":false,"verdict":"committed-delta-no-unique-symbols"},{"id":"05-redundant-twin-a","family":"burst:2026-08-04T185049451Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/05-redundant-twin-a","head":"521b4040","branch":"audit/05-redundant-twin-a","committedFiles":1,"uncommittedFiles":0,"addedSymbols":1,"uniqueSymbols":0,"uncommittedOnly":0,"safeToDelete":true,"verdict":"committed-delta-no-unique-symbols","redundantWith":["06-redundant-twin-b"]},{"id":"06-redundant-twin-b","family":"burst:2026-08-04T215049404Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/06-redundant-twin-b","head":"a0000417","branch":"audit/06-redundant-twin-b","committedFiles":1,"uncommittedFiles":0,"addedSymbols":1,"uniqueSymbols":0,"uncommittedOnly":0,"safeToDelete":true,"verdict":"committed-delta-no-unique-symbols","redundantWith":["05-redundant-twin-a"]},{"id":"07-duplicate-implementation-a","family":"burst:2026-08-04T202049473Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/07-duplicate-implementation-a","head":"c862cad7","branch":"audit/07-duplicate-implementation-a","committedFiles":1,"uncommittedFiles":0,"addedSymbols":1,"uniqueSymbols":1,"uncommittedOnly":0,"safeToDelete":false,"verdict":"unique-work-committed"},{"id":"08-duplicate-implementation-b","family":"burst:2026-08-04T215049404Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/08-duplicate-implementation-b","head":"d9cd40a6","branch":"audit/08-duplicate-implementation-b","committedFiles":1,"uncommittedFiles":0,"addedSymbols":1,"uniqueSymbols":1,"uncommittedOnly":0,"safeToDelete":false,"verdict":"unique-work-committed"},{"id":"09-genuinely-empty","family":"burst:2026-08-04T215049404Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/09-genuinely-empty","head":"e50fea3d","branch":"audit/09-genuinely-empty","committedFiles":0,"uncommittedFiles":0,"addedSymbols":0,"uniqueSymbols":0,"uncommittedOnly":0,"safeToDelete":true,"verdict":"nothing-unique"},{"id":"10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪","family":"burst:2026-08-04T215049404Z","familyRule":"creation-burst","path":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪","head":"e50fea3d","branch":"audit/10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪","committedFiles":0,"uncommittedFiles":1,"addedSymbols":1,"uniqueSymbols":1,"uncommittedOnly":1,"safeToDelete":false,"verdict":"unique-work-uncommitted"}],"edges":[{"type":"sibling","source":"01-unique-uncommitted-critical","target":"02-unique-committed-feature","family":"burst:2026-08-04T215049404Z","weight":1},{"type":"sibling","source":"01-unique-uncommitted-critical","target":"03-collision-payments-a","family":"burst:2026-08-04T215049404Z","weight":1},{"type":"sibling","source":"01-unique-uncommitted-critical","target":"04-collision-payments-b","family":"burst:2026-08-04T215049404Z","weight":1},{"type":"sibling","source":"01-unique-uncommitted-critical","target":"06-redundant-twin-b","family":"burst:2026-08-04T215049404Z","weight":1},{"type":"sibling","source":"01-unique-uncommitted-critical","target":"08-duplicate-implementation-b","family":"burst:2026-08-04T215049404Z","weight":1},{"type":"sibling","source":"01-unique-uncommitted-critical","target":"09-genuinely-empty","family":"burst:2026-08-04T215049404Z","weight":1},{"type":"sibling","source":"01-unique-uncommitted-critical","target":"10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪","family":"burst:2026-08-04T215049404Z","weight":1},{"type":"collision","source":"03-collision-payments-a","target":"04-collision-payments-b","weight":1,"severity":"high","kind":"proven","why":"git merge-tree reports a real conflict between these two worktrees, including their uncommitted work","symbols":[],"files":["config/policy.mjs"]},{"type":"duplicate","source":"05-redundant-twin-a","target":"06-redundant-twin-b","weight":1,"similarity":1,"classification":"cross-dispatch-waste","symbols":["callable:IDENTICAL_RELEASE_WORK"]},{"type":"duplicate","source":"07-duplicate-implementation-a","target":"08-duplicate-implementation-b","weight":1,"similarity":1,"classification":"cross-dispatch-waste","symbols":["callable:SHARED_RETRY_IMPL"]}],"families":[{"name":"burst:2026-08-04T215049404Z","members":["01-unique-uncommitted-critical","02-unique-committed-feature","03-collision-payments-a","04-collision-payments-b","06-redundant-twin-b","08-duplicate-implementation-b","09-genuinely-empty","10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪"]},{"name":"burst:2026-08-04T185049451Z","members":["05-redundant-twin-a"]},{"name":"burst:2026-08-04T202049473Z","members":["07-duplicate-implementation-a"]}],"base":{"ref":"main","oid":"e50fea3dd97fb219183faa80aeb0fea0cab06142","how":"conventional-name"},"counts":{"workstreams":10,"scanned":10,"skipped":0,"families":3,"collisions":1,"duplicatePairs":2,"safeToDelete":3,"atRisk":2,"stashAtRisk":0},"root":"/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/repo","backend":{"kind":"ctags","label":"universal-ctags 6.2.0 + enry (content-based language detection)","degraded":false,"enry":true,"ambiguityHandling":"content-classified"}};
+
+/*
+ * WHY THIS IS A SIMULATION AND NOT A STATIC PICTURE.
+ *
+ * The first version ran a fixed 320-step cooling loop once and drew the result. On a real
+ * repository that produced the failure this file exists to avoid: 29 nodes, 149 edges, every
+ * edge drawn with equal weight, labels stacked on top of one another, and the whole centre an
+ * undifferentiated hairball. It was visually TRUE and completely unusable, which is exactly the
+ * criticism holt's own source makes of unfiltered collision output: "616 findings with 6 real
+ * ones is strictly worse than 6, because the real ones become unreachable."
+ *
+ * Four things fix that, and each is here for one named reason:
+ *
+ *   a COLLIDE force        nodes had no radius awareness, so they overlapped and their labels
+ *                          became illegible. This is the direct cause of the unreadable centre.
+ *   HOVER-TRACE            with 149 edges you cannot follow one node's relationships by eye.
+ *                          Highlighting a node's neighbours and dimming everything else turns a
+ *                          hairball into an answer to "what does THIS one touch".
+ *   EDGE FILTERS           duplicate edges dominate the count and are the least actionable. The
+ *                          user decides what is drawn; duplicates and family edges start off.
+ *   ZOOM / PAN / DRAG      29 nodes fit on a screen. 200 do not, and holt is built for 200.
+ *
+ * The force model is the standard velocity-Verlet arrangement popularised by d3-force (link,
+ * many-body, centring, collision, with a decaying alpha) - implemented here directly rather than
+ * vendored, because this file must open from a file:// path with no network, inside corporate
+ * CSP, months after it was written, and a <script src> fails all three.
+ */
+
+const stage = document.getElementById('stage');
+const detail = document.getElementById('detail');
+const search = document.getElementById('search');
+const hint = document.getElementById('hint');
+const W = () => stage.clientWidth, H = () => stage.clientHeight;
+
+const colorOf = n =>
+  n.uncommittedOnly > 0 ? 'var(--risk)'
+  : n.safeToDelete       ? 'var(--safe)'
+  : (n.uniqueSymbols > 0 || n.committedFiles > 0) ? 'var(--hold)'
+  : 'var(--muted)';
+
+// "Safe" is true for two different reasons and drawing them identically is dangerous: one node
+// holds nothing at all, the other holds real committed work that is disposable ONLY because a
+// living sibling holds the identical content RIGHT NOW. Deleting one redundant node is fine;
+// deleting every green node on screen (which is exactly what a solid-green legend invites) takes
+// the sibling with it and destroys the only copy. redundantWith names which sibling(s) it is
+// relying on, so a dashed ring - rather than a second colour, which would collide with the
+// risk/hold/safe vocabulary above - marks a node whose safety is conditional on another node
+// still being on screen.
+const isRedundant = n => n.safeToDelete && Array.isArray(n.redundantWith) && n.redundantWith.length > 0;
+
+// An edge's CLASS is its collision kind where it has one, so the filters map onto the same
+// vocabulary the CLI prints rather than a second, invented one.
+const classOf = e => e.type === 'collision' ? (e.kind || 'predicted') : e.type;
+
+const EDGE_STYLE = {
+  proven:             { stroke:'var(--risk)',    w:1.8, o:.60, dash:'' },
+  'semantic-overlap': { stroke:'var(--overlap)', w:1.3, o:.45, dash:'' },
+  predicted:          { stroke:'var(--hold)',    w:1.3, o:.45, dash:'' },
+  identical:          { stroke:'var(--dup)',     w:1.2, o:.35, dash:'2 3' },
+  'proven-clean':     { stroke:'var(--sibling)', w:1,   o:.25, dash:'' },
+  'co-located':       { stroke:'var(--sibling)', w:1,   o:.25, dash:'' },
+  duplicate:          { stroke:'var(--dup)',     w:1.3, o:.40, dash:'4 3' },
+  sibling:            { stroke:'var(--sibling)', w:1,   o:.30, dash:'' },
+};
+const styleOf = e => EDGE_STYLE[classOf(e)] || EDGE_STYLE.sibling;
+
+const shown = new Set(['proven', 'semantic-overlap', 'predicted', 'identical']);
+document.querySelectorAll('[data-edge]').forEach(box => {
+  box.addEventListener('change', () => {
+    const k = box.dataset.edge;
+    if (box.checked) shown.add(k); else shown.delete(k);
+    // Toggling changes which forces act, so the layout must be allowed to re-settle.
+    alpha = Math.max(alpha, 0.4); kick();
+  });
+});
+
+// Deterministic seed: reopening the same file lands in the same place, which matters when the
+// export is attached to a review and two people are meant to be looking at the same picture.
+let seed = 42;
+const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+
+const nodes = DATA.nodes.map(n => ({
+  ...n,
+  x: rnd() * 700 + 150, y: rnd() * 420 + 90, vx: 0, vy: 0, fixed: false,
+  r: Math.max(5, Math.min(20, 5 + Math.sqrt((n.addedSymbols || 0) + (n.committedFiles || 0)) * 2.1)),
+}));
+const index = new Map(nodes.map((n, i) => [n.id, i]));
+const edges = DATA.edges
+  .filter(e => index.has(e.source) && index.has(e.target))
+  .map(e => ({ ...e, cls: classOf(e), s: index.get(e.source), t: index.get(e.target) }));
+
+// Adjacency, for hover-trace. Built once - recomputing it per mousemove is what makes a graph
+// of this size feel sluggish.
+const neighbours = nodes.map(() => new Set());
+edges.forEach(e => { neighbours[e.s].add(e.t); neighbours[e.t].add(e.s); });
+
+const active = () => edges.filter(e => shown.has(e.cls));
+
+/* ------------------------------------------------------------------ simulation ---- */
+
+let alpha = 1;
+const ALPHA_MIN = 0.005, ALPHA_DECAY = 0.018, VELOCITY_DECAY = 0.6;
+const LINK_DIST = 150;
+
+function step() {
+  const many = nodes.length > 260;      // above this, sampled repulsion keeps it interactive
+  const cx = W() / 2, cy = H() / 2;
+
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      if (many && ((i * 31 + j) % 3)) continue;
+      const a = nodes[i], b = nodes[j];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let d2 = dx * dx + dy * dy || 0.01;
+      if (d2 > 640000) continue;         // beyond ~800px the force is noise
+      const d = Math.sqrt(d2);
+      const rep = (LINK_DIST * LINK_DIST) / d2 * 0.55 * alpha;
+      const ux = dx / d, uy = dy / d;
+      a.vx -= ux * rep; a.vy -= uy * rep;
+      b.vx += ux * rep; b.vy += uy * rep;
+    }
+  }
+
+  // links - only the ones actually drawn, so hiding a class really does unclench the layout
+  for (const e of active()) {
+    const a = nodes[e.s], b = nodes[e.t];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+    const strength = (e.cls === 'proven' ? 0.06 : e.cls === 'sibling' ? 0.05 : 0.03) * alpha;
+    const f = (d - LINK_DIST) * strength;
+    const ux = dx / d, uy = dy / d;
+    a.vx += ux * f; a.vy += uy * f;
+    b.vx -= ux * f; b.vy -= uy * f;
+  }
+
+  // COLLISION - the force whose absence made the labels unreadable. The radius includes room
+  // for the label, so two nodes cannot settle close enough for their text to overlap.
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i], b = nodes[j];
+      const want = a.r + b.r + 26;
+      let dx = b.x - a.x, dy = b.y - a.y;
+      let d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+      if (d >= want) continue;
+      const push = (want - d) / d * 0.5;
+      dx *= push; dy *= push;
+      a.vx -= dx; a.vy -= dy;
+      b.vx += dx; b.vy += dy;
+    }
+  }
+
+  for (const n of nodes) {
+    if (n.fixed) { n.vx = 0; n.vy = 0; continue; }
+    n.vx += (cx - n.x) * 0.008 * alpha;
+    n.vy += (cy - n.y) * 0.008 * alpha;
+    n.vx *= VELOCITY_DECAY; n.vy *= VELOCITY_DECAY;
+    n.x += Math.max(-30, Math.min(30, n.vx));
+    n.y += Math.max(-30, Math.min(30, n.vy));
+  }
+  alpha = Math.max(0, alpha - ALPHA_DECAY * alpha);
+}
+
+/* --------------------------------------------------------------------- viewport ---- */
+
+let tx = 0, ty = 0, scale = 1;
+const toWorld = (px, py) => ({ x: (px - tx) / scale, y: (py - ty) / scale });
+
+stage.addEventListener('wheel', ev => {
+  ev.preventDefault();
+  const rect = stage.getBoundingClientRect();
+  const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  const before = toWorld(mx, my);
+  scale = Math.max(0.15, Math.min(6, scale * (ev.deltaY < 0 ? 1.12 : 1 / 1.12)));
+  tx = mx - before.x * scale; ty = my - before.y * scale;
+  draw();
+}, { passive: false });
+
+let dragNode = null, panning = false, last = null, moved = false;
+let hovered = -1, pinned = -1, keyboardFocused = -1, pendingFocus = -1;
+
+stage.addEventListener('pointerdown', ev => {
+  const rect = stage.getBoundingClientRect();
+  const p = toWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+  moved = false;
+  const hit = pick(p.x, p.y);
+  if (hit !== -1) { dragNode = hit; nodes[hit].fixed = true; }
+  else { panning = true; stage.classList.add('panning'); }
+  last = { x: ev.clientX, y: ev.clientY };
+  stage.setPointerCapture(ev.pointerId);
+});
+
+stage.addEventListener('pointermove', ev => {
+  const rect = stage.getBoundingClientRect();
+  const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+  if (dragNode !== null) {
+    moved = true;
+    const p = toWorld(mx, my);
+    nodes[dragNode].x = p.x; nodes[dragNode].y = p.y;
+    alpha = Math.max(alpha, 0.35); kick();
+    return;
+  }
+  if (panning) {
+    moved = true;
+    tx += ev.clientX - last.x; ty += ev.clientY - last.y;
+    last = { x: ev.clientX, y: ev.clientY };
+    draw();
+    return;
+  }
+  // HOVER-TRACE. The answer to "what does this one touch", which 149 undifferentiated edges
+  // cannot give you.
+  const p = toWorld(mx, my);
+  const hit = pick(p.x, p.y);
+  if (hit !== hovered) { hovered = hit; if (hit !== -1) describe(hit); draw(); }
+});
+
+const endPointer = () => {
+  if (dragNode !== null && !moved) nodes[dragNode].fixed = false;  // a click is not a pin
+  dragNode = null; panning = false; stage.classList.remove('panning');
+};
+stage.addEventListener('pointerup', endPointer);
+stage.addEventListener('pointercancel', endPointer);
+stage.addEventListener('dblclick', ev => {
+  const rect = stage.getBoundingClientRect();
+  const p = toWorld(ev.clientX - rect.left, ev.clientY - rect.top);
+  const hit = pick(p.x, p.y);
+  if (hit !== -1) { nodes[hit].fixed = false; alpha = Math.max(alpha, 0.3); kick(); }
+});
+
+stage.addEventListener('click', () => {
+  if (moved) return;
+  pinned = hovered;
+  if (pinned !== -1) describe(pinned);
+  draw();
+});
+
+function pick(x, y) {
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const n = nodes[i];
+    const dx = x - n.x, dy = y - n.y;
+    if (dx * dx + dy * dy <= (n.r + 6) * (n.r + 6)) return i;
+  }
+  return -1;
+}
+
+/* ----------------------------------------------------------------------- search ---- */
+
+let query = '';
+search.addEventListener('input', () => { query = search.value.trim().toLowerCase(); draw(); });
+addEventListener('keydown', ev => {
+  if (ev.key === '/' && document.activeElement !== search) { ev.preventDefault(); search.focus(); }
+  if (ev.key === 'Escape') {
+    search.value = ''; query = ''; pinned = -1; keyboardFocused = -1; pendingFocus = -1; draw();
+  }
+});
+document.querySelectorAll('[data-focus]').forEach(row => {
+  const activate = () => {
+    // Clicking a count filters to the nodes it counted - the number becomes navigable rather
+    // than decorative.
+    query = row.dataset.focus === 'risk' ? 'risk' : 'safe';
+    search.value = '';
+    draw();
+  };
+  row.addEventListener('click', activate);
+  row.addEventListener('keydown', ev => {
+    if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); activate(); }
+  });
+});
+const matches = n => {
+  if (!query) return true;
+  if (query === 'risk') return n.uncommittedOnly > 0;
+  if (query === 'safe') return n.safeToDelete;
+  return n.id.toLowerCase().includes(query);
+};
+
+/* -------------------------------------------------------------------- rendering ---- */
+
+// DOM construction, never string concatenation. The page is the THIRD sink for
+// repository-controlled text, and it used to build markup by concatenation and assign it to
+// innerHTML - so a workstream id was parsed as markup inside the browser even when the file on
+// disk was well-formed. createElementNS + textContent make that structurally impossible.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgEl(name, attrs) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const key of Object.keys(attrs)) node.setAttribute(key, String(attrs[key]));
+  return node;
+}
+
+function draw() {
+  // The SVG is replaced while the force layout settles. Capture the focused node before that
+  // replacement and restore it afterwards; otherwise Tab works for one frame and then throws
+  // the user back to the document body on the next animation tick.
+  const activeNode = Number(document.activeElement?.getAttribute?.('data-node-index'));
+  const restoreFocus = pendingFocus !== -1
+    ? pendingFocus
+    : (Number.isInteger(activeNode) && activeNode >= 0 ? activeNode : -1);
+  const focus = keyboardFocused !== -1 ? keyboardFocused : pinned !== -1 ? pinned : hovered;
+  const near = focus === -1 ? null : neighbours[focus];
+  const lit = i => focus === -1 ? matches(nodes[i]) : (i === focus || near.has(i));
+
+  const svg = svgEl('svg', { width: W(), height: H(), viewBox: '0 0 ' + W() + ' ' + H() });
+  const g = svgEl('g', { transform: 'translate(' + tx.toFixed(2) + ',' + ty.toFixed(2) + ') scale(' + scale.toFixed(3) + ')' });
+
+  for (const e of active()) {
+    const a = nodes[e.s], b = nodes[e.t], st = styleOf(e);
+    const on = focus === -1 ? (matches(a) || matches(b)) : (e.s === focus || e.t === focus);
+    const attrs = {
+      x1: a.x.toFixed(1), y1: a.y.toFixed(1), x2: b.x.toFixed(1), y2: b.y.toFixed(1),
+      stroke: st.stroke, 'stroke-width': st.w / Math.max(1, scale * 0.6),
+      opacity: on ? st.o : st.o * 0.08,
+    };
+    if (st.dash) attrs['stroke-dasharray'] = st.dash;
+    g.appendChild(svgEl('line', attrs));
+  }
+
+  // PASS 1 - circles. Drawn first so every label sits on top of every node.
+  nodes.forEach((n, i) => {
+    const on = lit(i);
+    const redundant = i !== focus && isRedundant(n);
+    const attrs = {
+      class: 'node', cx: n.x.toFixed(1), cy: n.y.toFixed(1), r: n.r.toFixed(1),
+      fill: colorOf(n), stroke: i === focus ? 'var(--fg)' : redundant ? 'var(--dup)' : 'var(--bg)',
+      'stroke-width': i === focus ? 2.5 : redundant ? 2 : 1.5, opacity: on ? 1 : 0.12,
+      tabindex: 0, role: 'button', 'data-node-index': i,
+      'aria-pressed': pinned === i ? 'true' : 'false',
+      'aria-label': 'Workstream ' + String(n.id).replace(/\s+/g, ' ') +
+        '. Verdict ' + String(n.verdict || 'unknown').replace(/\s+/g, ' ') +
+        '. ' + n.committedFiles + ' committed file(s), ' + n.uncommittedOnly + ' uncommitted-only file(s).',
+    };
+    if (redundant) attrs['stroke-dasharray'] = '3 2';
+    const circle = svgEl('circle', attrs);
+    circle.addEventListener('focus', () => {
+      keyboardFocused = i;
+      describe(i);
+    });
+    circle.addEventListener('click', ev => {
+      ev.stopPropagation?.();
+      keyboardFocused = i;
+      pinned = pinned === i ? -1 : i;
+      pendingFocus = i;
+      describe(i);
+      draw();
+    });
+    circle.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        pinned = pinned === i ? -1 : i;
+        keyboardFocused = i;
+        pendingFocus = i;
+        describe(i);
+        draw();
+        return;
+      }
+      const delta = ev.key === 'ArrowRight' || ev.key === 'ArrowDown' ? 1
+        : ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' ? -1 : 0;
+      if (!delta) return;
+      ev.preventDefault();
+      let next = i;
+      for (let tries = 0; tries < nodes.length; tries++) {
+        next = (next + delta + nodes.length) % nodes.length;
+        if (matches(nodes[next])) break;
+      }
+      keyboardFocused = next;
+      pendingFocus = next;
+      describe(next);
+      draw();
+    });
+    const tip = svgEl('title', {});
+    tip.textContent = n.id + (isRedundant(n) ? ' (redundant with ' + n.redundantWith.join(', ') + ')' : '');
+    circle.appendChild(tip);
+    g.appendChild(circle);
+  });
+
+  // PASS 2 - LABELS, PLACED GREEDILY. This is the fix for the thing that was actually wrong.
+  //
+  // The first attempt at this widened the collision force so nodes would sit further apart. That
+  // was measuring the wrong quantity: circle separation was already 22px and the labels are
+  // 100-200px WIDE, so the text kept overlapping no matter how far the circles were pushed. On
+  // holt's own repository, 4 of 29 labels were illegible in the rendered output.
+  //
+  // Separating nodes far enough for every name to fit would turn any real graph into a sparse
+  // sprawl, so the answer is the cartographic one: keep the layout tight and DROP a label that
+  // does not fit, rather than drawing it into another. Importance decides who keeps theirs —
+  // at-risk first, then the focused node and its neighbours, then size — so the labels that
+  // survive a crowded view are the ones a reader needs. Everything dropped keeps its tooltip and
+  // reappears on hover or on zoom, which is why nothing is lost by dropping it.
+  const order = nodes.map((n, i) => i)
+    .filter(i => lit(i) && (nodes[i].uncommittedOnly > 0 || i === focus || (near && near.has(i))
+      || scale >= 1.2 || true))
+    .sort((a, b) => {
+      const rank = j => (j === focus ? 0 : (near && near.has(j)) ? 1 : nodes[j].uncommittedOnly > 0 ? 2 : 3);
+      return rank(a) - rank(b) || nodes[b].r - nodes[a].r;
+    });
+
+  const placed = [];
+  const FONT = 10 / Math.max(0.7, Math.min(2, scale));
+  for (const i of order) {
+    const n = nodes[i];
+    const text = n.id.length > 28 ? n.id.slice(0, 27) + '…' : n.id;
+    const w = text.length * FONT * 0.58, h = FONT * 1.25;
+    const x = n.x, y = n.y + n.r + FONT + 1;
+    const box = { x0: x - w / 2, x1: x + w / 2, y0: y - h, y1: y };
+    // A label the reader has explicitly asked for is never dropped; anything else yields.
+    const mustShow = i === focus || (near && near.has(i));
+    const clash = placed.some(b => box.x0 < b.x1 && b.x0 < box.x1 && box.y0 < b.y1 && b.y0 < box.y1);
+    if (clash && !mustShow) continue;
+    placed.push(box);
+    const label = svgEl('text', {
+      x: x.toFixed(1), y: y.toFixed(1), 'text-anchor': 'middle',
+      'font-size': FONT.toFixed(2),
+      fill: i === focus ? 'var(--fg)' : 'var(--muted)',
+      'paint-order': 'stroke', stroke: 'var(--bg)', 'stroke-width': 3, 'stroke-linejoin': 'round',
+    });
+    label.textContent = text;
+    g.appendChild(label);
+  }
+
+  svg.appendChild(g);
+  stage.replaceChildren(svg);
+  stage.appendChild(hint);
+  if (restoreFocus !== -1) {
+    const target = svg.querySelector?.('[data-node-index="' + restoreFocus + '"]');
+    target?.focus?.({ preventScroll: true });
+  }
+  pendingFocus = -1;
+}
+
+function describe(i) {
+  const n = nodes[i];
+  const rel = DATA.edges.filter(e => e.source === n.id || e.target === n.id);
+  const EDGE_DETAIL_LIMIT = 100;
+  const shownRel = rel.slice(0, EDGE_DETAIL_LIMIT);
+  const omitted = rel.length - shownRel.length;
+  detail.textContent =
+    n.id + '\n' +
+    '─'.repeat(Math.min(34, n.id.length)) + '\n' +
+    'family      ' + n.family + ' (' + (n.familyRule || '?') + ')\n' +
+    'head        ' + (n.head || '—') + '\n' +
+    'branch      ' + (n.branch || '(detached)') + '\n' +
+    'verdict     ' + n.verdict + '\n\n' +
+    'committed   ' + n.committedFiles + ' file(s) base lacks\n' +
+    'uncommitted ' + n.uncommittedFiles + ' file(s)\n' +
+    'added       ' + n.addedSymbols + ' symbol(s)\n' +
+    'unique      ' + n.uniqueSymbols + ' symbol(s)\n' +
+    'at risk     ' + n.uncommittedOnly + ' uncommitted-only\n' +
+    'disposable  ' + (n.safeToDelete ? 'yes' : 'no') +
+      (n.redundantWith && n.redundantWith.length
+        ? '  (ONLY because: ' + n.redundantWith.join(', ') + ' — do not remove all of these together)'
+        : '') + '\n\n' +
+    'edges (' + rel.length + ')\n' +
+    shownRel.map(e =>
+      '  ' + String(e.kind || e.type).padEnd(18) + (e.source === n.id ? e.target : e.source) +
+      (e.why ? '\n     ' + e.why : '')).join('\n') +
+    (omitted > 0
+      ? '\n  … and ' + omitted + ' more; run holt context ' + JSON.stringify(n.id) + ' --json for the complete evidence'
+      : '');
+}
+
+/* ------------------------------------------------------------------------- loop ---- */
+
+let running = false;
+function kick() {
+  if (running) return;
+  running = true;
+  requestAnimationFrame(function frame() {
+    step();
+    draw();
+    if (alpha > ALPHA_MIN) requestAnimationFrame(frame);
+    else running = false;
+  });
+}
+
+kick();
+let t; addEventListener('resize', () => {
+  clearTimeout(t);
+  t = setTimeout(() => { alpha = Math.max(alpha, 0.3); kick(); }, 160);
+});
+</script>
+</body>
+</html>

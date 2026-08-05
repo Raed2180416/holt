@@ -1,0 +1,16 @@
+version: 2
+
+# Keep reviewed lock data and full-SHA action pins current. Dependabot preserves the trailing
+# version comments on SHA-pinned actions, so every update remains human-reviewable and immutable.
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

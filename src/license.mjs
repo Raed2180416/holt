@@ -76,6 +76,9 @@ export const FEATURE_TIER = {
   // a single-repo tool cannot compute at all because the evidence lives in N separate journals.
   'forensics-fleet': 'team',
   'audit-sink': 'team',       // continuous cursor-tracked export of the journal into a SIEM
+  // Explicit enrollment, authenticated TUF sync, and offline system CI enforcement. This is
+  // intentionally not SSO or an air-gap claim: it is a local machine-authority policy surface.
+  'managed-policy': 'enterprise',
 };
 
 /**

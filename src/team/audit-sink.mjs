@@ -44,7 +44,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, createPrivateKey } from 'node:crypto';
 import { checkEntitlement } from '../license.mjs';
-import { verifyJournal, readJournalRaw, journalPaths } from '../journal.mjs';
+import { verifyJournal, readJournalRaw, journalPaths, journalOrigin } from '../journal.mjs';
 import { exportJournal, SIEM_FORMATS } from '../siem.mjs';
 import { formatCheckpoint, signNote, merkleRoot, entryLeaf } from '../attest.mjs';
 
@@ -163,7 +163,7 @@ export async function sinkExport(cwd, {
   // 4. The batch checkpoint, signed on THIS host.
   const root = merkleRoot(leaves);
   const checkpointBody = formatCheckpoint({
-    origin: verification.checkpoint?.origin ?? `holt.dev/journal/${repo}`,
+    origin: verification.checkpoint?.origin ?? journalOrigin(repo),
     size: chained.length,
     root,
   });

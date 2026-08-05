@@ -30,6 +30,40 @@ test('MCP: every tool declares a name, description and object input schema', () 
   }
 });
 
+test('MCP: holt_clean declares the reversible quarantine contract', () => {
+  const tool = TOOLS.find((t) => t.name === 'holt_clean');
+  assert.ok(tool);
+  assert.equal(tool.annotations.readOnlyHint, false, 'quarantine moves local state');
+  assert.equal(tool.annotations.destructiveHint, false,
+    'the whole worktree and branch remain local, so hosts must not present this as deletion');
+  assert.match(tool.description, /recoverable local quarantine/i);
+  assert.match(tool.description, /restore argv/i);
+  assert.match(tool.description, /never deletes files or branches/i);
+});
+
+test('MCP: holt_purge is separately named and honestly marked destructive', () => {
+  const tool = TOOLS.find((t) => t.name === 'holt_purge');
+  assert.ok(tool);
+  assert.equal(tool.annotations.readOnlyHint, false);
+  assert.equal(tool.annotations.destructiveHint, true,
+    'a host must require destructive authority before physical checkout removal');
+  assert.equal(tool.inputSchema.required.includes('id'), true);
+  assert.match(tool.description, /dry-run by default/i);
+  assert.match(tool.description, /non-forced Git removal/i);
+  assert.match(tool.description, /keeps the branch/i);
+});
+
+test('MCP: quarantine recovery stays agent-native without adding two schema-heavy tools', () => {
+  const clean = TOOLS.find((t) => t.name === 'holt_clean');
+  assert.ok(clean);
+  assert.deepEqual(clean.inputSchema.properties.operation.enum,
+    ['preview', 'quarantine', 'list', 'restore']);
+  assert.equal(clean.annotations.readOnlyHint, false,
+    'the combined surface can move a registered worktree and must be annotated for the strongest operation');
+  assert.equal(clean.annotations.destructiveHint, false, 'no operation deletes or overwrites');
+  assert.match(clean.description, /restore one without overwriting or weakening prior protection/i);
+});
+
 test('MCP holt_status: returns the decision surface, not an inventory', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
@@ -39,14 +73,12 @@ test('MCP holt_status: returns the decision surface, not an inventory', async (t
   assert.equal(r.workstreams, 8);
   assert.equal(r.atRisk, 1, 'one workstream holds uncommitted-only work');
   assert.equal(r.collisions, 1);
-  // Four, not two, and the extra pair is the POINT: alpha-1 and beta-1 commit byte-identical
-  // content at different paths (the fixture's "two dispatches built the same thing"), so each is
-  // disposable while the other lives — the per-file content-identity recall fix. The summary must
-  // also SAY that two of the four are only conditionally safe, because an agent reading
-  // `disposable: 4` with no qualifier deletes all four and loses the work both copies held.
-  assert.equal(r.disposable, 4);
-  assert.equal(r.disposableRedundant, 2,
-    'the redundant pair must be distinguished from the genuinely-empty worktrees');
+  // Equal source at DIFFERENT paths is useful duplicate-work evidence, but never deletion
+  // authority: either path is the only durable copy of that pathname. Only the two worktrees that
+  // truly carry nothing beyond base are disposable in this fixture.
+  assert.equal(r.disposable, 2);
+  assert.equal(r.disposableRedundant ?? 0, 0,
+    'cross-path source similarity must not be reported as conditionally safe deletion authority');
   assert.match(r.reviewQueue, /to review/);
   assert.ok(Array.isArray(r.topRisks) && r.topRisks.length === 1);
   assert.equal(r.topRisks[0].id, 'uniqueUncommitted');

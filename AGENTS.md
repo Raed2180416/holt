@@ -12,13 +12,15 @@ relate UNCOMMITTED changes across worktrees, so a worktree can hold the only cop
 ### If you were asked to clean up worktrees, this is the whole task
 
 ```bash
-holt clean            # shows exactly what holds nothing base lacks — changes nothing
-holt clean --apply    # removes those worktrees and their merged branches
+holt clean            # previews which active worktrees would enter quarantine — changes nothing
+holt clean --apply    # moves them into locked, recoverable local quarantine
 ```
 
-That is the safe, complete action. `clean` re-verifies each worktree immediately before removing
-it, never touches one that holds work found nowhere else, and never touches one it could not
-assess. **You do not need to decide which worktrees are disposable — that is what this computes.**
+That is the safe action. `clean` re-verifies each worktree immediately before an atomic local
+move, never touches one that holds work found nowhere else, and never touches one it could not
+assess. It does **not** delete files or branches: the whole registered worktree stays locked in
+local quarantine and the result includes exact restore argv. **You do not need to decide which
+worktrees are disposable — that is what this computes.**
 
 Do not hand-inspect worktrees and reason about them yourself. Measured across real trials, that
 approach deleted a worktree holding the only copy of a security fix and kept two empty ones, in
@@ -55,11 +57,13 @@ to a verifiable ref first and then releases the lock.
 A worktree is not the only thing that can hold the only copy of something. An untracked file, a
 modified-but-uncommitted file and a gitignored file are all content **git cannot bring back** —
 so `rm`, `git rm`, `truncate`, `shred`, `mv` out of the tree, `cp`/`tee`/`dd` over it
-and `> file` are refused against those paths exactly as a worktree deletion is. Regenerable
-output (`node_modules/`, `dist/`, `build/`, `coverage/`, `*.log`, lockfiles) and anything
-already committed are never protected, so ordinary cleanup is unaffected. If a refusal names a
-file you truly do not want, commit it, `holt rescue` it, or delete it yourself outside the
-agent — do not look for another verb that gets past the guard.
+and `> file` are refused against those paths exactly as a worktree deletion is. Existing
+generated-looking output (`node_modules/`, `dist/`, `build/`, `coverage/`, `*.log`,
+lockfiles) is not accepted on its name alone: holt asks for confirmation because names are not
+proof that the bytes are reproducible. Paths that do not exist yet remain free to create, and
+anything already committed is recoverable. If a refusal names a file you truly do not want,
+commit it, `holt rescue` it, or delete it yourself outside the agent — do not look for another
+verb that gets past the guard.
 
 **Before starting work, check what your siblings are doing:**
 

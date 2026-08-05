@@ -48,6 +48,12 @@ test('TUI: the frame shows the story a human needs', async (t) => {
   assert.match(frame, /UNCOMMITTED_ONLY_SYMBOL/, 'the detail pane must NAME what deletion would lose');
   assert.match(frame, /holt rescue uniqueUncommitted --release/,
     'the pane must state the exact resolving command — a dashboard that only alarms is noise');
+
+  const disposable = model.rows.findIndex((r) => r.id === 'empty');
+  const cleanFrame = strip(renderFrame(model, { selected: disposable, filter: 'all', message: '' },
+    { columns: 130, rows: 34 }));
+  assert.match(cleanFrame, /would quarantine this \(recoverable; branch retained\)/,
+    'the TUI must not tell a user that clean physically deletes or reclaims the worktree');
 });
 
 test('TUI: filtering narrows to one bucket', async (t) => {
@@ -80,6 +86,27 @@ test('TUI: --snapshot works end-to-end through the real binary and exits', async
   assert.match(text, /at-risk/, 'counts present');
   // The crucial property: it EXITED. An interactive TUI that ignores --snapshot would hang here
   // and the timeout would fail the test.
+});
+
+test('TUI: an 80x20 frame never wraps into extra physical terminal rows', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+
+  const model = await buildModel(fx.root);
+  const frame = renderFrame(
+    model,
+    { selected: 0, filter: 'all', message: 'a deliberately long action result '.repeat(12) },
+    { columns: 80, rows: 20 },
+  );
+  const lines = frame.split('\n');
+
+  assert.equal(lines.length, 20,
+    'the logical frame must occupy exactly the supported terminal height');
+  for (const [i, line] of lines.entries()) {
+    const visible = strip(line);
+    assert.ok(visible.length <= 80,
+      `line ${i + 1} is ${visible.length} columns wide in an 80-column terminal and will wrap: ${visible}`);
+  }
 });
 
 test('TUI: a repo with unknown workstreams surfaces them, never hides them', async (t) => {

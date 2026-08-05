@@ -49,11 +49,44 @@ const ansi = {
 };
 const paint = (c, s) => `${ansi[c]}${s}${ansi.reset}`;
 
-/** Display width is not string length once unicode is involved; keep it simple but safe. */
+/** Approximate the width terminals use for one Unicode code point. Combining/format characters
+ * occupy no cell; East-Asian wide/full-width and emoji ranges occupy two. This is intentionally
+ * conservative: a line that is one cell shorter is harmless, while one cell longer wraps and
+ * tears the alternate-screen redraw. */
+function cellWidth(ch) {
+  const cp = ch.codePointAt(0) ?? 0;
+  if (cp === 0 || cp < 0x20 || (cp >= 0x7f && cp < 0xa0)
+    || /[\p{Mark}\p{Cf}]/u.test(ch)) return 0;
+  return cp >= 0x1100 && (
+    cp <= 0x115f || cp === 0x2329 || cp === 0x232a
+    || (cp >= 0x2e80 && cp <= 0xa4cf && cp !== 0x303f)
+    || (cp >= 0xac00 && cp <= 0xd7a3)
+    || (cp >= 0xf900 && cp <= 0xfaff)
+    || (cp >= 0xfe10 && cp <= 0xfe19)
+    || (cp >= 0xfe30 && cp <= 0xfe6f)
+    || (cp >= 0xff00 && cp <= 0xff60)
+    || (cp >= 0xffe0 && cp <= 0xffe6)
+    || (cp >= 0x1f000 && cp <= 0x1faff)
+    || (cp >= 0x20000 && cp <= 0x3fffd)
+  ) ? 2 : 1;
+}
+
+/** Display width is not string length once Unicode is involved. */
+function textWidth(s) {
+  return [...String(s)].reduce((sum, ch) => sum + cellWidth(ch), 0);
+}
+
 function pad(s, n) {
   const str = String(s);
-  const w = [...str].length;
-  return w >= n ? [...str].slice(0, n).join('') : str + ' '.repeat(n - w);
+  const w = textWidth(str);
+  if (w < n) return str + ' '.repeat(n - w);
+  let out = ''; let used = 0;
+  for (const ch of str) {
+    const next = cellWidth(ch);
+    if (used + next > n) break;
+    out += ch; used += next;
+  }
+  return out;
 }
 
 /** Matches exactly the escape sequences `paint()` above can produce — never a prefix of one,
@@ -64,7 +97,7 @@ const ANSI_RE = /\x1b\[[0-9;]*m/g;
 /** The width a terminal will actually show: escape codes cost zero columns, everything else
  *  is one code point (see pad() above for why raw .length is not this number). */
 function visibleWidth(s) {
-  return [...String(s).replace(ANSI_RE, '')].length;
+  return textWidth(String(s).replace(ANSI_RE, ''));
 }
 
 /**
@@ -105,7 +138,7 @@ function truncateAnsi(s, width) {
       const end = str.indexOf(HOLT_ESC_CLOSE, i + 1);
       if (end !== -1) {
         const token = str.slice(i, end + 1);
-        const w = [...token].length;
+        const w = textWidth(token);
         if (seen + w > budget) break;   // whole, or not at all
         out += token; i = end + 1; seen += w;
         continue;
@@ -116,7 +149,9 @@ function truncateAnsi(s, width) {
     // already guarantees i < str.length — the fallback is for the type checker, never live.
     const cp = str.codePointAt(i) ?? 0;
     const ch = String.fromCodePoint(cp);
-    out += ch; i += ch.length; seen++;
+    const w = cellWidth(ch);
+    if (seen + w > budget) break;
+    out += ch; i += ch.length; seen += w;
   }
   return `${out}…${ansi.reset}`;
 }
@@ -302,7 +337,12 @@ export function renderFrame(model, state, size) {
   );
   out.push(provenanceFooter(u));
 
-  return out.join('\n');
+  // The terminal contract is physical, not logical: returning exactly `height` newline-delimited
+  // strings is insufficient if even one is wider than the terminal, because wrapping creates an
+  // extra physical row and the alternate-screen redraw scrolls/tears. Header counts, key hints,
+  // action messages and the provenance footer all vary independently, so clamp the final composed
+  // frame at one choke point rather than trying to keep six width calculations in sync.
+  return out.map((line) => truncateAnsi(line, width)).join('\n');
 }
 
 function detailLines(row, width, height, u = budget()) {
@@ -374,7 +414,7 @@ function detailLines(row, width, height, u = budget()) {
 
   L.push('');
   L.push(paint('grey', row.verdict?.safe
-    ? 'holt clean --apply would remove this'
+    ? 'holt clean --apply would quarantine this (recoverable; branch retained)'
     : `holt rescue ${u.take(row.id, { ident: true })} --release preserves then unlocks`));
 
   // truncateAnsi, never a raw slice: `l.slice(0, width)` counts escape bytes as columns and cuts
@@ -406,6 +446,11 @@ export async function runTui(cwd, opts = {}) {
       columns: process.stdout.columns, rows: process.stdout.rows,
     }));
   };
+  // A terminal resize is a real state change, not merely a cosmetic signal.  Without a redraw,
+  // narrow terminals retain a 120-column frame until the next keypress, which can leave hidden
+  // rows and wrapped text on screen.  Redraw from the terminal's own resize event so the frame is
+  // immediately recomputed at its new dimensions.
+  process.stdout.on('resize', draw);
   const cleanup = () => {
     process.stdout.write(ansi.showCursor + ansi.main);
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
@@ -447,14 +492,21 @@ export async function runTui(cwd, opts = {}) {
     } else if (key.sequence === 'C') {
       const { clean } = await import('./actions.mjs');
       if (state.armClean) {
-        state.message = 'cleaning…'; draw();
+        state.message = 'quarantining…'; draw();
         const c = await clean(cwd, { apply: true });
         model = await buildModel(cwd, opts);
-        state.message = `removed ${c.removed} · skipped ${c.skipped.length}`;
+        const failures = Array.isArray(c.failures)
+          ? c.failures
+          : (Array.isArray(c.failed) ? c.failed : []);
+        const failedCount = c.failedCount
+          ?? (typeof c.failed === 'number' ? c.failed : failures.length);
+        const restore = c.quarantines?.[0]?.restore;
+        state.message = `quarantined ${c.quarantined} · skipped ${c.skipped.length} · failed ${failedCount}`
+          + (restore ? ` · restore: ${restore}` : ' · no files or branches deleted');
         state.armClean = false;
       } else {
         const c = await clean(cwd, {});
-        state.message = `would remove ${c.wouldRemove.length} — press C again to apply`;
+        state.message = `would quarantine ${c.wouldQuarantine.length} — press C again to apply (recoverable; branches retained)`;
         state.armClean = true;
       }
     } else {

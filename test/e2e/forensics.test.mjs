@@ -21,8 +21,8 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { newRepo } from '../fixtures.mjs';
-import { readJournal } from '../../src/journal.mjs';
-import { forensics, __test as fx } from '../../src/forensics.mjs';
+import { readJournal, appendEvent, journalPaths } from '../../src/journal.mjs';
+import { forensics, ForensicsIntegrityError, __test as fx } from '../../src/forensics.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -237,9 +237,12 @@ test('FORENSICS: silence is reported as silence, never as safety', async (t) => 
   assert.equal(out.attempts.blocked, 0);
   assert.match(out.attempts.note, /not evidence nothing happened/i,
     'a repo with no hook installed and a quiet repo look identical from here, and must say so');
+  assert.equal(out.journalIntegrity.state, 'no-journal');
+  assert.equal(out.journalIntegrity.verified, false,
+    'an absent journal is a coverage gap, not verified zero-event evidence');
 });
 
-test('FORENSICS: an event predating identity capture is unattributed, never back-filled', async (t) => {
+test('FORENSICS MUST REFUSE attribution from a legacy journal with no checkpoint', async (t) => {
   const f = await repoWithWorkAtRisk('forensics-legacy');
   t.after(() => f.cleanup());
 
@@ -250,12 +253,26 @@ test('FORENSICS: an event predating identity capture is unattributed, never back
     `${JSON.stringify({ at: '2026-01-01T00:00:00.000Z', action: 'blocked', command: 'rm -rf payments', targets: ['payments'] })}\n`,
     'utf8');
 
-  const r = await holt(['forensics', 'payments', '--json'], f.root);
-  const out = JSON.parse(r.stdout);
-  assert.equal(out.attempts.blocked, 1, 'the old line is still read');
-  assert.equal(out.actors.length, 0, 'and attributed to NOBODY');
-  assert.equal(out.unattributedEvents, 1, 'counted separately, in its own bucket');
-  assert.match(out.note, /NOT attributed/i);
+  await assert.rejects(() => forensics(f.root, { id: 'payments' }), (e) => {
+    assert.ok(e instanceof ForensicsIntegrityError);
+    assert.equal(e.code, 'EJOURNAL_UNTRUSTED');
+    assert.equal(e.verification.code, 'no-chain');
+    return true;
+  });
+});
+
+test('FORENSICS MUST REFUSE attribution when a checkpoint is missing or history is tampered', async (t) => {
+  const f = await repoWithWorkAtRisk('forensics-tampered');
+  t.after(() => f.cleanup());
+  await appendEvent(f.root, { action: 'blocked', id: 'payments', command: 'rm -rf payments' });
+  const { checkpoint } = await journalPaths(f.root);
+  await fs.rm(checkpoint);
+
+  await assert.rejects(() => forensics(f.root, { id: 'payments' }), (e) => {
+    assert.ok(e instanceof ForensicsIntegrityError);
+    assert.equal(e.verification.code, 'checkpoint-missing');
+    return true;
+  });
 });
 
 test('FORENSICS: an unrelated workstream\'s events do not contaminate the timeline', async (t) => {
@@ -264,8 +281,32 @@ test('FORENSICS: an unrelated workstream\'s events do not contaminate the timeli
   assert.equal(fx.eventConcerns({ action: 'blocked', command: 'rm -rf ../wt/api-v2' }, 'api'), false);
   assert.equal(fx.eventConcerns({ action: 'blocked', command: 'rm -rf ../wt/api' }, 'api'), true);
   assert.equal(fx.eventConcerns({ action: 'clean-remove', id: 'api' }, 'api'), true);
+  assert.equal(fx.eventConcerns({ action: 'clean-quarantine', id: 'api' }, 'api'), true);
   assert.equal(fx.eventConcerns({ action: 'blocked', targets: ['api'] }, 'api'), true);
   assert.equal(fx.eventConcerns({ action: 'clean-remove', id: 'other', path: '/x/api/y' }, 'api'), false);
+});
+
+test('FORENSICS: clean quarantine is recoverable protection, never a removal', async (t) => {
+  const f = await newRepo('forensics-quarantine');
+  t.after(() => f.cleanup());
+  await f.worktree('spent');
+
+  const cleaned = await holt(['clean', '--apply'], f.root, {
+    env: { AI_AGENT: 'claude-code_2-1-219_agent', CLAUDE_CODE_HOST_SESSION_ID: 'sess-QUARANTINE' },
+  });
+  assert.equal(cleaned.code, 0, cleaned.stderr);
+
+  const out = await forensics(f.root, { id: 'spent' });
+  assert.equal(out.attempts.quarantines, 1);
+  assert.equal(out.attempts.removals, 0);
+  assert.equal(out.survived.status, 'quarantined');
+  assert.ok(await fs.stat(out.survived.path).then((st) => st.isDirectory(), () => false),
+    'forensics must point at the retained directory, not merely repeat a journal claim');
+  assert.ok(Array.isArray(out.survived.restoreArgv) && out.survived.restoreArgv.length === 2);
+  const actor = out.actors.find((a) => a.session === 'sess-QUARANTINE');
+  assert.equal(actor.quarantined, 1);
+  assert.equal(actor.destroyed, 0);
+  assert.equal(out.timeline.find((e) => e.action === 'clean-quarantine').outcome, 'quarantined (recoverable)');
 });
 
 test('FORENSICS: the GENERATED OpenCode plugin forwards the session opencode hands it', async (t) => {
@@ -342,6 +383,53 @@ test('PAID: the gate is on the FEATURE, so importing the module directly is enti
   );
 });
 
+test('PAID: fleet forensics never correlates or totals a journal whose checkpoint does not verify', async (t) => {
+  const { fleetForensics } = await import('../../src/team/forensics-fleet.mjs');
+  const f = await repoWithWorkAtRisk('fleet-forensics-broken');
+  t.after(() => f.cleanup());
+  await appendEvent(f.root, {
+    action: 'blocked', id: 'payments', command: 'rm -rf payments',
+    actor: { user: 'dev', host: 'box', agent: 'claude-code', session: 'sess-BROKEN', confidence: 'reported' },
+  });
+  const { checkpoint } = await journalPaths(f.root);
+  await fs.rm(checkpoint);
+
+  const out = await fleetForensics([path.dirname(f.root)], {
+    maxDepth: 3, publicKeyB64: TEST_PUB, env: { HOLT_LICENSE: mintTeam() },
+  });
+  assert.equal(out.totals.events, 0);
+  assert.equal(out.totals.sessions, 0);
+  assert.equal(out.untrustedRepositories.length, 1);
+  assert.equal(out.untrustedRepositories[0].journalState, 'tampered-or-unverifiable');
+  assert.equal(out.repos[0].observedEntries, 1, 'the gap is named without treating its event as trusted');
+});
+
+test('PAID: fleet forensics counts quarantine separately from historical destruction', async (t) => {
+  const { fleetForensics } = await import('../../src/team/forensics-fleet.mjs');
+  const f = await newRepo('fleet-forensics-quarantine');
+  t.after(() => f.cleanup());
+  const actor = {
+    user: 'dev', host: 'box', agent: 'claude-code', session: 'sess-SAFE-MOVE', confidence: 'reported',
+  };
+  await appendEvent(f.root, {
+    action: 'clean-quarantine', id: 'spent', path: '/r/spent',
+    quarantinePath: '/r/.holt-clean/spent',
+    restoreArgv: [['git', 'worktree', 'unlock', '/r/.holt-clean/spent']],
+  }, { actor });
+
+  const out = await fleetForensics([path.dirname(f.root)], {
+    maxDepth: 3, publicKeyB64: TEST_PUB, env: { HOLT_LICENSE: mintTeam() },
+  });
+  const session = out.sessions.find((s) => s.session === 'sess-SAFE-MOVE');
+  assert.equal(out.totals.quarantined, 1);
+  assert.equal(out.totals.destroyed, 0);
+  assert.equal(session.quarantined, 1);
+  assert.equal(session.destroyed, 0);
+  assert.equal(out.refusedThenDestroyed.length, 0,
+    'a recoverable move cannot satisfy an incident query for completed destruction');
+  assert.match(out.note, /counted separately from destruction/);
+});
+
 test('PAID: the correlation only a fleet can compute — refused in one repo, destructive in another', async (t) => {
   const { fleetForensics } = await import('../../src/team/forensics-fleet.mjs');
 
@@ -354,10 +442,14 @@ test('PAID: the correlation only a fleet can compute — refused in one repo, de
   await holt(['hook', 'pre-tool-use', '--host', 'claude-code'], a.root,
     { stdin: claudeEvent(a.root, `rm -rf ${targetA}`, 'sess-SHARED-9999') });
 
-  // ...and, in B, it got a removal through (holt's own clean, recorded under the same session).
-  await b.worktree('spent'); // disposable: clean will remove it
-  await holt(['clean', '--apply'], b.root, {
-    env: { AI_AGENT: 'claude-code_2-1-219_agent', CLAUDE_CODE_HOST_SESSION_ID: 'sess-SHARED-9999' },
+  // ...and, in B, an OLDER Holt version recorded a physical clean-remove under the same session.
+  // The modern clean-quarantine action must not trigger this destructive finding; historical
+  // evidence must still retain its original meaning rather than being rewritten as recoverable.
+  await appendEvent(b.root, { action: 'clean-remove', id: 'spent', path: '/historical/spent' }, {
+    actor: {
+      user: 'dev', host: 'box', agent: 'claude-code', agentVersion: '2.1.219',
+      session: 'sess-SHARED-9999', confidence: 'reported',
+    },
   });
 
   // Both repos live under one parent, which is what a fleet root looks like.

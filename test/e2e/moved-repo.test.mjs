@@ -45,6 +45,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { newRepo } from '../fixtures.mjs';
+import { samePathAsync, underOrEqualAsync } from '../../src/paths.mjs';
 
 const CLI = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
 
@@ -282,9 +283,9 @@ test('moved repo: step 2 — moved but NOT repaired: holt refuses to answer, and
     assert.equal(gates[id], 2, `gate ${id} must exit 2 (unknown) on a moved, unrepaired repository`);
   }
 
-  // 5. Nothing is proposed for removal.
+  // 5. Nothing is proposed for quarantine.
   const clean = json(await holt(['clean', '--dry-run', '--json'], newRoot, homeEnv(homeA)), 'clean --dry-run');
-  assert.deepEqual(clean.wouldRemove, [], 'clean must propose nothing it could not verify');
+  assert.deepEqual(clean.wouldQuarantine, [], 'clean must propose nothing it could not verify');
   assert.deepEqual(clean.unknown.map((u) => u.id).sort(), [...IDS].sort(),
     'clean must report the unverifiable worktrees as unknown, not omit them');
 });
@@ -306,9 +307,16 @@ test('moved repo: step 3 — after `git worktree repair`, the answers are EQUIVA
   assert.deepEqual(gates, baselineGates, 'gate verdicts must survive the move unchanged');
 
   // The paths in the answer must be the NEW ones...
-  assert.equal(report.root, newRoot);
+  // Compared through samePathAsync/underOrEqualAsync, not raw string equality: git resolves
+  // symlinks (macOS /var → /private/var) and 8.3 short names (Windows RUNNER~1 → runneradmin)
+  // when it canonicalises paths, so report.root and u.path arrive in git's canonical form while
+  // newRoot/newBase are derived from os.tmpdir() which keeps the symlinked/short-name spelling.
+  // The codebase's own paths.mjs exists for exactly this class of defect.
+  assert.ok(await samePathAsync(report.root, newRoot),
+    `report.root ${report.root} must be the new repo root ${newRoot}`);
   for (const u of report.unique) {
-    assert.ok(u.path.startsWith(newBase), `'${u.id}' reported at ${u.path}, outside the moved tree`);
+    assert.ok(await underOrEqualAsync(u.path, newBase),
+      `'${u.id}' reported at ${u.path}, outside the moved tree`);
   }
 
   // ...and the OLD path must appear nowhere. This is what a cached absolute path looks like:
@@ -414,7 +422,8 @@ test('moved repo: the journal survives the move, keeps appending, and does not r
   };
   const early = await readFile(fx.root);
   assert.equal(early.length, 1, 'the pre-move action must be journalled');
-  assert.ok(early[0].path.startsWith(base + path.sep), 'the pre-move entry records the pre-move path');
+  assert.ok(await underOrEqualAsync(early[0].path, base),
+    'the pre-move entry records the pre-move path');
 
   await fs.rename(base, moved);
   const repaired = await git(['worktree', 'repair', path.join(moved, 'wt', 'before-move')], movedRoot);
@@ -438,7 +447,8 @@ test('moved repo: the journal survives the move, keeps appending, and does not r
   // would be an audit trail that cannot be trusted about anything else either.
   assert.deepEqual(late[0], early[0], 'the historical entry must be untouched by the move');
   assert.equal(late[1].id, 'after-move');
-  assert.ok(late[1].path.startsWith(moved + path.sep), 'the new entry must record the NEW path');
+  assert.ok(await underOrEqualAsync(late[1].path, moved),
+    'the new entry must record the NEW path');
 
   const shown = json(await holt(['journal', '--json'], movedRoot, env), 'journal --json');
   assert.equal(shown.events.length, 2, 'holt must still find its own journal after the move');

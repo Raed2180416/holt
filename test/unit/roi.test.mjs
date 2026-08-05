@@ -20,6 +20,8 @@ test('roi: prevented losses count blocks and verified rescues, and only those', 
     { at: '2026-07-02T00:00:00Z', action: 'blocked', command: 'git worktree remove --force x' },
     { at: '2026-07-02T00:01:00Z', action: 'blocked', command: 'git worktree unlock x' },
     { at: '2026-07-03T00:00:00Z', action: 'rescue', id: 'wt1' },
+    { at: '2026-07-03T00:01:00Z', action: 'clean-quarantine', id: 'junk0',
+      quarantinePath: '/r/.holt-quarantine/junk0', restoreArgv: [['git', 'worktree', 'unlock', '/r/.holt-quarantine/junk0']] },
     { at: '2026-07-04T00:00:00Z', action: 'clean-remove', id: 'junk1' },
     { at: '2026-07-04T00:01:00Z', action: 'removed', id: 'junk2' },
     { at: '2026-07-05T00:00:00Z', action: 'branch-delete', name: 'landed' },
@@ -34,11 +36,34 @@ test('roi: prevented losses count blocks and verified rescues, and only those', 
   assert.equal(s.breakdown.destructiveCommandsBlocked, 2);
   assert.equal(s.breakdown.workstreamsRescued, 1);
   assert.equal(s.breakdown.workstreamsProtected, 1);
+  assert.equal(s.breakdown.worktreesQuarantined, 1,
+    'a reversible quarantine is useful activity, but not a physical reclaim or prevented loss');
   assert.equal(s.breakdown.worktreesReclaimed, 2);
   assert.equal(s.breakdown.branchesDeleted, 1);
   assert.equal(s.preventedLosses, 3, 'blocks(2) + rescues(1); protects/cleans are not "prevented losses"');
   assert.match(s.headline, /refused 2 destructive command/);
   assert.match(s.note, /count of events that actually fired/);
+  assert.match(s.note, /branches retained/);
+});
+
+test('roi: quarantine never inflates historical physical cleanup', () => {
+  const s = summarizeJournal([
+    { at: '2026-08-05T00:00:00Z', action: 'clean-quarantine', id: 'spent' },
+  ]);
+  assert.equal(s.breakdown.worktreesQuarantined, 1);
+  assert.equal(s.breakdown.worktreesReclaimed, 0);
+  assert.equal(s.preventedLosses, 0);
+});
+
+test('roi: explicit purge is counted as physical reclamation, not prevented loss', () => {
+  const s = summarizeJournal([
+    { at: '2026-08-05T00:00:00Z', action: 'clean-quarantine', id: 'spent' },
+    { at: '2026-08-05T00:01:00Z', action: 'clean-purge', id: 'spent' },
+  ]);
+  assert.equal(s.breakdown.worktreesQuarantined, 1);
+  assert.equal(s.breakdown.worktreesReclaimed, 1);
+  assert.equal(s.preventedLosses, 0,
+    'reclaiming proved-disposable storage is useful but is not a prevented loss');
 });
 
 test('roi: a corrupt journal line is ignored, never counted', () => {

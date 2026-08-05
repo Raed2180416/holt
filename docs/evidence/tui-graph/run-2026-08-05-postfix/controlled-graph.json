@@ -1,0 +1,273 @@
+{
+  "nodes": [
+    {
+      "id": "01-unique-uncommitted-critical",
+      "family": "burst:2026-08-04T215049404Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/01-unique-uncommitted-critical",
+      "head": "e50fea3d",
+      "branch": "audit/01-unique-uncommitted-critical",
+      "committedFiles": 0,
+      "uncommittedFiles": 1,
+      "addedSymbols": 24,
+      "uniqueSymbols": 24,
+      "uncommittedOnly": 24,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    },
+    {
+      "id": "02-unique-committed-feature",
+      "family": "burst:2026-08-04T215049404Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/02-unique-committed-feature",
+      "head": "8884d3b3",
+      "branch": "audit/02-unique-committed-feature",
+      "committedFiles": 1,
+      "uncommittedFiles": 0,
+      "addedSymbols": 1,
+      "uniqueSymbols": 1,
+      "uncommittedOnly": 0,
+      "safeToDelete": false,
+      "verdict": "unique-work-committed"
+    },
+    {
+      "id": "03-collision-payments-a",
+      "family": "burst:2026-08-04T215049404Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/03-collision-payments-a",
+      "head": "3177d3be",
+      "branch": "audit/03-collision-payments-a",
+      "committedFiles": 1,
+      "uncommittedFiles": 0,
+      "addedSymbols": 0,
+      "uniqueSymbols": 0,
+      "uncommittedOnly": 0,
+      "safeToDelete": false,
+      "verdict": "committed-delta-no-unique-symbols"
+    },
+    {
+      "id": "04-collision-payments-b",
+      "family": "burst:2026-08-04T215049404Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/04-collision-payments-b",
+      "head": "8836cd3f",
+      "branch": "audit/04-collision-payments-b",
+      "committedFiles": 1,
+      "uncommittedFiles": 0,
+      "addedSymbols": 0,
+      "uniqueSymbols": 0,
+      "uncommittedOnly": 0,
+      "safeToDelete": false,
+      "verdict": "committed-delta-no-unique-symbols"
+    },
+    {
+      "id": "05-redundant-twin-a",
+      "family": "burst:2026-08-04T185049451Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/05-redundant-twin-a",
+      "head": "521b4040",
+      "branch": "audit/05-redundant-twin-a",
+      "committedFiles": 1,
+      "uncommittedFiles": 0,
+      "addedSymbols": 1,
+      "uniqueSymbols": 0,
+      "uncommittedOnly": 0,
+      "safeToDelete": true,
+      "verdict": "committed-delta-no-unique-symbols",
+      "redundantWith": [
+        "06-redundant-twin-b"
+      ]
+    },
+    {
+      "id": "06-redundant-twin-b",
+      "family": "burst:2026-08-04T215049404Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/06-redundant-twin-b",
+      "head": "a0000417",
+      "branch": "audit/06-redundant-twin-b",
+      "committedFiles": 1,
+      "uncommittedFiles": 0,
+      "addedSymbols": 1,
+      "uniqueSymbols": 0,
+      "uncommittedOnly": 0,
+      "safeToDelete": true,
+      "verdict": "committed-delta-no-unique-symbols",
+      "redundantWith": [
+        "05-redundant-twin-a"
+      ]
+    },
+    {
+      "id": "07-duplicate-implementation-a",
+      "family": "burst:2026-08-04T202049473Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/07-duplicate-implementation-a",
+      "head": "c862cad7",
+      "branch": "audit/07-duplicate-implementation-a",
+      "committedFiles": 1,
+      "uncommittedFiles": 0,
+      "addedSymbols": 1,
+      "uniqueSymbols": 1,
+      "uncommittedOnly": 0,
+      "safeToDelete": false,
+      "verdict": "unique-work-committed"
+    },
+    {
+      "id": "08-duplicate-implementation-b",
+      "family": "burst:2026-08-04T215049404Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/08-duplicate-implementation-b",
+      "head": "d9cd40a6",
+      "branch": "audit/08-duplicate-implementation-b",
+      "committedFiles": 1,
+      "uncommittedFiles": 0,
+      "addedSymbols": 1,
+      "uniqueSymbols": 1,
+      "uncommittedOnly": 0,
+      "safeToDelete": false,
+      "verdict": "unique-work-committed"
+    },
+    {
+      "id": "09-genuinely-empty",
+      "family": "burst:2026-08-04T215049404Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/09-genuinely-empty",
+      "head": "e50fea3d",
+      "branch": "audit/09-genuinely-empty",
+      "committedFiles": 0,
+      "uncommittedFiles": 0,
+      "addedSymbols": 0,
+      "uniqueSymbols": 0,
+      "uncommittedOnly": 0,
+      "safeToDelete": true,
+      "verdict": "nothing-unique"
+    },
+    {
+      "id": "10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪",
+      "family": "burst:2026-08-04T215049404Z",
+      "familyRule": "creation-burst",
+      "path": "/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/worktrees/10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪",
+      "head": "e50fea3d",
+      "branch": "audit/10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪",
+      "committedFiles": 0,
+      "uncommittedFiles": 1,
+      "addedSymbols": 1,
+      "uniqueSymbols": 1,
+      "uncommittedOnly": 1,
+      "safeToDelete": false,
+      "verdict": "unique-work-uncommitted"
+    }
+  ],
+  "edges": [
+    {
+      "type": "sibling",
+      "source": "01-unique-uncommitted-critical",
+      "target": "02-unique-committed-feature",
+      "family": "burst:2026-08-04T215049404Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "01-unique-uncommitted-critical",
+      "target": "03-collision-payments-a",
+      "family": "burst:2026-08-04T215049404Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "01-unique-uncommitted-critical",
+      "target": "04-collision-payments-b",
+      "family": "burst:2026-08-04T215049404Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "01-unique-uncommitted-critical",
+      "target": "06-redundant-twin-b",
+      "family": "burst:2026-08-04T215049404Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "01-unique-uncommitted-critical",
+      "target": "08-duplicate-implementation-b",
+      "family": "burst:2026-08-04T215049404Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "01-unique-uncommitted-critical",
+      "target": "09-genuinely-empty",
+      "family": "burst:2026-08-04T215049404Z",
+      "weight": 1
+    },
+    {
+      "type": "sibling",
+      "source": "01-unique-uncommitted-critical",
+      "target": "10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪",
+      "family": "burst:2026-08-04T215049404Z",
+      "weight": 1
+    },
+    {
+      "type": "collision",
+      "source": "03-collision-payments-a",
+      "target": "04-collision-payments-b",
+      "weight": 1,
+      "severity": "high",
+      "kind": "proven",
+      "why": "git merge-tree reports a real conflict between these two worktrees, including their uncommitted work",
+      "symbols": [],
+      "files": [
+        "config/policy.mjs"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "05-redundant-twin-a",
+      "target": "06-redundant-twin-b",
+      "weight": 1,
+      "similarity": 1,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "callable:IDENTICAL_RELEASE_WORK"
+      ]
+    },
+    {
+      "type": "duplicate",
+      "source": "07-duplicate-implementation-a",
+      "target": "08-duplicate-implementation-b",
+      "weight": 1,
+      "similarity": 1,
+      "classification": "cross-dispatch-waste",
+      "symbols": [
+        "callable:SHARED_RETRY_IMPL"
+      ]
+    }
+  ],
+  "families": [
+    {
+      "name": "burst:2026-08-04T215049404Z",
+      "members": [
+        "01-unique-uncommitted-critical",
+        "02-unique-committed-feature",
+        "03-collision-payments-a",
+        "04-collision-payments-b",
+        "06-redundant-twin-b",
+        "08-duplicate-implementation-b",
+        "09-genuinely-empty",
+        "10-extremely-long-agent-workstream-name-that-must-clip-cleanly-雪"
+      ]
+    },
+    {
+      "name": "burst:2026-08-04T185049451Z",
+      "members": [
+        "05-redundant-twin-a"
+      ]
+    },
+    {
+      "name": "burst:2026-08-04T202049473Z",
+      "members": [
+        "07-duplicate-implementation-a"
+      ]
+    }
+  ]
+}

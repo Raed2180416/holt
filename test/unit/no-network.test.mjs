@@ -21,12 +21,14 @@
  *      hosts", when the promise is "we do not talk". A grep that permits `github.com` would have
  *      waved through a genuine exfiltration to a github.com URL.
  *
- * So this asserts the CAPABILITY is absent: src/ imports no network-capable module and contains no
- * network call site. A module that cannot open a socket cannot phone home, whatever strings it
+ * So this asserts the CAPABILITY is absent from analysis, hooks, MCP and CI authority resolution.
+ * The only src/ exception is the separately imported Enterprise TUF adapter, reached solely by an
+ * explicit `holt managed-policy sync`; its exact destination and request shape live in the audited
+ * capability ledger. A module that cannot open a socket cannot phone home, whatever strings it
  * carries. That is a stronger property than the grep it replaces, and it is not fooled by text.
  *
- * The one download holt ever performs — the portable ctags fetch — lives in bin/install-ctags.mjs,
- * outside src/, precisely so this property stays absolute. See src/toolchain.mjs.
+ * The other explicit download — portable ctags setup — lives in bin/install-ctags.mjs. Neither
+ * network module is imported by ordinary analysis. See src/supply-chain.mjs.
  */
 
 import { test } from 'node:test';
@@ -49,6 +51,7 @@ const NETWORK_MODULES = [
 /** Call sites that reach the network without importing anything. */
 const NETWORK_CALLS = [
   { re: /(?<![\w.])fetch\s*\(/, what: 'fetch()' },
+  { re: /\bglobalThis\s*(?:\.\s*|\?\.\s*)fetch\b/, what: 'globalThis.fetch' },
   { re: /\bnew\s+WebSocket\s*\(/, what: 'new WebSocket()' },
   { re: /\bnavigator\s*\.\s*sendBeacon\s*\(/, what: 'navigator.sendBeacon()' },
   { re: /\bXMLHttpRequest\b/, what: 'XMLHttpRequest' },
@@ -115,11 +118,11 @@ async function networkFindings(dir) {
   return findings;
 }
 
-test('NO NETWORK: src/ imports no network-capable module and contains no call site', async () => {
+test('NO NETWORK: analysis, hooks, MCP and CI stay offline; only explicit managed-policy sync is in src', async () => {
   const findings = await networkFindings(SRC);
-  assert.deepEqual(findings, [],
-    'the free tool promises your code never leaves your machine, and that promise is only worth ' +
-    'something if it is absolute:\n  ' + findings.join('\n  '));
+  assert.deepEqual(findings, ['src/team/managed-policy-tuf.mjs: calls globalThis.fetch'],
+    'network capability must stay confined to the explicitly invoked, separately imported TUF adapter:\n  '
+    + findings.join('\n  '));
 });
 
 test('NO NETWORK: the check FIRES on a real network call — proven, not assumed', async (t) => {

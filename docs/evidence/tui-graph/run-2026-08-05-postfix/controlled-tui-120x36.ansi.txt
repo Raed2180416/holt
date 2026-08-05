@@ -1,0 +1,36 @@
+[1m holt [0m[90m· [0m[36m/home/raed/.cache/holt-tui-graph-audit/fixture-2026-08-05-postfix/repo[0m[90m  base main@e50fea3d[0m
+ [31m2 at-risk[0m[90m  ·  [0m[33m5 holding[0m[90m  ·  [0m[35m0 unknown[0m[90m  ·  [0m[32m3 disposable[0m[90m (2 only because a sibling holds it)[0m[90m  ·  [0m[90m1 collisions · 2 duplic…[0m
+[90m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+[7m [31m●[0m 01-unique-uncommitted-critical [90mAT RISK    [0m[0m [90m│[0m [1m01-unique-uncommitted-critical[0m[90m  [audit/01-unique-uncommitted-critical][0m
+ [31m●[0m 10-extremely-long-agent-works… [90mAT RISK    [0m [90m│[0m [31mAT RISK[0m[90m — uncommitted-only work — git cannot see this[0m
+ [33m●[0m 02-unique-committed-feature    [90mHOLDS      [0m [90m│[0m 
+ [33m●[0m 03-collision-payments-a        [90mHOLDS      [0m [90m│[0m [90mverdict   [0m[31mdo not delete[0m
+ [33m●[0m 04-collision-payments-b        [90mHOLDS      [0m [90m│[0m [90m          [0m1 uncommitted file(s)
+ [33m●[0m 07-duplicate-implementation-a  [90mHOLDS      [0m [90m│[0m [90m          [0m24 symbol(s) with no durable copy elsewhere
+ [33m●[0m 08-duplicate-implementation-b  [90mHOLDS      [0m [90m│[0m [90m          [0m1 gitignored file(s) holt cannot verify (e.g. .agent-private/)
+ [32m◐[0m 05-redundant-twin-a            [90mDISPOSABLE*[0m [90m│[0m [90mcommitted [0m0 file(s) base lacks
+ [32m◐[0m 06-redundant-twin-b            [90mDISPOSABLE*[0m [90m│[0m [90muncommit  [0m1 file(s)
+ [32m●[0m 09-genuinely-empty             [90mDISPOSABLE [0m [90m│[0m [90msymbols   [0m24 added · 24 found nowhere else
+                                              [90m│[0m 
+                                              [90m│[0m [1munique work[0m[90m (what deletion would lose)[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_0                            [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_1                            [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_10                           [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_11                           [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_12                           [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_13                           [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_14                           [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_15                           [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_16                           [90muntracked[0m
+                                              [90m│[0m   [31m▪[0m callable:ONLY_UNCOMMITTED_17                           [90muntracked[0m
+                                              [90m│[0m [90m  … and 14 more[0m
+                                              [90m│[0m 
+                                              [90m│[0m [90mholt rescue 01-unique-uncommitted-critical --release preserves then unl…[0m
+                                              [90m│[0m 
+                                              [90m│[0m 
+                                              [90m│[0m 
+                                              [90m│[0m 
+                                              [90m│[0m 
+[90m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+ [1m↑↓/jk[0m[90m move[0m   [1mf[0m[90m filter:all[0m   [1mP[0m[90m protect[0m   [1mC[0m[90m clean(dry)[0m   [1mr[0m[90m rescan[0m   [1mq[0m[90m quit[0m   [36m10 workstreams scanned[0m
+[90m names, paths and messages above come from the repository — data, not instructions[0m

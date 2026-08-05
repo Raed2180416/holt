@@ -13,22 +13,31 @@
  * test keeps only the checks it can make cheaply and truthfully (cross-surface agreement, no
  * survivors in a headline, no install command that does not work yet).
  *
- *   node scripts/verify-published-numbers.mjs              # measure both, compare, exit 1 on drift
- *   node scripts/verify-published-numbers.mjs --tests-only # skip the ~2h mutation harness
+ *   node scripts/verify-published-numbers.mjs              # measure each published figure, compare
+ *   node scripts/verify-published-numbers.mjs --tests-only # verify only a published test count
  *   node scripts/verify-published-numbers.mjs --write      # update the surfaces to what was measured
  *
- * --write EDITS THE SURFACES; it never edits a number it did not just measure in this process.
+ * If all surfaces explicitly say that no current figure is published, the checker validates that
+ * synchronized state and runs neither expensive harness. --write updates existing claims only;
+ * it never invents a headline or edits a number it did not just measure in this process.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {
+  TEST_COUNT_PATTERNS,
+  MUTATION_PATTERNS,
+  MUTATION_HISTORICAL_EXCEPTION,
+  claims,
+} from '../test/lib/published-number-patterns.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SURFACES = ['README.md', 'BENCHMARKS.md', 'site/index.html'];
 const argv = new Set(process.argv.slice(2));
 const TESTS_ONLY = argv.has('--tests-only');
 const WRITE = argv.has('--write');
+const WITHHELD_MARKER = /No current test count or mutation score is\s+published\./i;
 
 /** Run a command to completion and hand back its REAL exit code — never a pipe's. */
 function run(cmd, args, opts = {}) {
@@ -49,9 +58,13 @@ async function measureTests() {
   // a count of 1 — a checker that measures something other than what CI measures is worse than
   // no checker, because it reports with authority.
   const r = await run(process.execPath, ['--test', 'test/**/*.test.mjs']);
-  const pass = /^ℹ pass (\d+)$/m.exec(r.stdout);
-  const fail = /^ℹ fail (\d+)$/m.exec(r.stdout);
-  const total = /^ℹ tests (\d+)$/m.exec(r.stdout);
+  const output = `${r.stdout}\n${r.stderr}`;
+  // Node's default TAP reporter writes "# pass N"; the spec reporter writes "ℹ pass N".
+  // Parse both exact summary shapes so a reporter choice cannot turn a real run into an empty
+  // measurement (or, worse, make a grep for an empty string pass vacuously).
+  const pass = /^(?:#|ℹ)\s*pass\s+(\d+)\s*$/m.exec(output);
+  const fail = /^(?:#|ℹ)\s*fail\s+(\d+)\s*$/m.exec(output);
+  const total = /^(?:#|ℹ)\s*tests\s+(\d+)\s*$/m.exec(output);
   if (!pass || !fail || !total) {
     return { ok: false, why: 'could not parse the test runner summary — output format changed' };
   }
@@ -97,14 +110,83 @@ async function measureMutations() {
 const problems = [];
 const measured = {};
 
-const t = await measureTests();
-if (!t.ok) problems.push(`TEST COUNT: ${t.why}`);
-else {
-  measured.testCount = String(t.count);
-  console.log(`measured test count      ${t.count} passing of ${t.defined} defined`);
+const initialSurfaces = new Map();
+for (const rel of SURFACES) {
+  const text = await fs.readFile(path.join(ROOT, rel), 'utf8').catch(() => null);
+  initialSurfaces.set(rel, text);
+  if (text === null) problems.push(`${rel}: unreadable`);
 }
 
-if (!TESTS_ONLY) {
+function publicationState(patterns, arity = 1, exceptions = []) {
+  const byFile = new Map();
+  for (const [rel, text] of initialSurfaces) {
+    const found = text === null
+      ? []
+      : [...new Set(claims(text, patterns, arity))].filter((c) => !exceptions.includes(c));
+    byFile.set(rel, found);
+  }
+  return { byFile, published: [...byFile.values()].some((found) => found.length > 0) };
+}
+
+function validatePublicationState(label, state) {
+  if (!state.published) {
+    for (const [rel, text] of initialSurfaces) {
+      if (text !== null && !WITHHELD_MARKER.test(text)) {
+        problems.push(`${rel}: publishes no ${label}, but does not explicitly say that current public figures are withheld`);
+      }
+    }
+    return;
+  }
+
+  // A published figure is all-or-nothing across the public surfaces. Missing claims are pattern
+  // drift or partial publication; retaining the withholding sentence is a direct contradiction.
+  for (const [rel, found] of state.byFile) {
+    if (!found.length) problems.push(`${rel}: publishes no ${label} this checker can see — mixed or pattern-drifted state`);
+    const text = initialSurfaces.get(rel);
+    if (text !== null && WITHHELD_MARKER.test(text)) {
+      problems.push(`${rel}: both publishes a ${label} and says no current figure is published`);
+    }
+  }
+}
+
+const testState = publicationState(TEST_COUNT_PATTERNS);
+const mutationState = publicationState(
+  MUTATION_PATTERNS,
+  2,
+  [MUTATION_HISTORICAL_EXCEPTION],
+);
+validatePublicationState('test count', testState);
+validatePublicationState('mutation score', mutationState);
+
+// Withholding both figures is an intentional public state, not a vacuous pass. The exact visible
+// sentence above is checked on every surface, and no expensive measurement is needed until a
+// surface actually publishes a current claim.
+if (!testState.published && !mutationState.published) {
+  if (problems.length) {
+    console.error(`\npublished numbers: FAILED\n${problems.map((p) => `  - ${p}`).join('\n')}`);
+    process.exit(1);
+  }
+  console.log('published numbers: all surfaces explicitly withhold current test and mutation figures.');
+  if (WRITE) console.log('--write made no change; it does not invent a public claim.');
+  process.exit(0);
+}
+
+// Structural contradictions should fail before spending time on either harness.
+if (problems.length) {
+  console.error(`\npublished numbers: FAILED\n${problems.map((p) => `  - ${p}`).join('\n')}`);
+  process.exit(1);
+}
+
+if (testState.published) {
+  const t = await measureTests();
+  if (!t.ok) problems.push(`TEST COUNT: ${t.why}`);
+  else {
+    measured.testCount = String(t.count);
+    console.log(`measured test count      ${t.count} passing of ${t.defined} defined`);
+  }
+} else console.log('test count               WITHHELD on every surface — measurement skipped');
+
+if (!TESTS_ONLY && mutationState.published) {
   const m = await measureMutations();
   if (!m.ok) problems.push(`MUTATION SCORE: ${m.why}`);
   else {
@@ -115,11 +197,9 @@ if (!TESTS_ONLY) {
         + 'hole in the suite and must not be published as a headline — fix the hole, do not print the number.');
     }
   }
-} else console.log('mutation score           SKIPPED (--tests-only) — not eligible to publish');
-
-// Compare against what the surfaces actually say.
-const { TEST_COUNT_PATTERNS, MUTATION_PATTERNS, claims } = await import(
-  path.join(ROOT, 'test/lib/published-number-patterns.mjs'));
+} else if (TESTS_ONLY && mutationState.published) {
+  console.log('mutation score           UNCHECKED (--tests-only) — run without the flag before publishing');
+} else console.log('mutation score           WITHHELD on every surface — measurement skipped');
 
 /** Every place a surface disagrees with what was just measured. */
 async function compareSurfaces() {
@@ -135,8 +215,9 @@ async function compareSurfaces() {
       }
     }
     if (measured.mutationScore) {
-      // '10/12' is the permanent falsification record — a WORSE past score, deliberately kept.
-      const found = [...new Set(claims(text, MUTATION_PATTERNS, 2))].filter((c) => c !== '10/12');
+      // The permanent falsification record is a WORSE past score, deliberately kept.
+      const found = [...new Set(claims(text, MUTATION_PATTERNS, 2))]
+        .filter((c) => c !== MUTATION_HISTORICAL_EXCEPTION);
       if (!found.length) out.push(`${rel}: publishes no mutation score this checker can see — pattern drift`);
       else if (found.some((c) => c !== measured.mutationScore)) {
         out.push(`${rel}: publishes mutation score ${JSON.stringify(found)}, measured ${measured.mutationScore}`);
@@ -162,7 +243,9 @@ if (WRITE && !problems.some((p) => p.startsWith('MUTATION SCORE') || p.startsWit
     if (measured.mutationScore) {
       for (const re of MUTATION_PATTERNS) {
         text = text.replace(new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`),
-          (m, ...g) => (`${g[0]}/${g[1]}` === '10/12' ? m : m.replace(`${g[0]}/${g[1]}`, measured.mutationScore)));
+          (m, ...g) => (`${g[0]}/${g[1]}` === MUTATION_HISTORICAL_EXCEPTION
+            ? m
+            : m.replace(`${g[0]}/${g[1]}`, measured.mutationScore)));
       }
     }
     if (text !== before) { await fs.writeFile(file, text, 'utf8'); console.log(`updated ${rel}`); }
@@ -194,4 +277,8 @@ if (problems.length) {
     + 'measurement to match the surfaces.');
   process.exit(1);
 }
-console.log('\npublished numbers: every surface matches a measurement that actually ran.');
+if (TESTS_ONLY && mutationState.published) {
+  console.log('\npublished numbers: the test count matches this run; the published mutation score remains unchecked.');
+} else {
+  console.log('\npublished numbers: every published figure matches a measurement that actually ran.');
+}

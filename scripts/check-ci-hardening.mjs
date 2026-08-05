@@ -24,6 +24,28 @@
  *      compromise of the publishing account) silently runs new code inside this repository's job,
  *      with this repository's token. OWASP CI/CD-SEC-3 (Dependency Chain Abuse) is the same hole.
  *
+ *   4. MUTABLE COMPOSITE BOOTSTRAPS. A composite action can be pinned perfectly by its caller and
+ *      then throw that guarantee away by running `npm install github:owner/repo#main` (or `#v1`)
+ *      inside a `run:` block. The executable bytes are then chosen by a branch or tag at runtime,
+ *      not by the caller's SHA. Root action.yml is checked alongside workflow `uses:` lines.
+ *
+ *   5. CORPUS OWNERSHIP. The four pinned real repositories are a required 4/4 Linux gate. The
+ *      portable matrix excludes exactly that file through a denominator-checking runner; it may
+ *      not silently run full `npm test` without fixtures. Supported Node 22/24/26 majors must all
+ *      occur in that portable matrix.
+ *
+ *   6. MUTABLE EXECUTABLE INSTALLS. `go install module@latest`, an unversioned `cargo install`,
+ *      and `npm install -g tool` execute whatever a registry serves on that run. Exact versions or
+ *      commit objects are required, and the positive controls prove each mutable spelling fires.
+ *      `permissions: write-all` is rejected at workflow and job scope for the same reason: merely
+ *      having a permissions key is not evidence of least privilege.
+ *
+ *   7. UNMEASURED GIT RUNTIME. Holt's local evidence boundary requires Git 2.45's
+ *      `--no-lazy-fetch`. A runner-image label is not evidence of the executable selected on
+ *      PATH, so every CI job that installs Holt's test tree must run the live runtime/capability
+ *      check first. The same step carries the non-vacuous `/dev/null` hooks-path proof onto the
+ *      Windows matrix rather than assuming Git for Windows behaves like a POSIX build.
+ *
  * A GATE WITH NO POSITIVE CONTROL HAS PROVEN NOTHING. `--self-test` copies the real workflow tree
  * to a scratch directory, plants one violation of each rule, and requires the checker to go RED on
  * every one of them and GREEN on the untouched copy. If any planted violation is NOT caught, the
@@ -49,6 +71,15 @@ export const REQUIRED_OS = ['ubuntu-latest', 'macos-latest', 'windows-latest'];
 /** The script whose presence in a job is what makes the guard corpus's cross-platform run a fact
  *  rather than a side effect of a glob. */
 const CORPUS_RUNNER = 'scripts/run-guard-corpus.mjs';
+
+/** Executable runtime proof required before a CI job installs/runs Holt's test tree. */
+export const GIT_RUNTIME_CHECK = 'node scripts/check-git-runtime.mjs --verify-inert-hooks';
+
+/** A complete feature proof is executable evidence, not a prose matrix or an ordinary test glob. */
+export const FEATURE_PROOF_COMMAND = 'node scripts/run-feature-proof.mjs --out "$RUNNER_TEMP/feature-proof.json"';
+
+/** The omission check must run before the core smoke against the isolated installed package. */
+export const OMIT_OPTIONAL_PROOF = 'node scripts/check-omit-optional-install.mjs --prefix "$OPTIONAL_PREFIX"';
 
 /** `test/** /*.test.mjs` is the only pattern `npm test` expands. Anything under test/ that looks
  *  like a test but does not match it never runs, and nothing says so. */
@@ -195,6 +226,19 @@ export function hasTopLevelPermissions(text) {
   return text.split(/\r?\n/).some((l) => /^permissions:\s*(\{\s*\}\s*)?(#.*)?$/.test(l) || /^permissions:\s*\S/.test(l));
 }
 
+/** `write-all` defeats the least-privilege default whether declared for the entire workflow or
+ * for one job. Only column zero and direct job-property indentation are YAML permission keys;
+ * more deeply indented text can be shell/heredoc content and must not be mistaken for policy. */
+export function broadWritePermissions(text) {
+  const out = [];
+  for (const [index, line] of String(text ?? '').split(/\r?\n/).entries()) {
+    if (/^(?:permissions:| {4}permissions:)\s*write-all\s*(?:#.*)?$/.test(line)) {
+      out.push({ line: index + 1 });
+    }
+  }
+  return out;
+}
+
 /**
  * Every `uses:` reference in a workflow, with its trailing version comment.
  *
@@ -208,6 +252,121 @@ export function usesRefs(text) {
     const m = USES_RE.exec(lines[i]);
     if (!m) continue;
     out.push({ line: i + 1, ref: m[1], comment: m[2] ? m[2].trim() : null });
+  }
+  return out;
+}
+
+/**
+ * Executable shell lines from YAML `run:` scalars. Full-line YAML/shell comments are excluded;
+ * prose must never count either as evidence or as a violation.
+ *
+ * @param {string} text
+ * @returns {{line:number,text:string}[]}
+ */
+export function executableRunLines(text) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  const out = [];
+  let blockIndent = null;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const trimmed = raw.trim();
+    const indent = raw.length - raw.trimStart().length;
+
+    if (blockIndent !== null && trimmed !== '' && indent <= blockIndent) blockIndent = null;
+    if (blockIndent !== null) {
+      if (trimmed && !trimmed.startsWith('#')) out.push({ line: i + 1, text: trimmed });
+      continue;
+    }
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const m = /^\s*(?:-\s*)?run:\s*(.*)$/.exec(raw);
+    if (!m) continue;
+    const rest = m[1].trim();
+    if (/^[|>][-+0-9]*$/.test(rest)) { blockIndent = indent; continue; }
+    if (rest && !rest.startsWith('#')) out.push({ line: i + 1, text: rest });
+  }
+  return out;
+}
+
+/** A package-manager install from GitHub selects executable code. It is immutable only when the
+ * fragment is a full commit object name; no fragment means the repository's default branch. */
+const PACKAGE_INSTALL_RE = /\b(?:npm\s+(?:i|install)|pnpm\s+(?:add|install)|yarn\s+(?:add|global\s+add))\b/i;
+const GITHUB_PACKAGE_RE = /(?:github:|git\+(?:https|ssh):\/\/github\.com\/|https:\/\/github\.com\/)[^\s"'`#]+(?:#([^\s"'`]+))?/ig;
+
+/**
+ * @param {string} text
+ * @returns {{line:number,spec:string,ref:string|null}[]}
+ */
+export function mutableGitHubInstalls(text) {
+  const out = [];
+  for (const run of executableRunLines(text)) {
+    if (!PACKAGE_INSTALL_RE.test(run.text)) continue;
+    PACKAGE_INSTALL_RE.lastIndex = 0;
+    for (const m of run.text.matchAll(GITHUB_PACKAGE_RE)) {
+      const ref = m[1] ?? null;
+      if (!ref || !SHA_RE.test(ref)) out.push({ line: run.line, spec: m[0], ref });
+    }
+  }
+  return out;
+}
+
+const EXACT_VERSION_RE = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+const unquote = (word) => String(word ?? '').replace(/^["']|["']$/g, '');
+const localInstallSpec = (spec) => /^(?:\.?\.?[\\/]|[\\/]|file:|\$|\*)/.test(spec)
+  || /[\\/]holt-[^\\/]*\.tgz$/.test(spec);
+
+function exactPackageSpec(raw) {
+  const spec = unquote(raw);
+  if (!spec || localInstallSpec(spec)) return true;
+  if (/^(?:github:|git\+(?:https|ssh):\/\/github\.com\/|https:\/\/github\.com\/)/i.test(spec)) {
+    const ref = spec.includes('#') ? spec.slice(spec.lastIndexOf('#') + 1) : '';
+    return SHA_RE.test(ref);
+  }
+  const at = spec.lastIndexOf('@');
+  return at > 0 && EXACT_VERSION_RE.test(spec.slice(at + 1));
+}
+
+/**
+ * Executable package-manager installs whose selected code can move between CI runs.
+ * Local tarballs/paths are artifacts built by the workflow and are intentionally accepted.
+ *
+ * @param {string} text
+ * @returns {{line:number,manager:string,spec:string}[]}
+ */
+export function mutableExecutableInstalls(text) {
+  const out = [];
+  for (const run of executableRunLines(text)) {
+    for (const match of run.text.matchAll(/\bgo\s+install\s+([^\s;|&]+)/g)) {
+      const spec = unquote(match[1]);
+      if (localInstallSpec(spec)) continue;
+      const at = spec.lastIndexOf('@');
+      const ref = at >= 0 ? spec.slice(at + 1) : '';
+      if (!SHA_RE.test(ref) && !EXACT_VERSION_RE.test(ref)) {
+        out.push({ line: run.line, manager: 'go', spec });
+      }
+    }
+
+    if (/\bcargo\s+install\b/.test(run.text) && !/\s--path(?:=|\s)/.test(run.text)) {
+      const hasExactVersion = /\s--version(?:=|\s+)["']?=?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?["']?(?:\s|$)/.test(run.text);
+      const hasExactRevision = /\s--rev(?:=|\s+)["']?[0-9a-f]{40}["']?(?:\s|$)/.test(run.text);
+      if (!hasExactVersion && !hasExactRevision) {
+        out.push({ line: run.line, manager: 'cargo', spec: run.text });
+      }
+    }
+
+    const words = run.text.match(/"[^"]*"|'[^']*'|[^\s]+/g)?.map(unquote) ?? [];
+    for (let i = 0; i + 1 < words.length; i++) {
+      if (words[i] !== 'npm' || !['i', 'install'].includes(words[i + 1])) continue;
+      const tail = words.slice(i + 2);
+      if (!tail.includes('-g') && !tail.includes('--global')) continue;
+      const control = tail.findIndex((word) => ['&&', '||', '|', ';'].includes(word));
+      const installTail = control === -1 ? tail : tail.slice(0, control);
+      const specs = installTail.filter((word) => word && !word.startsWith('-'));
+      for (const spec of specs) {
+        if (!exactPackageSpec(spec)) out.push({ line: run.line, manager: 'npm', spec });
+      }
+      break;
+    }
   }
   return out;
 }
@@ -272,6 +431,16 @@ export async function checkAll(root = REPO_ROOT) {
     if (!hasTopLevelPermissions(text)) {
       v.push({ rule: 'permissions', file: rel, line: null, message: 'no workflow-level `permissions:` block — GITHUB_TOKEN inherits the repository default. Declare the minimum this workflow needs (contents: read for a workflow that only reads the repo).' });
     }
+    for (const hit of broadWritePermissions(text)) {
+      v.push({ rule: 'permissions', file: rel, line: hit.line, message: '`permissions: write-all` is not least privilege. Declare only the scopes this workflow or job actually uses.' });
+    }
+
+    for (const hit of mutableExecutableInstalls(text)) {
+      v.push({
+        rule: 'mutable-install', file: rel, line: hit.line,
+        message: `${hit.manager} installs executable code from a mutable selector (${hit.spec}). Pin an exact version or full commit object; local artifact paths remain allowed.`,
+      });
+    }
 
     // RULE: immutable action pins.
     for (const u of usesRefs(text)) {
@@ -307,6 +476,55 @@ export async function checkAll(root = REPO_ROOT) {
   }
   if (totalJobs === 0) {
     v.push({ rule: 'vacuity', file: '.github/workflows', line: null, message: 'no job was read from any workflow — the cross-platform rule checked nothing' });
+  }
+
+  // RULE: every CI job that installs the reviewed dependency/test tree proves the selected Git
+  // first. Checking before `npm ci` makes the ordering unambiguous and keeps every later test,
+  // package smoke and installed-artifact run under one measured prerequisite. Executable lines
+  // only: a comment saying "Git 2.45" is not a runtime check.
+  const ciJobs = allJobs.filter((job) => job.file === '.github/workflows/ci.yml');
+  for (const job of ciJobs) {
+    const commands = executableRunLines(job.body).map((line) => line.text);
+    const npmCiAt = commands.findIndex((line) => /(^|\s)npm\s+ci(?:\s|$)/.test(line));
+    if (npmCiAt === -1) continue;
+    const runtimeAt = commands.findIndex((line) => line.includes(GIT_RUNTIME_CHECK));
+    if (runtimeAt === -1) {
+      v.push({
+        rule: 'git-runtime', file: job.file, line: null,
+        message: `job ${job.id} installs Holt's test tree without executing the Git >=2.45 / --no-lazy-fetch and inert-hooks runtime proof`,
+      });
+    } else if (runtimeAt > npmCiAt) {
+      v.push({
+        rule: 'git-runtime', file: job.file, line: null,
+        message: `job ${job.id} checks Git only after npm ci; the runtime proof must precede Holt's dependency/test setup`,
+      });
+    }
+  }
+
+  // RULE: a composite action may not defeat its caller's immutable `uses: owner/repo@SHA` by
+  // fetching executable package bytes from a tag, branch, or default branch at runtime.
+  const actionRel = 'action.yml';
+  let actionText = null;
+  try { actionText = await fs.readFile(path.join(root, actionRel), 'utf8'); } catch {
+    v.push({ rule: 'composite-bootstrap', file: actionRel, line: null, message: 'root action.yml is missing — the published composite action contract cannot be checked' });
+  }
+  if (actionText !== null) {
+    for (const hit of mutableGitHubInstalls(actionText)) {
+      v.push({
+        rule: 'composite-bootstrap', file: actionRel, line: hit.line,
+        message: `composite action installs executable GitHub bytes from ${hit.ref ? `mutable ref \`${hit.ref}\`` : 'the mutable default branch'} (${hit.spec}). Execute the caller's checked-out \`github.action_path\` contents, or pin the fetched package to a full 40-character commit SHA.`,
+      });
+    }
+    for (const u of usesRefs(actionText)) {
+      if (u.ref.startsWith('./') || u.ref.startsWith('docker://')) continue;
+      const at = u.ref.lastIndexOf('@');
+      const ref = at < 0 ? '' : u.ref.slice(at + 1);
+      if (at < 0 || !SHA_RE.test(ref)) {
+        v.push({ rule: 'pin', file: actionRel, line: u.line, message: `composite action \`uses: ${u.ref}\` is not pinned to a full 40-character commit SHA` });
+      } else if (!u.comment || !VERSION_COMMENT_RE.test(u.comment)) {
+        v.push({ rule: 'pin', file: actionRel, line: u.line, message: `composite action \`uses: ${u.ref}\` needs a trailing version comment` });
+      }
+    }
   }
 
   // RULE: the guard corpus exists and is real.
@@ -357,6 +575,84 @@ export async function checkAll(root = REPO_ROOT) {
     }
   }
 
+  // RULE: one job owns the exact 4/4 network corpus; the cross-platform job owns every other test
+  // through a runner that proves its N-1 denominator. Missing fixtures must fail the former and
+  // must not make the latter falsely red on macOS/Windows.
+  const fullJob = allJobs.find((j) => j.file === '.github/workflows/ci.yml' && j.id === 'full');
+  if (!fullJob || !fullJob.body.includes('HOLT_REAL_REPOS:')
+      || !runsCommand(fullJob.body, 'bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"')
+      || !runsCommand(fullJob.body, 'npm test')) {
+    v.push({ rule: 'real-corpus-owner', file: '.github/workflows/ci.yml', line: null, message: 'the dedicated Linux full job must export HOLT_REAL_REPOS, clone all pinned fixtures, and execute npm test so real-repos.test.mjs is required 4/4 evidence' });
+  }
+
+  // RULE: the bounded feature runner is mandatory in the all-backends owner and its write-once
+  // JSON plus checksum survive a red completed run. A comment, ordinary `npm test`, or an upload
+  // that runs only on success cannot substitute for the source/runtime/denominator-bound artifact.
+  const featureProofUpload = fullJob?.body.indexOf('uses: actions/upload-artifact@') ?? -1;
+  const featureProofRun = fullJob?.body.indexOf(`run: ${FEATURE_PROOF_COMMAND}`) ?? -1;
+  if (!fullJob || !runsCommand(fullJob.body, FEATURE_PROOF_COMMAND)
+      || featureProofUpload < featureProofRun
+      || !fullJob.body.includes('if: ${{ always() }}')
+      || !fullJob.body.includes('if-no-files-found: error')
+      || !fullJob.body.includes('${{ runner.temp }}/feature-proof.json')
+      || !fullJob.body.includes('${{ runner.temp }}/feature-proof.json.sha256')) {
+    v.push({
+      rule: 'feature-proof', file: '.github/workflows/ci.yml', line: null,
+      message: 'the all-backends job must execute the complete feature-proof runner and always retain its JSON plus SHA-256 sidecar, including a completed invalid run',
+    });
+  }
+
+  // RULE: `--omit=optional` is a measured filesystem property. A global npm 10 install can retain
+  // the optional tree while exiting zero, so use an outside-checkout non-global prefix, prove every
+  // declared optional root absent, then drive the core smoke against that exact package path.
+  const packageJob = allJobs.find((j) => j.file === '.github/workflows/ci.yml' && j.id === 'package');
+  const packageCommands = executableRunLines(packageJob?.body ?? '').map((line) => line.text);
+  const omittedInstallAt = packageCommands.findIndex((line) => /npm\s+install\b/.test(line)
+    && /--omit=optional\b/.test(line) && /--prefix\s+"\$OPTIONAL_PREFIX"/.test(line)
+    && !/(?:^|\s)-(?:g|-global)(?:\s|$)/.test(line));
+  const omissionProofAt = packageCommands.findIndex((line) => line.includes(OMIT_OPTIONAL_PROOF));
+  const omittedSmokeAt = packageCommands.findIndex((line) => line.includes('node scripts/smoke-installed.mjs --bin "$HOLT_BIN"'));
+  if (!packageJob || omittedInstallAt === -1 || omissionProofAt <= omittedInstallAt
+      || omittedSmokeAt <= omissionProofAt
+      || !packageJob.body.includes('OPTIONAL_PREFIX: ${{ runner.temp }}/')
+      || !packageJob.body.includes('HOLT_BIN="$OPTIONAL_PREFIX/node_modules/holt/bin/holt.mjs"')
+      || runsCommand(packageJob.body, 'npm install -g --omit=optional')) {
+    v.push({
+      rule: 'omit-optional', file: '.github/workflows/ci.yml', line: null,
+      message: 'packaging must install into a fresh non-global runner-temp prefix, prove every optional root absent, then smoke that exact installed binary',
+    });
+  }
+  for (const job of allJobs.filter((j) => runsCommand(j.body, 'npm test'))) {
+    if (!job.body.includes('HOLT_REAL_REPOS:')
+        || !runsCommand(job.body, 'bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"')) {
+      v.push({
+        rule: 'real-corpus-owner', file: job.file, line: null,
+        message: `job ${job.id} executes full npm test without exporting HOLT_REAL_REPOS and cloning the exact four pinned fixtures; use the N-1 portable runner or own the full 4/4 corpus`,
+      });
+    }
+  }
+  const portableJob = allJobs.find((j) => j.file === '.github/workflows/ci.yml' && j.id === 'crossplat');
+  if (!portableJob || !runsCommand(portableJob.body, 'node scripts/run-crossplat-suite.mjs')
+      || runsCommand(portableJob.body, 'npm test')) {
+    v.push({ rule: 'real-corpus-owner', file: '.github/workflows/ci.yml', line: null, message: 'the cross-platform job must run the N-1 portable-suite enumerator, not full npm test without the pinned real-repository fixtures' });
+  }
+  for (const version of ['22.23.2', '24.19.0', '26.6.0']) {
+    if (!portableJob?.body.includes(`node: '${version}'`)) {
+      v.push({ rule: 'node-support', file: '.github/workflows/ci.yml', line: null, message: `the portable matrix does not test pinned supported Node ${version}` });
+    }
+  }
+
+  // RULE: path portability is checked before release day. The three-platform runtime matrix is
+  // the independent oracle; this static gate closes the instance class by refusing new raw path
+  // comparisons even when the current runner's filesystem happens to make them compare equal.
+  const staticJob = allJobs.find((j) => j.file === '.github/workflows/ci.yml' && j.id === 'static');
+  if (!staticJob || !runsCommand(staticJob.body, 'npm run lint:paths')) {
+    v.push({
+      rule: 'path-lint', file: '.github/workflows/ci.yml', line: null,
+      message: 'the static CI job must execute `npm run lint:paths`; release-only path lint cannot protect pull requests from macOS/Windows path regressions',
+    });
+  }
+
   // RULE: no test file may be invisible to the suite. A file named `foo.spec.mjs` or `foo.test.js`
   // under test/ is never expanded by `test/** /*.test.mjs`, so it never runs and nothing reports
   // that it did not — the same absence-of-evidence shape as an empty glob, at file-naming level.
@@ -387,6 +683,7 @@ async function stage(src, dst) {
     await fs.copyFile(path.join(wfDir, n), path.join(dst, '.github', 'workflows', n));
   }
   await fs.copyFile(path.join(src, '.github', 'guard-corpus.txt'), path.join(dst, '.github', 'guard-corpus.txt'));
+  await fs.copyFile(path.join(src, 'action.yml'), path.join(dst, 'action.yml'));
   // The corpus files themselves only need to EXIST and be non-empty for the rules under test.
   const corpus = (await fs.readFile(path.join(src, '.github', 'guard-corpus.txt'), 'utf8'))
     .split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
@@ -418,12 +715,60 @@ export async function selfTest() {
       },
     },
     {
+      name: 'a workflow that declares permissions: write-all',
+      rule: 'permissions',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('permissions:\n  contents: read', 'permissions: write-all'));
+      },
+    },
+    {
       name: 'an action pinned to a mutable tag (@v4)',
       rule: 'pin',
       mutate: async (d) => {
         const p = path.join(d, '.github', 'workflows', 'ci.yml');
         const t = await fs.readFile(p, 'utf8');
         await fs.writeFile(p, t.replace(/uses: actions\/checkout@[0-9a-f]{40}[^\n]*/, 'uses: actions/checkout@v4'));
+      },
+    },
+    {
+      name: 'a composite action that installs executable code from a mutable GitHub tag',
+      rule: 'composite-bootstrap',
+      mutate: async (d) => {
+        const p = path.join(d, 'action.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, `${t}\n  # positive-control plant\n  steps:\n    - shell: bash\n      run: npm install -g github:example/tool#v1\n`);
+      },
+    },
+    {
+      name: 'go install selects latest executable bytes',
+      rule: 'mutable-install',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          'github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6',
+          'github.com/go-enry/go-enry/v2/cmd/enry@latest',
+        ));
+      },
+    },
+    {
+      name: 'cargo install has no exact version or revision',
+      rule: 'mutable-install',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('jj-cli --version 0.43.0', 'jj-cli'));
+      },
+    },
+    {
+      name: 'npm global install selects an unversioned registry package',
+      rule: 'mutable-install',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('npm install -g opencode-ai@1.18.13', 'npm install -g opencode-ai'));
       },
     },
     {
@@ -495,6 +840,90 @@ export async function selfTest() {
         await fs.writeFile(path.join(d, 'test', 'e2e', 'ghost.spec.mjs'), 'export default 1;\n');
       },
     },
+    {
+      name: 'the pinned real-repository clone removed from its required 4/4 owner',
+      rule: 'real-corpus-owner',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"', 'echo fixtures-removed'));
+      },
+    },
+    {
+      name: 'the portable matrix runs full npm test without the pinned fixtures',
+      rule: 'real-corpus-owner',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('node scripts/run-crossplat-suite.mjs', 'npm test'));
+      },
+    },
+    {
+      name: 'pinned supported Node 26 removed from the portable matrix',
+      rule: 'node-support',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace("          - { os: ubuntu-latest, node: '26.6.0' }\n", ''));
+      },
+    },
+    {
+      name: 'the native-path portability lint is removed from pull-request CI',
+      rule: 'path-lint',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('        run: npm run lint:paths', '        run: echo native-path-lint-removed'));
+      },
+    },
+    {
+      name: 'one CI job inherits the runner Git without a runtime/capability proof',
+      rule: 'git-runtime',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(`        run: ${GIT_RUNTIME_CHECK}`, '        run: echo git-runtime-check-removed'));
+      },
+    },
+    {
+      name: 'the mandatory feature-proof execution is replaced by prose',
+      rule: 'feature-proof',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(`        run: ${FEATURE_PROOF_COMMAND}`, '        # feature proof removed'));
+      },
+    },
+    {
+      name: 'feature-proof evidence is uploaded only after success',
+      rule: 'feature-proof',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('        if: ${{ always() }}', '        if: ${{ success() }}'));
+      },
+    },
+    {
+      name: 'omit-optional smoke runs without proving package roots absent',
+      rule: 'omit-optional',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(`          NODE_PATH= ${OMIT_OPTIONAL_PROOF}`, '          echo optional-absence-not-checked'));
+      },
+    },
+    {
+      name: 'omit-optional falls back to the npm global install that retained dependencies',
+      rule: 'omit-optional',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          'npm install --ignore-scripts --omit=optional --prefix "$OPTIONAL_PREFIX" "$1"',
+          'npm install -g --omit=optional "$1"',
+        ));
+      },
+    },
   ];
 
   // NEVER-WORSE, first: the untouched copy must be clean. A checker that fails on a correct tree
@@ -551,7 +980,7 @@ if (process.argv[1]?.endsWith('check-ci-hardening.mjs')) {
     console.error(`\n${violations.length} CI hardening violation(s).`);
     bad = true;
   } else {
-    console.log('CI hardening: every workflow declares least-privilege permissions, every action is pinned to an immutable SHA, and the guard corpus runs on ' + REQUIRED_OS.join(', ') + '.');
+    console.log('CI hardening: least privilege, immutable executable inputs, measured Git, cross-platform ownership, retained feature proof, and real omit-optional isolation verified on ' + REQUIRED_OS.join(', ') + '.');
   }
   process.exit(bad ? 1 : 0);
 }

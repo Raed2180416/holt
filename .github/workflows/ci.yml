@@ -32,10 +32,14 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22.23.2', package-manager-cache: false }
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - run: npm ci
+      - name: committed Node 24 action bundle is reproducible on this OS
+        run: npm run action:check
       # The portable core: safety classifier, detection against ground truth, the CLI as a
       # binary, actions (protect/rescue/clean), and the invariant fuzzer. No optional backends —
       # the point of this job is that holt's CORE is correct on every OS, degraded loudly.
@@ -113,12 +117,14 @@ jobs:
           node -e "const r=require('./risk.json');const u=(r.unique||r.workstreams||[]);if(!JSON.stringify(r).includes('wt1'))throw new Error('installed holt did not see the worktree: '+JSON.stringify(r).slice(0,300));console.log('  installed binary correctly analysed a fresh repo')"
 
   bare:
-    name: no optional backends (degradation path)
+    name: no optional deep/external analyzers
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22.23.2', package-manager-cache: false }
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - name: assert the optional tools really are absent
         run: |
           ! command -v ctags || (echo "ctags present; this job must test the degraded path" && exit 1)
@@ -142,11 +148,14 @@ jobs:
     env:
       HOLT_REAL_REPOS: ${{ github.workspace }}/.holt-fixtures
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with: { go-version: 'stable' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22.23.2', package-manager-cache: false }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version: '1.26.5' }
+
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
 
       - name: install universal-ctags
         # apt, deliberately, even though it ships an older parser set (5.9.0 on Ubuntu 24.04, no
@@ -161,15 +170,15 @@ jobs:
 
       - name: install enry (content-based language detection)
         run: |
-          go install github.com/go-enry/enry@latest
+          go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
 
       - name: install jj (Jujutsu backend)
         run: |
-          cargo install --locked jj-cli --root "$HOME/.local" || echo "jj unavailable; its suite will skip and say so"
+          cargo install --locked jj-cli --version 0.43.0 --root "$HOME/.local" || echo "jj unavailable; its suite will skip and say so"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: install opencode (one of the 29 integration targets holt wires)
+      - name: install opencode (one of the 30 integration targets holt wires)
         # THE PUBLISHED TEST COUNT MUST NOT DEPEND ON WHAT THE GRADER HAPPENS TO HAVE INSTALLED.
         # test/e2e/opencode-plugin.test.mjs ends in `t.skip('opencode not installed')` when the
         # binary is absent, so this job measured 697 passing while README claimed 698 and
@@ -182,7 +191,8 @@ jobs:
         # solely on the maintainer's machine is exactly the class this workflow's other jobs exist
         # to close.
         run: |
-          npm i -g opencode-ai
+          test "$(npm view opencode-ai@1.18.13 dist.integrity)" = "sha512-HYmBizm5vyAqqYuKzhpleRdEKwh7TeFSeA4f/Edl0F8OSPnbLi3DaXNMtmtsL13e2/994M9JoIz11yrVNdoAfA=="
+          npm install -g opencode-ai@1.18.13
           opencode --version
 
       - run: npm ci
@@ -195,6 +205,23 @@ jobs:
         # disagreed, the four real-repo tests — the ones with the most external validity — skipped
         # in the suite step and had never once run in CI.
         run: bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"
+
+      - name: bounded feature proof with complete denominators
+        # This is intentionally stricter than the ordinary suite: every test file is named, every
+        # optional backend is required, every skip/todo/cancellation invalidates the result, and
+        # mutation/CI/release/host/path gates are retained in one source-bound artifact.
+        run: node scripts/run-feature-proof.mjs --out "$RUNNER_TEMP/feature-proof.json"
+
+      - name: retain the feature-proof artifact, including an invalid completed run
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feature-proof-linux-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/feature-proof.json
+            ${{ runner.temp }}/feature-proof.json.sha256
 
       - name: full suite
         run: npm test
@@ -252,7 +279,7 @@ jobs:
         run: npm run test:mutation
 
   crossplat:
-    name: full suite on ${{ matrix.os }}
+    name: portable suite on ${{ matrix.os }} / Node ${{ matrix.node }}
     # 24 OF 39 TEST FILES RAN ON LINUX ONLY — the MCP protocol, the TUI, the graph export, the
     # journal, the team layer, the monster round, the host manifest, the packaging guard. A tool
     # that manipulates paths for a living was proving its most platform-sensitive half on the one
@@ -264,12 +291,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - { os: ubuntu-latest, node: '22.23.2' }
+          - { os: ubuntu-latest, node: '24.19.0' }
+          - { os: ubuntu-latest, node: '26.6.0' }
+          - { os: macos-latest, node: '24.19.0' }
+          - { os: windows-latest, node: '24.19.0' }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
 
       - name: install universal-ctags (linux)
         if: runner.os == 'Linux'
@@ -286,18 +322,24 @@ jobs:
       # the F# corpus case resolved as Forth and yielded nothing, which is what this job caught on
       # macOS and Windows the first time it ran. Content-based detection is what makes the
       # language claim true, so the platforms that assert it must have it.
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with: { go-version: 'stable' }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: { go-version: '1.26.5' }
       - name: install enry (content-based language detection)
         shell: bash
         run: |
-          go install github.com/go-enry/enry@latest
+          go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - run: npm ci
       - name: what this platform actually has
         run: node bin/holt.mjs doctor
-      - run: npm test
+      - name: every portable test file (the pinned real-repo corpus has one required 4/4 owner)
+        # The `full` Linux job above clones all four immutable fixture commits and runs npm test,
+        # so real-repos.test.mjs is hard-failing 4/4 evidence there. This matrix enumerates every
+        # other test file and refuses if the exclusion count drifts from exactly one. That keeps
+        # Windows/macOS network variance from turning a portable regression job into a fixture
+        # availability job without shrinking the real-corpus denominator.
+        run: node scripts/run-crossplat-suite.mjs
 
   static:
     name: static analysis (ratchet)
@@ -309,11 +351,18 @@ jobs:
     # next regression, and lowers its own ceiling whenever debt is paid down.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22.23.2', package-manager-cache: false }
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - run: npm ci
       - run: npm run typecheck
+      - name: native paths must never be compared as display strings
+        # This is a portability gate, not release-day hygiene. It catches the raw path comparison
+        # class behind /var vs /private/var and Windows case/8.3/slash failures in the PR that
+        # introduces it, while the platform matrix supplies the independent runtime oracle.
+        run: npm run lint:paths
       - name: HOSTS.md must match the manifest it is generated from
         # HOSTS.md drifted from src/integrate/hosts.mjs by hand at least twice (Cursor's block-hook
         # promotion, the Roo/Kilo split) before this existed. Same ratchet shape as typecheck above:
@@ -338,9 +387,11 @@ jobs:
     name: packaging
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22.23.2', package-manager-cache: false }
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - run: npm ci
       - name: every checked-in release body must carry an install command
         # The gate lives here as well as on the release event so a body is caught in the PR that
@@ -374,12 +425,25 @@ jobs:
         # came to be missing four runtime modules and 12 of 14 language packs.
         run: node scripts/smoke-installed.mjs --bin holt
       - name: an install without optional dependencies must still work
-        # A corporate mirror, `npm i --omit=optional`, and older `--production` installs all do
-        # this. `holt integrate` wires 29 MCP targets that every point at `holt mcp`, so a missing
-        # runtime dependency here means 29 agents wired to a server that cannot start.
+        # A corporate mirror or `npm i --omit=optional` can remove the deep-clone backend. A global
+        # npm 10 install has been observed to retain optional packages despite the flag, so this
+        # proof uses a fresh non-global prefix outside the checkout, proves every declared optional
+        # root physically absent and unresolvable, and only then runs the planted-work product
+        # smoke against that exact installed binary. Required MCP/JSONC/TUF surfaces remain.
+        env:
+          OPTIONAL_PREFIX: ${{ runner.temp }}/holt-no-optional
         run: |
-          npm install -g --omit=optional ./holt-*.tgz
-          node scripts/smoke-installed.mjs --bin holt
+          set -euo pipefail
+          set -- "$PWD"/holt-*.tgz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "::error::expected exactly one packed Holt tarball, found $#"
+            exit 1
+          fi
+          npm install --ignore-scripts --omit=optional --prefix "$OPTIONAL_PREFIX" "$1"
+          NODE_PATH= node scripts/check-omit-optional-install.mjs --prefix "$OPTIONAL_PREFIX"
+          HOLT_BIN="$OPTIONAL_PREFIX/node_modules/holt/bin/holt.mjs"
+          NODE_PATH= node "$HOLT_BIN" audit
+          NODE_PATH= node scripts/smoke-installed.mjs --bin "$HOLT_BIN"
       - name: the published tarball must not ship anything operator-only
         run: |
           tar -tzf holt-*.tgz | tee /tmp/files.txt
@@ -395,14 +459,16 @@ jobs:
     name: supply-chain evidence
     runs-on: ubuntu-latest
     # Everything here works with NO credentials. The two credentialed halves — npm provenance and
-    # the detached manifest signature — live in release.yml and are guarded there, so this job
+    # the detached manifest signature — live in release-artifact.yml and are guarded there, so this job
     # can prove the evidence is TRUE on every commit rather than only at release time. An SBOM
     # and an integrity manifest first generated on release day are two artefacts nobody has ever
     # seen fail.
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '24' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '24.19.0', package-manager-cache: false }
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - run: npm ci
 
       - name: the integrity manifest must match the shipped files
@@ -460,9 +526,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with: { node-version: '22' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with: { node-version: '22.23.2', package-manager-cache: false }
+      - name: assert the required Git runtime and inert hooks boundary
+        run: node scripts/check-git-runtime.mjs --verify-inert-hooks
       - run: npm ci
       # The paid path is money and reputation, so it is tested on every OS the buyer might run
       # CI on: offline license crypto (forgery, rotation, expiry, the free-tool-never-breaks

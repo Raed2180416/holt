@@ -46,6 +46,28 @@ test('AUTOPROTECT: session-start with --autoprotect locks at-risk worktrees befo
   assert.match(rm.stderr, /locked/i);
 });
 
+test('AUTOPROTECT: Codex SessionStart returns documented context after locking, before any tool call',
+  async (t) => {
+    const { fx } = await standardFixture();
+    t.after(() => fx.cleanup());
+
+    const before = await sh('git', ['worktree', 'list', '--porcelain'], fx.root);
+    assert.ok(!before.stdout.includes('locked'), 'fixture must start unlocked');
+
+    const r = await sh(process.execPath,
+      [BIN, 'hook', 'session-start', '--autoprotect', '--host', 'codex', '--cwd', fx.root], fx.root);
+    assert.equal(r.code, 0, `Codex SessionStart hook must exit 0: ${r.stderr}`);
+    const payload = JSON.parse(r.stdout);
+    assert.equal(payload.hookSpecificOutput?.hookEventName, 'SessionStart');
+    assert.match(payload.hookSpecificOutput?.additionalContext ?? '',
+      /auto-protect: locked \d+ workstream/,
+      'the Codex developer context must state the protection applied at session start');
+
+    const after = await sh('git', ['worktree', 'list', '--porcelain'], fx.root);
+    assert.ok(after.stdout.includes('locked'),
+      'Codex SessionStart must actually lock at-risk worktrees, not merely describe a plan');
+  });
+
 test('AUTOPROTECT: without the flag, session-start locks nothing (opt-in stays explicit)', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());

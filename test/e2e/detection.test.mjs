@@ -76,15 +76,15 @@ test('P0 PRESENCE: committed unique work is detected and NOT confused with at-ri
     `expected ${truth.committedOnlySymbol}, got: ${row.uniqueSymbols.join(', ')}`);
 });
 
-test('P0: a symbol present in TWO workstreams is not unique to either', async (t) => {
+test('P0 AUTHORITY: same-named symbols at different paths remain distinct work instances', async (t) => {
   const { fx, truth } = await standardFixture();
   t.after(() => fx.cleanup());
 
   const { report } = await inspectFixture(fx);
   for (const id of truth.duplicatePair) {
     const row = byId(report.unique, id);
-    assert.ok(!row.uniqueSymbols.includes(truth.duplicateSymbol),
-      `${truth.duplicateSymbol} appears in both workstreams so it cannot be unique to ${id}`);
+    assert.ok(row.uniqueSymbols.includes(truth.duplicateSymbol),
+      `${truth.duplicateSymbol} lives at a distinct path in ${id} and must remain visible there`);
   }
 });
 
@@ -973,7 +973,7 @@ test('P0 SAFETY: a worktree carrying ONLY gitignored content is reported as hold
     `gitignored-only content is invisible to git and must count as at-risk: ${JSON.stringify(u)}`);
 });
 
-test('SAFETY: recognisable build output does NOT block cleanup — the gate must stay usable', async (t) => {
+test('SAFETY: recognisable build output remains visible to destructive authority', async (t) => {
   // The negative control. If ANY ignored file blocked deletion, every worktree with a dist/ or
   // node_modules/ would be unclearable and the command would be useless.
   const fx = await newRepo('ignored-build');
@@ -990,7 +990,7 @@ test('SAFETY: recognisable build output does NOT block cleanup — the gate must
 
   const { report } = await inspectFixture(fx);
   const s = report.safe.find((x) => x.id === 'just-build-output' || x.id.endsWith('/just-build-output'));
-  assert.equal(s.safe, true, `build output alone must remain disposable: ${JSON.stringify(s)}`);
+  assert.equal(s.safe, false, `names and manifests cannot prove exact bytes reproducible: ${JSON.stringify(s)}`);
 });
 
 test('P1 UNCOMMITTED CONFLICT: a conflict in work nobody has committed is PROVEN, not missed', async (t) => {
@@ -1120,7 +1120,7 @@ test('P1 PRECISION: two worktrees on the IDENTICAL commit are a duplicate, never
   assert.ok(dup, `the pair must still be REPORTED, as the duplicate it is: ${JSON.stringify(report.duplicates)}`);
 });
 
-test('P0 PRECISION: a bare generated entry is not "work found nowhere else"', async (t) => {
+test('P0 AUTHORITY: a bare generated entry is never silently discarded by name', async (t) => {
   // THE FORM GIT PRINTS DECIDED THE VERDICT. holt's GENERATED filter anchored every directory on
   // a trailing slash, so it matched `node_modules/react/index.js` and never the BARE entry
   // `node_modules`. Git prints the bare form whenever what it found is not a directory it can
@@ -1171,13 +1171,13 @@ test('P0 PRECISION: a bare generated entry is not "work found nowhere else"', as
   for (const id of ['bare-entry', 'linked']) {
     const row = report.unique.find((u) => u.id === id);
     assert.ok(row, `the worktree '${id}' must still be scanned`);
-    assert.deepEqual(row.pathsByLayer.untracked, [],
-      `a dependency tree is not unique work (${id}): ${JSON.stringify(row.pathsByLayer)}`);
-    assert.notEqual(row.verdict, 'unique-work-uncommitted',
-      `nothing in '${id}' exists only there: ${JSON.stringify(row)}`);
+    const diskOnly = [...row.pathsByLayer.untracked, ...row.pathsByLayer.ignored];
+    assert.ok(diskOnly.length > 0,
+      `the generated-looking entry must stay visible (${id}): ${JSON.stringify(row.pathsByLayer)}`);
+    assert.ok(row.uncommittedOnlyCount > 0, JSON.stringify(row));
     const safe = report.safe.find((s) => s.id === id);
-    assert.equal(safe?.safe, true,
-      `an empty worktree carrying only dependencies is disposable (${id}): ${JSON.stringify(safe)}`);
+    assert.equal(safe?.safe, false,
+      `a pathname must not license deletion (${id}): ${JSON.stringify(safe)}`);
   }
 });
 

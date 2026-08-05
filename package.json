@@ -1,7 +1,8 @@
 {
   "name": "holt",
   "version": "0.3.1",
-  "description": "holt™ — know what your agents made, and don't lose any of it: what each worktree produced, which ones collide, which are safe to delete, and a guard that stops an agent deleting work that exists nowhere else.",
+  "mcpName": "io.github.raed2180416/holt",
+  "description": "Coordinate, preserve, and safely clean parallel coding-agent worktrees from one evidence model.",
   "type": "module",
   "bin": {
     "holt": "./bin/holt.mjs"
@@ -14,22 +15,35 @@
     "bin",
     "src",
     "README.md",
+    "server.json",
+    "docs/MANAGED-POLICY.md",
+    "LICENSE-NOTICE.md",
     "MANIFEST.sha256",
     "MANIFEST.sha256.sig",
+    "npm-shrinkwrap.json",
     "SUPPLY-CHAIN.md"
   ],
   "engines": {
-    "node": ">=18"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
+    "git": ">=2.45.0"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "jsonc-parser": "3.3.1",
+    "tuf-js": "6.0.0"
+  },
   "optionalDependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "jsonc-parser": "^3.3.1",
-    "jscpd": "^5.0.14"
+    "jscpd": "5.0.14"
   },
   "devDependencies": {
+    "@tufjs/repo-mock": "5.0.0",
     "@types/node": "^22.0.0",
+    "esbuild": "0.28.1",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "fast-uri": "3.1.5",
+    "hono": "4.12.34"
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",
@@ -42,6 +56,9 @@
     "hosts:generate": "node scripts/generate-hosts.mjs",
     "hosts:check": "node scripts/generate-hosts.mjs --check",
     "lint:paths": "node scripts/lint-native-paths.mjs",
+    "action:build": "node scripts/build-action-bundle.mjs",
+    "action:check": "node scripts/build-action-bundle.mjs --check",
+    "test:release-contract": "node --test test/unit/release-contract.test.mjs",
     "manifest": "node scripts/gen-manifest.mjs",
     "audit:supply-chain": "node bin/holt.mjs audit",
     "prepack": "node scripts/gen-manifest.mjs"
@@ -60,7 +77,7 @@
     "codex",
     "cursor"
   ],
-  "license": "FSL-1.1-MIT",
+  "license": "SEE LICENSE IN LICENSE-NOTICE.md",
   "author": "Contrare",
   "homepage": "https://raed2180416.github.io/holt/",
   "repository": {

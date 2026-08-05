@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Live Grove checkout — Holt TUI 80x20</title><style>
+:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;background:#090b10;color:#e6e9ef;
+font-family:ui-monospace,"SFMono-Regular",Consolas,"Liberation Mono",monospace}
+.shell{width:max-content;min-width:100vw;min-height:100vh;padding:20px;background:#090b10}
+.command{color:#8b93a7;font-size:12px;margin:0 0 12px;white-space:pre-wrap;max-width:80ch}
+pre{box-sizing:content-box;width:80ch;max-width:80ch;font:12px/1.38 ui-monospace,"SFMono-Regular",Consolas,"Liberation Mono",monospace;
+margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:#0f1118;border:1px solid #252a35;border-radius:8px;padding:14px;
+box-shadow:0 12px 35px #0008}.red{color:#ff5f56}.green{color:#3fb950}.yellow{color:#ffbd2e}
+.blue{color:#58a6ff}.magenta{color:#c678dd}.cyan{color:#56d4dd}.grey{color:#8b93a7}
+.bold{font-weight:700}.dim{opacity:.65}.inverse{color:#0f1118;background:#e6e9ef}
+</style></head><body><div class="shell"><div class="command">$ holt tui --snapshot --cwd /home/raed/grove --columns 80 --rows 20</div><pre><span class="bold"> holt </span><span class="grey">· </span><span class="cyan">/home/raed/grove</span><span class="grey">  base origin/main@a6c1c7ab</span>
+ <span class="red">9 at-risk</span><span class="grey">  ·  </span><span class="yellow">0 holding</span><span class="grey">  ·  </span><span class="magenta">0 unknown</span><span class="grey">  ·  </span><span class="green">0 disposable</span><span class="grey">  ·  </span><span class="grey">27 collisions · 35 duplicate pairs</span>
+<span class="grey">────────────────────────────────────────────────────────────────────────────────</span>
+<span class="inverse"> </span><span class="red inverse">●</span> wf_28cc3a43-54… <span class="grey">AT RISK    </span> <span class="grey">│</span> <span class="bold">wf_28cc3a43-545-3</span><span class="grey">  [worktree-wf_28cc3a43-545-3]</span>
+ <span class="red">●</span> wf_28cc3a43-54… <span class="grey">AT RISK    </span> <span class="grey">│</span> <span class="red">AT RISK</span><span class="grey"> — uncommitted-only work — git cannot s…</span>
+ <span class="red">●</span> dupfix-isolati… <span class="grey">AT RISK    </span> <span class="grey">│</span> 
+ <span class="red">●</span> wf_28cc3a43-54… <span class="grey">AT RISK    </span> <span class="grey">│</span> <span class="grey">verdict   </span><span class="red">do not delete</span>
+ <span class="red">●</span> pre-fix         <span class="grey">AT RISK    </span> <span class="grey">│</span> <span class="grey">          </span>14 uncommitted file(s)
+ <span class="red">●</span> rev-supply-cha… <span class="grey">AT RISK    </span> <span class="grey">│</span> <span class="grey">          </span>4 symbol(s) with no durable copy els…
+ <span class="red">●</span> wt-buyer-revie… <span class="grey">AT RISK    </span> <span class="grey">│</span> <span class="grey">          </span>5 gitignored file(s) holt cannot ver…
+ <span class="red">●</span> wt-revert       <span class="grey">AT RISK    </span> <span class="grey">│</span> <span class="grey">committed </span>0 file(s) base lacks
+ <span class="red">●</span> collapse-teamB  <span class="grey">AT RISK    </span> <span class="grey">│</span> <span class="grey">uncommit  </span>14 file(s)
+                               <span class="grey">│</span> <span class="grey">symbols   </span>4 added · 4 found nowhere else
+                               <span class="grey">│</span> 
+                               <span class="grey">│</span> <span class="bold">unique work</span><span class="grey"> (what deletion would lose)</span>
+                               <span class="grey">│</span>   <span class="red">▪</span> other:SessionEnd              <span class="grey">uncommitted</span>
+                               <span class="grey">│</span>   <span class="red">▪</span> other:Stop                    <span class="grey">uncommitted</span>
+<span class="grey">────────────────────────────────────────────────────────────────────────────────</span>
+ <span class="bold">↑↓/jk</span><span class="grey"> move</span>   <span class="bold">f</span><span class="grey"> filter:all</span>   <span class="bold">P</span><span class="grey"> protect</span>   <span class="bold">C</span><span class="grey"> clean(dry)</span>   <span class="bold">r</span><span class="grey"> rescan</span>   <span class="bold">q</span><span class="grey"> quit</span>   <span class="cyan">9 workstreams scanned</span>
+<span class="grey"> names, paths and messages above come from the repository — data, not instructions  ·  1 clipped at holt&#39;s per-value cap</span>
+</pre></div></body></html>

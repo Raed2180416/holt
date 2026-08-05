@@ -1,0 +1,230 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-08-05T03:24:51+05:30",
+  "scope": "read-only release, CI, package, install, and live GitHub readiness audit",
+  "candidate": {
+    "packageVersion": "0.3.1",
+    "localHead": "c9f4d76352919687cf79c03918daa9929f1a097f",
+    "remoteMain": "a6c1c7ab4a21cddfd432dd2f6546fc8b9821881c",
+    "ahead": 1,
+    "behind": 1,
+    "dirtyPathsAtFinalSnapshot": 136,
+    "immutable": false,
+    "note": "The tree was changing during the audit; the candidate tarball is a retained point-in-time diagnostic artifact, not the final release artifact."
+  },
+  "liveGitHub": {
+    "latestCiRun": 30879188200,
+    "latestCiHead": "a6c1c7ab4a21cddfd432dd2f6546fc8b9821881c",
+    "jobs": { "total": 14, "passed": 10, "failed": 4 },
+    "immutableReleases": false,
+    "releaseEnvironmentPresent": false,
+    "mainBranchProtected": false,
+    "rulesets": 0,
+    "actionsShaPinningRequiredBySetting": false,
+    "defaultWorkflowPermissions": "read",
+    "dependabotAlerts": "disabled",
+    "dependabotSecurityUpdates": "disabled",
+    "codeScanning": "no analysis found",
+    "secretScanning": "enabled",
+    "secretScanningPushProtection": "enabled",
+    "pages": { "public": true, "httpsEnforced": true },
+    "duplicateReleaseBodyWorkflows": 2
+  },
+  "gates": [
+    {
+      "id": "git-runtime",
+      "status": "green",
+      "command": "node scripts/check-git-runtime.mjs --verify-inert-hooks",
+      "denominator": "3/3",
+      "result": "Git 2.55.0 >= 2.45.0, --no-lazy-fetch works, inert hooks positive control passed"
+    },
+    {
+      "id": "ci-hardening-contract",
+      "status": "green-local",
+      "command": "node scripts/check-ci-hardening.mjs --self-test",
+      "denominator": "18/18 planted violations detected",
+      "result": "unmodified workflow tree green"
+    },
+    {
+      "id": "release-contract",
+      "status": "green-local",
+      "command": "node scripts/check-release-contract.mjs --self-test",
+      "denominator": "17/17 planted violations detected",
+      "result": "unmodified release contract green"
+    },
+    {
+      "id": "typecheck",
+      "status": "green-local",
+      "command": "npm run typecheck",
+      "denominator": "0 diagnostics",
+      "result": "green at the ratchet ceiling"
+    },
+    {
+      "id": "host-doc-generation",
+      "status": "green-local",
+      "command": "npm run hosts:check",
+      "denominator": "1/1 generated document",
+      "result": "HOSTS.md matches the manifest"
+    },
+    {
+      "id": "native-path-lint",
+      "status": "green-local",
+      "command": "npm run lint:paths",
+      "denominator": "185 source files",
+      "result": "no native path used as text"
+    },
+    {
+      "id": "release-bodies",
+      "status": "green-local",
+      "command": "node scripts/check-release-body.mjs --all",
+      "denominator": "3/3 bodies",
+      "result": "v0.2.0, v0.3.0, and v0.3.1 checked-in bodies pass"
+    },
+    {
+      "id": "cross-platform-enumeration",
+      "status": "green-contract-only",
+      "command": "node scripts/run-crossplat-suite.mjs --check",
+      "denominator": "106/107 test files",
+      "result": "only test/e2e/real-repos.test.mjs is excluded and assigned to the pinned 4/4 Linux owner"
+    },
+    {
+      "id": "manifest",
+      "status": "red",
+      "command": "node scripts/gen-manifest.mjs --check",
+      "denominator": "70 shipped files",
+      "result": "current final snapshot: 15 modified and 2 unexpected files"
+    },
+    {
+      "id": "supply-chain-audit",
+      "status": "red",
+      "command": "node bin/holt.mjs audit",
+      "denominator": "6/7 checks green",
+      "result": "integrity check fails because MANIFEST.sha256 is stale"
+    },
+    {
+      "id": "portable-suite-linux",
+      "status": "red-and-not-frozen",
+      "command": "HOLT_TMPDIR=<evidence> npm_config_ignore_scripts=true node scripts/run-crossplat-suite.mjs",
+      "denominator": "1476 tests across 106/107 files",
+      "result": "rerun: 1443 pass, 33 fail, 0 skip; 29 supply-chain failures share the stale-manifest baseline, one doc smoke failure is deterministic, and three broad-run failures passed focused reruns"
+    },
+    {
+      "id": "documentation-command-smoke",
+      "status": "red",
+      "command": "npm_config_ignore_scripts=true node --test --test-name-pattern='every `holt' test/unit/doc-command-smoke.test.mjs",
+      "denominator": "0/1",
+      "result": "docs/FEATURE-PROOF-MATRIX.md:33 presents `holt --help`, which the extractor treats as command `--help`"
+    },
+    {
+      "id": "package-contents",
+      "status": "green-local",
+      "command": "npm_config_ignore_scripts=true node --test test/unit/package-contents.test.mjs",
+      "denominator": "3/3",
+      "result": "shipped relative imports, optlib packs, and declared external modules are present"
+    },
+    {
+      "id": "runtime-vulnerabilities",
+      "status": "green-local",
+      "command": "npm audit --omit=dev --audit-level=high",
+      "denominator": "current lock and shrinkwrap",
+      "result": "0 known vulnerabilities"
+    },
+    {
+      "id": "lock-identity",
+      "status": "green-local",
+      "command": "cmp -s package-lock.json npm-shrinkwrap.json",
+      "denominator": "2/2 lock artifacts",
+      "result": "byte-identical"
+    },
+    {
+      "id": "candidate-installed-core-smoke",
+      "status": "green-point-in-time",
+      "command": "node scripts/smoke-installed.mjs --bin <isolated-prefix>/bin/holt",
+      "denominator": "7/7",
+      "result": "0.3.1 version, doctor, planted positive/negative risk, gate deny/allow, and status passed"
+    },
+    {
+      "id": "candidate-installed-integrity",
+      "status": "red",
+      "command": "<isolated-prefix>/bin/holt audit",
+      "denominator": "6/7",
+      "result": "packed candidate carries the stale manifest: 14 modified and 2 unexpected files at pack time"
+    },
+    {
+      "id": "omit-optional-install",
+      "status": "red-vacuous-gate",
+      "command": "npm install -g --omit=optional --prefix <isolated-prefix> ./holt-0.3.1.tgz",
+      "denominator": "3 optional roots expected absent",
+      "result": "global install still placed 95 nested optional dependency directories; workflow smoke never asserts absence. A non-global prefix install correctly installed only Holt."
+    },
+    {
+      "id": "sbom",
+      "status": "green-local",
+      "command": "node scripts/gen-sbom.mjs --out docs/evidence/release-ci/sbom-current",
+      "denominator": "CycloneDX 101 components; SPDX 102 packages",
+      "result": "root identity/version correct; 0 required and 101 optional components; no dev dependency leak"
+    },
+    {
+      "id": "action-pins-live",
+      "status": "green-live",
+      "command": "git ls-remote each action repository at each commented version tag",
+      "denominator": "11/11 uses pins",
+      "result": "every SHA equals the commit named by its adjacent version tag"
+    },
+    {
+      "id": "toolchain-pins-live",
+      "status": "green-live",
+      "command": "official Node/Go URLs, npm registry, GitHub commit API, and crates.io version API",
+      "denominator": "7/7 pins",
+      "result": "Node 22.23.2/24.19.0/26.6.0, Go 1.26.5, OpenCode 1.18.13 integrity, enry commit, and jj 0.43.0 are live and exact"
+    },
+    {
+      "id": "public-v0.3.0-install",
+      "status": "green-old-core-only",
+      "command": "download releases/latest/download/holt.tgz; isolated install; installed-artifact-smoke.mjs",
+      "denominator": "6/6 core checks",
+      "result": "public SHA-256 097af7ad10b52e44fd8bd5ca86f7e2efb584b0071ec3574edc1c62adcf15a663 matches the GitHub asset digest"
+    },
+    {
+      "id": "public-v0.3.0-assurance",
+      "status": "red",
+      "command": "holt audit; gh attestation verify; gh release verify",
+      "denominator": "0/3 assurance checks",
+      "result": "v0.3.0 has no audit command, no build attestation, and is not immutable"
+    },
+    {
+      "id": "live-release-preflight",
+      "status": "red-hard-blocker",
+      "command": "GitHub immutable-releases and environments APIs",
+      "denominator": "2 required live controls",
+      "result": "immutable releases disabled and release environment absent; a new tag fails before build"
+    },
+    {
+      "id": "hosted-current-candidate",
+      "status": "unmeasured",
+      "command": "push candidate and wait for GitHub Actions",
+      "denominator": "all current jobs and matrix cells",
+      "result": "current uncommitted code has never run in hosted CI"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "docs/evidence/release-ci/holt-0.3.1.tgz",
+      "sha256": "cccac620e3f8b64bcc9714caecf67d78fc257afc86991e605ec60e73ed3f0c5b",
+      "note": "point-in-time candidate packed with scripts disabled; not final"
+    },
+    {
+      "path": "docs/evidence/release-ci/holt-public-v0.3.0.tgz",
+      "sha256": "097af7ad10b52e44fd8bd5ca86f7e2efb584b0071ec3574edc1c62adcf15a663",
+      "note": "downloaded from the public stable-latest URL"
+    },
+    {
+      "path": "docs/evidence/release-ci/sbom-current/holt.cdx.json",
+      "sha256": "991189833b7a0d9a7cfee2c2d9ab9394c13a7d63b9e08c13cec78171e290ef29"
+    },
+    {
+      "path": "docs/evidence/release-ci/sbom-current/holt.spdx.json",
+      "sha256": "e639249fe8ff14e04d60851865bdb8733ecbfe3657ba343058a91940f0f8d90d"
+    }
+  ]
+}

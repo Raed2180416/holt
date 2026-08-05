@@ -23,14 +23,17 @@
  * that ref and nothing else. Which is precisely why `drop` and `clear` are final — they rewrite
  * that reflog, and the commits they unlink become unreachable in the same breath.
  *
- * WHAT "UNIQUE" MEANS HERE, AND WHY IT MUST BE PER-BLOB. The honest question is not "is this
- * stash commit reachable from a branch" — it never is, by construction, so answering that way
- * would refuse every drop forever and teach people to switch the guard off. The question is
- * whether the CONTENT it carries is reachable: the blobs. That distinction is the whole
- * difference between a guard that relaxes when you do the right thing and one that nags. Run
- * `git stash apply` and commit, and the identical blob is now in a ref's history — the entry
- * holds nothing unique, and `drop` goes back to being allowed. Nothing about the stash commit
- * changed; the content's reachability did.
+ * WHAT "UNIQUE" MEANS HERE, AND WHY IT MUST BE PER TREE ENTRY. The honest question is not "is
+ * this stash commit reachable from a branch" — it never is, by construction, so answering that
+ * way would refuse every drop forever and teach people to switch the guard off. The question is
+ * whether the exact Git change it carries is durably reachable: operation + path + mode + object
+ * type + object id. A blob alone is not authority to delete an entry. The same bytes at
+ * `docs/deploy.sh` do not preserve `bin/deploy.sh`; mode 100644 does not preserve its executable
+ * 100755 counterpart; and a regular file does not preserve a symlink whose target string happens
+ * to hash to the same blob. Deletion is work too: a tombstone for `obsolete.js` is not preserved
+ * merely because the old blob remains in base. Run `git stash apply` and commit, and that exact
+ * change is now in a ref's history — the stash then holds nothing unique, and `drop` goes back to
+ * being allowed. Nothing about the stash commit changed; the change's reachability did.
  *
  * READ-ONLY. `git stash list` cannot be used: `stash` sits in src/git.mjs's DESTRUCTIVE_ALWAYS
  * gate, refused unconditionally, and rightly so. It is also only a wrapper — git implements
@@ -57,15 +60,22 @@ export const MAX_PATHS = 400;
 export async function stashEntries(cwd, { timeout = 10_000 } = {}) {
   const r = await git(['log', '-g', '--format=%gd%x00%gs%x00%H', 'refs/stash'], { cwd, timeout })
     .catch(() => null);
-  // Exit 128 with "unknown revision" IS the answer "this repository has no stash". A throw here
-  // would be indistinguishable from "holt could not look", and those must never be conflated.
-  if (!r || r.code !== 0) return [];
+  if (!r || r.code !== 0) {
+    // A failed reflog walk is empty evidence, not evidence of an empty stash. Prove the one benign
+    // failure separately with show-ref's tri-state contract: 0 = present, 1 = absent, anything
+    // else = the ref could not be inspected. A broken refs/stash must therefore fail closed too.
+    const probe = await git(['show-ref', '--verify', '--quiet', 'refs/stash'], { cwd, timeout })
+      .catch(() => null);
+    if (probe?.code === 1) return [];
+    const detail = r?.stderr?.trim() || probe?.stderr?.trim() || 'stash reflog probe failed';
+    throw new Error(detail);
+  }
   const out = [];
   let truncated = false;
   for (const line of r.stdout.split('\n')) {
     if (!line.trim()) continue;
     const [selector, message, oid] = line.split('\0');
-    if (!selector || !oid) continue;
+    if (!selector || !oid) throw new Error('stash reflog returned a malformed entry');
     // Read ONE PAST THE CAP so "holt stopped at 25" stays distinguishable from "there are exactly
     // 25". Concluding "there must be more" from "I hit the limit" is the same absence-of-evidence
     // mistake this module exists to end, one scope down: it makes the guard hedge about a stash it
@@ -96,16 +106,25 @@ function parseRawZ(stdout) {
   const toks = stdout.split('\0');
   const recs = [];
   for (let i = 0; i < toks.length; i++) {
-    const t = toks[i];
+    // `git log --raw --format=` may place a record separator newline before the raw header. A path
+    // may itself begin with a newline, so normalise only the token in header position, never paths.
+    const t = toks[i].replace(/^(?:\r?\n)+/, '');
     if (!t.startsWith(':')) continue;
     const fields = t.slice(1).split(' ');
+    const srcMode = fields[0];
+    const dstMode = fields[1];
+    const srcSha = fields[2];
     const dstSha = fields[3];
     const status = (fields[4] ?? '').trim();
     const takesTwo = status.startsWith('R') || status.startsWith('C');
     const p1 = toks[++i];
     const p2 = takesTwo ? toks[++i] : null;
     if (p1 === undefined) break;
-    recs.push({ dstSha, status, src: takesTwo ? p1 : null, path: takesTwo ? p2 : p1 });
+    recs.push({
+      srcMode, dstMode, srcSha, dstSha, status,
+      src: takesTwo ? p1 : null,
+      path: takesTwo ? p2 : p1,
+    });
   }
   return recs;
 }
@@ -113,8 +132,32 @@ function parseRawZ(stdout) {
 const NULL_OID = /^0+$/;
 
 /**
- * Every blob a single stash entry carries that its base did not, plus every path either side
- * touched.
+ * Git tree-entry type implied by a valid tree mode. `ls-tree` reports symlinks as type `blob`;
+ * mode 120000 is therefore essential to distinguish them from regular 100644/100755 files.
+ * Unknown modes withdraw the check instead of being guessed into an identity.
+ *
+ * @param {string} mode
+ * @returns {'blob'|'tree'|'commit'|null}
+ */
+function entryTypeForMode(mode) {
+  if (/^100[0-7]{3}$/.test(mode) || mode === '120000') return 'blob';
+  if (mode === '040000' || mode === '40000') return 'tree';
+  if (mode === '160000') return 'commit';
+  return null;
+}
+
+/**
+ * The authority key. Every field is part of what deletion would erase.
+ *
+ * @param {{operation?: 'present'|'delete', path: string, mode: string, type: string, sha: string}} entry
+ */
+function entryIdentity(entry) {
+  return `${entry.operation ?? 'present'}\0${entry.path}\0${entry.mode}\0${entry.type}\0${entry.sha}`;
+}
+
+/**
+ * Every exact tree entry a single stash entry carries that its base did not, plus every path
+ * either side touched.
  *
  * THREE SOURCES, because the entry stores three different states and losing any one of them is
  * losing work:
@@ -124,48 +167,78 @@ const NULL_OID = /^0+$/;
  *                                      in there, and both die with the entry)
  *   - the untracked commit's tree    — files in no commit anywhere, the most final loss of all
  *
- * `paths` collects BOTH sides of every record, deletes and rename sources included. Those are not
- * candidates — nothing new is at `src` — but they scope the reachability walk below, and a
- * rename's content lives at the source path in history. Leaving them out reported a stashed
- * rename as unique content.
+ * `paths` collects BOTH sides of every record, deletes and rename sources included, to keep the
+ * history walk complete for every path the stash changed. Merely appearing at a rename's source
+ * is not authority for its destination: the path remains part of `entryIdentity` below.
  */
 async function entryContent(cwd, oid, { timeout }) {
-  const candidates = new Map(); // `${sha}\0${path}` -> {sha, path, layer}
+  const candidates = new Map(); // entryIdentity -> {operation, sha, path, mode, type, layer}
   const paths = new Set();
+  let identitiesValid = true;
 
-  const add = (sha, path, layer) => {
-    if (!sha || NULL_OID.test(sha) || !path) return;
-    const key = `${sha}\0${path}`;
-    if (!candidates.has(key)) candidates.set(key, { sha, path, layer });
+  /**
+   * @param {string} sha
+   * @param {string} path
+   * @param {string} mode
+   * @param {string} type
+   * @param {string} layer
+   * @param {'present'|'delete'} [operation]
+   */
+  const add = (sha, path, mode, type, layer, operation = 'present') => {
+    if (!sha || NULL_OID.test(sha) || !path || !mode || !type) {
+      identitiesValid = false;
+      return;
+    }
+    const candidate = { operation, sha, path, mode, type, layer };
+    const key = entryIdentity(candidate);
+    if (!candidates.has(key)) candidates.set(key, candidate);
   };
 
   const diffInto = async (from, to, layer) => {
-    const r = await git(['diff', '--raw', '--no-abbrev', '-z', from, to], { cwd, timeout })
+    // Disable rename folding so a rename retains BOTH pieces of work: source-path deletion and
+    // destination-path entry. A destination blob alone does not preserve the removal intent.
+    const r = await git(['diff', '--raw', '--no-renames', '--no-abbrev', '-z', from, to], { cwd, timeout })
       .catch(() => null);
     if (!r || r.code !== 0) return false;
     for (const rec of parseRawZ(r.stdout)) {
       if (rec.path) paths.add(rec.path);
       if (rec.src) paths.add(rec.src);
-      // A deletion carries no new content; everything else has a destination blob.
-      if (!rec.status.startsWith('D')) add(rec.dstSha, rec.path, layer);
+      if (rec.status.startsWith('D')) {
+        // Absence is an operative tree change. Bind it to the exact entry removed so a deletion
+        // of different prior content at the same path cannot masquerade as the same work.
+        const type = entryTypeForMode(rec.srcMode);
+        if (!type) identitiesValid = false;
+        else add(rec.srcSha, rec.path, rec.srcMode, type, layer, 'delete');
+      } else {
+        const type = entryTypeForMode(rec.dstMode);
+        if (!type) identitiesValid = false;
+        else add(rec.dstSha, rec.path, rec.dstMode, type, layer);
+      }
     }
     return true;
   };
 
-  let ok = await diffInto(`${oid}^1`, oid, 'working tree');
+  // Read the parent vector once. A stash must have both a base and index parent. Treating a
+  // failed parent probe as "that parent does not exist" silently omits staged/untracked states.
+  const parentResult = await git(['rev-list', '--parents', '-n', '1', oid], { cwd, timeout })
+    .catch(() => null);
+  const parentFields = parentResult?.code === 0
+    ? parentResult.stdout.trim().split(/\s+/).filter(Boolean)
+    : [];
+  const parentVectorValid = parentFields[0] === oid
+    && parentFields.length >= 3 && parentFields.length <= 4;
+  const baseParent = parentVectorValid ? parentFields[1] : null;
+  const indexParent = parentVectorValid ? parentFields[2] : null;
+  const untrackedParent = parentVectorValid ? (parentFields[3] ?? null) : null;
 
-  const hasParent = async (n) => {
-    const r = await git(['rev-parse', '--verify', '--quiet', `${oid}^${n}^{commit}`], { cwd, timeout })
-      .catch(() => null);
-    return !!r && r.code === 0 && r.stdout.trim().length > 0;
-  };
+  let ok = parentVectorValid;
+  if (baseParent) ok = (await diffInto(baseParent, oid, 'working tree')) && ok;
+  if (baseParent && indexParent) ok = (await diffInto(baseParent, indexParent, 'staged')) && ok;
 
-  if (await hasParent(2)) ok = (await diffInto(`${oid}^1`, `${oid}^2`, 'staged')) && ok;
-
-  if (await hasParent(3)) {
+  if (untrackedParent) {
     // The untracked commit has no meaningful base to diff against — every blob in it is a file
     // git had never tracked, so the whole tree is candidate content.
-    const r = await git(['ls-tree', '-r', '-z', '--full-tree', `${oid}^3`], { cwd, timeout })
+    const r = await git(['ls-tree', '-r', '-z', '--full-tree', untrackedParent], { cwd, timeout })
       .catch(() => null);
     if (!r || r.code !== 0) ok = false;
     else {
@@ -173,14 +246,16 @@ async function entryContent(cwd, oid, { timeout }) {
         if (!rec) continue;
         const tab = rec.indexOf('\t');
         if (tab < 0) continue;
-        const [, type, sha] = rec.slice(0, tab).split(/\s+/);
+        const [mode, reportedType, sha] = rec.slice(0, tab).split(/\s+/);
         const path = rec.slice(tab + 1);
-        if (type === 'blob') { add(sha, path, 'untracked'); paths.add(path); }
+        const type = entryTypeForMode(mode);
+        if (!type || type !== reportedType) identitiesValid = false;
+        else { add(sha, path, mode, type, 'untracked'); paths.add(path); }
       }
     }
   }
 
-  return { candidates: [...candidates.values()], paths: [...paths], ok };
+  return { candidates: [...candidates.values()], paths: [...paths], ok: ok && identitiesValid };
 }
 
 /**
@@ -220,7 +295,7 @@ async function reachableTips(cwd, { timeout }) {
 }
 
 /**
- * Which of these blobs are reachable from a real ref?
+ * Which exact tree changes are reachable from a real ref?
  *
  * `--full-history` is not optional. Default history simplification prunes commits whose change to
  * a path is "uninteresting" relative to a simplified parent, so a version of a file that only
@@ -228,34 +303,52 @@ async function reachableTips(cwd, { timeout }) {
  * job is to prove content EXISTS somewhere, where a false negative means holt claims work is
  * unique when git could still hand it back.
  *
- * The pathspec is what keeps this affordable: without it the walk enumerates every tree and blob
- * in the repository. With it, only objects at the paths the stash actually touches.
+ * The pathspec is what keeps this affordable: without it the walk emits changed entries across the
+ * whole repository. With it, only history at paths the stash actually touches is considered.
  *
- * @returns {Promise<Set<string>|null>} reachable blob OIDs, or null when the walk could not be
- *   completed — which is NOT the same as "nothing is reachable" and is never treated as such.
+ * `rev-list --objects` is deliberately insufficient: it emits object ids but discards the path,
+ * mode and type that give those objects meaning. `git log --raw --root -m` emits every entry when
+ * it is introduced or changed, including root entries and merge resolutions. `--full-history`
+ * prevents path simplification from pruning a reachable side-branch version.
+ *
+ * @returns {Promise<Set<string>|null>} reachable change identities, or null when the walk could not
+ *   be completed — which is NOT the same as "nothing is reachable" and is never treated as such.
  */
-async function reachableBlobs(cwd, paths, { timeout }) {
+async function reachableEntries(cwd, paths, { timeout }) {
   if (!paths.length) return new Set();
   const tips = await reachableTips(cwd, { timeout });
   if (!tips || !tips.length) return new Set(); // an unborn/ref-less repo reaches nothing
   if (paths.length > MAX_PATHS) return null;
   // THE TIP LIST IS UNBOUNDED AND THE ARGUMENT LIST IS NOT. `paths` is capped at MAX_PATHS just
   // above; `tips` is one oid per ref, and a repository carrying tens of thousands of refs (every
-  // PR ref in a busy monorepo) builds an argv past ARG_MAX, where `execve` answers E2BIG. Objects
-  // reachable from a SET of tips are the union of the objects reachable from each tip, so walking
-  // the tips in argv-sized groups gives exactly the same set — see the ceiling note in git.mjs.
+  // PR ref in a busy monorepo) builds an argv past ARG_MAX, where `execve` answers E2BIG. Entries
+  // reachable from a SET of tips are the union of the entries in each tip's history, so walking the
+  // tips in argv-sized groups gives exactly the same set — see the ceiling note in git.mjs.
   const pathBytes = paths.reduce((n, p) => n + Buffer.byteLength(p, 'utf8') + 1, 0);
   const groups = chunkByArgvBytes(tips, ARGV_BYTE_BUDGET, pathBytes + 64);
   const set = new Set();
   for (const group of groups) {
-    const r = await git(['rev-list', '--objects', '--full-history', ...group, '--', ...paths],
+    const r = await git([
+      'log', '--raw', '--root', '-m', '--full-history', '--no-renames', '--no-abbrev', '-z',
+      '--format=', ...group, '--', ...paths,
+    ],
       { cwd, timeout }).catch(() => null);
     // A walk that could not be completed is NOT "nothing is reachable" — see this function's
     // contract. One failed group withdraws the whole answer rather than under-reporting it.
     if (!r || r.code !== 0) return null;
-    for (const line of r.stdout.split('\n')) {
-      const oid = line.split(' ')[0];
-      if (oid && oid.length >= 40) set.add(oid);
+    for (const rec of parseRawZ(r.stdout)) {
+      if (!rec.path) continue;
+      if (rec.status.startsWith('D')) {
+        if (!rec.srcSha || NULL_OID.test(rec.srcSha)) return null;
+        const type = entryTypeForMode(rec.srcMode);
+        if (!type) return null;
+        set.add(entryIdentity({ operation: 'delete', path: rec.path, mode: rec.srcMode, type, sha: rec.srcSha }));
+      } else {
+        if (!rec.dstSha || NULL_OID.test(rec.dstSha)) return null;
+        const type = entryTypeForMode(rec.dstMode);
+        if (!type) return null;
+        set.add(entryIdentity({ operation: 'present', path: rec.path, mode: rec.dstMode, type, sha: rec.dstSha }));
+      }
     }
   }
   return set;
@@ -273,7 +366,8 @@ async function reachableBlobs(cwd, paths, { timeout }) {
  * @param {string} cwd
  * @returns {Promise<{
  *   entries: Array<{selector: string, message: string, oid: string,
- *                   unique: Array<{path: string, sha: string, layer: string}>,
+ *                   unique: Array<{operation: 'present'|'delete', path: string, mode: string,
+ *                                  type: string, sha: string, layer: string}>,
  *                   uniqueCount: number, checked: boolean}>,
  *   atRisk: Array<object>, total: number, checked: boolean,
  *   truncated: boolean,
@@ -313,7 +407,7 @@ export async function stashState(cwd, { timeout = 10_000 } = {}) {
     /** @type {Set<string>|null} */
     let reachable = null;
     try {
-      reachable = await reachableBlobs(cwd, content.paths, { timeout });
+      reachable = await reachableEntries(cwd, content.paths, { timeout });
     } catch {
       reachable = null;
     }
@@ -323,7 +417,7 @@ export async function stashState(cwd, { timeout = 10_000 } = {}) {
     // this module exists to end, and it is the one shape of silence that loses work.
     const unique = reachable === null
       ? content.candidates
-      : content.candidates.filter((cand) => !reachable.has(cand.sha));
+      : content.candidates.filter((cand) => !reachable.has(entryIdentity(cand)));
     if (!checked) allChecked = false;
     out.push({ ...e, unique, uniqueCount: unique.length, checked });
   }
@@ -347,8 +441,9 @@ export function describeStash(state, { max = 3 } = {}) {
   const lines = state.atRisk.slice(0, max).map((e) => {
     const sample = e.unique.slice(0, 3).map((u) => `${u.path} (${u.layer})`).join(', ');
     const more = e.uniqueCount > 3 ? `, +${e.uniqueCount - 3} more` : '';
+    const noun = e.uniqueCount === 1 ? 'tree change' : 'tree changes';
     return `  • ${e.selector}: ${e.message}\n`
-      + `      ${e.uniqueCount} file(s) whose content no ref holds: ${sample}${more}`
+      + `      ${e.uniqueCount} exact ${noun} no ref holds: ${sample}${more}`
       + (e.checked ? '' : '\n      (holt could not complete the reachability check for this entry)');
   });
   // LOUD BREAK: if holt stopped scanning at MAX_ENTRIES, entries beyond the cap were NOT checked

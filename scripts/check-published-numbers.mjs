@@ -11,19 +11,19 @@
  *
  * This script instead extracts every CLAIM using the same context-shaped patterns as
  * test/unit/published-numbers.test.mjs (imported from test/lib/published-number-patterns.mjs, one
- * definition, not two), and requires:
+ * definition, not two), and permits exactly two public states:
  *
- *   1. at least one claim found per surface (anti-vacuity — a reworded badge that stops matching
- *      must fail loudly, not pass because grep found nothing to contradict);
- *   2. every claim found equal to the number the suite just measured.
+ *   1. every surface carries the exact visible sentence that no current test count or mutation
+ *      score is published, and no surface carries a current claim; or
+ *   2. every surface carries one recognised claim for each figure, every claim equals the
+ *      artifact-derived values supplied by CI, and no surface retains the withholding sentence.
  *
  * Usage:
  *   node scripts/check-published-numbers.mjs --tests 474 --mutation 39/39
  *   node scripts/check-published-numbers.mjs --tests 474 --mutation 39/39 --root /some/dir
  *   node scripts/check-published-numbers.mjs --tests 474 --mutation 39/39 --files a.md,b.html
  *
- * Exits 0 and prints "published numbers match the suite" when every surface's claims equal the
- * given actuals. Exits 1 with one line per failing surface otherwise.
+ * Partial withholding, a mixed claim/withholding state, stale values and pattern drift all exit 1.
  */
 
 import fs from 'node:fs/promises';
@@ -39,6 +39,7 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ROOT = path.resolve(HERE, '..');
 const DEFAULT_SURFACES = ['README.md', 'BENCHMARKS.md', 'site/index.html'];
+const WITHHELD_MARKER = /No current test count or mutation score is\s+published\./i;
 
 function parseArgs(argv) {
   const o = { tests: null, mutation: null, root: DEFAULT_ROOT, files: DEFAULT_SURFACES };
@@ -63,27 +64,54 @@ function parseArgs(argv) {
  */
 export function checkAll(entries, { actualTests, actualMutation }) {
   const failures = [];
-  for (const [file, text] of entries) {
-    const t = matchesExactClaim(text, TEST_COUNT_PATTERNS, actualTests);
-    if (!t.ok) {
-      failures.push(
-        t.found.length === 0
-          ? `${file}: no test-count claim found in a recognised shape (badge / "N tests passing" / tile / table row) — pattern drift or the number is missing`
-          : `${file}: test-count claim(s) ${JSON.stringify(t.found)} do not match the measured count ${actualTests}`,
-      );
-    }
-    const m = matchesExactClaim(text, MUTATION_PATTERNS, actualMutation, {
+  const rows = entries.map(([file, text]) => ({
+    file,
+    text,
+    test: matchesExactClaim(text, TEST_COUNT_PATTERNS, actualTests),
+    mutation: matchesExactClaim(text, MUTATION_PATTERNS, actualMutation, {
       arity: 2,
       exceptions: [MUTATION_HISTORICAL_EXCEPTION],
-    });
-    if (!m.ok) {
-      failures.push(
-        m.found.length === 0
-          ? `${file}: no mutation-score claim found in a recognised shape (badge / tile / "N/M killed") — pattern drift or the number is missing`
-          : `${file}: mutation-score claim(s) ${JSON.stringify(m.found)} do not match the measured score ${actualMutation}`,
-      );
+    }),
+  }));
+
+  function checkMetric({ key, label, measured, shapes }) {
+    const hasAnyClaim = rows.some((row) => row[key].found.length > 0);
+    if (!hasAnyClaim) {
+      for (const row of rows) {
+        if (!WITHHELD_MARKER.test(row.text)) {
+          failures.push(`${row.file}: no ${label} claim found and the exact public withholding sentence is missing`);
+        }
+      }
+      return;
+    }
+
+    for (const row of rows) {
+      if (WITHHELD_MARKER.test(row.text)) {
+        failures.push(`${row.file}: both publishes a ${label} and says no current figure is published`);
+      }
+      const result = row[key];
+      if (!result.ok) {
+        failures.push(
+          result.found.length === 0
+            ? `${row.file}: no ${label} claim found in a recognised shape (${shapes}) — partial publication or pattern drift`
+            : `${row.file}: ${label} claim(s) ${JSON.stringify(result.found)} do not match the measured value ${measured}`,
+        );
+      }
     }
   }
+
+  checkMetric({
+    key: 'test',
+    label: 'test-count',
+    measured: actualTests,
+    shapes: 'badge / "N tests passing" / tile / table row',
+  });
+  checkMetric({
+    key: 'mutation',
+    label: 'mutation-score',
+    measured: actualMutation,
+    shapes: 'badge / tile / "N/M killed"',
+  });
   return failures;
 }
 
@@ -100,7 +128,11 @@ async function main() {
     for (const line of failures) console.error(`::error::${line}`);
     process.exit(1);
   }
-  console.log(`published numbers match the suite (${o.tests} tests, ${o.mutation} mutations)`);
+  if (entries.every(([, text]) => WITHHELD_MARKER.test(text))) {
+    console.log('published-number state is synchronized: every surface explicitly withholds current figures.');
+  } else {
+    console.log(`published numbers match the measured inputs (${o.tests} tests, ${o.mutation} mutations)`);
+  }
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {

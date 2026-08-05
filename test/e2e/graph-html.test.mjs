@@ -120,6 +120,31 @@ function dataLiteral(html) {
 /** Pull `const DATA = <json>;` back out and parse it. */
 const parseData = (html) => JSON.parse(dataLiteral(html));
 
+/** Return one balanced CSS block, so responsive assertions cannot pass on a declaration that
+ *  exists in the wrong media query (a false green a whole-stylesheet regex would allow). */
+function cssBlock(source, marker) {
+  const markerAt = source.indexOf(marker);
+  assert.ok(markerAt >= 0, `missing CSS marker ${JSON.stringify(marker)}`);
+  const open = source.indexOf('{', markerAt + marker.length);
+  assert.ok(open >= 0, `missing CSS block for ${JSON.stringify(marker)}`);
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    if (source[i] !== '}') continue;
+    depth--;
+    if (depth === 0) return source.slice(open + 1, i);
+  }
+  assert.fail(`unclosed CSS block for ${JSON.stringify(marker)}`);
+}
+
+function cssDeclarations(block) {
+  return Object.fromEntries(block.split(';').flatMap((raw) => {
+    const colon = raw.indexOf(':');
+    if (colon < 1 || /[{}]/.test(raw)) return [];
+    return [[raw.slice(0, colon).trim(), raw.slice(colon + 1).trim()]];
+  }));
+}
+
 /* ------------------------------------------------------------------ the fixture ---- */
 
 /**
@@ -343,6 +368,12 @@ test('HTML INJECTION: the page builds its SVG as DOM, so a hostile id cannot bec
   const circles = created.filter((e) => e.tagName === 'circle');
   assert.ok(circles.length >= 2,
     `expected at least 2 circles, got ${circles.length} — the page rendered nothing, so nothing below is being tested`);
+  for (const circle of circles) {
+    assert.equal(circle.attrs.tabindex, '0', 'every graph node must be reachable in the Tab order');
+    assert.equal(circle.attrs.role, 'button', 'an SVG circle needs an explicit interactive role');
+    assert.match(circle.attrs['aria-label'] ?? '', /^Workstream .+ Verdict /,
+      'every graph node must expose its workstream identity and verdict to assistive technology');
+  }
   const texts = created.filter((e) => e.tagName === 'title' || e.tagName === 'text').map((e) => e.text);
   // ANTI-VACUITY, platform-aware. The id is a directory basename, so Windows strips the characters
   // it will not allow in one. What proves the assertion above was not vacuous is that the id
@@ -353,7 +384,11 @@ test('HTML INJECTION: the page builds its SVG as DOM, so a hostile id cannot bec
   assert.ok(hostileIds.some((t2) => /[^A-Za-z0-9._\/\\-]/.test(t2)),
     `no hostile character survived into any id, so the assertion above proved nothing: ${JSON.stringify(hostileIds)}`);
   for (const el of created) {
-    for (const v of Object.values(el.attrs)) {
+    for (const [key, v] of Object.entries(el.attrs)) {
+      // Repository text in an aria-label is inert because it is assigned with setAttribute, not
+      // parsed as markup. It is also necessary: a generic "node 3" label would technically pass
+      // an accessibility scanner while hiding the workstream and verdict from the user.
+      if (key === 'aria-label') continue;
       assert.ok(!/HOLT_XSS|<|>/.test(v), `repository data landed in an attribute: ${v}`);
     }
   }
@@ -403,6 +438,140 @@ test('NEVER WORSE: ordinary names render byte-for-byte faithfully, unescaped and
             html.includes(`/${report.counts.workstreams} workstreams`),
     'the header counts stopped rendering once they were routed through the escaper');
   assertScriptBlockIntact(html);
+});
+
+test('GRAPH RESPONSIVENESS: mobile stacks usable full-width graph and controls without changing the desktop split', () => {
+  const report = {
+    graph: { nodes: [], edges: [], families: [] },
+    base: { ref: 'main', oid: 'a'.repeat(40) },
+    counts: {
+      scanned: 0, workstreams: 0, families: 0, atRisk: 0, collisions: 0,
+      duplicatePairs: 0, safeToDelete: 0,
+    },
+    // An unbroken root is the width-stress case: real CI workspaces and generated worktree names
+    // can be longer than the mobile viewport.
+    root: '/fixture/' + 'long-repository-component-'.repeat(12),
+    backend: { kind: 'fixture' },
+    plan: { reviewReduction: { toReview: 0 } },
+  };
+  const html = renderHtml(report);
+  const styleStart = html.indexOf('<style>') + '<style>'.length;
+  const styleEnd = html.indexOf('</style>', styleStart);
+  assert.ok(styleStart >= '<style>'.length && styleEnd > styleStart, 'rendered page has no stylesheet');
+  const css = html.slice(styleStart, styleEnd);
+
+  // Desktop keeps the established side-by-side graph and 340px decision panel. The grid rows
+  // remove the old hard-coded 50px header assumption, so a wrapped header cannot hide the bottom
+  // of either pane.
+  const desktopBodyBlock = cssBlock(css, 'body');
+  const desktopBody = cssDeclarations(desktopBodyBlock);
+  assert.equal(desktopBody.display, 'grid');
+  assert.equal(desktopBody['grid-template-rows'], 'auto minmax(0,1fr)');
+  assert.match(desktopBodyBlock, /height:\s*100vh;\s*height:\s*100dvh;/,
+    'desktop needs both the legacy and dynamic viewport-height declarations');
+  assert.equal(cssDeclarations(cssBlock(css, '.wrap')).display, 'flex');
+  assert.equal(cssDeclarations(cssBlock(css, '#stage')).flex, '1 1 auto');
+  assert.equal(cssDeclarations(cssBlock(css, 'aside')).width, '340px');
+
+  // Scope every mobile assertion to the media block. Otherwise a desktop `width:100%` elsewhere
+  // could make this test pass while the actual 390px layout remained a 50px graph beside 340px
+  // controls — the defect this regression was written from.
+  const mobile = cssBlock(css, '@media (max-width:700px)');
+  const mobileBody = cssDeclarations(cssBlock(mobile, 'body'));
+  const mobileWrap = cssDeclarations(cssBlock(mobile, '.wrap'));
+  const mobileStage = cssDeclarations(cssBlock(mobile, '#stage'));
+  const mobileAside = cssDeclarations(cssBlock(mobile, 'aside'));
+  assert.equal(mobileBody.display, 'block');
+  assert.equal(mobileBody['overflow-x'], 'hidden');
+  assert.equal(mobileBody['overflow-y'], 'auto', 'stacked controls must remain vertically reachable');
+  assert.equal(mobileWrap['flex-direction'], 'column');
+  assert.equal(mobileStage.width, '100%');
+  assert.equal(mobileStage.flex, 'none');
+  assert.match(cssBlock(mobile, '#stage'), /height:\s*52vh;\s*height:\s*clamp\(/,
+    'mobile needs a legacy viewport-height fallback before the small-viewport unit');
+  assert.match(mobileStage.height, /^clamp\((\d+)px,\s*\d+(?:\.\d+)?svh,\s*\d+px\)$/);
+  assert.ok(Number.parseInt(mobileStage['min-height'], 10) >= 240,
+    `mobile graph interaction surface is too short: ${mobileStage['min-height']}`);
+  assert.equal(mobileAside.width, '100%');
+  assert.equal(mobileAside['border-left'], '0');
+  assert.match(mobileAside['border-top'], /^1px solid /);
+  assert.equal(cssDeclarations(cssBlock(css, '.meta'))['overflow-wrap'], 'anywhere',
+    'long repository metadata can otherwise create horizontal page overflow');
+
+  // The graph must precede the panel for `flex-direction:column` to put visualization first and
+  // controls immediately below it. This is a DOM contract, not a CSS-token assertion.
+  assert.match(html, /<div class="wrap">\s*<div id="stage">[\s\S]*?<\/div><\/div>\s*<aside>/,
+    'the mobile stack no longer places the decision panel directly after the graph');
+});
+
+test('GRAPH DETAIL: relationship evidence is never silently hidden behind a display cap', () => {
+  const nodes = Array.from({ length: 102 }, (_unused, i) => ({
+    id: i === 0 ? 'root-workstream' : 'node-' + i,
+    family: 'fixture', familyRule: 'test', head: 'a'.repeat(40), branch: 'fixture',
+    verdict: 'holds unique committed work', committedFiles: i === 0 ? 1 : 0,
+    uncommittedFiles: 0, addedSymbols: 0, uniqueSymbols: 0, uncommittedOnly: 0,
+    safeToDelete: false,
+  }));
+  const edges = Array.from({ length: 101 }, (_unused, i) => ({
+    source: 'root-workstream', target: 'node-' + (i + 1),
+    type: 'collision', kind: 'proven', why: 'fixture edge ' + (i + 1),
+  }));
+  const report = {
+    graph: { nodes, edges, families: [] },
+    base: { ref: 'main', oid: 'a'.repeat(40) },
+    counts: {
+      scanned: 102, workstreams: 102, families: 1, atRisk: 0, collisions: 101,
+      duplicatePairs: 0, safeToDelete: 0,
+    },
+    root: '/fixture/repo', backend: 'fixture',
+    plan: { reviewReduction: { toReview: 102 } },
+  };
+  const html = renderHtml(report);
+  const created = [];
+  const makeEl = (name) => {
+    const el = {
+      tagName: name, attrs: {}, children: [], text: '', listeners: {},
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      appendChild(c) { this.children.push(c); return c; },
+      replaceChildren(...c) { this.children = c; },
+      addEventListener(k, fn) { this.listeners[k] = fn; },
+      removeEventListener() {}, setPointerCapture() {},
+      getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 700 }; },
+      classList: { add() {}, remove() {} },
+      set textContent(v) { this.text = String(v); this.children.length = 0; },
+      get textContent() { return this.text; },
+      get dataset() { return {}; },
+      get clientWidth() { return 1000; },
+      get clientHeight() { return 700; },
+      querySelectorAll() { return []; },
+    };
+    created.push(el);
+    return el;
+  };
+  const stage = makeEl('div');
+  const detail = makeEl('div');
+  const document = {
+    createElementNS: (_ns, name) => makeEl(name),
+    getElementById: (id) => id === 'stage' ? stage : id === 'detail' ? detail : makeEl('div'),
+    querySelectorAll: () => [],
+    get activeElement() { return null; },
+  };
+  let frames = 0;
+  const raf = (fn) => { if (frames++ < 2) fn(); return frames; };
+  const body = scriptBody(html);
+  const src = body.slice(0, body.lastIndexOf('</script>')) + '\nreturn { describe };';
+  const api = new Function('document', 'addEventListener', 'setTimeout', 'clearTimeout',
+    'requestAnimationFrame', 'Math', src)(document, () => {}, () => 0, () => {}, raf, Math);
+
+  api.describe(0);
+  assert.match(detail.text, /edges \(101\)/);
+  assert.match(detail.text, /proven\s+node-15\b/,
+    'the old fourteen-edge cap must not hide an ordinary fifteenth relationship');
+  assert.match(detail.text, /proven\s+node-100\b/);
+  assert.doesNotMatch(detail.text, /proven\s+node-101\b/,
+    'the explicit preview limit must actually bound very large details');
+  assert.match(detail.text, /and 1 more; run holt context "root-workstream" --json/,
+    'anything omitted must be counted and point to the complete machine-readable evidence');
 });
 
 
@@ -535,12 +704,21 @@ test('GRAPH REDUNDANCY: a redundant-but-safe node is visually and structurally d
 
   await fx.worktree('genuinely-empty');
 
+  // A docs-only commit has committed content but intentionally no extractable symbol. The old
+  // colour rule looked only at uniqueSymbols, so this unsafe workstream rendered neutral gray
+  // even while the TUI correctly called it HOLDS.
+  const docsOnly = await fx.worktree('docs-only-committed');
+  await fs.writeFile(path.join(docsOnly, 'release-notes.md'), '# Release evidence\n');
+  await fx.git(['add', '-A'], docsOnly);
+  await fx.git(['commit', '-q', '-m', 'docs: unique committed evidence'], docsOnly);
+
   const report = await inspect(fx.root, {});
   const html = renderHtml(report);
   const data = JSON.parse(dataLiteral(html));
   const byId = new Map(data.nodes.map((n) => [n.id, n]));
   const twinANode = byId.get('twin-a');
   const emptyNode = byId.get('genuinely-empty');
+  const docsNode = byId.get('docs-only-committed');
 
   // NON-VACUITY FIRST.
   assert.equal(twinANode.safeToDelete, true, `setup: ${JSON.stringify(twinANode)}`);
@@ -549,6 +727,8 @@ test('GRAPH REDUNDANCY: a redundant-but-safe node is visually and structurally d
     `twin-a must carry redundantWith naming its sibling, or nothing below is tested: ${JSON.stringify(twinANode)}`);
   assert.ok(!emptyNode.redundantWith,
     `genuinely-empty must NOT carry redundantWith, or this is not the negative control: ${JSON.stringify(emptyNode)}`);
+  assert.ok(docsNode.committedFiles > 0 && docsNode.uniqueSymbols === 0 && !docsNode.safeToDelete,
+    `docs-only fixture must hold unique committed files without symbols: ${JSON.stringify(docsNode)}`);
 
   // Run the page's own script and check the rendered circle attributes for both nodes.
   const created = [];
@@ -589,7 +769,8 @@ test('GRAPH REDUNDANCY: a redundant-but-safe node is visually and structurally d
   const circleFor = (id) => circles.find((c) => c.children.some((k) => k.tagName === 'title' && k.text.startsWith(id)));
   const twinCircle = circleFor('twin-a');
   const emptyCircle = circleFor('genuinely-empty');
-  assert.ok(twinCircle && emptyCircle, 'both nodes must actually be drawn, or nothing below is tested');
+  const docsCircle = circleFor('docs-only-committed');
+  assert.ok(twinCircle && emptyCircle && docsCircle, 'all three nodes must actually be drawn, or nothing below is tested');
 
   assert.notEqual(twinCircle.attrs['stroke-dasharray'], emptyCircle.attrs['stroke-dasharray'],
     `a redundant-safe node and a genuinely empty node drew identical strokes: ${JSON.stringify({
@@ -597,4 +778,6 @@ test('GRAPH REDUNDANCY: a redundant-but-safe node is visually and structurally d
     })}`);
   assert.equal(twinCircle.attrs.fill, emptyCircle.attrs.fill,
     'both are still legitimately "safe" and should share the same fill colour — only the ring differs');
+  assert.equal(docsCircle.attrs.fill, 'var(--hold)',
+    'unique committed files must render as HOLDS even when symbol extraction finds zero symbols');
 });
