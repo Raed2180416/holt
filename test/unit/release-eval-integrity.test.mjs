@@ -365,6 +365,13 @@ test('RELEASE EVAL DEADLINES: confirmatory controller is external-cancellation-o
 test('RELEASE EVAL SANDBOX: exact mount plan hides controller/grader and the no-Holt runtime', async (t) => {
   const base = await fs.mkdtemp(path.join(os.homedir(), '.holt-eval-visibility-test-'));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
+  // The hosted Linux fallback runs bubblewrap through sudo with all capabilities
+  // dropped.  mkdtemp deliberately creates a 0700 directory, which is correct
+  // for ordinary test isolation but prevents that capability-dropped process
+  // from traversing the host-side bind source.  Widen only this disposable
+  // fixture's traversal permission; the sandbox still masks the path and the
+  // visibility assertion remains the same.
+  await fs.chmod(base, 0o755);
   const containRoot = path.join(base, 'attempt-000');
   const cwd = path.join(containRoot, 'fixture', 'repo');
   await fs.mkdir(cwd, { recursive: true });
