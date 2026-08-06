@@ -830,6 +830,32 @@ test('P5: the plan drops disposables, collapses duplicates, and orders the rest'
     'order must be ascending by entanglement');
 });
 
+test('P5 AUTHORITY: primary evidence is never presented as a landing candidate', async (t) => {
+  const fx = await newRepo('plan-primary-excluded');
+  t.after(() => fx.cleanup());
+  await fx.worktree('agent-1');
+  await fx.write('src/agent.js', 'export function AGENT_WORK() { return 1; }\n', fx.wt('agent-1'));
+  await fx.commit('agent work', fx.wt('agent-1'));
+  await fx.write('src/primary-only.js', 'export function PRIMARY_WORK() { return 2; }\n');
+
+  const { report } = await inspectFixture(fx, { includePrimary: true });
+  const primary = report.safe.find((s) => s.isPrimary);
+  assert.ok(primary, 'the fixture must include primary evidence');
+  const ids = new Set([
+    ...report.plan.order.map((x) => x.id),
+    ...report.plan.drop.map((x) => x.id),
+    ...report.plan.collapse.map((x) => x.id),
+  ]);
+  assert.equal(ids.has(primary.id), false, `primary leaked into landing candidates: ${JSON.stringify(report.plan)}`);
+  assert.ok(report.plan.excluded?.some((x) => x.id === primary.id), 'the exclusion must be explicit');
+  assert.equal(
+    report.plan.reviewReduction.dropped + report.plan.reviewReduction.collapsed
+      + report.plan.reviewReduction.toReview + report.plan.reviewReduction.excluded,
+    report.plan.reviewReduction.total,
+    'review denominator must account for excluded primary evidence',
+  );
+});
+
 test('P5 COLLAPSE: exact fan-out copies collapse only when every copy is durable', async (t) => {
   const fx = await newRepo('collapse-safety');
   t.after(() => fx.cleanup());

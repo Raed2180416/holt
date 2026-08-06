@@ -898,6 +898,85 @@ export function safeToDelete(scanResult, unique = null) {
   }).sort((a, b) => Number(b.safe) - Number(a.safe));
 }
 
+/**
+ * Translate the rich analysis verdict into the much narrower authority a caller gets when it
+ * intends to delete a worktree without looking again.
+ *
+ * `safeToDelete()` deliberately answers a graph question: a redundant worktree is safe *in a
+ * re-verified cleanup set* because another live worktree holds the same durable bytes.  That is
+ * not the same as permission for an independent `rm -rf` or an agent-facing MCP answer.  Keeping
+ * this conversion in one place prevents the CLI, MCP, hooks, and future adapters from each
+ * inventing a slightly different interpretation of `safe`.
+ *
+ * Exact deletion authority also requires an exact scan. `approximate` and `unknown` are useful
+ * diagnostic states, but neither can authorise a destructive command. `unverifiable` is a known
+ * preservation risk (for example, observed ignored bytes), so it remains a normal refusal rather
+ * than being mislabeled as “the instrument saw nothing.”
+ *
+ * @param {Record<string, any>|null|undefined} verdict
+ * @returns {{decision: string, safeToDelete: boolean, analysisSafe: boolean, mayQuarantine: boolean,
+ *   recheckRequired: boolean, reason: string}}
+ */
+export function directDeleteDecision(verdict) {
+  const analysisSafe = verdict?.safe === true;
+  const redundant = Array.isArray(verdict?.redundantWith) && verdict.redundantWith.length > 0;
+  const exact = verdict?.confidence === 'measured';
+
+  if (!exact) {
+    if (verdict?.confidence === 'unverifiable') {
+      return {
+        decision: 'holds_work',
+        safeToDelete: false,
+        analysisSafe,
+        mayQuarantine: false,
+        recheckRequired: false,
+        reason: verdict?.reasons?.[0] ?? 'the scan found content whose durability is not proven',
+      };
+    }
+    return {
+      decision: 'unknown',
+      safeToDelete: false,
+      analysisSafe,
+      mayQuarantine: false,
+      recheckRequired: true,
+      reason: 'the scan is not exact; re-scan with normal Git visibility before any deletion',
+    };
+  }
+
+  if (redundant) {
+    return {
+      decision: 'redundant_one_of_set',
+      safeToDelete: false,
+      analysisSafe,
+      // `clean --apply` is explicitly re-verified and moves to recoverable quarantine. It is the
+      // safe path for a redundant set; a direct delete is not.
+      mayQuarantine: analysisSafe,
+      recheckRequired: true,
+      reason: `identical durable content is also held by ${verdict.redundantWith.join(', ')}`,
+    };
+  }
+
+  if (analysisSafe) {
+    return {
+      decision: 'removable_now',
+      safeToDelete: true,
+      analysisSafe: true,
+      mayQuarantine: true,
+      recheckRequired: false,
+      reason: verdict.reasons?.[0] ?? 'no unique work was found',
+    };
+  }
+
+  return {
+    decision: 'holds_work',
+    safeToDelete: false,
+    analysisSafe: false,
+    mayQuarantine: false,
+    recheckRequired: false,
+    reason: verdict?.reasons?.[0] ?? 'work was found that must be preserved',
+  };
+}
+
 /* ------------------------------------------------------- P1: collisions ---- */
 
 /**
@@ -1631,8 +1710,12 @@ export function landingPlan(scanResult, {
 } = {}) {
   const uniq = uniqueWork(scanResult);
   const safe = safeToDelete(scanResult, uniq);
-  const safeIds = setOf(safe.filter((s) => s.safe).map((s) => s.id));
   const live = scanResult.workstreams.filter((w) => w.ok);
+  const isPrimary = (w) => w.isPrimary === true || w.familyRule === 'primary-worktree';
+  const primaryIds = new Set(live.filter(isPrimary).map((w) => w.id));
+  const exactSafe = safe.filter((s) => s.safe && !primaryIds.has(s.id)
+    && (!s.confidence || s.confidence === 'measured'));
+  const safeIds = setOf(exactSafe.map((s) => s.id));
 
   const entanglement = new Map();
   for (const c of cols) {
@@ -1643,7 +1726,11 @@ export function landingPlan(scanResult, {
   }
 
   const uniqById = new Map(uniq.map((u) => [u.id, u]));
-  const workstreamById = new Map(live.map((w) => [w.id, w]));
+  // The primary is evidence, not a branch an agent should land or collapse. Keep it in the
+  // overall scan but remove it from the candidate map so every downstream operation inherits the
+  // same boundary instead of having to remember a renderer-only exclusion.
+  const candidatesLive = live.filter((w) => !isPrimary(w));
+  const workstreamById = new Map(candidatesLive.map((w) => [w.id, w]));
   const supersededBy = new Map();
   const collapseEvidence = new Map();
   const parent = new Map();
@@ -1710,8 +1797,7 @@ export function landingPlan(scanResult, {
     }
   }
 
-  const candidates = scanResult.workstreams
-    .filter((w) => w.ok)
+  const candidates = candidatesLive
     .map((w) => {
       const u = uniqById.get(w.id);
       return {
@@ -1732,7 +1818,7 @@ export function landingPlan(scanResult, {
     .filter((c) => (!safeIds.has(c.id) || supersededTargets.has(c.id)) && !c.supersededBy)
     .sort((a, b) => a.entanglement - b.entanglement || b.uniqueSymbols - a.uniqueSymbols);
 
-  const dropRows = safe.filter((s) => s.safe && !s.redundantWith?.some((id) => id !== 'base'));
+  const dropRows = exactSafe.filter((s) => !s.redundantWith?.some((id) => id !== 'base'));
   const collapseRows = candidates.filter((c) => c.supersededBy).map((c) => ({
     id: c.id,
     into: c.supersededBy,
@@ -1752,9 +1838,15 @@ export function landingPlan(scanResult, {
       dropped: dropRows.length,
       collapsed: collapseRows.length,
       toReview: toLand.length,
+      excluded: live.length - candidatesLive.length,
     },
-    reviewSurface: reviewSurface(live, safeIds),
-    note: 'holt produces the ORDER. Executing rebases is git-machete / stack-pr / Graphite territory.',
+    reviewSurface: reviewSurface(candidatesLive, safeIds),
+    excluded: live.filter(isPrimary).map((w) => ({
+      id: w.id,
+      reason: 'primary worktree is evidence, not a landing candidate',
+    })),
+    note: 'holt produces the ORDER. Executing rebases is git-machete / stack-pr / Graphite territory. '
+      + 'The primary worktree is excluded from landing candidates.',
   };
 }
 

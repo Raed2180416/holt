@@ -17,7 +17,7 @@ import { discover, repoAbsenceError } from '../src/discover.mjs';
 // The CI matrix exists because that exact bug shipped once.
 import { fileURLToPath } from 'node:url';
 import { scan } from '../src/scan.mjs';
-import { analyze, contextDigest } from '../src/analyze.mjs';
+import { analyze, contextDigest, directDeleteDecision } from '../src/analyze.mjs';
 import { deepDuplicates, detectJscpd } from '../src/deep.mjs';
 import { detectCtags, detectEnry, languageCoverage } from '../src/symbols.mjs';
 import {
@@ -116,7 +116,7 @@ COMMANDS
   plan                advisory drop / collapse / landing review plan            (P5)
   impact              who DEPENDS on what another workstream changed  (not a conflict check)
   order               heuristic landing order over observed relationships
-  partition           advisory starting ownership map  [--agents <n>]   (1–256)
+  partition           structural ownership map (task anchors recommended) [--agents <n>]   (1–256)
   branches            the branch graveyard: landed / content-landed / unlanded  [--apply]
   journal             hash-chained audit trail of every protect / UNPROTECT / rescue /
                       clean / branch-delete / blocked; actor is reported, inferred or unknown
@@ -211,6 +211,9 @@ OPTIONS
   --all               collisions: also show bare file overlap (hidden by default: it is
                       high-volume and low-evidence; landing order always uses it)
   --limit <n>         hotspots/duplicates/collisions: max rows (1–100)
+  --path <glob>       partition task anchor (repeatable; keeps the map scoped to intended paths)
+  --component <name>  partition component anchor (repeatable; structural provider hint)
+  --structural        explicitly request the advanced file-layout view without task anchors
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
   --since <iso>       forensics: ignore events before this date
   --agent <id>        forensics: only this agent's events
@@ -320,7 +323,7 @@ function parseArgs(argv) {
   const opts = {
     _: /** @type {string[]} */ ([]), json: false, base: null, cwd: process.cwd(), symbols: true,
     strictReadOnly: false, concurrency: 8, includePrimary: false,
-    deep: false, html: null, help: false,
+    deep: false, html: null, help: false, structural: false,
     host: 'generic', command: null, bin: 'holt', global: false,
     profile: null, authority: null, store: null, bootstrapRoot: null, metadataUrl: null, targetsUrl: null,
     repository: null, repositoryRoot: null, recoveryMode: null, lockToken: null, orphan: null,
@@ -336,6 +339,10 @@ function parseArgs(argv) {
       case '--global': opts.global = true; break;
       case '--all-hosts': opts.allHosts = true; break;
       case '--deep': opts.deep = true; break;
+      case '--structural': opts.structural = true; break;
+      case '--path': (opts.taskPaths ??= []).push(argv[++i]); break;
+      case '--component': (opts.taskComponents ??= []).push(argv[++i]); break;
+      case '--paths': opts.taskPaths = String(argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean); break;
       case '--collapse': opts.collapse = true; break;
       case '--dry-run': opts.dryRun = true; break;
       case '--apply': opts.apply = true; break;
@@ -631,6 +638,32 @@ function cmdAction(result, opts = {}) {
     if (Array.isArray(v) && v.length) {
       lines.push(paint('grey', `  ${label} (${v.length}): ${v.slice(0, 5).join(', ')}${v.length > 5 ? ` … +${v.length - 5}` : ''}`));
     }
+  }
+  // `auto()` does the reversible half itself and deliberately hands the irreversible half back to
+  // the person. The JSON already carried this contract, but the human path used to drop it and
+  // leave only “protected: N” — an alarm without the next move. Keep the handoff short, exact,
+  // and command-shaped so it is useful without turning a routine run into a report dump.
+  const needsYou = result?.needsYou;
+  if (needsYou?.disposable > 0) {
+    lines.push(paint('bold', `\nNEEDS YOUR DECISION — ${needsYou.disposable} worktree(s) are disposable after re-verification`));
+    if (Array.isArray(needsYou.ids) && needsYou.ids.length) {
+      lines.push(`  candidates: ${JSON.stringify(needsYou.ids)}`);
+    }
+    if (needsYou.command) lines.push(`  next: ${needsYou.command}`);
+    if (needsYou.why) lines.push(paint('grey', `  ${needsYou.why}`));
+  }
+  const atRisk = result?.atRisk;
+  if (atRisk?.count > 0) {
+    lines.push(paint('yellow', `\nAT RISK — ${atRisk.count} workstream(s) require preservation`));
+    if (Array.isArray(atRisk.ids) && atRisk.ids.length) lines.push(`  workstreams: ${JSON.stringify(atRisk.ids)}`);
+    if (atRisk.note) lines.push(paint('grey', `  ${atRisk.note}`));
+  }
+  if (Array.isArray(result?.unknown) && result.unknown.length) {
+    lines.push(paint('yellow', `\nUNKNOWN — ${result.unknown.length} workstream(s) have no exact answer`));
+    for (const u of result.unknown.slice(0, 5)) {
+      lines.push(`  ${JSON.stringify(u.id)} — ${String(u.why ?? 're-scan before acting').slice(0, 160)}`);
+    }
+    if (result.unknown.length > 5) lines.push(paint('grey', `  … and ${result.unknown.length - 5} more`));
   }
   if (result.note) lines.push(paint('grey', `\n  ${result.note}`));
   if (lines.length) out(lines.join('\n'));
@@ -2250,7 +2283,11 @@ async function main() {
   }
   if (cmd === 'partition') {
     const { report, scanned } = await buildReport(opts);
-    const plan = partitionPlan(report, await listTrackedFiles(scanned.root), { agents: opts.agents ?? 2 });
+    const plan = partitionPlan(report, await listTrackedFiles(scanned.root), {
+      agents: opts.agents ?? 2,
+      paths: opts.taskPaths,
+      components: opts.taskComponents,
+    });
     if (opts.json) return emitJson(plan);
     out(renderPartition(plan));
     return;
@@ -3013,23 +3050,28 @@ async function main() {
       //
       // gate therefore refuses a redundant worktree and says why, naming the siblings, so the
       // human can pick which one goes instead of the tool guessing.
-      const redundantOnly = verdict.safe && verdict.redundantWith?.length;
-      if (opts.json) emitJson(verdict);
-      else if (verdict.confidence === 'unknown') {
-        out(paint('yellow', `? ${id}: UNKNOWN — holt could not scan it. Refusing to call it safe.`));
+      const authority = directDeleteDecision(verdict);
+      const redundantOnly = authority.decision === 'redundant_one_of_set';
+      if (opts.json) {
+        // `safe` is the gate's direct-delete answer. Preserve the richer graph result separately
+        // so machine callers cannot accidentally chain `rm -rf` on a redundant or approximate
+        // analysis verdict while retaining the evidence that explains the decision.
+        emitJson({ ...verdict, safe: authority.safeToDelete, ...authority });
+      } else if (authority.decision === 'unknown') {
+        out(paint('yellow', `? ${id}: UNKNOWN — holt does not have an exact deletion proof. Refusing to call it safe.`));
         for (const r of verdict.reasons) out(paint('grey', `    ${r}`));
       } else if (redundantOnly) {
         out(paint('yellow', `? ${id}: DUPLICATE — the same work is also in ${verdict.redundantWith.join(', ')}`));
         out(paint('grey', '    Any ONE may leave the active set, but not all. `holt clean --apply`'));
         out(paint('grey', '    quarantines extras safely (it re-checks before each move); this gate will'));
         out(paint('grey', '    not authorise a delete it cannot re-verify.'));
-      } else if (verdict.safe) {
+      } else if (authority.safeToDelete) {
         out(paint('green', `✓ ${id}: disposable — ${verdict.reasons[0]}`));
       } else {
         out(paint('red', `✗ ${id}: HOLDS UNIQUE WORK`));
         for (const r of verdict.reasons) out(paint('grey', `    ${r}`));
       }
-      process.exit(verdict.confidence === 'unknown' ? 2 : redundantOnly ? 1 : verdict.safe ? 0 : 1);
+      process.exit(authority.decision === 'unknown' ? 2 : authority.safeToDelete ? 0 : 1);
       return;
     }
 

@@ -110,3 +110,16 @@ test('SEQUENCING: with no evidence at all, workstreams stay parallel — the fix
   });
   assert.deepEqual(plan.parallel, ['x', 'y']);
 });
+
+test('ORDER AUTHORITY: primary and non-exact rows are excluded, never called parallel-safe', () => {
+  const plan = landingOrder({
+    safe: [
+      { id: 'primary', isPrimary: true, safe: false, confidence: 'measured' },
+      { id: 'unknown', safe: false, confidence: 'unknown' },
+      { id: 'ready', safe: false, confidence: 'measured' },
+    ],
+    unique: [{ id: 'ready' }], collisions: [], duplicates: [],
+  });
+  assert.deepEqual(plan.parallel, ['ready']);
+  assert.deepEqual(plan.excluded.map((x) => x.id).sort(), ['primary', 'unknown']);
+});

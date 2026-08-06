@@ -335,6 +335,9 @@ test('ARGUMENTS: the declaration each tool already publishes is now the thing th
     [at, { limit: Infinity }, /'limit' must be a finite number/],
     [clean, { apply: 'true' }, /'apply' must be true or false/],  // a destructive flag, never guessed
     [clean, { apply: 1 }, /'apply' must be true or false/],
+    [part, { paths: 'src/**' }, /'paths' must be an array/],
+    [part, { paths: ['src/**', 7] }, /paths\[1\].*string/],
+    [part, { paths: ['bad\u0000path'] }, /NUL byte/],
     [at, [], /must be a JSON object/],
     [at, 'nope', /must be a JSON object/],
   ];
@@ -367,6 +370,7 @@ test('ARGUMENTS: the declaration each tool already publishes is now the thing th
     [check, { id: 'A-memory-core/stage' }],
     [clean, { apply: true }],
     [clean, {}],
+    [part, { paths: ['src/**'], components: ['auth'] }],
     [tool('holt_rescue'), { id: 'release-1.2.3', release: false }],
     [tool('holt_duplicates'), { deep: true, limit: 5 }],
   ]) {

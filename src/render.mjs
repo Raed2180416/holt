@@ -702,6 +702,14 @@ export function renderContext(digest) {
 export function renderOrder(plan) {
   const u = repoData();
   const out = [c('bold', 'holt order') + c('grey', '  (heuristic — conflictsWithLater names the merges to watch)')];
+  if (plan.excluded?.length) {
+    out.push(c('yellow', `\n  EXCLUDED FROM LANDING (${plan.excluded.length})`)
+      + c('grey', '  primary, disposable, or non-exact work is evidence—not a parallel landing candidate'));
+    for (const item of plan.excluded.slice(0, 12)) {
+      out.push(`    ${u.take(item.id, ID)}  ${c('grey', u.take(item.reason))}`);
+    }
+    if (plan.excluded.length > 12) out.push(c('grey', `    … and ${plan.excluded.length - 12} more`));
+  }
   if (plan.parallel.length) {
     out.push(`\n  PARALLEL-SAFE  ${c('grey', 'no observed interaction — land in any order, concurrently')}`);
     for (const id of plan.parallel) out.push(`    ${c('green', u.take(id, ID))}`);
@@ -722,7 +730,20 @@ export function renderOrder(plan) {
 export function renderPartition(plan) {
   const u = repoData();
   const out = [c('bold', `holt partition — ${plan.agents} agents`)
-    + c('grey', `  (${plan.granularity ?? 'top-level-directory'} · advisory: a collision-free starting map, not a work plan)`)];
+    + c('grey', `  (${plan.granularity ?? 'top-level-directory'} · structural advisory, not a task plan)`)];
+  if (plan.taskContext?.status === 'insufficient_task_context') {
+    out.push(c('yellow', '\n  INSUFFICIENT TASK CONTEXT')
+      + c('grey', ' — no task paths/components were supplied; these buckets describe repository shape only.'));
+    out.push(c('grey', '  Supply --path/--component, or keep this explicitly as the advanced structural view.'));
+  } else if (plan.taskContext?.status === 'unresolved') {
+    out.push(c('yellow', '\n  TASK ANCHORS UNRESOLVED')
+      + c('grey', ` — none matched: ${plan.taskContext.unmatched.map((x) => u.take(x, ID)).join(', ')}`));
+  } else if (plan.taskContext?.status === 'partial') {
+    out.push(c('yellow', '\n  TASK SCOPE PARTIAL')
+      + c('grey', ` — ${plan.taskContext.matchedFiles} tracked file(s) matched; unresolved: ${plan.taskContext.unmatched.map((x) => u.take(x, ID)).join(', ')}`));
+  } else if (plan.taskContext?.status === 'provided') {
+    out.push(c('green', `\n  TASK SCOPE`) + c('grey', ` — ${plan.taskContext.matchedFiles} tracked file(s) matched the supplied anchors`));
+  }
   for (const b of plan.buckets) {
     out.push(`\n  AGENT ${b.agent}  ${c('grey', `${b.weight} tracked file(s)`)}`);
     // A directory name is repository-controlled in exactly the way a worktree basename is.

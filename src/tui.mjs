@@ -182,7 +182,23 @@ const isRedundantSafe = (row) => row.bucket === 'disposable' && (row.verdict?.re
 function bucketOf(node, verdict, uniq) {
   if (!verdict || verdict.confidence === 'unknown') return BUCKET.unknown;
   if (verdict.safe) return BUCKET.disposable;
-  if ((uniq?.uncommittedOnlyCount ?? 0) > 0 || node.uncommittedFiles > 0) return BUCKET.atRisk;
+  // `uncommittedOnlyCount` is intentionally lossless and includes ignored files. It is not a
+  // label: an ignored-only primary used to render as “uncommitted-only” and suggest
+  // `rescue --release`, even though there were zero uncommitted files and Git cannot unlock the
+  // main worktree. Name the observed layer instead.
+  const hasUncommitted = (uniq?.uncommittedFileCount ?? 0) > 0
+    || (uniq?.atRiskSymbolCount ?? 0) > 0
+    || node.uncommittedFiles > 0;
+  const hasIgnored = (uniq?.ignoredFileCount ?? 0) > 0;
+  if (hasUncommitted || hasIgnored) {
+    const hint = hasUncommitted && hasIgnored
+      ? 'uncommitted and gitignored content — preserve before cleanup'
+      : hasIgnored
+        ? 'gitignored content — Git cannot restore these bytes'
+        : BUCKET.atRisk.hint;
+    return { ...BUCKET.atRisk, hint };
+  }
+  if (verdict.confidence === 'unverifiable') return BUCKET.unknown;
   return BUCKET.holds;
 }
 
@@ -370,12 +386,16 @@ function detailLines(row, width, height, u = budget()) {
   }
   L.push(paint('grey', 'committed ') + `${row.committedFiles} file(s) base lacks`);
   L.push(paint('grey', 'uncommit  ') + `${row.uncommittedFiles} file(s)`);
+  if ((row.uniq?.ignoredFileCount ?? 0) > 0) {
+    L.push(paint('grey', 'ignored   ') + `${row.uniq.ignoredFileCount} file(s) Git cannot restore`);
+  }
   L.push(paint('grey', 'symbols   ') + `${row.addedSymbols} added · ${row.uniqueSymbols} found nowhere else`);
 
   const layers = row.uniq ? [
     ...row.uniq.byLayer.uncommitted.map((s) => ['uncommitted', s.key]),
     ...row.uniq.byLayer.untracked.map((s) => ['untracked', s.key]),
     ...row.uniq.byLayer.committed.map((s) => ['committed', s.key]),
+    ...(row.uniq.pathsByLayer?.ignored ?? []).map((p) => ['ignored', p]),
   ] : [];
   if (layers.length) {
     L.push('');
@@ -397,7 +417,7 @@ function detailLines(row, width, height, u = budget()) {
     const budget = Math.max(3, height - L.length - 8);
     const shown = layers.slice(0, budget);
     for (const [layer, key] of shown) {
-      L.push(`  ${paint(layer === 'committed' ? 'yellow' : 'red', '▪')} ${u.cell(key, width - 18, { ident: true })} ${paint('grey', layer)}`);
+      L.push(`  ${paint(layer === 'committed' ? 'yellow' : layer === 'ignored' ? 'magenta' : 'red', '▪')} ${u.cell(key, width - 18, { ident: true })} ${paint('grey', layer)}`);
     }
     const rest = layers.length - shown.length;
     if (rest > 0) L.push(paint('grey', `  … and ${rest} more`));
@@ -413,9 +433,12 @@ function detailLines(row, width, height, u = budget()) {
   }
 
   L.push('');
+  const primary = row.familyRule === 'primary-worktree';
   L.push(paint('grey', row.verdict?.safe
     ? 'holt clean --apply would quarantine this (recoverable; branch retained)'
-    : `holt rescue ${u.take(row.id, { ident: true })} --release preserves then unlocks`));
+    : primary
+      ? `holt rescue ${u.take(row.id, { ident: true })} preserves a recovery ref (the primary worktree cannot be unlocked)`
+      : `holt rescue ${u.take(row.id, { ident: true })} --release preserves then unlocks`));
 
   // truncateAnsi, never a raw slice: `l.slice(0, width)` counts escape bytes as columns and cuts
   // colour codes in half — the terminal then receives a dangling `\x1b[9` that is not text, and

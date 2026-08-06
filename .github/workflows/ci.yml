@@ -10,6 +10,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Avoid duplicate push/PR runs racing over the same checkout and leaving a cancelled matrix cell
+# as the last visible status. Pull requests may cancel superseded runs; pushes and manual runs are
+# retained because their exact commit is release evidence.
+concurrency:
+  group: holt-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # LEAST PRIVILEGE, DECLARED RATHER THAN INHERITED. With no `permissions:` key the GITHUB_TOKEN
 # handed to every job here takes the enterprise/organisation/repository default, which on a
 # repository that has never been tightened is write access on every scope — for a workflow whose
@@ -636,3 +643,27 @@ jobs:
         # says "we only talk to approved hosts" when the promise is "we do not talk".
         # The test also PROVES it fires, against seven planted exfiltration shapes.
         run: node --test test/unit/no-network.test.mjs
+
+  required:
+    name: required CI aggregate
+    # A matrix job can contain a cancelled or skipped cell while the workflow's other jobs are
+    # green. GitHub branch protection needs one stable check that observes every required job and
+    # fails closed on failure, cancellation, or skip. This is intentionally last and always runs.
+    if: ${{ always() }}
+    needs: [matrix, bare, full, crossplat, static, package, supply-chain, business]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every required job must complete successfully
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const needs = JSON.parse(process.env.NEEDS_JSON);
+          const bad = Object.entries(needs).filter(([, value]) => value?.result !== 'success');
+          if (bad.length) {
+            for (const [name, value] of bad) console.error(`${name}: ${value?.result ?? 'missing'}`);
+            process.exit(1);
+          }
+          console.log(`all ${Object.keys(needs).length} required CI jobs passed`);
+          NODE

@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { standardFixture } from '../fixtures.mjs';
+import { newRepo, standardFixture } from '../fixtures.mjs';
 import { __test } from '../../src/mcp/server.mjs';
 
 const { handle, TOOLS, clearCache } = __test;
@@ -104,6 +104,31 @@ test('MCP holt_check_workstream: fail-closed verdicts with reasons', async (t) =
   const missing = await call('holt_check_workstream', fx, { id: 'not-a-worktree' });
   assert.ok(missing.error, 'unknown id must be an explicit error');
   assert.ok(Array.isArray(missing.known) && missing.known.length > 0, 'must list what IS known');
+});
+
+test('MCP holt_check_workstream: redundant twins are not direct-delete authority', async (t) => {
+  const fx = await newRepo('mcp-redundant-gate');
+  t.after(() => fx.cleanup());
+
+  for (const id of ['twin-a', 'twin-b']) {
+    const wt = await fx.worktree(id);
+    await fx.write('src/twin.js', 'export function SAME_DURABLE_WORK() { return 7; }\n', wt);
+    await fx.commit(`commit ${id}`, wt);
+  }
+
+  const a = await call('holt_check_workstream', fx, { id: 'twin-a' });
+  const b = await call('holt_check_workstream', fx, { id: 'twin-b' });
+
+  for (const [id, verdict, sibling] of [['twin-a', a, 'twin-b'], ['twin-b', b, 'twin-a']]) {
+    assert.equal(verdict.analysisSafe, true, `${id} should remain a graph-level redundant finding`);
+    assert.equal(verdict.safeToDelete, false,
+      `${id} must not authorise an independent delete: ${JSON.stringify(verdict)}`);
+    assert.equal(verdict.decision, 'redundant_one_of_set');
+    assert.equal(verdict.recheckRequired, true);
+    assert.ok(verdict.redundantWith?.includes(sibling));
+    assert.match(verdict.recommendation, /DO NOT DIRECTLY DELETE/);
+    assert.match(verdict.recommendation, /holt clean --apply/);
+  }
 });
 
 test('MCP holt_context: names the contending sibling and what it already built', async (t) => {

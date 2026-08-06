@@ -234,7 +234,7 @@ Each quoted evidence name below is an exact string present in the named test/har
 - User surfaces: `cli:partition`, `mcp:holt_partition`
 - Exact executable evidence: `test/unit/partition.test.mjs` — “partition: buckets are disjoint and cover every top-level segment”; `test/unit/partition.test.mjs` — “partition: PROPERTY — no two conflicting workstreams land in different buckets”
 - Independent oracle: Seeded random graphs checked for disjoint coverage, ownership, and conflict co-location.
-- Remaining unproven gap: Directory ownership does not infer a complete task decomposition or developer expertise.
+- Remaining boundary: Without explicit task paths/components, Holt returns `insufficient_task_context` and labels the output as an advanced structural view; even an anchored map does not infer a complete task decomposition or developer expertise.
 - Mandatory runner evidence: `complete-test-corpus`
 
 #### `branch-graveyard`

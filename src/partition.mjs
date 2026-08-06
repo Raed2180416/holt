@@ -56,33 +56,77 @@ const unitOf = (file, depth) => {
 /**
  * @param {Record<string, any>} report - analyze() report (uses full collision evidence when available)
  * @param {string[]} trackedFiles - repo-relative paths from `git ls-files`
- * @param {{agents?: number}} opts
+ * @param {{agents?: number, paths?: string[], components?: string[]}} opts
  */
-export function partitionPlan(report, trackedFiles, { agents = 2 } = {}) {
+export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], components = [] } = {}) {
   const requested = Number(agents);
-  const n = Math.min(MAX_PARTITION_AGENTS, Math.max(2,
+  // One requested agent is a valid, useful answer. The old minimum of two contradicted the CLI
+  // and MCP schemas and forced a meaningless empty second packet on a single-task repository.
+  const requestedAgents = Math.min(MAX_PARTITION_AGENTS, Math.max(1,
     Number.isFinite(requested) ? Math.floor(requested) : 2));
   const files = [...new Set((trackedFiles ?? []).map(String))];
+  const anchors = [...new Set([...paths, ...components].map(String).map((s) => s.trim()).filter(Boolean))];
+  const compileAnchor = (selector) => {
+    // Small, deterministic glob subset for task anchors. It is deliberately not shell-expanded:
+    // task context is data, never a command. `**` crosses directories; `*` and `?` stay within
+    // one. A literal directory anchor (for example `src`) owns its descendants; globs retain
+    // normal exact-match semantics so `src/*.js` does not silently claim `src/deep/x.js`.
+    let source = '';
+    for (let i = 0; i < selector.length; i++) {
+      const ch = selector[i];
+      if (ch === '*' && selector[i + 1] === '*') {
+        if (selector[i + 2] === '/') { source += '(?:.*/)?'; i += 2; }
+        else { source += '.*'; i += 1; }
+      } else if (ch === '*') source += '[^/]*';
+      else if (ch === '?') source += '[^/]';
+      else if (/[.+^${}()|[\]\\]/.test(ch)) source += `\\${ch}`;
+      else source += ch;
+    }
+    const directorySuffix = !/[?*]/.test(selector) ? '(?:/.*)?' : '';
+    try { return new RegExp(`^(?:${source})${directorySuffix}$`); } catch { return null; }
+  };
+  const selectors = anchors.map((anchor) => [anchor, compileAnchor(anchor)]);
+  const matches = (file, selector) => selector?.test(file) === true;
+  const scopedFiles = anchors.length
+    ? files.filter((file) => selectors.some(([, selector]) => matches(file, selector)))
+    : files;
+  const unmatchedAnchors = anchors.filter((anchor, index) => {
+    const selector = selectors[index]?.[1];
+    return !files.some((file) => matches(file, selector));
+  });
+  const taskStatus = !anchors.length
+    ? 'insufficient_task_context'
+    : scopedFiles.length
+      ? unmatchedAnchors.length ? 'partial' : 'provided'
+      : 'unresolved';
   const evidenceFiles = [...new Set((report.collisionsAll ?? report.collisions ?? [])
     .flatMap((c) => c.sharedFiles ?? []).map(String))];
-  const allPaths = [...new Set([...files, ...evidenceFiles])];
-  const targetUnits = Math.min(n, Math.max(1, allPaths.length));
+  const scopedEvidence = anchors.length
+    ? evidenceFiles.filter((file) => selectors.some(([, selector]) => matches(file, selector)))
+    : evidenceFiles;
+  const allPaths = [...new Set([...scopedFiles, ...scopedEvidence])];
+  const targetUnits = Math.min(requestedAgents, Math.max(1, allPaths.length));
   const maxDepth = Math.max(1, ...allPaths.map((f) => {
     const dirs = f.split('/').slice(0, -1);
     return dirs.length ? dirs.length + 1 : 2;
   }));
   let depth = 1;
   while (depth < maxDepth && new Set(allPaths.map((f) => unitOf(f, depth))).size < targetUnits) depth++;
+  // Do not manufacture empty buckets when a repository has fewer defensible path units than the
+  // requested fan-out. `requestedAgents` remains visible in the result so an orchestrator can
+  // explain why it received fewer packets; `agents` is the executable allocation.
+  const availableUnits = new Set(allPaths.map((f) => unitOf(f, depth))).size;
+  const n = Math.min(requestedAgents, Math.max(1, availableUnits));
 
   // Weight per path unit. The unit deepens only when top-level directories cannot provide enough
   // independent buckets; this preserves locality for ordinary repositories while making a
   // single-directory monorepo useful for a larger fan-out.
   const dirWeight = new Map();
-  for (const f of files) {
+  for (const f of scopedFiles) {
     const seg = unitOf(f, depth);
     dirWeight.set(seg, (dirWeight.get(seg) ?? 0) + 1);
   }
-  for (const f of evidenceFiles) {
+  for (const f of scopedEvidence) {
     const seg = unitOf(f, depth);
     if (!dirWeight.has(seg)) dirWeight.set(seg, 0);
   }
@@ -172,12 +216,26 @@ export function partitionPlan(report, trackedFiles, { agents = 2 } = {}) {
 
   return {
     agents: n,
+    requestedAgents,
+    taskContext: taskStatus === 'insufficient_task_context'
+      ? {
+        status: taskStatus,
+        reason: 'No intended task paths or components were supplied; this is a structural map, not a task allocation.',
+        next: 'Supply --path/--component (or MCP paths/components), or explicitly treat this as an advanced structural view.',
+      }
+      : {
+        status: taskStatus,
+        anchors,
+        matchedFiles: scopedFiles.length,
+        unmatched: unmatchedAnchors,
+      },
     granularity: depth === 1 ? 'top-level-directory' : depth >= maxDepth ? 'file-or-deep-directory' : `directory-depth-${depth}`,
     buckets,
     avoid,
+    mode: 'structural',
     advisory: 'path units are disjoint; every connected tangle of conflicting workstreams '
       + '(transitively, not just pairwise) is glued into a single bucket, weight-balanced against '
-      + 'everything else. Holt deepens units only when the requested fan-out needs it. It cannot '
-      + 'know your task split — treat this as the collision-free starting map, not a work plan.',
+      + 'everything else. Holt deepens units only when the requested fan-out needs it. Without '
+      + 'explicit task anchors this is a structural starting map, not a work plan.',
   };
 }

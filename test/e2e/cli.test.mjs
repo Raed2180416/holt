@@ -196,6 +196,35 @@ test('CLI: `gate` exit codes are the documented contract', async (t) => {
   assert.equal(missing.code, 2, 'unknown must exit 2, never 0');
 });
 
+test('CLI: gate JSON carries direct-delete authority, not a raw redundant graph verdict', async (t) => {
+  const fx = await newRepo('cli-redundant-gate');
+  t.after(() => fx.cleanup());
+
+  for (const id of ['twin-a', 'twin-b']) {
+    const wt = await fx.worktree(id);
+    await fx.write('src/twin.js', 'export function SAME_DURABLE_WORK() { return 7; }\n', wt);
+    await fx.commit(`commit ${id}`, wt);
+  }
+
+  const r = await holt(['gate', 'twin-a', '--cwd', fx.root, '--json'], fx.root);
+  assert.equal(r.code, 1, `a redundant twin must not authorise rm -rf: ${r.stdout}${r.stderr}`);
+  const payload = JSON.parse(r.stdout);
+  assert.equal(payload.safe, false);
+  assert.equal(payload.analysisSafe, true);
+  assert.equal(payload.decision, 'redundant_one_of_set');
+  assert.equal(payload.recheckRequired, true);
+  assert.ok(payload.redundantWith?.includes('twin-b'));
+
+  const approximate = await holt([
+    'gate', 'twin-a', '--cwd', fx.root, '--strict-read-only', '--json',
+  ], fx.root);
+  assert.equal(approximate.code, 2,
+    `an approximate scan must never become direct-delete authority: ${approximate.stdout}${approximate.stderr}`);
+  const approximatePayload = JSON.parse(approximate.stdout);
+  assert.equal(approximatePayload.safe, false);
+  assert.equal(approximatePayload.decision, 'unknown');
+});
+
 test('CLI: `gate` and `rescue` must not give a script two different answers', async (t) => {
   const fx = await newRepo('cli-parity');
   t.after(() => fx.cleanup());

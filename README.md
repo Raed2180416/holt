@@ -159,7 +159,7 @@ safe to act on.
 |---|---|---|
 | **Exact destructive authority** | `status`, `risk`, `gate`, `clean` | Exact path, operation, mode, object type and object ID evidence decides whether removal is allowed. A failed instrument or unmeasured path produces `unverifiable`, not permission. |
 | **Cross-worktree intelligence** | `collisions`, `hotspots`, `duplicates --deep`, `context`, `impact`, `plan` | Proven textual conflicts are distinguished from predicted same-file or symbol overlap. Duplicate and dependency results are review candidates, not destructive authority. |
-| **Coordination** | `order`, `partition`, `branches`, `stash` | Order and partition are heuristic plans over the observed graph, not compatibility certificates or knowledge of the agents' tasks. Branch deletion uses `git branch -d`, never `-D`. |
+| **Coordination** | `order`, `partition`, `branches`, `stash` | `order` sequences observed interactions; `partition` is task-scoped when given `--path`/`--component` anchors and otherwise explicitly returns an advanced structural map, never a guessed task plan. Neither is a compatibility certificate. Branch deletion uses `git branch -d`, never `-D`. |
 | **Safe action loop** | `protect`, `auto`, `rescue`, `discard`, `clean`, `purge` | Rescue and discard capture to a verified ref first. `auto` performs reversible protection changes; `clean --apply` moves fresh-checked candidates into locked quarantine. The separately named, dry-run-first `purge` re-verifies a completed clean quarantine, anchors its exact HEAD, retains its branch, and uses non-forced Git removal to reclaim disk. |
 | **Combination testing** | `verify A B --run "<test command>"` | Runs the supplied suite against A, B and A+B. A clean result means only that the supplied tests observed no combination-only failure. |
 | **Evidence and incident review** | `journal`, `forensics` | The hash chain detects edits, deletion, reordering and truncation relative to its checkpoint. Actor attribution is reported, inferred or unknown; absent hook coverage is not guessed. |
@@ -449,7 +449,17 @@ quietly shrinks a result.
 | Stash entries scanned | 25 | how far `holt stash` walks the reflog | *"holt scanned only the first 25 stash entries — there are more"*, and the response carries `truncated: true` |
 | Stash paths per entry | 400 | paths carried into the reachability walk | the entry is reported as checked-with-a-bound rather than clean |
 | git call timeout | 30 s | any single git invocation | the call **throws** (`git … timed out after 30000ms`); callers record the instrument as failed, and a failed instrument is reported as `unknown` — e.g. `branches` returns *"instrument failed — refusing to classify; nothing here licenses a deletion"* |
-| `partition --agents` | 256 | requested agent count | refused by name with exit 2, never silently clamped |
+| `partition --agents` | 256 | requested agent count | values outside 1–256 are rejected; fewer executable buckets are reported when the scoped map has fewer independent units |
+
+Partitioning is intentionally context-first:
+
+```bash
+holt partition --path 'packages/api/**' --path 'packages/web/**' --agents 2
+```
+
+Those anchors scope the map to the work you actually intend to delegate. If no anchors are
+available, Holt labels the result `insufficient_task_context`; use `--structural` only when you
+want the repository-shape view as an advanced advisory, not an automatic task decomposition.
 
 **The property that matters is not the numbers, it is the direction.** These paths are designed to fail
 *closed*: when a bound binds, holt says so and lowers its own confidence. They do not let holt

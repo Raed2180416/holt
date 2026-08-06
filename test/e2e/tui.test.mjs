@@ -56,6 +56,29 @@ test('TUI: the frame shows the story a human needs', async (t) => {
     'the TUI must not tell a user that clean physically deletes or reclaims the worktree');
 });
 
+test('TUI: ignored-only primary work is named accurately and gets a valid recovery action', async (t) => {
+  const fx = await newRepo('tui-ignored-primary');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', '.env.local\n');
+  await fx.commit('ignore local environment file');
+  await fx.write('.env.local', 'API_KEY=local-only\n');
+
+  const model = await buildModel(fx.root);
+  const row = model.rows.find((r) => (r.uniq?.ignoredFileCount ?? 0) > 0);
+  assert.ok(row, 'the primary ignored file must be represented in the TUI model');
+  assert.equal(row.bucket, 'atRisk');
+  assert.match(row.bucketMeta.hint, /gitignored/);
+
+  const frame = strip(renderFrame(model, {
+    selected: model.rows.indexOf(row), filter: 'all', message: '',
+  }, { columns: 130, rows: 34 }));
+  assert.match(frame, /\.env\.local/);
+  assert.match(frame, /Git cannot restore/);
+  assert.match(frame, /primary worktree cannot be unlock/);
+  assert.doesNotMatch(frame, /rescue .* --release preserves/,
+    'the primary worktree cannot be unlocked, so TUI must not suggest --release');
+});
+
 test('TUI: filtering narrows to one bucket', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());

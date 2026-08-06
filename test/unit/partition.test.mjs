@@ -45,9 +45,10 @@ test('partition: weight is balanced within one heaviest-directory of even', () =
   assert.ok(Math.abs(weights[0] - weights[1]) <= 4, `imbalanced: ${weights}`);
 });
 
-test('partition: agents below 2 clamp to 2, and output is deterministic', () => {
+test('partition: one agent is honoured, and output is deterministic', () => {
   const one = partitionPlan({ collisions: [] }, FILES, { agents: 0 });
-  assert.equal(one.buckets.length, 2);
+  assert.equal(one.buckets.length, 1);
+  assert.equal(one.requestedAgents, 1);
   assert.deepEqual(
     partitionPlan({ collisions: [] }, FILES, { agents: 3 }),
     partitionPlan({ collisions: [] }, FILES, { agents: 3 }));
@@ -68,6 +69,44 @@ test('partition: full collision evidence feeds hotspots even when the visible li
     collisionsAll: [{ a: 'wt1', b: 'wt2', sharedFiles: ['src/a.js'] }],
   }, FILES, { agents: 2 });
   assert.deepEqual(plan.avoid.map((x) => x.file), ['src/a.js']);
+});
+
+test('partition: requested fan-out never creates empty buckets and exposes structural context', () => {
+  const plan = partitionPlan({ collisions: [] }, ['src/only.js'], { agents: 8 });
+  assert.equal(plan.requestedAgents, 8);
+  assert.equal(plan.agents, 1, 'one defensible path unit means one executable packet');
+  assert.ok(plan.buckets.every((b) => b.dirs.length > 0), 'no empty work packet may be emitted');
+  assert.equal(plan.taskContext.status, 'insufficient_task_context');
+  assert.equal(plan.mode, 'structural');
+});
+
+test('partition: explicit path anchors scope the structural map and report unmatched anchors', () => {
+  const scoped = partitionPlan({ collisions: [] }, FILES, {
+    agents: 3, paths: ['src/**'],
+  });
+  assert.equal(scoped.taskContext.status, 'provided');
+  assert.deepEqual(scoped.taskContext.anchors, ['src/**']);
+  assert.ok(scoped.buckets.flatMap((b) => b.dirs).every((d) => d === 'src' || d.startsWith('src/')));
+
+  const missing = partitionPlan({ collisions: [] }, FILES, { agents: 2, components: ['does-not-exist'] });
+  assert.equal(missing.taskContext.status, 'unresolved');
+  assert.deepEqual(missing.taskContext.unmatched, ['does-not-exist']);
+});
+
+test('partition: glob anchors stay scoped and mixed task context is explicit', () => {
+  const rootOnly = partitionPlan({ collisions: [] }, ['src/a.js', 'src/deep/b.js', 'docs/readme.md'], {
+    agents: 2, paths: ['src/*.js'],
+  });
+  assert.equal(rootOnly.taskContext.status, 'provided');
+  assert.equal(rootOnly.taskContext.matchedFiles, 1);
+  assert.deepEqual(rootOnly.taskContext.unmatched, []);
+
+  const mixed = partitionPlan({ collisions: [] }, ['src/a.js', 'docs/readme.md'], {
+    agents: 2, paths: ['src/**', 'missing/**'],
+  });
+  assert.equal(mixed.taskContext.status, 'partial');
+  assert.equal(mixed.taskContext.matchedFiles, 1);
+  assert.deepEqual(mixed.taskContext.unmatched, ['missing/**']);
 });
 
 /**

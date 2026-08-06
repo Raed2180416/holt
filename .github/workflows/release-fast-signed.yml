@@ -1,14 +1,18 @@
 name: release artifact (fast signed)
 
-# Operator-selected fallback for a release when the optional adversarial corpus gate is being
-# deferred. It still builds from one immutable tag, signs the in-package manifest, verifies the
-# package bytes and publishes only a GitHub Release. The normal tag workflow remains the richer
-# evidence path for future releases.
+# Operator-selected release path. It still builds from one immutable tag, signs the in-package
+# manifest, verifies the package bytes and publishes only a GitHub Release. It is not a CI bypass:
+# the operator must provide a completed, successful `ci` run whose head SHA is exactly the tag's
+# commit. The normal tag workflow remains the richer evidence path for future releases.
 on:
   workflow_dispatch:
     inputs:
       tag:
         description: Existing stable tag to publish (for example v0.3.1)
+        required: true
+        type: string
+      ci_run_id:
+        description: Successful full CI run ID for the exact tag commit (required)
         required: true
         type: string
 
@@ -28,6 +32,7 @@ jobs:
       contents: write
     env:
       TAG: ${{ inputs.tag }}
+      CI_RUN_ID: ${{ inputs.ci_run_id }}
     steps:
       - name: prove the requested tag and release state before checkout
         env:
@@ -38,6 +43,21 @@ jobs:
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           test -n "${GH_TOKEN:-}"
           test "$(gh api repos/$GITHUB_REPOSITORY/immutable-releases --jq '.enabled')" = true
+          [[ "$CI_RUN_ID" =~ ^[0-9]+$ ]]
+          TAG_SHA=$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq '.sha')
+          CI_JSON=$(gh run view "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --json headSha,status,conclusion,workflowName)
+          node - "$TAG_SHA" "$CI_JSON" <<'NODE'
+          const [tagSha, raw] = process.argv.slice(2);
+          const run = JSON.parse(raw);
+          const problems = [];
+          if (run.workflowName !== 'ci') problems.push(`workflow=${run.workflowName ?? 'unknown'}`);
+          if (run.status !== 'completed') problems.push(`status=${run.status ?? 'unknown'}`);
+          if (run.conclusion !== 'success') problems.push(`conclusion=${run.conclusion ?? 'unknown'}`);
+          if (run.headSha !== tagSha) problems.push(`headSha=${run.headSha ?? 'unknown'} expected=${tagSha}`);
+          if (problems.length) throw new Error(`CI evidence is not a successful exact-head ci run: ${problems.join(', ')}`);
+          console.log(`verified CI run ${process.env.CI_RUN_ID} for ${tagSha}`);
+          NODE
           set +e
           gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/release.txt" 2>&1
           rc=$?

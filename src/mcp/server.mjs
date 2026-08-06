@@ -33,7 +33,7 @@
 import packageJson from '../../package.json' with { type: 'json' };
 import { discover, repoAbsenceError } from '../discover.mjs';
 import { scan } from '../scan.mjs';
-import { analyze, contextDigest } from '../analyze.mjs';
+import { analyze, contextDigest, directDeleteDecision } from '../analyze.mjs';
 import { landingOrder } from '../order.mjs';
 import { branchAudit } from '../branches.mjs';
 import { partitionPlan } from '../partition.mjs';
@@ -181,11 +181,15 @@ const TOOLS = [
   {
     name: 'holt_partition',
     title: 'Pre-flight split for N agents',
-    description:
-      'Pre-flight split for N agents: disjoint balanced directory buckets, every observed hotspot assigned exactly one owner. Advisory — a collision-free starting map, not a work plan.',
+    description: 'Structural map; supply task paths/components. Without anchors this is not a task plan.',
     inputSchema: {
       type: 'object',
-      properties: { ...REPO_ARG, agents: { type: 'number', minimum: 1, maximum: MAX_AGENTS, description: 'How many agents you are about to spawn (default 2, at most 256).' } },
+      properties: {
+        ...REPO_ARG,
+        agents: { type: 'number', minimum: 1, maximum: MAX_AGENTS },
+        paths: { type: 'array', maxItems: 256, items: { type: 'string', maxLength: 4096 } },
+        components: { type: 'array', maxItems: 256, items: { type: 'string', maxLength: 512 } },
+      },
       additionalProperties: false,
     },
   },
@@ -614,6 +618,29 @@ function validateArgs(tool, rawArgs) {
       continue;
     }
 
+    if (spec.type === 'array') {
+      if (!Array.isArray(v)) {
+        throw new ToolArgumentError(`${tool.name}: '${name}' must be an array, got ${v === null ? 'null' : typeof v}`);
+      }
+      if (typeof spec.maxItems === 'number' && v.length > spec.maxItems) {
+        throw new ToolArgumentError(`${tool.name}: '${name}' has ${v.length} items; the maximum is ${spec.maxItems}`);
+      }
+      const itemSpec = spec.items ?? {};
+      if (itemSpec.type === 'string') {
+        for (const [i, item] of v.entries()) {
+          if (typeof item !== 'string') {
+            throw new ToolArgumentError(`${tool.name}: '${name}[${i}]' must be a string`);
+          }
+          if (item.includes('\0')) throw new ToolArgumentError(`${tool.name}: '${name}[${i}]' contains a NUL byte`);
+          if (typeof itemSpec.maxLength === 'number' && item.length > itemSpec.maxLength) {
+            throw new ToolArgumentError(`${tool.name}: '${name}[${i}]' is ${item.length} characters; the maximum is ${itemSpec.maxLength}`);
+          }
+        }
+      }
+      out[name] = [...v];
+      continue;
+    }
+
     out[name] = v;                                 // no other types are declared by any tool
   }
 
@@ -804,7 +831,11 @@ async function dispatch(name, args, cwd, limit) {
       // server into heap exhaustion and SIGABRT, and the long-lived process was gone for the rest
       // of the session. The bound is declared in the schema and enforced by validateArgs, which
       // is why there is no second hand-written clamp here to drift out of step with it.
-      return partitionPlan(report, files, { agents: args.agents ?? 2 });
+      return partitionPlan(report, files, {
+        agents: args.agents ?? 2,
+        paths: args.paths,
+        components: args.components,
+      });
     }
 
     case 'holt_status': {
@@ -897,14 +928,25 @@ async function dispatch(name, args, cwd, limit) {
           known: report.safe.map((s) => s.id).slice(0, 40),
         };
       }
+      const authority = directDeleteDecision(v);
       return {
         id: v.id,
-        safeToDelete: v.safe,
+        // MCP is often called immediately before a host removes a worktree. Its boolean must
+        // mean direct-delete authority, not the richer graph fact that a redundant member can be
+        // quarantined safely as part of a re-verified set.
+        safeToDelete: authority.safeToDelete,
+        analysisSafe: authority.analysisSafe,
+        decision: authority.decision,
+        mayQuarantine: authority.mayQuarantine,
+        recheckRequired: authority.recheckRequired,
         confidence: v.confidence,
         reasons: v.reasons,
-        recommendation: v.confidence === 'unknown'
-          ? 'DO NOT DELETE — holt could not scan this workstream, so it cannot be called safe'
-          : v.safe ? 'safe to delete' : 'DO NOT DELETE — holds work that would be lost',
+        redundantWith: v.redundantWith,
+        recommendation: authority.decision === 'unknown'
+          ? 'DO NOT DELETE — holt does not have an exact deletion proof; re-scan or use verified quarantine'
+          : authority.decision === 'redundant_one_of_set'
+            ? `DO NOT DIRECTLY DELETE — identical durable content is also in ${(v.redundantWith ?? []).join(', ')}; use holt clean --apply`
+            : authority.safeToDelete ? 'safe to delete' : 'DO NOT DELETE — holds work that would be lost',
       };
     }
 

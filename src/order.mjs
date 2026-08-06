@@ -24,13 +24,23 @@ const CONFLICT_KINDS = new Set(['proven', 'predicted', 'semantic-overlap']);
 
 /**
  * @param {Record<string, any>} report - the analyze() report (uses .safe, .unique, .collisions, .duplicates)
- * @returns {{lanes: Array, parallel: string[], note: string}}
+ * @returns {{lanes: Array, parallel: string[], excluded: Array, note: string}}
  */
 export function landingOrder(report) {
-  const ids = (report.safe ?? []).map((s) => s.id);
+  // Landing order is an action aid, not an inventory. A primary worktree is the user's active
+  // checkout, not an agent branch to land, and an approximate/unknown verdict has no evidence
+  // strong enough to call it parallel-safe. Keep those rows visible in status/plan, but never put
+  // them in a lane that says “land concurrently.” Test fixtures predating the typed confidence
+  // field remain compatible: an absent confidence is treated as the old exact fixture contract.
+  const excluded = (report.safe ?? []).filter((s) => s.isPrimary || s.familyRule === 'primary-worktree'
+    || s.confidence === 'unknown' || s.confidence === 'approximate' || s.confidence === 'unverifiable'
+    || s.safe === true);
+  const eligible = (report.safe ?? []).filter((s) => !excluded.includes(s));
+  const ids = eligible.map((s) => s.id);
   const weight = new Map();
   for (const u of report.unique ?? []) {
-    weight.set(u.id, (u.committedFileCount ?? 0) + (u.uncommittedCount ?? 0) + (u.uniqueSymbolCount ?? 0));
+    weight.set(u.id, (u.committedFileCount ?? 0) + (u.uncommittedOnlyCount ?? u.uncommittedCount ?? 0)
+      + (u.uniqueSymbolCount ?? 0));
   }
 
   // Build the evidence graph. proven-clean pairs are evidence of NON-interaction and add no edge.
@@ -103,7 +113,16 @@ export function landingOrder(report) {
   return {
     parallel,
     lanes: entangledLanes,
+    excluded: excluded.map((s) => ({
+      id: s.id,
+      reason: s.isPrimary || s.familyRule === 'primary-worktree'
+        ? 'primary worktree is not a landing candidate'
+        : s.safe === true
+          ? 'disposable workstream is already reproducible from base'
+          : 'landing safety is not exact; review the workstream before ordering it',
+    })),
     note: 'parallel = no observed interaction (not a compatibility certificate). Lane order is a '
-      + 'min-entanglement heuristic; conflictsWithLater names the merges to watch at each step.',
+      + 'min-entanglement heuristic; conflictsWithLater names the merges to watch at each step. '
+      + 'Primary, disposable, and non-exact workstreams are excluded from landing candidates.',
   };
 }
