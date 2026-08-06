@@ -504,11 +504,20 @@ test('ATTACK: a symbol extraction that FAILED must not read as "no symbols"', as
   assert.equal((ok.get('real.js') ?? []).length, 1, 'PRECONDITION: the symbol must be findable');
   assert.deepEqual(ok.failed, [], 'a successful extraction reports no failures');
 
-  // A timeout must be REPORTED, not silently returned as an empty answer.
-  const timedOut = await ctagsBatch(dir, ['real.js'], { timeout: 1 });
-  assert.deepEqual(timedOut.failed, ['real.js'],
-    'a failed extraction must name the files it could not read — returning [] makes it ' +
-    'indistinguishable from a file that genuinely has no symbols');
+  // Force ctags to reject a deliberately missing option instead of racing the scheduler with a
+  // 1 ms timeout. The old timing-based version was itself flaky: a fast ctags could finish before
+  // the timer, making this assertion fail even though the production error path was correct.
+  const previousOptions = process.env.HOLT_CTAGS_OPTIONS;
+  process.env.HOLT_CTAGS_OPTIONS = path.join(dir, 'does-not-exist.ctags');
+  try {
+    const failed = await ctagsBatch(dir, ['real.js'], { timeout: 60_000 });
+    assert.deepEqual(failed.failed, ['real.js'],
+      'a failed extraction must name the files it could not read — returning [] makes it ' +
+      'indistinguishable from a file that genuinely has no symbols');
+  } finally {
+    if (previousOptions === undefined) delete process.env.HOLT_CTAGS_OPTIONS;
+    else process.env.HOLT_CTAGS_OPTIONS = previousOptions;
+  }
 });
 
 test('ATTACK: a file too large to tag reads as "no symbols" instead of "not measured"', async (t) => {
