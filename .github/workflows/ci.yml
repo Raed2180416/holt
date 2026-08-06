@@ -34,6 +34,9 @@ jobs:
 
   matrix:
     name: core on ${{ matrix.os }}
+    # A runner or child process that stops making progress must become an explicit CI failure,
+    # never an apparently-live release check. The core matrix normally completes well below this.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -151,6 +154,7 @@ jobs:
 
   bare:
     name: no optional deep/external analyzers
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -177,6 +181,7 @@ jobs:
 
   full:
     name: all backends
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     env:
       HOLT_REAL_REPOS: ${{ github.workspace }}/.holt-fixtures
@@ -330,6 +335,7 @@ jobs:
 
   crossplat:
     name: portable suite on ${{ matrix.os }} / Node ${{ matrix.node }}
+    timeout-minutes: 60
     # 24 OF 39 TEST FILES RAN ON LINUX ONLY — the MCP protocol, the TUI, the graph export, the
     # journal, the team layer, the monster round, the host manifest, the packaging guard. A tool
     # that manipulates paths for a living was proving its most platform-sensitive half on the one
@@ -422,6 +428,7 @@ jobs:
 
   static:
     name: static analysis (ratchet)
+    timeout-minutes: 20
     # 20,749 lines of JavaScript shipped with no linter, no type checker and no gate of any kind.
     # For a tool whose failure mode is permanent, unrecoverable data loss that is below standard.
     #
@@ -463,6 +470,7 @@ jobs:
         run: node scripts/check-ci-hardening.mjs --self-test
 
   package:
+    timeout-minutes: 20
     name: packaging
     runs-on: ubuntu-latest
     steps:
@@ -535,6 +543,7 @@ jobs:
           echo "tarball is clean: bin/ src/ README LICENSE only"
 
   supply-chain:
+    timeout-minutes: 30
     name: supply-chain evidence
     runs-on: ubuntu-latest
     # Everything here works with NO credentials. The two credentialed halves — npm provenance and
@@ -598,6 +607,7 @@ jobs:
         run: node --test test/unit/supply-chain.test.mjs
 
   business:
+    timeout-minutes: 30
     name: commerce and entitlement
     runs-on: ${{ matrix.os }}
     strategy:
@@ -645,6 +655,7 @@ jobs:
         run: node --test test/unit/no-network.test.mjs
 
   required:
+    timeout-minutes: 10
     name: required CI aggregate
     # A matrix job can contain a cancelled or skipped cell while the workflow's other jobs are
     # green. GitHub branch protection needs one stable check that observes every required job and
