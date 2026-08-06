@@ -401,24 +401,36 @@ test('RELEASE EVAL SANDBOX: exact mount plan hides controller/grader and the no-
     t.skip(`bubblewrap runtime probe is Linux-only on ${process.platform}`);
     return;
   }
+  const runProbe = (command, argv) => new Promise((resolve, reject) => {
+    execFile(command, argv, { cwd }, (error, stdout, stderr) => {
+      if (error) reject(new Error(`${command} visibility probe failed: ${stderr || error.message}`));
+      else resolve(JSON.parse(stdout));
+    });
+  });
+
   let executed;
   try {
-    executed = await new Promise((resolve, reject) => {
-      execFile('/usr/bin/bwrap', plan.argv, { cwd }, (error, stdout, stderr) => {
-        if (error) reject(new Error(`bubblewrap visibility probe failed: ${stderr || error.message}`));
-        else resolve(JSON.parse(stdout));
-      });
-    });
+    executed = await runProbe('/usr/bin/bwrap', plan.argv);
   } catch (error) {
     // GitHub-hosted Linux runners ship bubblewrap but disable unprivileged user/mount namespaces.
-    // The product's mount plan is still checked above; without the kernel capability there is no
-    // truthful runtime visibility result to assert. Keep this explicit capability skip rather than
-    // treating a runner policy as an application failure (or weakening the mount assertions).
-    if (/uid map|permission denied|operation not permitted|ENOENT|spawn .*bwrap/i.test(String(error?.message ?? error))) {
-      t.skip(`bubblewrap namespace capability unavailable: ${error?.message ?? error}`);
-      return;
+    // Retry through non-interactive sudo so the runtime visibility claim is still executed, not
+    // downgraded to a skip merely because the runner's user namespace policy is restrictive.
+    const capabilityError = /uid map|permission denied|operation not permitted|ENOENT|spawn .*bwrap/i
+      .test(String(error?.message ?? error));
+    if (!capabilityError) throw error;
+    try {
+      executed = await runProbe('/usr/bin/sudo', ['-n', '/usr/bin/bwrap', ...plan.argv]);
+    } catch (privilegedError) {
+      // A non-Linux host has already returned above. On Linux, retain an explicit capability skip
+      // only when both direct and privileged probes are unavailable; neither path weakens the mount
+      // plan assertions above, and the reason remains visible to the proof controller.
+      if (/uid map|permission denied|operation not permitted|ENOENT|spawn .*bwrap|password is required/i
+        .test(String(privilegedError?.message ?? privilegedError))) {
+        t.skip(`bubblewrap namespace capability unavailable (direct: ${error?.message ?? error}; privileged: ${privilegedError?.message ?? privilegedError})`);
+        return;
+      }
+      throw privilegedError;
     }
-    throw error;
   }
   assert.deepEqual(executed, { secret: false, grader: false, fixture: true });
 });

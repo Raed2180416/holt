@@ -2780,11 +2780,11 @@ async function startUtilityMutationWatcher({ built, runnerScenario }) {
   const watchedDirectories = [...new Set(targets.map((target) => path.dirname(target)))].sort();
   const executableBytes = await fs.readFile(executable).catch(() => null);
 
-  // Node's Windows fs.watch backend has an assertion failure for some short/long temp-path
-  // spellings (the process aborts inside src/win/fs-event.c before the evaluator can record
-  // evidence). A file-level polling watcher is the same evaluator-owned witness for this narrow
-  // mutation proof and keeps the test alive on every supported Windows runner.
-  if (process.platform === 'win32') {
+  // Polling is the portable fallback when a kernel watcher cannot be allocated (for example,
+  // Linux runners whose inotify watch quota is already occupied by another process). It observes
+  // the exact protected files, keeps the same evaluator-owned evidence shape, and does not turn a
+  // resource limit into an unmeasured or skipped mutation proof.
+  const pollingWatcher = async () => {
     const events = [];
     const seenTargets = new Set();
     let resolveFirstEvent;
@@ -2809,7 +2809,8 @@ async function startUtilityMutationWatcher({ built, runnerScenario }) {
         resolveFirstEvent();
       };
       listeners.set(target, listener);
-      watchFileFs(target, { interval: 100, persistent: false }, listener);
+      // Keep the polling handle alive while the caller awaits firstEvent; stop() removes it.
+      watchFileFs(target, { interval: 100, persistent: true }, listener);
     }
     return {
       applicable: true,
@@ -2843,7 +2844,13 @@ async function startUtilityMutationWatcher({ built, runnerScenario }) {
         return { ...evidence, evidencePath, evidenceSha256: sha256(body), evidenceBytes: body.length };
       },
     };
-  }
+  };
+
+  // Node's Windows fs.watch backend has an assertion failure for some short/long temp-path
+  // spellings (the process aborts inside src/win/fs-event.c before the evaluator can record
+  // evidence). A file-level polling watcher is the same evaluator-owned witness for this narrow
+  // mutation proof and keeps the test alive on every supported Windows runner.
+  if (process.platform === 'win32') return pollingWatcher();
 
   // inotifywait is the strongest Linux witness, but it is not a portable dependency: macOS and
   // Windows expose different kernel watcher APIs and do not ship /usr/bin/inotifywait. Keep the
@@ -2939,7 +2946,20 @@ async function startUtilityMutationWatcher({ built, runnerScenario }) {
     stdoutChunks.push(Buffer.from(chunk));
     resolveFirstEvent();
   });
-  await readyPromise;
+  try {
+    await readyPromise;
+  } catch (error) {
+    // inotifywait can be present yet unusable when the host has exhausted its per-user watch
+    // quota. That is an environment resource limit, not evidence that the target stayed clean;
+    // fall back to file-level polling so the mutation proof remains live and attributable.
+    const diagnostic = `${error?.message ?? error}\n${Buffer.concat(stderrChunks).toString('utf8')}`;
+    if (!/upper limit|failed to watch|no space left|watch.*quota|permission denied|operation not permitted|ENOENT/i.test(diagnostic)) {
+      throw error;
+    }
+    if (closed === null) child.kill('SIGTERM');
+    await closePromise;
+    return pollingWatcher();
+  }
 
   return {
     applicable: true,
