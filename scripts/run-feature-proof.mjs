@@ -175,7 +175,7 @@ export const FEATURES = [
     interfaces: ['cli:partition', 'mcp:holt_partition'],
     tests: [T('test/unit/partition.test.mjs', 'partition: buckets are disjoint and cover every top-level segment'), T('test/unit/partition.test.mjs', 'partition: PROPERTY — no two conflicting workstreams land in different buckets')],
     oracle: 'Seeded random graphs checked for disjoint coverage, ownership, and conflict co-location.',
-    gap: 'Directory ownership does not infer a complete task decomposition or developer expertise.',
+    gap: 'Without explicit task paths/components, Holt returns `insufficient_task_context` and labels the output as an advanced structural view; even an anchored map does not infer a complete task decomposition or developer expertise.',
     evidence: ['complete-test-corpus'],
   },
   {
