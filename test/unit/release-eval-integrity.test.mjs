@@ -363,7 +363,16 @@ test('RELEASE EVAL DEADLINES: confirmatory controller is external-cancellation-o
 });
 
 test('RELEASE EVAL SANDBOX: exact mount plan hides controller/grader and the no-Holt runtime', async (t) => {
-  const base = await fs.mkdtemp(path.join(os.homedir(), '.holt-eval-visibility-test-'));
+  // Keep the disposable fixture outside both the real/temporary HOME and /tmp.  The exact
+  // sandbox plan masks HOME and /tmp before it rebinds the fixture.  A fixture created inside
+  // either masked tree is therefore not a valid source for the privileged (sudo) bubblewrap
+  // fallback used by hosted Linux runners: the root process cannot traverse the source after the
+  // mask is mounted, even though the unprivileged user-namespace path can.  os.tmpdir() is the
+  // runner-owned temporary root (not HOME); on Linux use /var/tmp because some developer
+  // environments place os.tmpdir() below HOME as well.  macOS and Windows do not execute the
+  // bubblewrap runtime probe, so their ordinary temporary root remains the right fixture.
+  const fixtureRoot = process.platform === 'linux' ? '/var/tmp' : os.tmpdir();
+  const base = await fs.mkdtemp(path.join(fixtureRoot, '.holt-eval-visibility-test-'));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
   // The hosted Linux fallback runs bubblewrap through sudo with all capabilities
   // dropped.  mkdtemp deliberately creates a 0700 directory, which is correct
