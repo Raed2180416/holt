@@ -34,7 +34,7 @@ import {
   installQwenCodeHooks, preCommitHook,
 } from '../../src/integrate/adapters.mjs';
 import { receiptPath } from '../../src/integrate/receipt.mjs';
-import { samePathSync } from '../../src/paths.mjs';
+import { samePathAsync, samePathSync } from '../../src/paths.mjs';
 
 /**
  * Real git, at module scope. '/dev/null' NOT os.devNull — git-for-windows is MSYS and translates
@@ -1460,8 +1460,9 @@ test('UNINSTALL FAILURE: malformed host config is reported, keeps its receipt, a
   const failed = await holtBin(['uninstall', '--json', '--cwd', repo], repo);
   assert.equal(failed.code, 2, `${failed.stdout}${failed.stderr}`);
   const report = JSON.parse(failed.stdout);
-  assert.ok(report.failures.some((row) => samePathSync(row.path, claude)
-      && /failed to read or reconcile hooks/.test(row.error)),
+  const malformedFailure = report.failures.find((row) =>
+    /failed to read or reconcile hooks/.test(row.error));
+  assert.ok(malformedFailure && await samePathAsync(malformedFailure.path, claude),
     `the exact unreadable config must be named as incomplete: ${failed.stdout}`);
   assert.match(await fs.readFile(claude, 'utf8'), /holt hook pre-tool-use/,
     'an unreadable file must remain untouched rather than being guessed at');
@@ -1551,8 +1552,9 @@ test('UNINSTALL PERMISSIONS: unreadable host config fails honestly and is retrya
   const failed = await holtBin(['uninstall', '--json', '--cwd', repo], repo);
   assert.equal(failed.code, 2, `${failed.stdout}${failed.stderr}`);
   const report = JSON.parse(failed.stdout);
-  assert.ok(report.failures.some((row) => samePathSync(row.path, claude)
-      && /EACCES|permission denied|failed to read or reconcile hooks/i.test(row.error)),
+  const permissionFailure = report.failures.find((row) =>
+    /EACCES|permission denied|failed to read or reconcile hooks/i.test(row.error));
+  assert.ok(permissionFailure && await samePathAsync(permissionFailure.path, claude),
     `permission failure must name the file and incomplete operation: ${failed.stdout}`);
   await fs.access(receipt);
 
