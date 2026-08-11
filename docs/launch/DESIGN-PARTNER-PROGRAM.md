@@ -94,9 +94,12 @@ decision rather than merely produced an interesting report.
 
 ### 3. Install and observe
 
-Use a project-scoped install of the v0.3.1 core where appropriate:
+Use the official stable GitHub release, verify what was installed, then keep Holt's repository
+integration project-scoped unless the partner explicitly approves a broader scope:
 
 ```bash
+npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz
+holt --version
 holt setup
 holt status
 holt risk

@@ -31,8 +31,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { HOSTS, getHost, strengthLabel, CLOUD_CAVEAT } from './hosts.mjs';
-import { recordCreated, readReceipt, holtOwnsFile, clearReceipt } from './receipt.mjs';
-import { relativeWithinAsync } from '../paths.mjs';
+import {
+  recordCreated, recordSharedCreated, readReceipt, receiptPath, holtOwnsFile,
+  createSharedRegularFileExclusive, quarantineReceiptOwnedSharedFile,
+  retainQuarantinedSharedFile,
+  restoreQuarantinedSharedFile, clearReceipt,
+} from './receipt.mjs';
+import { relativeWithinAsync, samePathAsync } from '../paths.mjs';
 
 /**
  * jsonc-parser is an exact required runtime dependency. It remains dynamically loaded and cached
@@ -2141,7 +2146,7 @@ async function repoIsEsm(repoRoot) {
       return pkg.type === 'module';        // the nearest package.json decides, field present or not
     } catch { /* keep walking up */ }
     const parent = path.dirname(dir);
-    if (parent === dir) break;
+    if (await samePathAsync(parent, dir)) break;
     dir = parent;
   }
   return false;                            // no package.json anywhere -> Node treats .js as CommonJS
@@ -2233,7 +2238,14 @@ async function gitCommonDir(cwd) {
   } catch { return null; }
 }
 
-export async function installGitHooks(repoRoot, { bin = 'holt' } = {}) {
+/**
+ * @param {string} repoRoot
+ * @param {{bin?:string,onBeforeSharedHookMutation?:(()=>any)|null,onAfterSharedHookCreate?:(()=>any)|null,onAfterSharedHookRecoveryPublish?:(()=>any)|null}} [options]
+ */
+export async function installGitHooks(repoRoot, {
+  bin = 'holt', onBeforeSharedHookMutation = null, onAfterSharedHookCreate = null,
+  onAfterSharedHookRecoveryPublish = null,
+} = {}) {
   // `.git` IS A FILE IN A LINKED WORKTREE, not a directory — it holds `gitdir: …`. Joining
   // '.git/hooks' onto a worktree root therefore fails with ENOTDIR, which is exactly what happened
   // the first time integrate was taught to wire the worktrees agents actually run in.
@@ -2242,25 +2254,152 @@ export async function installGitHooks(repoRoot, { bin = 'holt' } = {}) {
   // directory. So the right answer is to ask git where that is and write there once — the same
   // file every worktree already executes — rather than to skip linked worktrees and leave them
   // half-wired.
-  let hooksRoot = path.join(repoRoot, '.git');
   const common = await gitCommonDir(repoRoot);
-  if (common) hooksRoot = common;
+  if (!common) {
+    return {
+      adapter: 'git-hooks',
+      path: path.join(repoRoot, '.git', 'hooks', 'pre-commit'),
+      action: 'skipped (not a Git repository with a durable common directory)',
+    };
+  }
+  const hooksRoot = common;
   const dir = path.join(hooksRoot, 'hooks');
   const file = path.join(dir, 'pre-commit');
   const wanted = preCommitHook(bin);
   let reconciled = false;
-  try {
-    const existing = await fs.readFile(file, 'utf8');
-    if (existing === wanted) return { adapter: 'git-hooks', path: file, action: 'already present' };
-    if (!isExactGeneratedPreCommit(existing)) {
-      return { adapter: 'git-hooks', path: file, action: 'skipped (a pre-commit hook already exists or the prior holt hook was edited)' };
-    }
+  let created = false;
+  /** @type {any} */
+  let staged = null;
+  const transaction = await quarantineReceiptOwnedSharedFile(
+    repoRoot,
+    'git-hooks/pre-commit',
+    file,
+    {
+      onBeforeRename: onBeforeSharedHookMutation,
+      onAfterRecoveryPublish: onAfterSharedHookRecoveryPublish,
+      classify: (bytes) => {
+        const text = bytes.toString('utf8');
+        if (text === wanted) return 'current';
+        return isExactGeneratedPreCommit(text) ? 'stage' : 'leave';
+      },
+    },
+  );
+  if (transaction.state === 'current') {
+    return { adapter: 'git-hooks', path: file, action: 'already present' };
+  }
+  if (transaction.state === 'leave') {
+    return { adapter: 'git-hooks', path: file, action: 'skipped (a pre-commit hook already exists or the prior holt hook was edited)' };
+  }
+  if (transaction.state === 'unowned') {
+    return {
+      adapter: 'git-hooks', path: file,
+      action: 'skipped (generated-looking bytes are not receipt-owned by this Holt install)',
+    };
+  }
+  if (transaction.state === 'unavailable') {
+    return {
+      adapter: 'git-hooks', path: file,
+      action: `skipped (pre-commit hook is not one stable regular file: ${transaction.reason ?? 'unavailable'})`,
+    };
+  }
+  if (transaction.state === 'staged') {
+    staged = transaction;
     reconciled = true;
-  } catch { /* none yet */ }
+  } else {
+    created = true;
+  }
 
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(file, wanted, { mode: 0o755 });
-  return { adapter: 'git-hooks', path: file, action: reconciled ? 'reconciled' : 'installed' };
+  /** @type {any} */
+  let creation = null;
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    // Exclusive creation is the other half of the transaction: once the receipt-owned prior
+    // hook has moved, a concurrently-created user hook is never overwritten. Ownership is bound
+    // to the descriptor that performed this creation; a later pathname re-read cannot adopt a
+    // replacement inode, even when its bytes are identical.
+    creation = await createSharedRegularFileExclusive(file, Buffer.from(wanted), { mode: 0o755 });
+    if (typeof onAfterSharedHookCreate === 'function') await onAfterSharedHookCreate();
+    if ((created || reconciled)
+      && !(await recordSharedCreated(repoRoot, 'git-hooks/pre-commit', file, creation))) {
+      throw new Error('installed shared pre-commit hook but could not durably record its ownership');
+    }
+    const recoveryPath = staged ? await retainQuarantinedSharedFile(staged) : null;
+    return {
+      adapter: 'git-hooks',
+      path: file,
+      action: reconciled ? 'reconciled (prior hook retained for recovery)' : 'installed',
+      ...(recoveryPath ? { recoveryPath } : {}),
+    };
+  } catch (error) {
+    const recoveryPaths = [];
+    const rememberRecovery = (recoveryPath) => {
+      if (typeof recoveryPath === 'string' && !recoveryPaths.includes(recoveryPath)) {
+        recoveryPaths.push(recoveryPath);
+      }
+    };
+    // If Holt authored a new executable but failed before its receipt became durable, detach only
+    // that exact descriptor identity into recovery. Leaving it active would make a retry report
+    // "already present" even though uninstall could never prove ownership. A replacement inode,
+    // including byte-identical content, does not match this synthetic one-shot authority and stays.
+    if (creation) {
+      try {
+        const rejected = await quarantineReceiptOwnedSharedFile(
+          repoRoot,
+          'git-hooks/pre-commit',
+          file,
+          {
+            receipt: { shared: { 'git-hooks/pre-commit': creation } },
+            classify: () => 'stage',
+          },
+        );
+        if (rejected.state === 'staged') {
+          rememberRecovery(await retainQuarantinedSharedFile(rejected));
+        }
+      } catch (detachError) {
+        rememberRecovery(detachError?.recoveryPath);
+        error.message += `; rejected hook could not be fully detached: ${detachError?.message ?? detachError}`;
+      }
+    }
+    if (staged) {
+      // Restore only into an absent pathname. If a concurrent file now occupies the hook path,
+      // retain the old Holt hook in quarantine and report its recovery path instead of overwriting.
+      try {
+        const recovery = await restoreQuarantinedSharedFile(staged, {
+          onAfterPublish: onAfterSharedHookRecoveryPublish,
+        });
+        rememberRecovery(recovery.recoveryPath);
+        // Copying the old bytes back creates a new inode. Rebind the receipt to that exact inode;
+        // otherwise the apparent rollback is an unowned executable that can never be reconciled.
+        if (!(await recordSharedCreated(
+          repoRoot, 'git-hooks/pre-commit', file, recovery.creation,
+        ))) {
+          const unownedRestore = await quarantineReceiptOwnedSharedFile(
+            repoRoot,
+            'git-hooks/pre-commit',
+            file,
+            {
+              receipt: { shared: { 'git-hooks/pre-commit': recovery.creation } },
+              classify: () => 'stage',
+            },
+          );
+          if (unownedRestore.state === 'staged') {
+            rememberRecovery(await retainQuarantinedSharedFile(unownedRestore));
+          }
+          throw new Error('prior hook copy could not be rebound to a durable ownership receipt');
+        }
+        error.message += `; prior hook copied back and retained at ${recovery.recoveryPath}`;
+      } catch (restoreError) {
+        error.message += `; ${restoreError.message}`;
+        rememberRecovery(restoreError.recoveryPath);
+      }
+    }
+    if (recoveryPaths.length) {
+      error.recoveryPaths = recoveryPaths;
+      error.recoveryPath = recoveryPaths.at(-1);
+      error.message += `; recovery path${recoveryPaths.length === 1 ? '' : 's'}: ${recoveryPaths.join(', ')}`;
+    }
+    throw error;
+  }
 }
 
 /* ---------------------------------------------------------------- host detection ---- */
@@ -2361,7 +2500,8 @@ export async function resolveBin(preferred = null) {
     : {
         bin: 'holt',
         how: 'NOT FOUND on PATH — integrations reference `holt`; install it with '
-          + '`npm install -g holt` or agents will be unable to run it',
+          + '`npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz` '
+          + 'or agents will be unable to run it (the `holt` npm registry name is not an official distribution)',
         missing: true,
       };
 }
@@ -2535,12 +2675,46 @@ export async function integrate(repoRoot, {
  * Covers current target shapes AND retired/legacy ones, because a repository integrated by an
  * older holt may hold config at a path this version no longer writes to.
  */
-export async function uninstall(repoRoot, { home = os.homedir(), scope = 'project' } = {}) {
+function isAbsent(error) {
+  return error?.code === 'ENOENT';
+}
+
+/** @param {string | null} [observedText] */
+function uninstallFailure(results, adapter, file, error, operation = 'inspect', observedText = null) {
+  if (isAbsent(error)) return;
+  // A readable but malformed FOREIGN config is not evidence that Holt owns anything in it. The
+  // uninstall path may inspect every supported host location, including files Holt never touched;
+  // making an unrelated syntax error block package removal is the opposite of safe integration.
+  // If bytes were observed and they do not even name Holt, leave the file alone and converge.
+  // Unreadable bytes remain an honest failure because their contents could not be classified.
+  if (typeof observedText === 'string' && !/holt/i.test(observedText)) return;
+  const row = {
+    adapter,
+    path: file,
+    action: `failed to ${operation}: ${error?.message ?? String(error)}`,
+    ok: false,
+  };
+  if (typeof error?.recoveryPath === 'string') row.recoveryPath = error.recoveryPath;
+  results.push(row);
+}
+
+export async function uninstall(repoRoot, {
+  home = os.homedir(), scope = 'project', finalizeReceipt = true,
+  onBeforeSharedHookMutation = null, onAfterSharedHookRecoveryPublish = null,
+} = {}) {
   const results = [];
   // OWNERSHIP COMES FROM THE RECEIPT, NOT FROM THE RESIDUE. `null` means holt could not read it,
   // which must mean "own nothing" — every unlink below is gated on a positive answer, so an
   // unreadable receipt leaves files in place rather than taking a guess at whose they are.
   const receipt = await readReceipt(repoRoot);
+  if (receipt === null) {
+    results.push({
+      adapter: 'receipt',
+      path: await receiptPath(repoRoot) ?? repoRoot,
+      action: 'failed to read the install receipt; ownership-sensitive files and the receipt will be retained for a safe retry',
+      ok: false,
+    });
+  }
 
   // ---- AGENTS.md: strip holt's block; remove the file only if holt CREATED it and still owns it -
   {
@@ -2566,7 +2740,9 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
           results.push({ adapter: 'agents-md', path: file, action: "holt's block removed, your content kept" });
         }
       }
-    } catch { /* no AGENTS.md — nothing to remove */ }
+    } catch (error) {
+      uninstallFailure(results, 'agents-md', file, error, 'remove Holt guidance');
+    }
   }
 
   // ---- MCP config: every current target, plus every retired one, both scopes as requested ----
@@ -2576,7 +2752,12 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
 
     if (t.format === 'toml') {
       let existing;
-      try { existing = await fs.readFile(t.file, 'utf8'); } catch { continue; }
+      try {
+        existing = await fs.readFile(t.file, 'utf8');
+      } catch (error) {
+        uninstallFailure(results, 'mcp', t.file, error, 'read TOML config');
+        continue;
+      }
       if (!/^\s*\[mcp_servers\.holt\]\s*$/m.test(existing)) continue;
       const stripped = tomlWithoutHoltServer(existing);
       if (!stripped.trim()) {
@@ -2589,11 +2770,16 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
       continue;
     }
 
-    let cfg, rawText;
+    let cfg;
+    /** @type {string | null} */
+    let rawText = null;
     try {
       rawText = await fs.readFile(t.file, 'utf8');
       cfg = readJsoncOrThrow(rawText);
-    } catch { continue; }
+    } catch (error) {
+      uninstallFailure(results, 'mcp', t.file, error, 'read JSON/JSONC config', rawText);
+      continue;
+    }
     if (!cfg[t.key] || !cfg[t.key].holt) continue;
     // A server merely NAMED holt is not holt's. See isHoltMcpEntry.
     if (!isHoltMcpEntry(cfg[t.key].holt)) {
@@ -2644,8 +2830,11 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
   // ---- Claude Code hooks: remove only entries matching holt's structural signature ----
   {
     const file = path.join(repoRoot, '.claude', 'settings.json');
+    /** @type {string | null} */
+    let observedText = null;
     try {
       const rawText = await fs.readFile(file, 'utf8');
+      observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       let removed = 0;
       let result = rawText;
@@ -2726,14 +2915,19 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
           }
         }
       }
-    } catch { /* no settings.json */ }
+    } catch (error) {
+      uninstallFailure(results, 'claude-code', file, error, 'read or reconcile hooks', observedText);
+    }
   }
 
   // ---- Cursor hooks.json: same multi-event pattern as Claude Code ----
   {
     const file = path.join(repoRoot, '.cursor', 'hooks.json');
+    /** @type {string | null} */
+    let observedText = null;
     try {
       const rawText = await fs.readFile(file, 'utf8');
+      observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       let removed = 0;
       let result = rawText;
@@ -2779,14 +2973,19 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
           }
         }
       }
-    } catch { /* no hooks.json */ }
+    } catch (error) {
+      uninstallFailure(results, 'cursor', file, error, 'read or reconcile hooks', observedText);
+    }
   }
 
   // ---- Current project hook surfaces: Codex, Devin CLI and Cascade -----------------------
   {
     const file = path.join(repoRoot, '.agents', 'hooks.json');
+    /** @type {string | null} */
+    let observedText = null;
     try {
       const rawText = await fs.readFile(file, 'utf8');
+      observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       const entry = cfg?.[ANTIGRAVITY_HOOK_KEY];
       if (entry && isAntigravityHoltHook(entry)) {
@@ -2810,14 +3009,19 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
           action: `left in place (${ANTIGRAVITY_HOOK_KEY} is not structurally Holt-owned)`,
         });
       }
-    } catch { /* absent or unreadable: leave it alone */ }
+    } catch (error) {
+      uninstallFailure(results, 'antigravity', file, error, 'read or reconcile hooks', observedText);
+    }
   }
 
   // ---- Current project hook surfaces: Codex, Qwen, Devin CLI and Cascade -----------------
   for (const spec of PROJECT_JSON_HOOK_SPECS) {
     const file = path.join(repoRoot, spec.rel);
+    /** @type {string | null} */
+    let observedText = null;
     try {
       const rawText = await fs.readFile(file, 'utf8');
+      observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       const events = objectAt(cfg, spec.prefix);
       if (!events || typeof events !== 'object' || Array.isArray(events)) continue;
@@ -2861,36 +3065,46 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
         await fs.writeFile(file, result, 'utf8');
         results.push({ adapter: spec.host, path: file, action: `${removed} holt hook command(s) removed, your settings kept` });
       }
-    } catch { /* absent or unreadable: leave it alone */ }
+    } catch (error) {
+      uninstallFailure(results, spec.host, file, error, 'read or reconcile hooks', observedText);
+    }
   }
 
   // ---- Copilot's dedicated project file: remove only the entry carrying holt's marker ------
   {
     const file = path.join(repoRoot, '.github', 'hooks', 'holt.json');
+    /** @type {string | null} */
+    let observedText = null;
     try {
       const rawText = await fs.readFile(file, 'utf8');
+      observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       const entries = cfg.hooks?.PreToolUse;
-      if (!Array.isArray(entries)) throw new Error('no PreToolUse array');
-      const kept = entries.filter((entry) => !isCopilotHoltEntry(entry));
-      const removed = entries.length - kept.length;
-      if (removed > 0) {
-        const rel = await relativeWithinAsync(repoRoot, file);
-        if (await holtOwnsFile(repoRoot, rel, receipt)) {
-          await fs.rm(file, { force: true });
-          results.push({ adapter: 'copilot', path: file, action: 'removed (holt-only content)' });
-        } else {
-          let result = jsoncWrite(
-            rawText,
-            [[['hooks', 'PreToolUse'], kept.length ? kept : undefined]],
-            { tabSize: 2, insertSpaces: true },
-          );
-          if (!result.endsWith('\n')) result += '\n';
-          await fs.writeFile(file, result, 'utf8');
-          results.push({ adapter: 'copilot', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+      // A valid foreign file without this event is simply not ours. Parse/read/write failures are
+      // different: those make it impossible to prove that Holt was removed and must be reported.
+      if (Array.isArray(entries)) {
+        const kept = entries.filter((entry) => !isCopilotHoltEntry(entry));
+        const removed = entries.length - kept.length;
+        if (removed > 0) {
+          const rel = await relativeWithinAsync(repoRoot, file);
+          if (await holtOwnsFile(repoRoot, rel, receipt)) {
+            await fs.rm(file, { force: true });
+            results.push({ adapter: 'copilot', path: file, action: 'removed (holt-only content)' });
+          } else {
+            let result = jsoncWrite(
+              rawText,
+              [[['hooks', 'PreToolUse'], kept.length ? kept : undefined]],
+              { tabSize: 2, insertSpaces: true },
+            );
+            if (!result.endsWith('\n')) result += '\n';
+            await fs.writeFile(file, result, 'utf8');
+            results.push({ adapter: 'copilot', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+          }
         }
       }
-    } catch { /* absent, unreadable or foreign: leave it alone */ }
+    } catch (error) {
+      uninstallFailure(results, 'copilot', file, error, 'read or reconcile hooks', observedText);
+    }
   }
 
   // ---- Cline executable: no shared-file merge is possible, so ownership is receipt-backed ---
@@ -2907,7 +3121,9 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
           results.push({ adapter: 'cline', path: file, action: 'left in place (generated hook was modified or ownership could not be proved)' });
         }
       }
-    } catch { /* no hook */ }
+    } catch (error) {
+      uninstallFailure(results, 'cline', file, error, 'read generated hook');
+    }
   }
 
   // ---- Goose project plugin: both files are generated and deleted only while byte-owned -----
@@ -2915,15 +3131,29 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
     const root = path.join(repoRoot, '.agents', 'plugins', 'holt');
     const rels = [path.join('.agents', 'plugins', 'holt', 'plugin.json'), path.join('.agents', 'plugins', 'holt', 'hooks', 'hooks.json')];
     const files = rels.map((rel) => path.join(repoRoot, rel));
+    let unreadable = false;
+    const present = [];
+    for (const file of files) {
+      try {
+        await fs.readFile(file);
+        present.push(true);
+      } catch (error) {
+        present.push(false);
+        if (!isAbsent(error)) {
+          unreadable = true;
+          uninstallFailure(results, 'goose', file, error, 'read generated plugin');
+        }
+      }
+    }
     const ownership = [];
-    for (let i = 0; i < files.length; i++) {
+    for (let i = 0; i < files.length && !unreadable; i++) {
       ownership.push(await holtOwnsFile(repoRoot, rels[i], receipt));
     }
-    if (ownership.every(Boolean)) {
+    if (!unreadable && present.every(Boolean) && ownership.every(Boolean)) {
       for (const file of files) await fs.rm(file, { force: true });
       results.push({ adapter: 'goose', path: root, action: 'removed' });
-    } else if (ownership.some(Boolean)) {
-      results.push({ adapter: 'goose', path: root, action: 'left in place (one generated plugin file was modified; ownership is no longer complete)' });
+    } else if (!unreadable && (present.some(Boolean) || ownership.some(Boolean))) {
+      results.push({ adapter: 'goose', path: root, action: 'left in place (plugin install is partial, modified, or ownership is no longer complete)' });
     }
   }
 
@@ -2939,21 +3169,63 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
       } else {
         results.push({ adapter: 'opencode', path: file, action: 'left in place (modified or ownership could not be proved)' });
       }
-    } catch { /* no plugin file */ }
+    } catch (error) {
+      uninstallFailure(results, 'opencode', file, error, 'read generated plugin');
+    }
   }
 
   // ---- git pre-commit hook: remove only if it is still holt's own, unmodified file ----
   {
-    const file = path.join(repoRoot, '.git', 'hooks', 'pre-commit');
+    // Install resolves the shared Git directory because `.git` is a FILE in linked worktrees.
+    // Uninstall must resolve the identical location; otherwise running it from the worktree an
+    // agent actually uses leaves the shared hook pointing at a binary the user is about to remove.
+    const common = await gitCommonDir(repoRoot);
+    const hooksRoot = common ?? path.join(repoRoot, '.git');
+    const file = path.join(hooksRoot, 'hooks', 'pre-commit');
     try {
-      const text = await fs.readFile(file, 'utf8');
-      if (isExactGeneratedPreCommit(text)) {
-        await fs.rm(file, { force: true });
-        results.push({ adapter: 'git-hooks', path: file, action: 'removed' });
+      const transaction = await quarantineReceiptOwnedSharedFile(
+        repoRoot,
+        'git-hooks/pre-commit',
+        file,
+        {
+          receipt,
+          onBeforeRename: onBeforeSharedHookMutation,
+          onAfterRecoveryPublish: onAfterSharedHookRecoveryPublish,
+          classify: (bytes) => (isExactGeneratedPreCommit(bytes.toString('utf8')) ? 'stage' : 'leave'),
+        },
+      );
+      if (transaction.state === 'absent') {
+        // Converged: no hook exists, so there is nothing to report or remove.
+      } else if (transaction.state === 'unavailable') {
+        results.push({
+          adapter: 'git-hooks',
+          path: file,
+          action: `left in place (stable regular-file evidence unavailable: ${transaction.reason ?? 'unavailable'}); inspect ${file} and retry \`holt integrate --remove\``,
+        });
+      } else if (transaction.state === 'unowned') {
+        results.push({
+          adapter: 'git-hooks',
+          path: file,
+          action: `left in place (the install receipt does not own this exact file identity); inspect ${file}, remove it manually only if intended, then retry \`holt integrate --remove\``,
+        });
+      } else if (transaction.state === 'leave' || transaction.state === 'current') {
+        results.push({
+          adapter: 'git-hooks',
+          path: file,
+          action: `left in place (the hook bytes differ from Holt's generated hook); inspect ${file}, preserve or remove it deliberately, then retry \`holt integrate --remove\``,
+        });
       } else {
-        results.push({ adapter: 'git-hooks', path: file, action: 'left in place (not holt-authored, or edited since)' });
+        const recoveryPath = await retainQuarantinedSharedFile(transaction);
+        results.push({
+          adapter: 'git-hooks',
+          path: file,
+          action: 'removed from active hook path (receipt-owned; recovery retained)',
+          recoveryPath,
+        });
       }
-    } catch { /* no pre-commit hook */ }
+    } catch (error) {
+      uninstallFailure(results, 'git-hooks', file, error, 'safely retire shared pre-commit hook');
+    }
   }
 
   // ---- empty directories holt created, and then the receipt itself -------------------------
@@ -2962,16 +3234,28 @@ export async function uninstall(repoRoot, { home = os.homedir(), scope = 'projec
   // when the receipt says holt created them AND they are still empty: a directory the user has
   // since put something in is theirs, and `rmdir` refuses a non-empty directory anyway, which
   // makes that the safe primitive rather than `rm -rf`.
-  if (receipt) {
+  const failed = results.some((result) => result.ok === false);
+  if (receipt && !failed) {
     // Deepest first, so `.claude/hooks` is gone before `.claude` is considered.
     for (const rel of [...receipt.dirs].sort((a, b) => b.split('/').length - a.split('/').length)) {
       if (!rel || rel === '.' || rel.startsWith('..')) continue;
       try {
         await fs.rmdir(path.join(repoRoot, rel));
         results.push({ adapter: 'dirs', path: path.join(repoRoot, rel), action: 'removed (empty, holt created it)' });
-      } catch { /* not empty, not there, or not ours to remove — all mean leave it */ }
+      } catch (error) {
+        // Non-empty is user content and absence is already converged. Other errors (notably
+        // permissions and malformed path types) mean cleanup is incomplete and need a retry.
+        if (!isAbsent(error) && error?.code !== 'ENOTEMPTY' && error?.code !== 'EEXIST') {
+          uninstallFailure(results, 'dirs', path.join(repoRoot, rel), error, 'remove empty install directory');
+        }
+      }
     }
-    await clearReceipt(repoRoot);
+    if (finalizeReceipt && !results.some((result) => result.ok === false)) {
+      const storedReceipt = await receiptPath(repoRoot);
+      if (storedReceipt && !(await clearReceipt(repoRoot))) {
+        uninstallFailure(results, 'receipt', storedReceipt, new Error('receipt could not be cleared'), 'clear install receipt');
+      }
+    }
   }
 
   return results;

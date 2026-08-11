@@ -41,12 +41,240 @@
  */
 
 import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
-import { createHash, createPrivateKey } from 'node:crypto';
+import { createHash, createPrivateKey, randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { checkEntitlement } from '../license.mjs';
 import { verifyJournal, readJournalRaw, journalPaths, journalOrigin } from '../journal.mjs';
 import { exportJournal, SIEM_FORMATS } from '../siem.mjs';
 import { formatCheckpoint, signNote, merkleRoot, entryLeaf } from '../attest.mjs';
+import { readStableRegularFile } from '../stable-file.mjs';
+
+const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
+const NONBLOCK = fsConstants.O_NONBLOCK ?? 0;
+const MODULE_FILE = fileURLToPath(import.meta.url);
+const ANCHORED_WRITER_FLAG = '--holt-anchored-audit-writer-v1';
+const SAME_OBJECT = (left, right) => left && right
+  && String(left.dev) === String(right.dev)
+  && String(left.ino) === String(right.ino);
+
+function sinkRefuse(code, message) {
+  throw Object.assign(new Error(`audit sink REFUSED: ${message}`), { code });
+}
+
+async function observedSinkPathKind(target) {
+  let handle;
+  try {
+    // Open first. The descriptor is the authority; the later lstat only proves the name still
+    // points at that descriptor. This avoids turning a check-then-open race into a write target.
+    handle = await fs.open(target, fsConstants.O_RDONLY | NOFOLLOW | NONBLOCK);
+    const opened = await handle.stat();
+    const named = await fs.lstat(target);
+    if (named.isSymbolicLink() || !SAME_OBJECT(opened, named)) {
+      sinkRefuse('EDESTINATION', `destination changed while it was being resolved: ${target}`);
+    }
+    if (opened.isDirectory()) return 'directory';
+    if (opened.isFile() || opened.isFIFO()) return 'stream';
+    sinkRefuse('EDESTINATION', `destination must be a regular file, FIFO, or directory: ${target}`);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 'missing';
+    // Node cannot open directories as file descriptors on Windows. Keep the fallback narrow and
+    // still reject reparse-point/symlink names before using the directory only as a parent.
+    if (process.platform === 'win32' && ['EISDIR', 'EPERM', 'EACCES'].includes(error?.code)) {
+      const named = await fs.lstat(target);
+      if (named.isDirectory() && !named.isSymbolicLink()) return 'directory';
+    }
+    if (error?.code === 'ELOOP') sinkRefuse('EDESTINATION', `destination must not be a symlink: ${target}`);
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function directoryIdentity(directory) {
+  const named = await fs.lstat(directory);
+  if (!named.isDirectory() || named.isSymbolicLink()) {
+    sinkRefuse('EDESTINATION', `destination parent is not one real directory: ${directory}`);
+  }
+  return {
+    path: directory,
+    canonical: await fs.realpath(directory),
+    dev: String(named.dev),
+    ino: String(named.ino),
+  };
+}
+
+async function sameDirectoryIdentity(expected) {
+  try {
+    const current = await directoryIdentity(expected.path);
+    return current.canonical === expected.canonical
+      && current.dev === expected.dev && current.ino === expected.ino;
+  } catch {
+    return false;
+  }
+}
+
+function relativeLeaf(value) {
+  const leaf = String(value);
+  if (!leaf || leaf === '.' || leaf === '..' || leaf.includes('/') || leaf.includes('\\')
+    || leaf.includes('\0') || path.basename(leaf) !== leaf) {
+    sinkRefuse('EDESTINATION', `anchored writer received an invalid leaf name: ${JSON.stringify(leaf)}`);
+  }
+  return leaf;
+}
+
+async function appendSinkBytesRelative(leafInput, body) {
+  const leaf = relativeLeaf(leafInput);
+  let handle;
+  try {
+    handle = await fs.open(
+      leaf,
+      fsConstants.O_WRONLY | fsConstants.O_APPEND | fsConstants.O_CREAT | NOFOLLOW | NONBLOCK,
+      0o600,
+    );
+    const opened = await handle.stat();
+    const named = await fs.lstat(leaf);
+    if (named.isSymbolicLink() || !SAME_OBJECT(opened, named)
+      || !(opened.isFile() || opened.isFIFO())) {
+      sinkRefuse('EDESTINATION', `destination is not one stable regular file or FIFO: ${leaf}`);
+    }
+    if (opened.isFile() && opened.nlink !== 1) {
+      sinkRefuse('EDESTINATION', `destination has ${opened.nlink} hard links: ${leaf}`);
+    }
+    await handle.writeFile(body);
+    if (opened.isFile()) await handle.sync();
+    const after = await handle.stat();
+    const namedAfter = await fs.lstat(leaf);
+    if (namedAfter.isSymbolicLink() || !SAME_OBJECT(opened, after) || !SAME_OBJECT(after, namedAfter)) {
+      sinkRefuse('EDESTINATION', `destination changed while records were being written: ${leaf}`);
+    }
+  } catch (error) {
+    if (error?.code === 'ELOOP') sinkRefuse('EDESTINATION', `destination must not be a symlink: ${leaf}`);
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function atomicReplaceFileRelative(leafInput, bytes) {
+  const leaf = relativeLeaf(leafInput);
+  const temporary = `.${leaf}.${process.pid}.${randomUUID()}.tmp`;
+  let handle;
+  try {
+    handle = await fs.open(
+      temporary,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(bytes);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(temporary, leaf);
+    const observed = await readStableRegularFile(leaf, {
+      maxBytes: Buffer.byteLength(bytes), requireSingleLink: true, requireOwner: true,
+    });
+    if (!observed.ok || !observed.bytes.equals(Buffer.from(bytes))) {
+      sinkRefuse('EDESTINATION', `published state did not verify at ${leaf}`);
+    }
+  } finally {
+    await handle?.close().catch(() => {});
+    await fs.rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+async function anchoredWriterMain(encodedIdentity) {
+  const expected = JSON.parse(Buffer.from(String(encodedIdentity), 'base64url').toString('utf8'));
+  const observed = await directoryIdentity('.');
+  if (observed.canonical !== expected.canonical
+    || observed.dev !== expected.dev || observed.ino !== expected.ino) {
+    sinkRefuse('EDESTINATION', 'destination parent changed before the anchored writer started');
+  }
+  // The process cwd is now the directory handle: if the pathname is renamed or replaced after
+  // READY, every relative operation below remains attached to this exact directory inode.
+  process.stdout.write('READY\n');
+  process.stdin.setEncoding('utf8');
+  let raw = '';
+  for await (const chunk of process.stdin) raw += chunk;
+  const request = JSON.parse(raw);
+  if (!request || !Array.isArray(request.operations)) {
+    sinkRefuse('EDESTINATION', 'anchored writer request is malformed');
+  }
+  for (const operation of request.operations) {
+    const bytes = Buffer.from(String(operation?.bytesB64 ?? ''), 'base64');
+    if (operation?.kind === 'append') await appendSinkBytesRelative(operation.leaf, bytes);
+    else if (operation?.kind === 'replace') await atomicReplaceFileRelative(operation.leaf, bytes);
+    else sinkRefuse('EDESTINATION', `anchored writer operation is unsupported: ${operation?.kind}`);
+  }
+  process.stdout.write(`${JSON.stringify({ ok: true })}\n`);
+}
+
+/**
+ * @param {string} directory
+ * @param {Array<{kind:string,leaf:string,bytesB64:string}>} operations
+ * @param {{onReady?: ((detail:any)=>any)|null, timeoutMs?:number}} [options]
+ */
+async function runAnchoredWriter(directory, operations, { onReady = null, timeoutMs = 30_000 } = {}) {
+  const expected = await directoryIdentity(directory);
+  const encoded = Buffer.from(JSON.stringify(expected), 'utf8').toString('base64url');
+  const child = spawn(process.execPath, [MODULE_FILE, ANCHORED_WRITER_FLAG, encoded], {
+    cwd: directory,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env, HOLT_AUDIT_ANCHORED_WRITER: '1' },
+  });
+  let stdout = '';
+  let stderr = '';
+  let ready = false;
+  let readyResolve;
+  let readyReject;
+  const readyPromise = new Promise((resolve, reject) => {
+    readyResolve = resolve;
+    readyReject = reject;
+  });
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+    if (!ready && stdout.startsWith('READY\n')) {
+      ready = true;
+      readyResolve();
+    }
+  });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  child.once('error', (error) => readyReject(error));
+  const exitPromise = new Promise((resolve) => {
+    child.once('exit', (code, signal) => {
+      if (!ready) readyReject(new Error(stderr || `anchored writer exited before ready (${code ?? signal})`));
+      resolve({ code, signal });
+    });
+  });
+  const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
+  timer.unref?.();
+  try {
+    await readyPromise;
+    if (onReady) await onReady({ directory, identity: expected });
+    child.stdin.end(JSON.stringify({ operations }));
+    const exited = await exitPromise;
+    if (exited.code !== 0) {
+      sinkRefuse('EDESTINATION', `anchored writer failed: ${stderr.trim() || exited.signal || exited.code}`);
+    }
+    if (!stdout.includes('{"ok":true}')) {
+      sinkRefuse('EDESTINATION', 'anchored writer returned no completion attestation');
+    }
+    if (!(await sameDirectoryIdentity(expected))) {
+      sinkRefuse('EDESTINATION', `destination parent directory changed during the write: ${directory}`);
+    }
+  } catch (error) {
+    child.stdin.destroy();
+    child.kill('SIGTERM');
+    await exitPromise.catch(() => {});
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export class EntitlementError extends Error {
   constructor(entitlement) {
@@ -67,13 +295,18 @@ export async function cursorPath(cwd, destination) {
 }
 
 export async function readCursor(cwd, destination) {
-  try {
-    return JSON.parse(await fs.readFile(await cursorPath(cwd, destination), 'utf8'));
-  } catch (e) {
-    if (e.code === 'ENOENT') return null;
+  const file = await cursorPath(cwd, destination);
+  const observed = await readStableRegularFile(file, { maxBytes: 64 * 1024, requireSingleLink: true });
+  if (!observed.ok) {
+    if (observed.code === 'ENOENT') return null;
     // A cursor that exists but cannot be read is NOT "start from zero": that would silently
     // re-ship the entire history into a SIEM with a retention budget. Refuse and say why.
-    throw new Error(`sink cursor is unreadable (${e.message}) — refusing to guess how much has already been exported`);
+    throw new Error(`sink cursor is unreadable (${observed.reason}) — refusing to guess how much has already been exported`);
+  }
+  try {
+    return JSON.parse(observed.bytes.toString('utf8'));
+  } catch (error) {
+    throw new Error(`sink cursor is unreadable (${error.message}) — refusing to guess how much has already been exported`);
   }
 }
 
@@ -95,12 +328,13 @@ async function loadSigningKey({ signingKey = null, signingKeyPath = null, env = 
  * @param {string} cwd                any path inside the repository
  * @param {{to?: string|null, format?: string, dryRun?: boolean, env?: Record<string, string|undefined>, now?: number|null,
  *          signerName?: string|null, signingKey?: string|null, signingKeyPath?: string|null,
- *          publicKeyB64?: string|null}} [opts]
+ *          publicKeyB64?: string|null, onDestinationWriterReady?: ((detail:any)=>any)|null}} [opts]
  * @returns {Promise<any>}
  */
 export async function sinkExport(cwd, {
   to = null, format = 'ocsf', dryRun = false, env = process.env, now = null,
   signerName = null, signingKey = null, signingKeyPath = null, publicKeyB64 = null,
+  onDestinationWriterReady = null,
 } = {}) {
   const ent = checkEntitlement('audit-sink', { env, publicKeyB64 });
   if (!ent.entitled) throw new EntitlementError(ent);
@@ -151,8 +385,8 @@ export async function sinkExport(cwd, {
 
   // 3. Where the bytes land. A directory gets one file per UTC day, which is what a log shipper
   //    and a retention policy both expect; a file is appended to.
-  const stat = await fs.stat(to).catch(() => null);
-  const destination = stat?.isDirectory()
+  const destinationKind = await observedSinkPathKind(to);
+  const destination = destinationKind === 'directory'
     ? path.join(to, `holt-audit-${new Date(now ?? Date.now()).toISOString().slice(0, 10)}.ndjson`)
     : to;
 
@@ -191,11 +425,26 @@ export async function sinkExport(cwd, {
     await fs.mkdir(path.dirname(destination), { recursive: true });
     // Records first, cursor last. The other order would mark records shipped that never landed —
     // a silent audit gap, which is the one failure a retention obligation cannot tolerate.
-    if (body) await fs.appendFile(destination, body, 'utf8');
-    await fs.writeFile(`${destination}.checkpoint`, checkpointText, 'utf8');
+    const destinationDirectory = path.dirname(destination);
+    const destinationOperations = [];
+    if (body) {
+      destinationOperations.push({
+        kind: 'append', leaf: path.basename(destination), bytesB64: Buffer.from(body).toString('base64'),
+      });
+    }
+    destinationOperations.push({
+      kind: 'replace', leaf: path.basename(`${destination}.checkpoint`),
+      bytesB64: Buffer.from(checkpointText, 'utf8').toString('base64'),
+    });
+    await runAnchoredWriter(destinationDirectory, destinationOperations, {
+      onReady: onDestinationWriterReady,
+    });
     const cp = await cursorPath(cwd, to);
     await fs.mkdir(path.dirname(cp), { recursive: true });
-    await fs.writeFile(cp, `${JSON.stringify(nextCursor, null, 2)}\n`, 'utf8');
+    await runAnchoredWriter(path.dirname(cp), [{
+      kind: 'replace', leaf: path.basename(cp),
+      bytesB64: Buffer.from(`${JSON.stringify(nextCursor, null, 2)}\n`, 'utf8').toString('base64'),
+    }]);
   }
 
   return {
@@ -219,4 +468,11 @@ export async function sinkExport(cwd, {
       : 'batch checkpoint is UNSIGNED. Set HOLT_AUDIT_SIGNING_KEY on the aggregation host to a key '
         + 'the developer machines do not hold; without it the checkpoint proves integrity, not origin.',
   };
+}
+
+if (process.argv[2] === ANCHORED_WRITER_FLAG) {
+  anchoredWriterMain(process.argv[3]).catch((error) => {
+    process.stderr.write(`${error?.stack ?? error}\n`);
+    process.exitCode = 1;
+  });
 }

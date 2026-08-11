@@ -31,9 +31,12 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { newRepo, standardFixture } from '../fixtures.mjs';
-import { assessCommand, cachedReport } from '../../src/agent.mjs';
+import { assessCommand, buildBrief, cachedReport } from '../../src/agent.mjs';
+import { rescue } from '../../src/actions.mjs';
 import { git } from '../../src/git.mjs';
-import { stashState, describeStash, MAX_ENTRIES } from '../../src/stash.mjs';
+import {
+  stashState, describeStash, STASH_POP_CONFLICT_GUIDANCE, MAX_ENTRIES,
+} from '../../src/stash.mjs';
 import { renderRisk } from '../../src/render.mjs';
 
 /** Real git, for establishing premises. Tests must never assume what the command does. */
@@ -72,6 +75,16 @@ async function withGitCommandLog(t, run) {
 
 /** The word that must appear in the stash and nowhere else. */
 const ONLY_HERE = 'RESCUE_ME_ONLY_IN_THE_STASH';
+
+/** Every user-facing channel must state the real order: apply first, rescue second. */
+function assertStashRecoveryGuidance(text, channel) {
+  assert.match(text, /`git stash apply` first/i,
+    `${channel}: applying the off-disk entry must be the first step: ${text}`);
+  assert.match(text, /then commit[\s\S]+(?:`holt rescue|`holt_rescue)/i,
+    `${channel}: rescue is an alternative only after the applied bytes exist in a worktree: ${text}`);
+  assert.match(text, /cannot capture an unapplied stash entry/i,
+    `${channel}: name the limitation instead of implying rescue reads refs\/stash: ${text}`);
+}
 
 /**
  * Which commits reachable from a REAL ref introduce this content?
@@ -123,6 +136,19 @@ async function sweptFixture(t) {
 test('REFUTATION: drop/clear DENY while pop safely restores the only copy', async (t) => {
   const fx = await sweptFixture(t);
 
+  // This is the usability trap the old advice hid: rescue captures a WORKTREE. With the entry
+  // still off disk, there is genuinely nothing for it to capture even though the stash holds the
+  // only copy. Guidance that presents bare `holt rescue` as an alternative to applying the entry
+  // therefore sends the user down a successful no-op path.
+  const offDiskRescue = await rescue(fx.root, path.basename(fx.root), { includePrimary: true });
+  assert.equal(offDiskRescue.ok, true, JSON.stringify(offDiskRescue));
+  assert.equal(offDiskRescue.nothingToRescue, true,
+    'premise: rescue cannot capture bytes that are still only in refs/stash');
+  assert.equal(
+    await fs.stat(path.join(fx.root, 'src/rescue_me.js')).then(() => true, () => false),
+    false, 'rescue must not manufacture the off-disk file',
+  );
+
   for (const cmd of ['git stash drop', 'git stash clear', 'git stash drop stash@{0}']) {
     const v = await assessCommand(cmd, fx.root);
     assert.equal(v.decision, 'deny',
@@ -130,9 +156,7 @@ test('REFUTATION: drop/clear DENY while pop safely restores the only copy', asyn
     assert.match(v.reason, /stash@\{0\}/, `it must NAME the entry it would destroy: ${v.reason}`);
     assert.match(v.reason, /src\/rescue_me\.js/,
       `and sample the content that dies with it: ${v.reason}`);
-    assert.match(v.reason, /git stash apply/,
-      `and name the way to make this safe: ${v.reason}`);
-    assert.match(v.reason, /holt rescue/, `and holt's own escape hatch: ${v.reason}`);
+    assertStashRecoveryGuidance(v.reason, `${cmd} guard`);
   }
 
   const pop = await assessCommand('git stash pop', fx.root);
@@ -163,9 +187,35 @@ test('REFUTATION: a conflicted pop keeps the stash entry and both versions on di
     'Git must state that the failed pop retained the recovery entry');
   assert.match((await gitIn(['stash', 'list'], fx.root)).out, /stash@\{0\}/,
     'the entry remains reachable after a conflict');
+  assert.match(STASH_POP_CONFLICT_GUIDANCE, /only after a successful apply/i,
+    'the shared diagnostic must agree with the observed drop timing');
+  assert.match(STASH_POP_CONFLICT_GUIDANCE, /conflicts[\s\S]+keeps the stash entry/i,
+    'the shared diagnostic must state the observed conflict outcome');
   const conflicted = await fs.readFile(path.join(fx.root, 'conflict.txt'), 'utf8');
   assert.match(conflicted, /stashed-only-version/);
   assert.match(conflicted, /working-only-version/);
+});
+
+test('RECOVERY: apply first, then Holt rescue makes an off-disk stash durable', async (t) => {
+  const fx = await sweptFixture(t);
+
+  const applied = await gitIn(['stash', 'apply'], fx.root);
+  assert.equal(applied.code, 0, `the first documented step must work: ${applied.err}`);
+  assert.match(await fs.readFile(path.join(fx.root, 'src/rescue_me.js'), 'utf8'),
+    new RegExp(ONLY_HERE), 'apply must put the bytes back into the worktree');
+  assert.match((await gitIn(['stash', 'list'], fx.root)).out, /stash@\{0\}/,
+    '`apply`, unlike `pop`, must keep the recovery entry');
+
+  const captured = await rescue(fx.root, path.basename(fx.root), { includePrimary: true });
+  assert.equal(captured.ok, true, JSON.stringify(captured));
+  assert.equal(captured.verified, true, 'the applied bytes must be verified on the rescue ref');
+  assert.match(captured.ref ?? '', /^refs\/holt\/rescue\//);
+  const durable = await gitIn(['grep', '-a', ONLY_HERE, captured.ref, '--', '.'], fx.root);
+  assert.equal(durable.code, 0, `the rescue ref must contain the exact stash-only bytes: ${durable.err}`);
+
+  const drop = await assessCommand('git stash drop', fx.root);
+  assert.equal(drop.decision, 'allow',
+    `once the rescue ref holds the exact work, dropping the stash loses nothing: ${JSON.stringify(drop)}`);
 });
 
 test('FAIL CLOSED: a stash reflog probe failure is unknown, never an empty all-clear', async (t) => {
@@ -604,6 +654,10 @@ test('REPORT: a stash holding the only copy is a repository-level at-risk row, n
   const rendered = renderRisk(report);
   assert.match(rendered, /stash@\{0\}/, `\`holt risk\` must show the entry: ${rendered}`);
   assert.match(rendered, /src\/rescue_me\.js/, `and what it holds: ${rendered}`);
+  assertStashRecoveryGuidance(rendered, 'terminal risk report');
+
+  const brief = await buildBrief(fx.root, { includePrimary: true });
+  assertStashRecoveryGuidance(brief, 'agent brief');
   // A REPOSITORY-LEVEL LINE, NOT A FAKE WORKSTREAM. Inventing a workstream row would put a
   // non-existent id into every downstream consumer (gate, rescue, landing plan, the graph).
   assert.equal(report.unique.some((u) => /stash/i.test(u.id)), false,
@@ -665,6 +719,7 @@ test('MCP: the channel agents actually read does not stay silent about the stash
   assert.equal(risk.stash.entries[0].selector, 'stash@{0}');
   assert.equal(risk.stash.entries[0].sample[0].path, 'src/rescue_me.js');
   assert.match(risk.stash.note, /git stash drop/, 'and name the verb that destroys it');
+  assertStashRecoveryGuidance(risk.stash.note, 'MCP at-risk note');
   // NEVER A SYNTHETIC WORKSTREAM: an agent handed one would try to check, land or delete it.
   assert.equal(risk.workstreams.some((w) => /stash/i.test(w.id ?? '')), false,
     'the stash must not appear as a workstream row');

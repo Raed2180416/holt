@@ -440,7 +440,7 @@ Each quoted evidence name below is an exact string present in the named test/har
 #### `managed-policy-authority`
 
 - User surfaces: `cli:managed-policy`, `cli:ci`
-- Exact executable evidence: `test/e2e/managed-policy-cli.test.mjs` — “managed-policy is a real Enterprise entitlement with a reachable command surface”; `test/e2e/managed-policy-tuf.test.mjs` — “real Updater verifies and activates policy with a root-bound sorted receipt, then offline authority load performs zero fetches”; `test/e2e/managed-policy-authority.test.mjs` — “system-enrolled active policy resolves by exact trusted identity and evaluates every layer additively without fetch”
+- Exact executable evidence: `test/e2e/managed-policy-cli.test.mjs` — “managed-policy is a real Enterprise entitlement with a reachable command surface”; `test/e2e/managed-policy-tuf.test.mjs` — “system managed-policy TUF suite passes under the real uid-0 and fixed-/etc contract”; `test/e2e/managed-policy-authority.test.mjs` — “system managed-policy authority suite passes under the real uid-0 and fixed-/etc contract”
 - Independent oracle: Real tuf-js signatures/rotation/delegation, root-owned out-of-repository authority, inode-bound repository identity, crash receipts, and byte-identical last-good state.
 - Remaining unproven gap: SSO/SCIM, Windows system ACL authority, signed offline-media update workflow, and a hosted macOS root-ownership run are not shipped or proven.
 - Mandatory runner evidence: `complete-test-corpus`, `mutation-fingerprint`
@@ -526,7 +526,7 @@ Each quoted evidence name below is an exact string present in the named test/har
 #### `monster-and-randomized-invariants`
 
 - User surfaces: `harness:monster`, `harness:fuzz`
-- Exact executable evidence: `test/e2e/monster.test.mjs` — “MONSTER: 40 worktrees of every trap at once — full loop, every byte graded”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=${seed}: holt never calls at-risk content safe, never removes it”
+- Exact executable evidence: `test/e2e/monster.test.mjs` — “MONSTER: 40 worktrees of every trap at once — full loop, every byte graded”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=1: holt never calls at-risk content safe, never removes it”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=2: holt never calls at-risk content safe, never removes it”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=3: holt never calls at-risk content safe, never removes it”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=4: holt never calls at-risk content safe, never removes it”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=5: holt never calls at-risk content safe, never removes it”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=6: holt never calls at-risk content safe, never removes it”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=7: holt never calls at-risk content safe, never removes it”; `test/e2e/fuzz-invariant.test.mjs` — “FUZZ INVARIANT seed=8: holt never calls at-risk content safe, never removes it”
 - Independent oracle: Direct filesystem/base comparison and retained-byte checks share no verdict code with Holt.
 - Remaining unproven gap: Seeded randomized and synthetic worst cases remain finite; passing them is not proof against every possible race.
 - Mandatory runner evidence: `complete-test-corpus`, `mutation-fingerprint`

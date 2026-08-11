@@ -46,6 +46,11 @@
  *      check first. The same step carries the non-vacuous `/dev/null` hooks-path proof onto the
  *      Windows matrix rather than assuming Git for Windows behaves like a POSIX build.
  *
+ *   8. DUPLICATED EXPENSIVE EVIDENCE. The complete feature proof already owns every test file and
+ *      the full mutation corpus. Re-running either after the proof made the green all-backends
+ *      path structurally exceed its job timeout. Publication consumes the retained, checksummed
+ *      denominators, and the measured job envelope is pinned with explicit runner headroom.
+ *
  * A GATE WITH NO POSITIVE CONTROL HAS PROVEN NOTHING. `--self-test` copies the real workflow tree
  * to a scratch directory, plants one violation of each rule, and requires the checker to go RED on
  * every one of them and GREEN on the untouched copy. If any planted violation is NOT caught, the
@@ -77,6 +82,12 @@ export const GIT_RUNTIME_CHECK = 'node scripts/check-git-runtime.mjs --verify-in
 
 /** A complete feature proof is executable evidence, not a prose matrix or an ordinary test glob. */
 export const FEATURE_PROOF_COMMAND = 'node scripts/run-feature-proof.mjs --out "$RUNNER_TEMP/feature-proof.json"';
+
+/** Publication reuses checksum-bound proof denominators instead of rerunning hours of work. */
+export const FEATURE_PROOF_PUBLICATION_COMMAND = 'node scripts/run-feature-proof.mjs --verify-publication "$RUNNER_TEMP/feature-proof.json"';
+
+/** Run 31477499554 measured 59m08s through proof retention; this is 25% headroom, not a guess. */
+export const FULL_JOB_TIMEOUT_MINUTES = 75;
 
 /** The omission check must run before the core smoke against the isolated installed package. */
 export const OMIT_OPTIONAL_PROOF = 'node scripts/check-omit-optional-install.mjs --prefix "$OPTIONAL_PREFIX"';
@@ -224,6 +235,25 @@ export function jobOperatingSystems(body) {
  */
 export function hasTopLevelPermissions(text) {
   return text.split(/\r?\n/).some((l) => /^permissions:\s*(\{\s*\}\s*)?(#.*)?$/.test(l) || /^permissions:\s*\S/.test(l));
+}
+
+/** Read the scalar entries in a top-level block-style permissions map. An unexpected nested or
+ * non-scalar shape is retained as an invalid entry so a least-privilege equality check fails
+ * closed instead of silently ignoring syntax it does not understand. */
+function topLevelPermissionEntries(text) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  const start = lines.findIndex((line) => /^permissions:\s*(?:#.*)?$/.test(line));
+  if (start === -1) return [];
+  const entries = [];
+  for (let index = start + 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (!line.trim() || /^\s*#/.test(line)) continue;
+    const indent = line.length - line.trimStart().length;
+    if (indent === 0) break;
+    const match = /^ {2}([A-Za-z][A-Za-z0-9_-]*):\s*([^#\s]+)\s*(?:#.*)?$/.exec(line);
+    entries.push(match ? [match[1], match[2]] : ['<invalid>', line.trim()]);
+  }
+  return entries;
 }
 
 /** `write-all` defeats the least-privilege default whether declared for the entire workflow or
@@ -421,10 +451,15 @@ export async function checkAll(root = REPO_ROOT) {
   let totalJobs = 0;
   /** @type {{file:string,id:string,body:string}[]} */
   const allJobs = [];
+  /** @type {{action:string,sha:string,version:string|null,file:string,line:number}[]} */
+  const actionPins = [];
+  /** @type {Map<string,string>} */
+  const workflowTexts = new Map();
 
   for (const name of names) {
     const rel = `.github/workflows/${name}`;
     const text = await fs.readFile(path.join(wfDir, name), 'utf8');
+    workflowTexts.set(rel, text);
 
     // RULE: least privilege. Omitting `permissions:` inherits the enterprise/org/repository
     // default, which is broader than any of these workflows needs.
@@ -456,6 +491,7 @@ export async function checkAll(root = REPO_ROOT) {
         v.push({ rule: 'pin', file: rel, line: u.line, message: `\`uses: ${u.ref}\` is pinned to a MUTABLE ref. A tag or branch can be repointed by whoever owns it; a full-length commit SHA cannot. Use \`${u.ref.slice(0, at)}@<40-char sha> # ${ref}\`.` });
         continue;
       }
+      actionPins.push({ action: u.ref.slice(0, at).toLowerCase(), sha: ref, version: u.comment, file: rel, line: u.line });
       if (!u.comment || !VERSION_COMMENT_RE.test(u.comment)) {
         v.push({ rule: 'pin', file: rel, line: u.line, message: `\`uses: ${u.ref}\` is pinned but does not say to WHAT. Add a trailing version comment (\`# v4.2.2\`) so the pin is reviewable and updatable.` });
       }
@@ -476,6 +512,83 @@ export async function checkAll(root = REPO_ROOT) {
   }
   if (totalJobs === 0) {
     v.push({ rule: 'vacuity', file: '.github/workflows', line: null, message: 'no job was read from any workflow — the cross-platform rule checked nothing' });
+  }
+
+  // RULE: one fetched action has one reviewed implementation across the workflow tree. A stale
+  // checkout/setup-node pin in a rarely-run release job otherwise survives after CI has moved to
+  // a new major, leaving Dependabot PRs open forever and making the executable supply chain depend
+  // on which trigger happened to fire. This does not demand "latest"; it demands one deliberate,
+  // reviewable pin everywhere that action is used.
+  const pinsByAction = new Map();
+  for (const pin of actionPins) {
+    if (!pinsByAction.has(pin.action)) pinsByAction.set(pin.action, []);
+    pinsByAction.get(pin.action).push(pin);
+  }
+  for (const [action, pins] of pinsByAction) {
+    const identities = new Set(pins.map((pin) => `${pin.sha}\0${pin.version ?? ''}`));
+    if (identities.size > 1) {
+      v.push({
+        rule: 'action-coherence', file: '.github/workflows', line: null,
+        message: `${action} has ${identities.size} different SHA/version pins across workflows: ${pins.map((pin) => `${pin.file}:${pin.line}`).join(', ')}`,
+      });
+    }
+  }
+
+  // RULE: a mutating workflow may not erase a command failure with `|| true`, and repository
+  // changes must travel through reviewed branch/PR machinery rather than a scheduled token doing
+  // an unsigned direct push. Diagnostic commands that can fail need explicit status handling so
+  // expected non-success and instrumentation failure remain distinguishable.
+  for (const job of allJobs) {
+    for (const command of executableRunLines(job.body)) {
+      if (/\|\|\s*(?:true|:)(?:\s|$)/.test(command.text)) {
+        v.push({
+          rule: 'false-green-shell', file: job.file, line: command.line,
+          message: `job ${job.id} discards a command failure with a shell no-op; capture and classify the exit/status explicitly`,
+        });
+      }
+      if (/(?:^|[;&|]\s*|\s)git\s+push(?:\s|$)/.test(command.text)) {
+        v.push({
+          rule: 'direct-protected-push', file: job.file, line: command.line,
+          message: `job ${job.id} pushes Git state directly; generate a reviewed branch/PR or keep the workflow report-only`,
+        });
+      }
+    }
+  }
+  for (const [file, workflow] of workflowTexts) {
+    for (const [index, line] of workflow.split(/\r?\n/).entries()) {
+      if (/^\s+continue-on-error:\s*true\s*(?:#.*)?$/.test(line)) {
+        v.push({
+          rule: 'false-green-shell', file, line: index + 1,
+          message: '`continue-on-error: true` converts a required workflow failure into a green step/job; classify the expected status inside the command instead',
+        });
+      }
+    }
+  }
+
+  // RULE: the scheduled social-proof evaluator is a fail-honest, report-only monitor. A threshold
+  // miss is an expected nonzero result, but an unavailable/malformed lookup is not. The old
+  // `--apply || true` erased both distinctions and then pushed an unsigned commit to main. Keep
+  // the expected verdict/status mapping explicit and leave the reviewed signed PR as sole writer.
+  const milestoneFile = '.github/workflows/milestone.yml';
+  const milestoneText = workflowTexts.get(milestoneFile) ?? '';
+  const milestoneJob = allJobs.find((job) => job.file === milestoneFile && job.id === 'milestone');
+  const milestoneCommands = executableRunLines(milestoneJob?.body ?? '').map((line) => line.text);
+  const milestonePermissions = topLevelPermissionEntries(milestoneText);
+  if (!milestoneJob
+      || milestonePermissions.length !== 1
+      || milestonePermissions[0][0] !== 'contents'
+      || milestonePermissions[0][1] !== 'read'
+      || /^ {4}permissions:/m.test(milestoneJob.body)
+      || !milestoneCommands.some((line) => line.includes('node scripts/milestone.mjs --check > "$report"'))
+      || !milestoneCommands.some((line) => line === 'status=$?')
+      || !milestoneCommands.some((line) => line.includes('MILESTONE_STATUS="$status"'))
+      || !milestoneCommands.some((line) => line.includes('Array.isArray(report.errors) || report.errors.length > 0'))
+      || !milestoneCommands.some((line) => line.includes('status !== (report.met ? 0 : 1)'))
+      || milestoneText.includes('scripts/milestone.mjs --apply')) {
+    v.push({
+      rule: 'milestone-monitor', file: milestoneFile, line: null,
+      message: 'the milestone workflow must be read-only, preserve the evaluator exit status, reject lookup errors/malformed verdicts, and leave public-claim changes to a reviewed signed PR',
+    });
   }
 
   // RULE: every CI job that installs the reviewed dependency/test tree proves the selected Git
@@ -581,8 +694,8 @@ export async function checkAll(root = REPO_ROOT) {
   const fullJob = allJobs.find((j) => j.file === '.github/workflows/ci.yml' && j.id === 'full');
   if (!fullJob || !fullJob.body.includes('HOLT_REAL_REPOS:')
       || !runsCommand(fullJob.body, 'bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"')
-      || !runsCommand(fullJob.body, 'npm test')) {
-    v.push({ rule: 'real-corpus-owner', file: '.github/workflows/ci.yml', line: null, message: 'the dedicated Linux full job must export HOLT_REAL_REPOS, clone all pinned fixtures, and execute npm test so real-repos.test.mjs is required 4/4 evidence' });
+      || !runsCommand(fullJob.body, FEATURE_PROOF_COMMAND)) {
+    v.push({ rule: 'real-corpus-owner', file: '.github/workflows/ci.yml', line: null, message: 'the dedicated Linux full job must export HOLT_REAL_REPOS, clone all pinned fixtures, and execute the complete feature proof so real-repos.test.mjs is required 4/4 evidence' });
   }
 
   // RULE: the bounded feature runner is mandatory in the all-backends owner and its write-once
@@ -590,8 +703,11 @@ export async function checkAll(root = REPO_ROOT) {
   // that runs only on success cannot substitute for the source/runtime/denominator-bound artifact.
   const featureProofUpload = fullJob?.body.indexOf('uses: actions/upload-artifact@') ?? -1;
   const featureProofRun = fullJob?.body.indexOf(`run: ${FEATURE_PROOF_COMMAND}`) ?? -1;
+  const publicationRun = fullJob?.body.indexOf(`run: ${FEATURE_PROOF_PUBLICATION_COMMAND}`) ?? -1;
   if (!fullJob || !runsCommand(fullJob.body, FEATURE_PROOF_COMMAND)
       || featureProofUpload < featureProofRun
+      || publicationRun < featureProofUpload
+      || !runsCommand(fullJob.body, FEATURE_PROOF_PUBLICATION_COMMAND)
       || !fullJob.body.includes('if: ${{ always() }}')
       || !fullJob.body.includes('if-no-files-found: error')
       || !fullJob.body.includes('${{ runner.temp }}/feature-proof.json')
@@ -599,6 +715,25 @@ export async function checkAll(root = REPO_ROOT) {
     v.push({
       rule: 'feature-proof', file: '.github/workflows/ci.yml', line: null,
       message: 'the all-backends job must execute the complete feature-proof runner and always retain its JSON plus SHA-256 sidecar, including a completed invalid run',
+    });
+  }
+
+  // RULE: the retained proof is the single owner of the complete corpus and mutation fingerprint.
+  // Run 31477499554 spent 53m59s in that proof (47m22s in mutation) after 5m06s setup. The old
+  // workflow then scheduled two more full corpora and two more mutation runs, so a green result
+  // could not fit its 60-minute cap. The 75-minute envelope is the measured 59m08s path plus 25%
+  // runner variance; duplicate work is rejected rather than hidden by another timeout increase.
+  const fullCommands = executableRunLines(fullJob?.body ?? '').map((line) => line.text);
+  const timeout = Number(/^\s+timeout-minutes:\s*(\d+)\s*$/m.exec(fullJob?.body ?? '')?.[1]);
+  const proofRuns = fullCommands.filter((line) => line.includes(FEATURE_PROOF_COMMAND)).length;
+  const publicationRuns = fullCommands.filter((line) => line.includes(FEATURE_PROOF_PUBLICATION_COMMAND)).length;
+  const duplicateSuites = fullCommands.filter((line) => /(?:^|\s)npm\s+(?:run\s+)?test(?:\s|$)/.test(line));
+  const duplicateMutations = fullCommands.filter((line) => /(?:^|\s)(?:npm\s+run\s+test:mutation|node\s+test\/mutation\.mjs)(?:\s|$)/.test(line));
+  if (timeout !== FULL_JOB_TIMEOUT_MINUTES || proofRuns !== 1 || publicationRuns !== 1
+      || duplicateSuites.length > 0 || duplicateMutations.length > 0) {
+    v.push({
+      rule: 'feature-proof-budget', file: '.github/workflows/ci.yml', line: null,
+      message: `all-backends must have one ${FULL_JOB_TIMEOUT_MINUTES}-minute measured envelope, one complete proof, one checksum-bound publication check, and zero duplicate full-suite/mutation runs`,
     });
   }
 
@@ -781,6 +916,63 @@ export async function selfTest() {
       },
     },
     {
+      name: 'one workflow retains an older reviewed pin for the same fetched action',
+      rule: 'action-coherence',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          /uses: actions\/checkout@[0-9a-f]{40}\s+#\s+v7\.0\.1/,
+          'uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0',
+        ));
+      },
+    },
+    {
+      name: 'a scheduled mutation hides every evaluator failure with or-true',
+      rule: 'false-green-shell',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'milestone.yml');
+        await fs.appendFile(p, '\n      - run: node scripts/milestone.mjs --apply || true\n');
+      },
+    },
+    {
+      name: 'a required workflow step is allowed to fail green',
+      rule: 'false-green-shell',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'milestone.yml');
+        await fs.appendFile(p, '\n      - run: node scripts/milestone.mjs --check\n        continue-on-error: true\n');
+      },
+    },
+    {
+      name: 'a workflow token pushes an unsigned change directly to the protected branch',
+      rule: 'direct-protected-push',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'milestone.yml');
+        await fs.appendFile(p, '\n      - run: git push origin HEAD:main\n');
+      },
+    },
+    {
+      name: 'the scheduled milestone monitor treats a lookup error as an ordinary threshold miss',
+      rule: 'milestone-monitor',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'milestone.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          'if (!Array.isArray(report.errors) || report.errors.length > 0)',
+          'if (!Array.isArray(report.errors))',
+        ));
+      },
+    },
+    {
+      name: 'the report-only milestone monitor regains repository write authority',
+      rule: 'milestone-monitor',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'milestone.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('permissions:\n  contents: read', 'permissions:\n  contents: write'));
+      },
+    },
+    {
       name: 'the guard corpus emptied',
       rule: 'corpus',
       mutate: async (d) => { await fs.writeFile(path.join(d, '.github', 'guard-corpus.txt'), '# nothing left\n'); },
@@ -901,6 +1093,54 @@ export async function selfTest() {
         const p = path.join(d, '.github', 'workflows', 'ci.yml');
         const t = await fs.readFile(p, 'utf8');
         await fs.writeFile(p, t.replace('        if: ${{ always() }}', '        if: ${{ success() }}'));
+      },
+    },
+    {
+      name: 'all-backends timeout is below the measured proof envelope',
+      rule: 'feature-proof-budget',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          `    timeout-minutes: ${FULL_JOB_TIMEOUT_MINUTES}`,
+          '    timeout-minutes: 60',
+        ));
+      },
+    },
+    {
+      name: 'checksum-bound publication check is removed after feature proof',
+      rule: 'feature-proof-budget',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          `        run: ${FEATURE_PROOF_PUBLICATION_COMMAND}`,
+          '        run: echo retained-proof-denominators-not-checked',
+        ));
+      },
+    },
+    {
+      name: 'complete test corpus is rerun after the retained feature proof',
+      rule: 'feature-proof-budget',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          `        run: ${FEATURE_PROOF_PUBLICATION_COMMAND}`,
+          `        run: ${FEATURE_PROOF_PUBLICATION_COMMAND}\n      - run: npm test`,
+        ));
+      },
+    },
+    {
+      name: 'mutation fingerprint is rerun after the retained feature proof',
+      rule: 'feature-proof-budget',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          `        run: ${FEATURE_PROOF_PUBLICATION_COMMAND}`,
+          `        run: ${FEATURE_PROOF_PUBLICATION_COMMAND}\n      - run: npm run test:mutation`,
+        ));
       },
     },
     {

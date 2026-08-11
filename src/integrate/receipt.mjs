@@ -36,10 +36,13 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { constants as FSC } from 'node:fs';
+import { ensurePrivateDirectory, readStableRegularFile } from '../stable-file.mjs';
 import { execFile } from 'node:child_process';
 
-const RECEIPT_VERSION = 1;
+const RECEIPT_VERSION = 2;
+const NOFOLLOW = FSC.O_NOFOLLOW ?? 0;
 
 function commonDir(cwd) {
   return new Promise((resolve) => {
@@ -68,7 +71,7 @@ export async function fileHash(abs) {
  * A `created` entry is a LIST of accepted hashes; receipts written before that change carry a bare
  * string, and both forms are read everywhere (see recordCreated and ownershipOf).
  *
- * @returns {Promise<{version: number, created: Record<string, string|string[]|null>, dirs: string[]}|null>}
+ * @returns {Promise<{version: number, created: Record<string, string|string[]|null>, shared: Record<string, string|string[]|null>, dirs: string[]}|null>}
  *   `null` means holt could not read it — which callers MUST treat as "own nothing", not "own all".
  */
 export async function readReceipt(repoRoot) {
@@ -78,14 +81,14 @@ export async function readReceipt(repoRoot) {
   // recorded. Returning `null` here instead conflated "nowhere to keep a receipt" with "a receipt
   // I could not parse", and that froze uninstall in plain directories — a regression caught by
   // two pre-existing tests that uninstall from a non-git temp dir.
-  if (!p) return { version: RECEIPT_VERSION, created: {}, dirs: [] };
+  if (!p) return { version: RECEIPT_VERSION, created: {}, shared: {}, dirs: [] };
   let raw;
   try {
     raw = await fs.readFile(p, 'utf8');
   } catch (e) {
     // ENOENT is a real answer: holt has never installed here, so it created nothing. Any other
     // error is "could not look", and must not be reported as an empty receipt.
-    if (e && e.code === 'ENOENT') return { version: RECEIPT_VERSION, created: {}, dirs: [] };
+    if (e && e.code === 'ENOENT') return { version: RECEIPT_VERSION, created: {}, shared: {}, dirs: [] };
     return null;
   }
   try {
@@ -94,6 +97,7 @@ export async function readReceipt(repoRoot) {
     return {
       version: Number(j.version) || RECEIPT_VERSION,
       created: (j.created && typeof j.created === 'object') ? j.created : {},
+      shared: (j.shared && typeof j.shared === 'object') ? j.shared : {},
       dirs: Array.isArray(j.dirs) ? j.dirs : [],
     };
   } catch {
@@ -146,11 +150,294 @@ export async function recordCreated(repoRoot, { files = [], dirs = [] } = {}) {
   try {
     await fs.mkdir(path.dirname(p), { recursive: true });
     await fs.writeFile(p, `${JSON.stringify({
-      version: RECEIPT_VERSION, created, dirs: [...dirSet],
+      version: RECEIPT_VERSION, created, shared: existing.shared ?? {}, dirs: [...dirSet],
     }, null, 2)}\n`, 'utf8');
     return true;
   } catch {
     return false;
+  }
+}
+
+const sameInode = (left, right) => left && right
+  && String(left.dev) === String(right.dev)
+  && String(left.ino) === String(right.ino);
+const hashBytes = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const identityToken = (sha256, stat) => ({
+  sha256,
+  dev: String(stat.dev),
+  ino: String(stat.ino),
+  size: Number(stat.size),
+  ctimeMs: Number(stat.ctimeMs),
+});
+const tokenMatches = (token, sha256, stat) => !!token
+  && token.sha256 === sha256
+  && token.dev === String(stat.dev)
+  && token.ino === String(stat.ino)
+  && token.size === Number(stat.size)
+  && token.ctimeMs === Number(stat.ctimeMs);
+// Shared-file ownership was introduced together with v2 identity receipts; no released v1
+// receipt contained this namespace. A bare legacy/content hash is therefore evidence of bytes,
+// not authority over the current inode, and must fail closed instead of being "upgraded" by use.
+const receiptEntryMatches = (entry, sha256, stat) => !!entry
+  && typeof entry === 'object'
+  && tokenMatches(entry, sha256, stat);
+
+async function writeReceiptAtomic(file, value) {
+  const dir = path.dirname(file);
+  const temp = path.join(dir, `.install-receipt.${process.pid}.${randomUUID()}.tmp`);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+  // A successful rename consumes the unique temporary pathname. On failure retain it rather than
+  // issuing a later path-based delete: another process must never be able to substitute a leaf
+  // between our failed publication and cleanup and have Holt erase that substitute.
+  await fs.rename(temp, file);
+}
+
+/** Create one shared regular file exclusively and return the exact identity Holt authored. */
+export async function createSharedRegularFileExclusive(absPath, bytes, { mode = 0o755 } = {}) {
+  let handle;
+  try {
+    // Do not make a partially-written program executable. The descriptor starts private and
+    // non-executable; only complete, synced bytes receive the requested final mode.
+    handle = await fs.open(absPath, FSC.O_WRONLY | FSC.O_CREAT | FSC.O_EXCL | NOFOLLOW, 0o600);
+    await handle.writeFile(bytes);
+    await handle.sync();
+    if (process.platform !== 'win32') await handle.chmod(mode);
+    await handle.sync();
+    const stat = await handle.stat();
+    const pathStat = await fs.lstat(absPath);
+    if (!stat.isFile() || !pathStat.isFile() || pathStat.isSymbolicLink()
+      || !sameInode(stat, pathStat)) {
+      throw new Error('created shared file identity changed before publication');
+    }
+    return identityToken(hashBytes(Buffer.from(bytes)), stat);
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
+ * Record a generated file that lives in repository-shared Git state rather than one worktree.
+ * The receipt binds the exact creation inode as well as bytes. A later same-byte replacement is
+ * another file and cannot inherit deletion authority.
+ */
+export async function recordSharedCreated(repoRoot, key, absPath, expectedToken) {
+  const p = await receiptPath(repoRoot);
+  if (!p) return false;
+  const existing = await readReceipt(repoRoot);
+  if (existing === null) return false;
+  const observed = await readStableRegularFile(absPath, {
+    maxBytes: 1024 * 1024,
+    requireSingleLink: true,
+    requireOwner: true,
+  });
+  if (!observed.ok) return false;
+  const now = hashBytes(observed.bytes);
+  if (!tokenMatches(expectedToken, now, observed.stat)) return false;
+  const exactRecord = identityToken(now, observed.stat);
+  const shared = {
+    ...(existing.shared ?? {}),
+    // A shared pathname has one active inode. Retaining prior inode identities expands deletion
+    // authority without helping the current file, and silently capping that history makes the
+    // receipt appear complete when it is not. Publish only the exact current identity.
+    [key]: exactRecord,
+  };
+  try {
+    await writeReceiptAtomic(p, {
+      version: RECEIPT_VERSION,
+      created: existing.created ?? {},
+      shared,
+      dirs: existing.dirs ?? [],
+    });
+    const after = await readStableRegularFile(absPath, {
+      maxBytes: 1024 * 1024,
+      requireSingleLink: true,
+      requireOwner: true,
+    });
+    return after.ok && tokenMatches(exactRecord, hashBytes(after.bytes), after.stat);
+  } catch {
+    return false;
+  }
+}
+
+/** True only when this receipt owns the exact current bytes of a shared generated file. */
+export async function holtOwnsSharedFile(repoRoot, key, absPath, receipt) {
+  const r = receipt ?? await readReceipt(repoRoot);
+  if (!r) return false;
+  const recorded = r.shared?.[key];
+  if (!recorded) return false;
+  const observed = await readStableRegularFile(absPath, {
+    maxBytes: 1024 * 1024,
+    requireSingleLink: true,
+    requireOwner: true,
+  });
+  if (!observed.ok) return false;
+  const now = hashBytes(observed.bytes);
+  return (Array.isArray(recorded) ? recorded : [recorded])
+    .some((entry) => receiptEntryMatches(entry, now, observed.stat));
+}
+
+/**
+ * Move one receipt-owned shared file out of its executable pathname before mutating it.
+ *
+ * The ownership check and a later rm/write cannot safely be two pathname operations: another
+ * process may replace the leaf in between. This transaction first reads one descriptor-bound
+ * inode, then renames the pathname into a private same-directory quarantine and verifies that
+ * the inode which moved is the inode which was authorised. If a replacement won the race, its
+ * bytes are copied back to the original pathname without overwriting anything and the quarantined
+ * inode is retained at the reported recovery path. They are never deleted as Holt-owned bytes.
+ *
+ * @param {string} repoRoot
+ * @param {string} key
+ * @param {string} absPath
+ * @param {{receipt?:any,onBeforeRename?:(()=>any)|null,onAfterRecoveryPublish?:(()=>any)|null,classify?:((bytes:Buffer)=>('current'|'leave'|'stage'))}} [options]
+ * @returns {Promise<
+ *   {state:'absent'|'unavailable'|'unowned'|'current'|'leave',reason?:string,sha256?:string,stat?:any}
+ *   |{state:'staged',originalPath:string,stagedPath:string,stagingDir:string,sha256:string,stat:any}
+ * >}
+ */
+export async function quarantineReceiptOwnedSharedFile(repoRoot, key, absPath, {
+  receipt = undefined, onBeforeRename = null, onAfterRecoveryPublish = null,
+  classify = () => 'stage',
+} = {}) {
+  // This is the ONLY initial observation. Callers classify these exact descriptor-bound bytes;
+  // they must not read the pathname first and then ask this function to authorise a later inode.
+  const observed = await readStableRegularFile(absPath, {
+    maxBytes: 1024 * 1024,
+    requireSingleLink: true,
+    requireOwner: true,
+  });
+  if (!observed.ok) {
+    return {
+      state: observed.code === 'ENOENT' ? 'absent' : 'unavailable',
+      reason: observed.reason,
+    };
+  }
+  const sha256 = hashBytes(observed.bytes);
+  const disposition = classify(observed.bytes);
+  if (!['current', 'leave', 'stage'].includes(disposition)) {
+    throw new Error(`invalid shared-file disposition '${disposition}'`);
+  }
+  if (disposition !== 'stage') {
+    return { state: disposition, sha256, stat: observed.stat };
+  }
+
+  const r = receipt === undefined ? await readReceipt(repoRoot) : receipt;
+  if (!r) return { state: 'unowned', sha256, stat: observed.stat };
+  const recorded = r.shared?.[key];
+  if (!recorded) return { state: 'unowned', sha256, stat: observed.stat };
+  const accepted = Array.isArray(recorded) ? recorded : [recorded];
+  if (!accepted.some((entry) => receiptEntryMatches(entry, sha256, observed.stat))) {
+    return { state: 'unowned', sha256, stat: observed.stat };
+  }
+
+  if (onBeforeRename) await onBeforeRename();
+  const receiptFile = await receiptPath(repoRoot);
+  if (!receiptFile) return { state: 'unowned', sha256, stat: observed.stat };
+  // Recovery bytes are explicit product state, not anonymous executable-directory siblings.
+  // Keeping them below <git-common-dir>/holt/recovery makes their ownership and future storage
+  // inventory mechanically discoverable without walking the repository or guessing by name.
+  const recoveryRoot = await ensurePrivateDirectory(path.join(path.dirname(receiptFile), 'recovery'));
+  const stagingDir = await fs.mkdtemp(path.join(recoveryRoot, 'shared-hook-'));
+  if (process.platform !== 'win32') await fs.chmod(stagingDir, 0o700);
+  const stagedPath = path.join(stagingDir, path.basename(absPath));
+  try {
+    await fs.rename(absPath, stagedPath);
+    const moved = await readStableRegularFile(stagedPath, {
+      maxBytes: 1024 * 1024,
+      requireSingleLink: true,
+      requireOwner: true,
+    });
+    if (!moved.ok || !sameInode(observed.stat, moved.stat) || hashBytes(moved.bytes) !== sha256) {
+      let restored = false;
+      if (moved.ok) {
+        try {
+          // Re-publish a copy, never the quarantined inode itself. The quarantine remains a durable
+          // recovery copy even if the newly published pathname is removed immediately afterward.
+          await createSharedRegularFileExclusive(absPath, moved.bytes, {
+            mode: moved.stat.mode & 0o777,
+          });
+          restored = true;
+          if (typeof onAfterRecoveryPublish === 'function') await onAfterRecoveryPublish();
+        } catch { /* retain the quarantined bytes for explicit recovery */ }
+      }
+      const error = Object.assign(new Error(
+        `receipt-owned shared file changed before quarantine${restored ? '; a copy was restored' : ''}; retained at ${stagedPath}`,
+      ), {
+        code: 'ESHAREDRACE',
+        recoveryPath: stagedPath,
+      });
+      throw error;
+    }
+    return {
+      state: 'staged', originalPath: absPath, stagedPath, stagingDir, sha256, stat: moved.stat,
+    };
+  } catch (error) {
+    // Even an empty transaction directory is retained in the explicit recovery namespace. A
+    // later pathname cleanup cannot be proven to target the same directory we created, and a
+    // storage inventory can safely classify this small artifact by its namespace.
+    throw error;
+  }
+}
+
+/**
+ * Verify and retain a quarantined shared file as the recovery copy.
+ *
+ * Portable filesystems do not offer an atomic "unlink this path only if it still names inode X"
+ * primitive. Retention is therefore the only class-level rule that cannot turn a late pathname
+ * substitution into deletion of the wrong bytes.
+ */
+export async function retainQuarantinedSharedFile(staged) {
+  const observed = await readStableRegularFile(staged.stagedPath, {
+    maxBytes: 1024 * 1024,
+    requireSingleLink: true,
+    requireOwner: true,
+  });
+  if (!observed.ok || !sameInode(staged.stat, observed.stat)
+    || hashBytes(observed.bytes) !== staged.sha256) {
+    const error = Object.assign(
+      new Error(`shared-file quarantine changed; retained at ${staged.stagedPath}`),
+      { code: 'ESHAREDRACE', recoveryPath: staged.stagedPath },
+    );
+    throw error;
+  }
+  return staged.stagedPath;
+}
+
+/**
+ * Restore a copy without replacing a file which appeared at the original pathname. The staged
+ * inode is always retained, including after successful publication, so loss of the new pathname
+ * cannot erase the final recovery copy.
+ *
+ * @param {{originalPath:string,stagedPath:string,stagingDir:string,sha256:string,stat:import('node:fs').Stats}} staged
+ * @param {{onAfterPublish?:(()=>any)|null}} [options]
+ */
+export async function restoreQuarantinedSharedFile(staged, { onAfterPublish = null } = {}) {
+  const observed = await readStableRegularFile(staged.stagedPath, {
+    maxBytes: 1024 * 1024,
+    requireSingleLink: true,
+    requireOwner: true,
+  });
+  if (!observed.ok || !sameInode(staged.stat, observed.stat)
+    || hashBytes(observed.bytes) !== staged.sha256) {
+    const error = Object.assign(
+      new Error(`shared-file quarantine changed; retained at ${staged.stagedPath}`),
+      { code: 'ESHAREDRACE', recoveryPath: staged.stagedPath },
+    );
+    throw error;
+  }
+  try {
+    const creation = await createSharedRegularFileExclusive(staged.originalPath, observed.bytes, {
+      mode: observed.stat.mode & 0o777,
+    });
+    if (typeof onAfterPublish === 'function') await onAfterPublish();
+    return { recoveryPath: staged.stagedPath, creation };
+  } catch (cause) {
+    const error = Object.assign(new Error(
+      `shared-file quarantine could not be restored without overwriting another file; retained at ${staged.stagedPath}`,
+      { cause },
+    ), { code: 'ESHAREDRACE', recoveryPath: staged.stagedPath });
+    throw error;
   }
 }
 

@@ -69,10 +69,10 @@ roadmap item, draft contract or unverified release process into a current assura
 | Signed releases | GitHub currently reports immutable releases enabled and a `release` environment restricted to tags matching `v*`. Environment-secret names `HOLT_RELEASE_SIGNING_KEY` and `HOLT_RELEASE_ADMIN_TOKEN` exist. Detached Ed25519 signing of `MANIFEST.sha256` is fail-closed, and the workflow requests GitHub artifact attestations. This is control-plane configuration, not proof about an artifact: verify the actual downloaded release with `holt audit --require-signature` and `gh attestation verify`. v0.3.0 predates these assurances. |
 | Release credential scope | The immutable-state preflight needs only repository **Administration: read**. The environment currently holds the maintainer's broader GitHub OAuth credential (`repo`, `workflow`, `read:org`, `gist` observed); rotation to a repository-scoped fine-grained PAT or GitHub App token is an open least-privilege item. No token value is retained in evidence. |
 | Can a customer verify an installed copy? | Yes, offline: `holt audit`. It re-hashes every shipped file against `MANIFEST.sha256` and re-proves the capability ledger — no network, no repository, no account needed. |
-| Dependency-confusion / typosquat exposure | holt is distributed from this repository's GitHub releases only — not from the npm registry — so there is no public package name to squat. Provenance ties every release to this repository and commit. |
+| Dependency-confusion / typosquat exposure | The official install source is the signed GitHub release tarball: `npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz`. The bare `holt` npm registry name is **not** an official distribution and was unclaimed at this review (`npm view holt` returned 404). That unreserved namespace is itself a dependency-confusion/typosquat risk; do not interpret the use of the npm client as authority to run `npm install -g holt`. Provenance can bind an official GitHub release to this repository and commit, but does not reserve an unrelated registry namespace. |
 | Post-install scripts | **None.** The package defines no `postinstall`, `preinstall` or `install` script. |
 | Third-party binaries | Optional and never bundled: `ctags`, `enry`, `rg`, `jj`, `jscpd`. `holt setup` can download a pinned static `universal-ctags` and refuses it on a SHA-256 mismatch, launch a confirmed package-manager command, or run exact-versioned `go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6`. `mount` is used on macOS/Unix for network-filesystem detection; `where` probes tools on Windows. Installing approved backends yourself avoids the setup network paths. |
-| Vulnerability disclosure | GitHub Security Advisories; 72-hour acknowledgement, 7-day substantive reply. `SECURITY.md`. |
+| Vulnerability disclosure | GitHub Security Advisories. Reports are handled on a best-effort basis; no acknowledgement or remediation SLA is promised today. `SECURITY.md`. |
 
 ---
 
@@ -98,7 +98,7 @@ roadmap item, draft contract or unverified release process into a current assura
 | What happens if the vendor disappears? | The tool continues to run. Licences keep verifying until expiry, plus a 14-day grace period, with no server involved. The free tier is the whole single-repo product and is unaffected by any licence state. |
 | Backup / DR | The local product holds no vendor-side repository data to restore. Continuity and retention for commercial contact/licence records depend on the payment, mail and licence-service systems described in the privacy policy and applicable agreement. |
 | Incident response | GitHub Security Advisories is the disclosed private reporting channel. Verify remediation status, fixed version and release digest for the specific incident. |
-| Support | Public issue tracker. No contractual support SLA is offered today. |
+| Support | Public issue tracker, as described in `SUPPORT.md`. No contractual support SLA is offered today. |
 
 ---
 

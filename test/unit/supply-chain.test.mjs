@@ -116,6 +116,15 @@ test('POSITIVE CONTROL: the detectors find what is known to be present', () => {
   const deep = fs.readFileSync(path.join(ROOT, 'src/deep.mjs'), 'utf8');
   assert.ok(fileCapabilities(deep).has('eval'),
     'src/deep.mjs uses createRequire() — a code-loading capability the ledger must show');
+
+  const auditSink = fs.readFileSync(path.join(ROOT, 'src/team/audit-sink.mjs'), 'utf8');
+  assert.ok(fileCapabilities(auditSink).has('process'),
+    'the anchored audit writer is a real subprocess boundary and must remain visible');
+  assert.ok(spawnTargets(auditSink).has('<dynamic:process>'),
+    'process.execPath is dynamic syntax even though production fixes it to this Node runtime');
+  const sinkSite = CAPABILITIES.dynamicCallSites.find((site) => site.file === 'src/team/audit-sink.mjs');
+  assert.deepEqual(sinkSite?.canRun, ['node'],
+    'the dynamic sink call site must resolve only to the current Node executable');
 });
 
 test('the comment stripper does not eat regex literals containing slashes', () => {

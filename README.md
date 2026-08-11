@@ -59,11 +59,13 @@ observe → classify → protect → gate → act → verify/recover
 ## Install and try the core
 
 Holt currently requires Node `^22.22.2 || ^24.15.0 || >=26.0.0` and Git 2.45 or newer. Git 2.45
-is the safety floor for the local-object checks Holt performs. The repository's current package
-version is v0.3.1; verify the release asset and its checksums for the exact version you install.
+is the safety floor for the local-object checks Holt performs. This source checkout describes
+v0.3.1. The stable URL below installs the latest version that has actually been published, which
+may differ until this checkout is released; verify `holt --version`, the release notes, and the
+checksums for the exact artifact you install.
 
 ```bash
-npm install -g https://github.com/Raed2180416/holt/releases/download/v0.3.1/holt.tgz
+npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz
 cd your-repository
 holt setup       # inspect available backends and project-scoped integrations
 holt auto        # perform reversible protection; make no deletion decision for you
@@ -139,13 +141,30 @@ it is not a universal compatibility certificate.
 The category is intentionally narrow: **Holt is not “42 Git commands,” an all-in-one DevOps suite,
 or a managed fleet control plane. It is the integrity layer around parallel agent transactions.**
 
+## Integration coverage
+
+`holt integrate` writes project-scoped files and preserves existing user configuration. Re-running it
+repairs Holt-owned entries without duplicating them; `holt uninstall` removes only receipt-owned,
+unchanged artifacts. Host configuration on disk is not evidence that a host loaded, trusted, or
+enforced it.
+
+- **MCP** — 16 tools in the executable schema. The protocol path is exercised over stdio as
+  `initialize → 16 tools → tools/call`; MCP remains reactive model-pull unless a host supplies a
+  separate lifecycle context hook.
+- **Implemented deterministic pre-tool blocking** — Claude Code, OpenCode, Cursor, Codex local clients, Qwen Code, Copilot CLI, Cline IDE, Goose, Devin CLI and Devin Desktop Cascade cover their documented local surfaces. Their current schemas are contract-tested, but none is currently claimed as a real-host enforcement run.
+- **Hook-capable, not yet wired** — Gemini, Crush, Amp, Factory and Junie still receive MCP + advisory.
+- **Cloud or ephemeral** — Codex cloud, Copilot cloud, Cursor cloud, Google Jules, Replit Agent do not receive local worktree enforcement by default.
+
+Holt describes nearly 30 distinct agent product surfaces, but support is deliberately split by
+evidence grade. Current MCP/hook files for Cursor, Codex, Qwen Code, Copilot, Cline, Goose, Continue, Devin CLI, Cascade, Crush, Gemini CLI and VS Code are generated and parsed in schema fixtures. Gemini, Crush, Amp, Factory and Junie hooks are still unverified and unwired; their hosts remain MCP-capable rather than live-verified blockers. Run `holt providers`, `holt hosts`, and `holt doctor --json` for the machine-readable provider, configured-on-disk, trust, runtime, and live-proof boundaries.
+
 ## Evidence and limits
 
 The repository contains deterministic unit, end-to-end, filesystem, Git, package, protocol, and
 mutation checks for the shipped surface. It also records a CI matrix for the core safety and CLI
 flows on Linux, macOS, and Windows. Read [the feature-proof matrix](docs/FEATURE-PROOF-MATRIX.md)
 for the exact executable evidence, independent oracles, denominators, and remaining gaps.
-No current test count or mutation score is published here: a number becomes eligible only when the
+No current test count or mutation score is published. A number becomes eligible only when the
 complete, linked release and mutation evidence meets the repository's publication contract.
 
 That evidence is deliberately not stretched into claims it cannot support:

@@ -8,6 +8,7 @@
  */
 
 import { budget, padTo, padStartTo, provenanceLines as sharedProvenanceLines } from './untrusted.mjs';
+import { stashRecoveryGuidance } from './stash.mjs';
 
 const useColor = () =>
   process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
@@ -321,7 +322,7 @@ function stashSection(report, u) {
   }
   if (stash.atRisk.length > 6) out.push(c('grey', `  … and ${stash.atRisk.length - 6} more`));
   out.push('');
-  out.push(c('grey', '  `git stash apply` then commit — or `holt rescue` — makes these reachable;'));
+  out.push(c('grey', `  ${stashRecoveryGuidance()}`));
   out.push(c('grey', '  until then `git stash drop`/`clear` destroys them and git cannot bring them back.'));
   return out;
 }

@@ -42,9 +42,15 @@ import { readReceipt, ownershipOf } from './integrate/receipt.mjs';
 import { analyze, contextDigest } from './analyze.mjs';
 import { scratchDir } from './symbols.mjs';
 import { git } from './git.mjs';
-import { stashState, describeStash, MAX_ENTRIES } from './stash.mjs';
+import {
+  stashState, describeStash, stashRecoveryGuidance, STASH_POP_CONFLICT_GUIDANCE, MAX_ENTRIES,
+} from './stash.mjs';
 import { guardAllowPattern } from './config.mjs';
 import { budget, provenanceLines } from './untrusted.mjs';
+import {
+  ensurePrivateDirectory, readStableRegularFile, writePrivateFileAtomic,
+} from './stable-file.mjs';
+import { compileLinearGlobTokens } from './linear-glob.mjs';
 
 /* ------------------------------------------------------------------ cache ---- */
 
@@ -102,7 +108,8 @@ async function hashPathContent(hash, root, rel, absolute = path.join(root, rel),
     return;
   }
   if (stat.isFile()) {
-    hash.update(await fs.readFile(absolute).catch(() => Buffer.from(`${label}-read-error`)));
+    const stable = await readStableRegularFile(absolute);
+    hash.update(stable.ok ? stable.bytes : Buffer.from(`${label}-read-${stable.reason}`));
     return;
   }
   if (!stat.isDirectory()) return;
@@ -259,8 +266,16 @@ function cacheAnswers(cached, opts) {
  * call into a cold scan — a 20-second stall in the agent's critical path, which is the cost this
  * cache exists to avoid.
  */
+function privateStateRoot() {
+  const owner = typeof process.getuid === 'function'
+    ? String(process.getuid())
+    : createHash('sha256').update(process.env.USERPROFILE ?? process.env.HOME ?? 'unknown-user')
+      .digest('hex').slice(0, 12);
+  return path.join(scratchDir(), `holt-state-${owner}`);
+}
+
 function cacheDirectory() {
-  return path.join(scratchDir(), 'holt-cache');
+  return path.join(privateStateRoot(), 'cache');
 }
 
 export async function evictCacheFiles(dir = cacheDirectory(), {
@@ -270,8 +285,8 @@ export async function evictCacheFiles(dir = cacheDirectory(), {
   const candidates = names.filter((name) => /^holt-cache-[a-f0-9]{16}\.json$/.test(name));
   const entries = await Promise.all(candidates.map(async (name) => {
     const file = path.join(dir, name);
-    const stat = await fs.stat(file).catch(() => null);
-    return stat?.isFile() ? { file, mtimeMs: stat.mtimeMs } : null;
+    const stat = await fs.lstat(file).catch(() => null);
+    return stat?.isFile() && !stat.isSymbolicLink() ? { file, mtimeMs: stat.mtimeMs } : null;
   }));
   // `.filter(Boolean)` does not narrow the null out for checkJS, and an un-narrowed entry here
   // would be a runtime crash in the eviction path rather than a type nit.
@@ -310,11 +325,17 @@ export async function cachedReport(cwd, opts = {}) {
   const fp = await fingerprint(disc.root);
   const dir = cacheDirectory();
   const file = cachePath(disc.root, opts);
-  await fs.mkdir(dir, { recursive: true }).catch(() => {});
-  await maintainCache(dir);
-
+  let cacheReady = true;
   try {
-    const cached = JSON.parse(await fs.readFile(file, 'utf8'));
+    await ensurePrivateDirectory(privateStateRoot());
+    await ensurePrivateDirectory(dir);
+    await maintainCache(dir);
+  } catch { cacheReady = false; }
+
+  if (cacheReady) try {
+    const stored = await readStableRegularFile(file, { requireSingleLink: true, requireOwner: true });
+    if (!stored.ok) throw new Error(stored.reason);
+    const cached = JSON.parse(stored.bytes.toString('utf8'));
     // VERSION 2: `report.safe[].prunable` was added, and the guard reads it to bound what
     // `git worktree prune` can reach. The fingerprint tracks REPOSITORY state, not holt's build,
     // so without this bump a cache written by the previous version would be served to a guard
@@ -327,7 +348,9 @@ export async function cachedReport(cwd, opts = {}) {
 
   const scanned = await scan(disc, opts);
   const report = await analyze(scanned, opts);
-  await fs.writeFile(file, JSON.stringify({ version: 2, fingerprint: fp, report, scanned }), 'utf8')
+  if (cacheReady) await writePrivateFileAtomic(
+    file, JSON.stringify({ version: 2, fingerprint: fp, report, scanned }),
+  )
     .catch(() => { /* an unwritable cache must never fail the scan */ });
 
   return { report, scanned, fingerprint: fp, root: disc.root, fromCache: false };
@@ -1027,6 +1050,25 @@ function heredocConsumesCode(line) {
   return program;
 }
 
+/** Find a heredoc terminator without compiling repository text into a regular expression. */
+function findHeredocTerminator(text, delimiter) {
+  let lineStart = 0;
+  while (lineStart <= text.length) {
+    const newline = text.indexOf('\n', lineStart);
+    const lineEnd = newline === -1 ? text.length : newline;
+    let contentStart = lineStart;
+    let contentEnd = lineEnd;
+    while (contentStart < contentEnd && (text[contentStart] === ' ' || text[contentStart] === '\t')) contentStart++;
+    while (contentEnd > contentStart && (text[contentEnd - 1] === ' ' || text[contentEnd - 1] === '\t')) contentEnd--;
+    if (text.slice(contentStart, contentEnd) === delimiter) {
+      return { index: lineStart, length: lineEnd - lineStart };
+    }
+    if (newline === -1) break;
+    lineStart = newline + 1;
+  }
+  return null;
+}
+
 /**
  * The byte ranges of a command that are DATA, not command.
  *
@@ -1133,16 +1175,15 @@ function scanMasks(command) {
         const consumer = heredocConsumesCode(s.slice(cmdStart, bodyStart));
         const kind = consumer ? `heredoc-${consumer}` : 'heredoc';
         // The terminator is a line consisting only of the word (tabs allowed for <<-).
-        const term = new RegExp(`^[\\t ]*${delim}[\\t ]*$`, 'm');
         const rest = s.slice(bodyStart + 1);
-        const hit = term.exec(rest);
+        const hit = findHeredocTerminator(rest, delim);
         if (!hit) {
           unterminated = true;
           regions.push([bodyStart, s.length - 1, kind]);
           i = s.length;
           continue;
         }
-        const end = bodyStart + 1 + hit.index + hit[0].length;
+        const end = bodyStart + 1 + hit.index + hit.length;
         regions.push([bodyStart, end, kind]);
         i = end;
         clearWord();
@@ -3496,6 +3537,46 @@ function optionValue(tokens, ...names) {
  *   ordinary command (empty for a command containing no for-loop).
  */
 const FOR_LOOP = /\bfor\s+([A-Za-z_]\w*)\s+in\s+([^\n;]+?)\s*(?:;|\n)\s*do\b([\s\S]+?)(?:;|\n)?\s*done\b/g;
+
+const shellNameChar = (ch) => {
+  const code = ch?.charCodeAt(0) ?? -1;
+  return ch === '_' || (code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+};
+
+/** Expand one shell-loop identifier without turning input bytes into regular-expression syntax. */
+function replaceLoopVariable(body, name, replacement) {
+  const quotedBraced = '"${' + name + '}"';
+  const quotedBare = '"$' + name + '"';
+  const braced = '${' + name + '}';
+  const bare = '$' + name;
+  let out = '';
+  let i = 0;
+  while (i < body.length) {
+    if (body.startsWith(quotedBraced, i)) {
+      out += replacement;
+      i += quotedBraced.length;
+      continue;
+    }
+    if (body.startsWith(quotedBare, i)) {
+      out += replacement;
+      i += quotedBare.length;
+      continue;
+    }
+    if (body.startsWith(braced, i)) {
+      out += replacement;
+      i += braced.length;
+      continue;
+    }
+    if (body.startsWith(bare, i) && !shellNameChar(body[i + bare.length])) {
+      out += replacement;
+      i += bare.length;
+      continue;
+    }
+    out += body[i++];
+  }
+  return out;
+}
+
 export function expandForLoops(command) {
   const out = [];
   const src = String(command ?? '');
@@ -3521,8 +3602,7 @@ export function expandForLoops(command) {
     // Dropping BOTH quotes of a `"$VAR"` pair is deliberate and stays: the list may be a glob, and
     // the containment rule matches it against the worktrees, so quoting in the body cannot hide a
     // destroyer. What is wrong is dropping one of them.
-    const ref = new RegExp(`"\\$\\{?${name}\\}?"|\\$\\{?${name}\\}?`, 'g');
-    const expanded = body.replace(ref, ` ${list.trim()} `).trim().replace(/\s+/g, ' ');
+    const expanded = replaceLoopVariable(body, name, ` ${list.trim()} `).trim().replace(/\s+/g, ' ');
     // THE BODY IS EMITTED WHETHER OR NOT THE BINDING CHANGED IT. This was `expanded !== body.trim()`
     // — emit only if substituting the variable actually rewrote something — which quietly means "a
     // body that never mentions the loop variable is not worth looking at". A loop body RUNS, every
@@ -4498,20 +4578,41 @@ function isGlobPattern(p) {
 /** Backwards-compatible shim: `GLOBBY.test(x)` was the old spelling of this question. */
 const GLOBBY = { test: isGlobPattern };
 
-/** A member of a bracket expression, escaped for the inside of a JS character class. */
-const clsEsc = (ch) => (/[\]\\^-]/.test(ch) ? `\\${ch}` : ch.replace(/[\n\r\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`));
+const POSIX_CLASSES = new Set([
+  'alpha', 'digit', 'alnum', 'upper', 'lower', 'space', 'blank', 'xdigit', 'word',
+  'cntrl', 'print', 'graph', 'punct',
+]);
 
-/**
- * POSIX character classes, as the ranges a JS class can hold. An UNKNOWN name is not guessed at —
- * the bracket expression is declared invalid and the caller falls back to the literal, which is
- * what the shell does with a bracket expression it cannot honour.
- */
-const POSIX_CLASSES = Object.freeze({
-  alpha: 'A-Za-z', digit: '0-9', alnum: '0-9A-Za-z', upper: 'A-Z', lower: 'a-z',
-  space: ' \\t\\n\\r\\f\\v', blank: ' \\t', xdigit: '0-9A-Fa-f', word: '0-9A-Za-z_',
-  cntrl: '\\x00-\\x1f\\x7f', print: '\\x20-\\x7e', graph: '\\x21-\\x7e',
-  punct: '!-/:-@\\[-`{-~',
-});
+const asciiBetween = (char, low, high) => {
+  const code = char.charCodeAt(0);
+  return code >= low && code <= high;
+};
+
+function posixClassMatches(name, char, icase) {
+  const candidates = icase ? [...new Set([char, char.toLowerCase(), char.toUpperCase()])] : [char];
+  return candidates.some((candidate) => {
+    const code = candidate.charCodeAt(0);
+    const upper = asciiBetween(candidate, 65, 90);
+    const lower = asciiBetween(candidate, 97, 122);
+    const digit = asciiBetween(candidate, 48, 57);
+    if (name === 'alpha') return upper || lower;
+    if (name === 'digit') return digit;
+    if (name === 'alnum') return upper || lower || digit;
+    if (name === 'upper') return upper;
+    if (name === 'lower') return lower;
+    if (name === 'space') return [' ', '\t', '\n', '\r', '\f', '\v'].includes(candidate);
+    if (name === 'blank') return candidate === ' ' || candidate === '\t';
+    if (name === 'xdigit') return digit || asciiBetween(candidate, 65, 70) || asciiBetween(candidate, 97, 102);
+    if (name === 'word') return upper || lower || digit || candidate === '_';
+    if (name === 'cntrl') return code <= 0x1f || code === 0x7f;
+    if (name === 'print') return code >= 0x20 && code <= 0x7e;
+    if (name === 'graph') return code >= 0x21 && code <= 0x7e;
+    if (name === 'punct') return (code >= 0x21 && code <= 0x2f)
+      || (code >= 0x3a && code <= 0x40) || (code >= 0x5b && code <= 0x60)
+      || (code >= 0x7b && code <= 0x7e);
+    return false;
+  });
+}
 
 /**
  * ONE BRACKET EXPRESSION, TRANSLATED — never copied.
@@ -4530,7 +4631,8 @@ const POSIX_CLASSES = Object.freeze({
  * The first is the one that matters most: getting negation backwards does not weaken the answer,
  * it inverts it — holt would protect exactly the files the command does NOT touch.
  *
- * @returns {{src: string, end: number}|null} null = this is not a bracket expression holt can
+ * @returns {{items: Array<{kind:'literal',value:string}|{kind:'range',low:string,high:string}|
+ *   {kind:'posix',name:string}>, negate:boolean, end:number}|null} null = this is not a bracket expression holt can
  *   honour. The caller then treats the WHOLE pattern as a literal path, which is what the shell
  *   does: with `nullglob` off (the default in bash, sh, zsh and ksh) a pattern that matches nothing
  *   is passed through to the command verbatim. Measured: `rm app/[id].tsx` with no `app/i.tsx` on
@@ -4540,11 +4642,11 @@ function parseBracket(p, at) {
   let i = at + 1;
   let negate = false;
   if (p[i] === '!' || p[i] === '^') { negate = true; i++; }
-  let body = '';
+  const items = [];
   let first = true;
   for (; i < p.length; i++) {
     const c = p[i];
-    if (c === ']' && !first) return { src: bracketSrc(body, negate), end: i };
+    if (c === ']' && !first) return { items, negate, end: i };
     first = false;
     // `[:alpha:]`, and the collating/equivalence forms that share its shape.
     if (c === '[' && (p[i + 1] === ':' || p[i + 1] === '.' || p[i + 1] === '=')) {
@@ -4553,13 +4655,12 @@ function parseBracket(p, at) {
       if (close === -1) return null;
       const name = p.slice(i + 2, close);
       if (kind === ':') {
-        const range = POSIX_CLASSES[name];
-        if (!range) return null;          // an unknown class is not guessed at
-        body += range;
+        if (!POSIX_CLASSES.has(name)) return null; // an unknown class is not guessed at
+        items.push({ kind: 'posix', name });
       } else {
         // A collating element or equivalence class of one character is that character.
         if ([...name].length !== 1) return null;
-        body += clsEsc(name);
+        items.push({ kind: 'literal', value: name });
       }
       i = close + 1;
       continue;
@@ -4573,26 +4674,30 @@ function parseBracket(p, at) {
       let skip = 2;
       if (hi === '\\' && p[i + 3] !== undefined) { hi = p[i + 3]; skip = 3; }
       if (lit.codePointAt(0) > hi.codePointAt(0)) return null;
-      body += `${clsEsc(lit)}-${clsEsc(hi)}`;
+      items.push({ kind: 'range', low: lit, high: hi });
       i += skip;
       continue;
     }
-    body += clsEsc(lit);
+    items.push({ kind: 'literal', value: lit });
   }
   return null;   // no closing `]`: POSIX says the `[` is an ordinary character
 }
 
-/**
- * The JS class for a bracket body. `/` NEVER matches through a bracket expression — POSIX pathname
- * expansion cannot cross a separator by any spelling, and a positive class holding `/` (or a
- * negated one that fails to exclude it) is how a pattern silently reaches into a directory it did
- * not name.
- */
-function bracketSrc(body, negate) {
-  if (negate) return `[^/${body}]`;
-  // The lookahead is exact where subtraction is not: a RANGE can span `/` (`[.-9]`), and there is
-  // no way to write "this range minus one character" inside a JS class.
-  return body === '' ? '[^\\s\\S]' : `(?!/)[${body}]`;
+function bracketMatches(bracket, char, icase) {
+  if (char === '/') return false;
+  const candidates = icase ? [...new Set([char, char.toLowerCase(), char.toUpperCase()])] : [char];
+  const found = bracket.items.some((item) => {
+    if (item.kind === 'literal') {
+      return candidates.some((candidate) => candidate === item.value
+        || (icase && candidate.toLowerCase() === item.value.toLowerCase()));
+    }
+    if (item.kind === 'range') {
+      return candidates.some((candidate) => candidate.codePointAt(0) >= item.low.codePointAt(0)
+        && candidate.codePointAt(0) <= item.high.codePointAt(0));
+    }
+    return posixClassMatches(item.name, char, icase);
+  });
+  return bracket.negate ? !found : found;
 }
 
 /**
@@ -4614,7 +4719,7 @@ function bracketSrc(body, negate) {
  *
  * @param {string} rel a PATTERN (see escapeGlob): `\x` is the literal character x.
  * @param {{pathspec?: boolean, icase?: boolean}} [mode]
- * @returns {{literal: string|null, lit: string, icase: boolean, re: RegExp}}
+ * @returns {{literal: string|null, lit: string, icase: boolean, re: {test:(value:string)=>boolean}}}
  *   `literal` keeps its old meaning — non-null only when the target is a plain path, which is the
  *   fact `destroys` uses to decide that a directory encloses a dirty path.
  *   `lit` is ALWAYS the literal spelling of the pattern, for the nullglob-off fallback below.
@@ -4623,22 +4728,33 @@ function bracketSrc(body, negate) {
 function pathMatcher(rel, mode = {}) {
   // `:(icase)` folds case — see parseGitPathspec. The flag travels on the matcher so `lit`, the
   // nullglob-off literal reading, folds with it rather than staying case-sensitive on its own.
-  const flags = mode.icase ? 'i' : '';
   const literalOf = (s) => {
     const l = unescapeGlob(s).replace(/\/+$/, '');
-    return { literal: l, lit: l, icase: !!mode.icase, re: new RegExp(`^${l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, flags) };
+    const expected = mode.icase ? l.toLowerCase() : l;
+    return {
+      literal: l, lit: l, icase: !!mode.icase,
+      re: Object.freeze({ test: (value) => (mode.icase ? String(value).toLowerCase() : String(value)) === expected }),
+    };
   };
   if (!isGlobPattern(rel)) return literalOf(rel);
-  let src = '';
+  // Guard input is untrusted. Beyond this finite token budget, matching every path is the safe
+  // degradation: the destructive guard asks for confirmation instead of spending unbounded CPU.
+  if (rel.length > 8192) {
+    return {
+      literal: null, lit: unescapeGlob(rel).replace(/\/+$/, ''), icase: !!mode.icase,
+      re: Object.freeze({ test: () => true }),
+    };
+  }
+  const tokens = [];
   for (let i = 0; i < rel.length; i++) {
     const c = rel[i];
     if (c === '\\' && i + 1 < rel.length) {
-      src += rel[++i].replace(/[.*+?^${}()|[\]\\/-]/g, '\\$&');
+      tokens.push({ kind: 'literal', value: rel[++i] });
     } else if (c === '*') {
-      if (mode.pathspec) { src += '.*'; if (rel[i + 1] === '*') i++; }
-      else if (rel[i + 1] === '*') { src += '.*'; i++; }
-      else src += '[^/]*';
-    } else if (c === '?') src += mode.pathspec ? '.' : '[^/]';
+      if (mode.pathspec) { tokens.push({ kind: 'star', crossSlash: true }); if (rel[i + 1] === '*') i++; }
+      else if (rel[i + 1] === '*') { tokens.push({ kind: 'star', crossSlash: true }); i++; }
+      else tokens.push({ kind: 'star', crossSlash: false });
+    } else if (c === '?') tokens.push({ kind: 'one', crossSlash: !!mode.pathspec });
     else if (c === '[') {
       const b = parseBracket(rel, i);
       // A bracket holt cannot honour makes the WHOLE pattern non-matching in the shell, and a
@@ -4646,11 +4762,14 @@ function pathMatcher(rel, mode = {}) {
       // not a thrown SyntaxError out of the guard's critical path, which is how `rm -rf 'x[z-a]'`
       // exited 1 and, under the PreToolUse contract, ran.
       if (!b) return literalOf(rel);
-      src += b.src;
+      tokens.push({ kind: 'class', matches: (char, icase) => bracketMatches(b, char, icase) });
       i = b.end;
-    } else src += c.replace(/[.+^${}()|\\]/g, '\\$&');
+    } else tokens.push({ kind: 'literal', value: c });
   }
-  return { literal: null, lit: unescapeGlob(rel).replace(/\/+$/, ''), icase: !!mode.icase, re: new RegExp(`^${src}$`, flags) };
+  return {
+    literal: null, lit: unescapeGlob(rel).replace(/\/+$/, ''), icase: !!mode.icase,
+    re: compileLinearGlobTokens(tokens, { icase: !!mode.icase, overflowMatches: true }),
+  };
 }
 
 /**
@@ -5606,8 +5725,8 @@ async function assessStashEntries(command, dir, hit, stashGit = git) {
           + 'at risk was found among those — but this command can reach entries holt never '
           + 'examined, so that is not an all-clear.\n'
           + 'Run `git stash list` and check the entries past '
-          + `stash@{${MAX_ENTRIES - 1}} before proceeding, or `
-          + '`holt rescue` them to a ref first.',
+          + `stash@{${MAX_ENTRIES - 1}} before proceeding. `
+          + stashRecoveryGuidance(),
       };
     }
     return { decision: 'allow', reason: null, kind: hit.kind, targets: [] };
@@ -5625,13 +5744,11 @@ async function assessStashEntries(command, dir, hit, stashGit = git) {
       targets,
       reason: `holt is asking before this: ${hit.kind}. The stash holds content no ref holds:\n`
         + `${detail}\n`
-        // THE SPECIFIC RISK, SAID OUT LOUD. `pop` = apply, then drop — and it drops on a partial
-        // apply too. So this content survives ONLY IF the apply succeeds; if it conflicts, the
-        // entry is unlinked anyway and the blobs above become unreachable in the same command.
-        // A message that only says "content no ref holds" describes the stake without describing
-        // the mechanism, and the mechanism is the whole reason `apply` is the better verb.
-        + 'This content survives only if the apply succeeds — `pop` drops the entry either way, '
-        + 'including on a conflict.\n'
+        // THE SPECIFIC RECOVERY SEMANTICS, SAID OUT LOUD. `pop` applies first and drops only after
+        // success. On a conflict Git keeps the entry, which is why `pop` stays outside the
+        // destructive-entry rule above. A diagnostic claiming the opposite would steer users
+        // away from a recovery path the guard itself correctly allows.
+        + `${STASH_POP_CONFLICT_GUIDANCE}\n`
         + `${hit.recovery}\n`
         + 'Run `git stash list` to inspect first, or confirm this is what you mean.',
     };
@@ -5644,8 +5761,7 @@ async function assessStashEntries(command, dir, hit, stashGit = git) {
       + `${detail}\n`
       + 'A stash entry is a commit nothing points at: unlink it from the reflog and those blobs '
       + 'are unreachable in the same breath.\n'
-      + 'Run `git stash apply` to bring it back into a worktree first, or `holt rescue <id>` to '
-      + 'capture it to a ref — then dropping it loses nothing and holt will say so.',
+      + stashRecoveryGuidance(),
   };
 }
 
@@ -6236,7 +6352,7 @@ export const BRIEF_REFRESH_AFTER = 20;
 /** Sibling of the report cache: what was last SAID, as opposed to what was last computed. */
 function briefStatePath(root) {
   const key = createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 16);
-  return path.join(scratchDir(), `holt-brief-${key}.json`);
+  return path.join(privateStateRoot(), `brief-${key}.json`);
 }
 
 /**
@@ -6387,7 +6503,7 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
       `work and deleting a worktree will not lose it, but \`git stash drop\`/\`clear\` will: ` +
       `${shown.map((e) => u.take(e.selector, ID)).join(', ')}.` +
       `${stashed.length > shown.length ? ` … and ${stashed.length - shown.length} more. ` : ' '}` +
-      '`git stash apply` then commit, or `holt rescue`, makes it reachable.',
+      stashRecoveryGuidance(),
     );
   }
   // LOUD BREAK: if holt stopped scanning at MAX_ENTRIES, entries beyond the cap were NOT checked
@@ -6464,27 +6580,32 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   const digest = createHash('sha256').update(text).digest('hex').slice(0, 32);
   if (!root) return text;
   const statePath = briefStatePath(root);
+  let stateReady = true;
+  try { await ensurePrivateDirectory(privateStateRoot()); } catch { stateReady = false; }
   // SessionStart and Antigravity invocation 0 deliberately speak even if another process emitted
   // the same text recently, but they still have to record WHAT was said.  Without this write, the
   // immediately-following UserPromptSubmit/PreInvocation call sees no prior digest and injects
   // the byte-identical paragraph again.  That one-turn duplicate is still noise and still spends
   // model context; "always speak now" is not "pretend nothing was said".
   if (!opts.onlyIfChanged) {
-    await fs.writeFile(statePath, JSON.stringify({
+    if (stateReady) await writePrivateFileAtomic(statePath, JSON.stringify({
       version: 1, digest, suppressed: 0,
-    }), 'utf8').catch(() => { /* an unwritable state file must never break a hook */ });
+    })).catch(() => { /* an unwritable state file must never break a hook */ });
     return text;
   }
   /** @type {{digest?:string, suppressed?:number}|null} */
   let prev = null;
-  try { prev = JSON.parse(await fs.readFile(statePath, 'utf8')); } catch { /* first time */ }
+  if (stateReady) try {
+    const stored = await readStableRegularFile(statePath, { requireSingleLink: true, requireOwner: true });
+    if (stored.ok) prev = JSON.parse(stored.bytes.toString('utf8'));
+  } catch { /* first time */ }
 
   const repeats = prev?.digest === digest ? (prev.suppressed ?? 0) + 1 : 0;
   const suppress = repeats > 0 && repeats < BRIEF_REFRESH_AFTER;
 
-  await fs.writeFile(statePath, JSON.stringify({
+  if (stateReady) await writePrivateFileAtomic(statePath, JSON.stringify({
     version: 1, digest, suppressed: suppress ? repeats : 0,
-  }), 'utf8').catch(() => { /* an unwritable state file must never break a hook */ });
+  })).catch(() => { /* an unwritable state file must never break a hook */ });
 
   return suppress ? null : text;
 }

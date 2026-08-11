@@ -1,38 +1,38 @@
 ---
 name: Bug report
-about: Create a report to help us improve
+about: Report reproducible Holt CLI, TUI, hook, MCP, or integration behaviour
 title: ''
-labels: ''
+labels: 'bug'
 assignees: ''
 
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+Thanks for taking the time to make Holt safer. Do not include credentials, licence tokens,
+private source, or unredacted repository paths. Security vulnerabilities belong in a private
+[GitHub Security Advisory](https://github.com/Raed2180416/holt/security/advisories/new), not here.
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+## What happened?
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+Include the exact command and complete redacted output.
 
-**Screenshots**
-If applicable, add screenshots to help explain your problem.
+## What did you expect?
 
-**Desktop (please complete the following information):**
- - OS: [e.g. iOS]
- - Browser [e.g. chrome, safari]
- - Version [e.g. 22]
+## Minimal reproduction
 
-**Smartphone (please complete the following information):**
- - Device: [e.g. iPhone6]
- - OS: [e.g. iOS8.1]
- - Browser [e.g. stock browser, safari]
- - Version [e.g. 22]
+List the smallest sequence that reproduces the issue. Say whether the repository uses Git
+worktrees, jj workspaces, submodules, partial/shallow clone, network storage, or symlinked paths.
 
-**Additional context**
-Add any other context about the problem here.
+## Environment
+
+- Holt version (`holt --version`):
+- Install source (official GitHub release, source checkout, other):
+- OS and architecture:
+- Shell / terminal:
+- Node version (`node --version`):
+- Git version (`git --version`):
+- Agent host and version, if this is an integration issue:
+
+## Diagnostics
+
+Attach relevant **redacted** output from `holt doctor --json` and, for install-integrity issues,
+`holt audit --json`. Review environment values, usernames and paths before posting.

@@ -27,7 +27,12 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 /** Files whose install command a human is expected to copy and run. */
-const COVERED = ['README.md', 'site/index.html'];
+const COVERED = [
+  'README.md',
+  'site/index.html',
+  'SUPPORT.md',
+  'docs/launch/DESIGN-PARTNER-PROGRAM.md',
+];
 
 test('every covered file advertises an npm install command for the GitHub release tarball', async () => {
   let checked = 0;
@@ -57,5 +62,29 @@ test('no covered file carries a tag-pinned GitHub-release URL', async () => {
       + '  Every future release makes this command hand the reader an old build, and it 404s '
       + '  outright until that exact tag is published.\n'
       + '  Use `releases/latest/download/holt.tgz` instead.');
+  }
+});
+
+test('shipped remediation never points at the unclaimed npm registry name', async () => {
+  const shipped = [];
+  for (const base of ['src', 'bin']) {
+    const root = path.join(ROOT, base);
+    for (const rel of await fs.readdir(root, { recursive: true })) {
+      if (!rel.endsWith('.mjs')) continue;
+      const label = path.posix.join(base, rel.split(path.sep).join('/'));
+      shipped.push({ rel: label, text: await fs.readFile(path.join(root, rel), 'utf8') });
+    }
+  }
+  assert.ok(shipped.length > 20, 'the shipped-source scan is unexpectedly empty');
+  for (const { rel, text } of shipped) {
+    assert.doesNotMatch(text, /npm install -g holt(?:[`\s),.]|$)/,
+      `${rel} must not recommend an npm registry package that is not published`);
+  }
+
+  for (const rel of ['src/integrate/adapters.mjs', 'src/supply-chain.mjs']) {
+    const source = shipped.find((entry) => entry.rel === rel)?.text ?? '';
+    assert.match(source,
+      /npm install -g https:\/\/github\.com\/Raed2180416\/holt\/releases\/latest\/download\/holt\.tgz/,
+      `${rel} remediation must name the same official stable GitHub release as README/site`);
   }
 });

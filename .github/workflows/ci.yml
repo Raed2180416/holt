@@ -181,7 +181,11 @@ jobs:
 
   full:
     name: all backends
-    timeout-minutes: 60
+    # Hosted run 31477499554 measured 5m06s of setup plus a 53m59s complete proof; mutation was
+    # 47m22s of that proof. The former 60-minute cap left under one minute for artifact retention
+    # and final gates. Seventy-five minutes is the measured path plus 25% runner-variance headroom,
+    # and the CI hardening gate below rejects duplicate corpus/mutation work that could consume it.
+    timeout-minutes: 75
     runs-on: ubuntu-latest
     env:
       HOLT_REAL_REPOS: ${{ github.workspace }}/.holt-fixtures
@@ -278,60 +282,14 @@ jobs:
             ${{ runner.temp }}/feature-proof.json
             ${{ runner.temp }}/feature-proof.json.sha256
 
-      - name: full suite
-        run: npm test
+      - name: public claims match the retained proof denominators
+        # The feature proof already ran every test file and the full mutation fingerprint. Verify
+        # its SHA-256 sidecar and reuse those exact denominators; independently rerunning both here
+        # made a successful job structurally unable to finish inside its own timeout.
+        run: node scripts/run-feature-proof.mjs --verify-publication "$RUNNER_TEMP/feature-proof.json"
 
       - name: the tool must be able to inspect its own repository
         run: node bin/holt.mjs status
-
-      - name: published numbers must match reality
-        # Doc numbers rot the instant they are written and nothing re-checks them — this repo
-        # already shipped README/BENCHMARKS disagreeing with each other AND with the suite. The
-        # fix is not vigilance, it is a gate: the claimed test count and mutation score are
-        # compared against what the suite actually reports, and a mismatch fails the build.
-        # site/index.html is included because it was the ONE surface this gate never checked,
-        # and it is the surface the public actually reads — it drifted to 199/13-13 unnoticed.
-        # test/unit/published-numbers.test.mjs covers the other half: all surfaces must AGREE.
-        run: |
-          npm test 2>&1 | tee /tmp/holt-suite.txt >/dev/null || true
-          ACTUAL_TESTS=$(grep -oE '^# pass [0-9]+|^ℹ pass [0-9]+' /tmp/holt-suite.txt | grep -oE '[0-9]+' | head -1)
-          # A SKIPPED TEST DID NOT RUN, so it cannot count toward "N tests passing". node reports
-          # pass and skipped separately, and this gate deliberately compares the published number
-          # against PASS — the tests that actually executed. Any new skip therefore lowers the
-          # count and fails this gate, which forces the skip to be fixed or the claim corrected,
-          # rather than quietly inflating a number nobody re-checks.
-          SKIPPED=$(grep -oE '^# skipped [0-9]+|^ℹ skipped [0-9]+' /tmp/holt-suite.txt | grep -oE '[0-9]+' | head -1)
-          if [ "${SKIPPED:-0}" != "0" ]; then
-            echo "::warning::${SKIPPED} test(s) did not execute and are NOT counted as passing:"
-            grep -aE '# SKIP' /tmp/holt-suite.txt | sed 's/^/  /' | head -20
-          fi
-          ACTUAL_MUT=$(npm run test:mutation 2>&1 | grep -oE '[0-9]+/[0-9]+ mutations killed' | grep -oE '^[0-9]+/[0-9]+')
-          echo "suite reports: $ACTUAL_TESTS tests, $ACTUAL_MUT mutations"
-          # A GATE THAT CANNOT FAIL IS NOT A GATE. If either parse comes back empty — the
-          # reporter changed its wording, the suite died before printing a summary — then every
-          # `grep -q "$ACTUAL_TESTS"` below becomes `grep -q ""`, which matches every file ever
-          # written, and this step reports "published numbers match the suite" having compared
-          # nothing at all. Refuse to proceed on an unmeasured number.
-          for pair in "ACTUAL_TESTS:$ACTUAL_TESTS" "ACTUAL_MUT:$ACTUAL_MUT"; do
-            if [ -z "${pair#*:}" ]; then
-              echo "::error::${pair%%:*} could not be parsed from the suite output — refusing to compare against an empty string"
-              exit 1
-            fi
-          done
-          # `grep -q "$ACTUAL_TESTS" "$f"` — the check this replaced — passes the instant those
-          # digits appear ANYWHERE in the file: an SVG coordinate, a hex colour, a port number, a
-          # year. scripts/check-published-numbers.mjs matches the CLAIM instead (the shields
-          # badge, the site tile, the "N tests passing" sentence, the BENCHMARKS table row — the
-          # same shapes test/unit/published-numbers.test.mjs already checks agree with each
-          # other) and requires every such claim to equal what this run measured. Proven against a
-          # scratch fixture, both directions, in test/unit/published-numbers-gate.test.mjs.
-          node scripts/check-published-numbers.mjs --tests "$ACTUAL_TESTS" --mutation "$ACTUAL_MUT"
-
-      - name: mutation testing — prove the tests would FAIL on a real defect
-        # A green suite proves the tests RAN. This proves they would have caught the specific
-        # defects that matter: a tool that authorises deleting work, or runs a command it
-        # promised never to run. A survivor fails the build.
-        run: npm run test:mutation
 
   crossplat:
     name: portable suite on ${{ matrix.os }} / Node ${{ matrix.node }}

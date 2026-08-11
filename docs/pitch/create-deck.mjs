@@ -189,7 +189,7 @@ function footer(slide, value = "HOLT / PRE-SEED / AUGUST 2026") {
 // 7 — ICP and buyer.
 {
   const slide = base("Beachhead", 7);
-  title(slide, "Start where concurrency already hurts.", "The first customer is a team using several coding agents or worktrees against the same active repository.");
+  title(slide, "Start where concurrency already hurts.", "First customer: a team already running several agents or worktrees in one active repository.");
   const rows = [
     ["USER", "Staff engineer / platform engineer", "Feels the incident and owns the repository workflow."],
     ["CHAMPION", "AI tooling or developer productivity lead", "Wants more agent throughput without opaque cleanup risk."],
@@ -213,7 +213,7 @@ function footer(slide, value = "HOLT / PRE-SEED / AUGUST 2026") {
   const moat = [
     ["RECOVERY GRAPH", "What can be restored, from which evidence, after partial failure."],
     ["ADVERSARIAL CORPUS", "Broken worktrees, hidden dirt, stale receipts, and ambiguous merges become regression cases."],
-    ["CROSS-HOST CONTRACT", "Observed semantics across Linux, macOS, Windows, CI, IDEs, and agent hosts."],
+    ["CROSS-HOST CONTRACT", "A target for separately observed semantics across Linux, macOS, Windows, CI, IDEs, and agent hosts."],
     ["WORKFLOW NEUTRALITY", "One independent layer can serve multiple coding agents instead of competing with them."],
   ];
   moat.forEach(([h, b], i) => {

@@ -214,9 +214,22 @@ async function runFuzzRound(seed, worktreeCount) {
   return violations;
 }
 
+// These are literal observable TAP contracts, not a template. The feature-proof runner requires
+// every configured seed to appear independently in the retained output.
+const FUZZ_CASES = Object.freeze([
+  { seed: 1, title: 'FUZZ INVARIANT seed=1: holt never calls at-risk content safe, never removes it' },
+  { seed: 2, title: 'FUZZ INVARIANT seed=2: holt never calls at-risk content safe, never removes it' },
+  { seed: 3, title: 'FUZZ INVARIANT seed=3: holt never calls at-risk content safe, never removes it' },
+  { seed: 4, title: 'FUZZ INVARIANT seed=4: holt never calls at-risk content safe, never removes it' },
+  { seed: 5, title: 'FUZZ INVARIANT seed=5: holt never calls at-risk content safe, never removes it' },
+  { seed: 6, title: 'FUZZ INVARIANT seed=6: holt never calls at-risk content safe, never removes it' },
+  { seed: 7, title: 'FUZZ INVARIANT seed=7: holt never calls at-risk content safe, never removes it' },
+  { seed: 8, title: 'FUZZ INVARIANT seed=8: holt never calls at-risk content safe, never removes it' },
+]);
+
 // Rounds are independent; seeds are fixed so any failure is a permanent, reproducible case.
-for (const seed of [1, 2, 3, 4, 5, 6, 7, 8]) {
-  test(`FUZZ INVARIANT seed=${seed}: holt never calls at-risk content safe, never removes it`, async () => {
+for (const { seed, title } of FUZZ_CASES) {
+  test(title, async () => {
     const violations = await runFuzzRound(seed, 6);
     assert.deepEqual(violations, [],
       `INVARIANT VIOLATED (reproduce with seed=${seed}):\n${violations.join('\n')}`);

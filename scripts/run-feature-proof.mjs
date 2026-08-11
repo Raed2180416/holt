@@ -17,6 +17,7 @@
  * Usage:
  *   node scripts/run-feature-proof.mjs --plan
  *   node scripts/run-feature-proof.mjs --out ~/.cache/holt-feature-proof/proof.json
+ *   node scripts/run-feature-proof.mjs --verify-publication ~/.cache/holt-feature-proof/proof.json
  */
 
 import { createHash } from 'node:crypto';
@@ -397,7 +398,7 @@ export const FEATURES = [
   {
     id: 'managed-policy-authority', area: 'enterprise-policy',
     interfaces: ['cli:managed-policy', 'cli:ci'],
-    tests: [T('test/e2e/managed-policy-cli.test.mjs', 'managed-policy is a real Enterprise entitlement with a reachable command surface'), T('test/e2e/managed-policy-tuf.test.mjs', 'real Updater verifies and activates policy with a root-bound sorted receipt, then offline authority load performs zero fetches'), T('test/e2e/managed-policy-authority.test.mjs', 'system-enrolled active policy resolves by exact trusted identity and evaluates every layer additively without fetch')],
+    tests: [T('test/e2e/managed-policy-cli.test.mjs', 'managed-policy is a real Enterprise entitlement with a reachable command surface'), T('test/e2e/managed-policy-tuf.test.mjs', 'system managed-policy TUF suite passes under the real uid-0 and fixed-/etc contract'), T('test/e2e/managed-policy-authority.test.mjs', 'system managed-policy authority suite passes under the real uid-0 and fixed-/etc contract')],
     oracle: 'Real tuf-js signatures/rotation/delegation, root-owned out-of-repository authority, inode-bound repository identity, crash receipts, and byte-identical last-good state.',
     gap: 'SSO/SCIM, Windows system ACL authority, signed offline-media update workflow, and a hosted macOS root-ownership run are not shipped or proven.',
     evidence: ['complete-test-corpus', 'mutation-fingerprint'],
@@ -477,7 +478,13 @@ export const FEATURES = [
   {
     id: 'monster-and-randomized-invariants', area: 'adversarial-proof',
     interfaces: ['harness:monster', 'harness:fuzz'],
-    tests: [T('test/e2e/monster.test.mjs', 'MONSTER: 40 worktrees of every trap at once — full loop, every byte graded'), T('test/e2e/fuzz-invariant.test.mjs', 'FUZZ INVARIANT seed=${seed}: holt never calls at-risk content safe, never removes it')],
+    tests: [
+      T('test/e2e/monster.test.mjs', 'MONSTER: 40 worktrees of every trap at once — full loop, every byte graded'),
+      ...[1, 2, 3, 4, 5, 6, 7, 8].map((seed) => T(
+        'test/e2e/fuzz-invariant.test.mjs',
+        `FUZZ INVARIANT seed=${seed}: holt never calls at-risk content safe, never removes it`,
+      )),
+    ],
     oracle: 'Direct filesystem/base comparison and retained-byte checks share no verdict code with Holt.',
     gap: 'Seeded randomized and synthetic worst cases remain finite; passing them is not proof against every possible race.',
     evidence: ['complete-test-corpus', 'mutation-fingerprint'],
@@ -1112,6 +1119,98 @@ export async function safeArtifactPath(out) {
   return absolute;
 }
 
+/**
+ * Read a completed proof only after its write-once sidecar binds the exact bytes.
+ * Publication must consume checksum-verified retained evidence, not an independently edited JSON
+ * summary. The sidecar proves byte integrity; source/runtime identity remains inside the artifact.
+ *
+ * @param {string} out
+ */
+export async function readVerifiedArtifact(out) {
+  const absolute = path.resolve(out);
+  const [encoded, sidecar] = await Promise.all([
+    fs.readFile(absolute, 'utf8'),
+    fs.readFile(`${absolute}.sha256`, 'utf8'),
+  ]);
+  const match = /^([a-f0-9]{64})  ([^\r\n]+)\r?\n?$/.exec(sidecar);
+  if (!match || match[2] !== path.basename(absolute)) {
+    throw new Error(`invalid feature-proof SHA-256 sidecar for ${absolute}`);
+  }
+  const actual = sha256(encoded);
+  if (actual !== match[1]) {
+    throw new Error(`feature-proof SHA-256 sidecar does not match ${absolute}`);
+  }
+  return JSON.parse(encoded);
+}
+
+/**
+ * Extract the public test/mutation denominators from the one retained proof run. A value is
+ * eligible only when the whole feature proof is valid, the complete corpus passed every observed
+ * test, and the mutation command killed every mutation. This replaces three post-proof reruns
+ * that made the hosted job exceed its own timeout without adding independent evidence.
+ *
+ * @param {any} artifact
+ * @returns {{tests:string, mutation:string}}
+ */
+export function publicationInputs(artifact) {
+  if (artifact?.schemaVersion !== 1 || artifact?.kind !== 'holt-feature-proof') {
+    throw new Error('publication requires a schema-v1 Holt feature-proof artifact');
+  }
+  if (artifact.valid !== true) {
+    throw new Error('publication requires a valid feature-proof artifact; partial evidence is ineligible');
+  }
+  const results = Array.isArray(artifact.results) ? artifact.results : [];
+  const sole = (id) => {
+    const matches = results.filter((result) => result?.id === id);
+    if (matches.length !== 1) throw new Error(`publication requires exactly one ${id} result, found ${matches.length}`);
+    return matches[0];
+  };
+
+  const corpus = sole('complete-test-corpus');
+  const tap = corpus.tap ?? {};
+  const integer = (value) => Number.isInteger(value) && value >= 0;
+  for (const field of ['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo']) {
+    if (!integer(tap[field])) throw new Error(`complete-test-corpus has no finite ${field} denominator`);
+  }
+  if (corpus.exitCode !== 0 || corpus.signal !== null || corpus.grade?.pass !== true
+      || tap.tests <= 0 || tap.pass !== tap.tests
+      || tap.fail !== 0 || tap.cancelled !== 0 || tap.skipped !== 0 || tap.todo !== 0) {
+    throw new Error('complete-test-corpus is not a complete all-passing publication denominator');
+  }
+
+  const mutation = sole('mutation-fingerprint');
+  if (mutation.exitCode !== 0 || mutation.signal !== null || mutation.grade?.pass !== true) {
+    throw new Error('mutation-fingerprint did not pass and cannot supply a publication denominator');
+  }
+  const matches = [...String(mutation.stdout ?? '').matchAll(/(?:^|\n)\s*(\d+)\/(\d+) mutations killed(?:\s|$)/g)];
+  if (matches.length !== 1) {
+    throw new Error(`mutation-fingerprint must report exactly one killed/total denominator, found ${matches.length}`);
+  }
+  const killed = Number(matches[0][1]);
+  const total = Number(matches[0][2]);
+  if (!Number.isSafeInteger(killed) || !Number.isSafeInteger(total) || total <= 0 || killed !== total) {
+    throw new Error(`mutation-fingerprint is incomplete: ${killed}/${total} mutations killed`);
+  }
+  return { tests: String(tap.pass), mutation: `${killed}/${total}` };
+}
+
+/**
+ * Verify public number/withholding state against a completed proof without re-running the corpus.
+ *
+ * @param {string} out
+ */
+export async function verifyPublication(out) {
+  const artifact = await readVerifiedArtifact(out);
+  const inputs = publicationInputs(artifact);
+  const result = await runProcess({
+    id: 'published-number-gate', kind: 'gate',
+    description: 'Public claims match retained feature-proof denominators',
+    command: process.execPath,
+    args: ['scripts/check-published-numbers.mjs', '--tests', inputs.tests, '--mutation', inputs.mutation],
+  });
+  return { inputs, result };
+}
+
 async function writeArtifact(artifact, out) {
   let absolute = await safeArtifactPath(out);
   await fs.mkdir(path.dirname(absolute), { recursive: true });
@@ -1126,7 +1225,7 @@ async function writeArtifact(artifact, out) {
 }
 
 function parseArgs(argv) {
-  const opts = { plan: false, out: null, help: false, internalDeepRuntime: false };
+  const opts = { plan: false, out: null, verifyPublication: null, help: false, internalDeepRuntime: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === '--plan' || arg === '--list') opts.plan = true;
@@ -1135,6 +1234,9 @@ function parseArgs(argv) {
     else if (arg === '--out') {
       if (!argv[index + 1]) throw new Error('--out needs a path');
       opts.out = argv[++index];
+    } else if (arg === '--verify-publication') {
+      if (!argv[index + 1]) throw new Error('--verify-publication needs a feature-proof path');
+      opts.verifyPublication = argv[++index];
     } else {
       throw new Error(`unknown argument ${JSON.stringify(arg)}; partial/skip filters are intentionally unsupported`);
     }
@@ -1145,13 +1247,24 @@ function parseArgs(argv) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.internalDeepRuntime) {
-    if (opts.plan || opts.out || opts.help) throw new Error('internal deep runtime evidence cannot be combined with public modes');
+    if (opts.plan || opts.out || opts.verifyPublication || opts.help) throw new Error('internal deep runtime evidence cannot be combined with public modes');
     await printDeepRuntimeTap();
     return;
   }
   if (opts.help) {
-    console.log('usage: node scripts/run-feature-proof.mjs --plan | --out <outside-repo.json>');
+    console.log('usage: node scripts/run-feature-proof.mjs --plan | --out <outside-repo.json> | --verify-publication <feature-proof.json>');
     console.log('There are no skip/only/timeout flags: a partial run is not a feature-proof artifact.');
+    return;
+  }
+  if (opts.verifyPublication) {
+    if (opts.plan || opts.out) throw new Error('--verify-publication cannot be combined with proof execution modes');
+    const { inputs, result } = await verifyPublication(opts.verifyPublication);
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    if (!result.grade.pass) {
+      process.stderr.write(`feature-proof publication verification failed for ${inputs.tests} tests and ${inputs.mutation} mutations\n`);
+      process.exitCode = 1;
+    }
     return;
   }
   const plan = await buildPlan();

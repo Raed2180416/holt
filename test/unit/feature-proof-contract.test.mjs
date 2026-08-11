@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: FSL-1.1-MIT
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import {
   ROOT, CLI_COMMANDS, FEATURES, HOST_IDS, MCP_TOOLS,
   buildEvidenceCommands, buildPlan, focusedTestMarkers, gradeCommand, gradeRun, parseTap, runtimeIdentity,
-  safeArtifactPath, sourceIdentity,
+  publicationInputs, readVerifiedArtifact, safeArtifactPath, sourceIdentity,
 } from '../../scripts/run-feature-proof.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -93,6 +94,8 @@ test('FEATURE PROOF INVENTORY: feature rows are complete, unique, executable, an
       const stat = await fs.stat(absolute);
       assert.ok(stat.isFile() && stat.size > 0, `${feature.id}: missing/empty proof file ${proof.path}`);
       assert.ok(proof.title.length >= 12, `${feature.id}: exact test/harness title is required`);
+      assert.doesNotMatch(proof.title, /\$\{[^}]+\}/,
+        `${feature.id}: a template is not an observable TAP title; declare an exact emitted title`);
       const source = await fs.readFile(absolute, 'utf8');
       assert.ok(source.includes(proof.title),
         `${feature.id}: declared test/harness title is not present in ${proof.path}: ${proof.title}`);
@@ -230,6 +233,55 @@ test('FEATURE PROOF RUNNER: zero tests, skips, todos, cancellations, and nonzero
     assert.equal(grade.pass, false, `${name} must invalidate proof`);
   }
   assert.equal(gradeCommand({ kind: 'gate', exitCode: 9, stdout: '', stderr: 'failed' }).pass, false);
+});
+
+test('FEATURE PROOF RUNNER: publication reuses one valid corpus and mutation result without rerunning either', () => {
+  const artifact = {
+    schemaVersion: 1,
+    kind: 'holt-feature-proof',
+    valid: true,
+    results: [
+      {
+        id: 'complete-test-corpus', exitCode: 0, signal: null,
+        grade: { pass: true, reasons: [] },
+        tap: { tests: 1615, pass: 1615, fail: 0, cancelled: 0, skipped: 0, todo: 0 },
+      },
+      {
+        id: 'mutation-fingerprint', exitCode: 0, signal: null,
+        grade: { pass: true, reasons: [] }, stdout: '  145/145 mutations killed (100%)\n', stderr: '',
+      },
+    ],
+  };
+  assert.deepEqual(publicationInputs(artifact), { tests: '1615', mutation: '145/145' });
+
+  for (const [name, mutate] of [
+    ['invalid proof', (copy) => { copy.valid = false; }],
+    ['duplicate corpus result', (copy) => { copy.results.push(structuredClone(copy.results[0])); }],
+    ['failed corpus grade', (copy) => { copy.results[0].grade.pass = false; }],
+    ['partial corpus pass count', (copy) => { copy.results[0].tap.pass -= 1; }],
+    ['skipped corpus test', (copy) => { copy.results[0].tap.skipped = 1; }],
+    ['surviving mutation', (copy) => { copy.results[1].stdout = '144/145 mutations killed (99%)\n'; }],
+    ['missing mutation denominator', (copy) => { copy.results[1].stdout = 'mutation run finished\n'; }],
+  ]) {
+    const copy = structuredClone(artifact);
+    mutate(copy);
+    assert.throws(() => publicationInputs(copy), undefined, `${name} must not become a publishable number`);
+  }
+});
+
+test('FEATURE PROOF RUNNER: publication input verifies the write-once SHA-256 sidecar first', async (t) => {
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-proof-publication-'));
+  t.after(() => fs.rm(scratch, { recursive: true, force: true }));
+  const out = path.join(scratch, 'feature-proof.json');
+  const artifact = { schemaVersion: 1, kind: 'holt-feature-proof', valid: false, results: [] };
+  const encoded = `${JSON.stringify(artifact, null, 2)}\n`;
+  const digest = createHash('sha256').update(encoded).digest('hex');
+  await fs.writeFile(out, encoded, 'utf8');
+  await fs.writeFile(`${out}.sha256`, `${digest}  ${path.basename(out)}\n`, 'utf8');
+  assert.deepEqual(await readVerifiedArtifact(out), artifact);
+
+  await fs.writeFile(out, `${encoded} `, 'utf8');
+  await assert.rejects(readVerifiedArtifact(out), /SHA-256 sidecar does not match/);
 });
 
 test('FEATURE PROOF RUNNER: publication requires clean source, finite result shapes, and observed passing proof IDs', async () => {

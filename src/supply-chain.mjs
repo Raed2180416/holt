@@ -291,6 +291,10 @@ export const CAPABILITIES = {
       file: 'src/git.mjs', identifier: 'executable', canRun: ['git'],
       why: 'the production Git executable is fixed to `git`; an internal test-only runner seam may substitute a wrapper without changing the production default or argv allowlist',
     },
+    {
+      file: 'src/team/audit-sink.mjs', identifier: 'process', canRun: ['node'],
+      why: 'the Team audit sink starts this exact installed module under process.execPath, with argv fixed to its private anchored-writer mode. The child holds the already-verified sink directory as cwd so a concurrent pathname replacement cannot redirect writes; it cannot select another program or arbitrary module.',
+    },
   ],
 
   /**
@@ -754,7 +758,9 @@ export function verifyIntegrity({ root = '.', requireSignature = false, publicKe
     return {
       ok: false, code: 'no-manifest', signature: 'absent',
       reason: `no ${MANIFEST_FILE} beside this installation — integrity cannot be checked, so it is reported as UNVERIFIED rather than as clean`,
-      fix: 'Reinstall from the published tarball (npm install -g holt), which ships one.',
+      fix: 'Reinstall from the official release tarball '
+        + '(npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz), '
+        + 'which ships one.',
       files: { total: 0, matched: 0, modified: [], missing: [], unexpected: [] },
     };
   }
@@ -1111,8 +1117,9 @@ export const MODULE_LEDGER = {
   'src/license.mjs': ['filesystem'],
   'src/paths.mjs': ['filesystem', 'process'],
   'src/scan.mjs': ['filesystem'],
+  'src/stable-file.mjs': ['filesystem'],
   'src/supply-chain.mjs': ['filesystem'],
-  'src/team/audit-sink.mjs': ['filesystem'],
+  'src/team/audit-sink.mjs': ['filesystem', 'process'],
   'src/team/fleet.mjs': ['filesystem'],
   'src/team/managed-policy-authority.mjs': ['filesystem'],
   'src/team/managed-policy-cli.mjs': ['filesystem'],
