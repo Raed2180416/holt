@@ -128,6 +128,20 @@ test('NEVER THROWS: no bracket expression, however malformed, escapes as an exce
   }
 });
 
+test('LINEAR GLOB: adversarial wildcard input stays bounded in an isolated process', async () => {
+  const pattern = `${'a*'.repeat(5000)}b`;
+  const subject = `${'a'.repeat(5000)}c`;
+  const moduleUrl = new URL('../../src/agent.mjs', import.meta.url).href;
+  const source = `import { globMatches } from ${JSON.stringify(moduleUrl)};`
+    + `process.stdout.write(String(globMatches(${JSON.stringify(pattern)}, ${JSON.stringify(subject)})));`;
+  const started = Date.now();
+  const result = await exec(process.execPath, ['--input-type=module', '-e', source], {
+    timeout: 1500, maxBuffer: 1024 * 1024,
+  });
+  assert.equal(result.stdout, 'true', 'over-budget destructive globs must degrade to the conservative match');
+  assert.ok(Date.now() - started < 1500, 'glob execution exceeded its isolated hard budget');
+});
+
 test('NULLGLOB IS OFF: a pattern that matches nothing is passed through LITERALLY', async (t) => {
   // Measured in a real shell, and this is the whole reason the literal reading is a second target:
   //   $ ls app        -> [id].tsx  plain.tsx

@@ -7,10 +7,10 @@ maintainers, gives you a coordinated-disclosure thread, and needs no email addre
 trusted. Please do not open a public issue for a security report.
 
 Include what you did, what happened, and what you expected. A proof of concept is welcome but
-never required. You will get an acknowledgement within 72 hours and a substantive reply within
-7 days.
+never required. Reports are handled on a best-effort basis; the project does not currently promise
+an acknowledgement or remediation timetable.
 
-We will credit you in the release notes unless you ask us not to.
+If a report leads to a release, tell us whether and how you would like to be credited.
 
 ## What is in scope
 
@@ -19,7 +19,7 @@ We will credit you in the release notes unless you ask us not to.
   execute a git command outside its allowlist.
 - The license verification path — in particular anything that lets a forged or edited license
   verify.
-- The license service (`server/`).
+- The licence-service source in `server/`, and any project-operated deployment of that code.
 
 ## What is not a vulnerability
 
@@ -32,12 +32,11 @@ We will credit you in the release notes unless you ask us not to.
 
 ## Security review
 
-Before its first paid release, holt's commercial surface (offline license verification, the
-Stripe-webhook license service, the HTTP endpoints, CLI entitlement, and the supply chain) was
-put through an adversarial audit covering token forgery, webhook replay, payment-event
-confusion, terminal-escape injection, rate-limit bypass, and secret handling. Findings were
-fixed and each is pinned by a regression test; the offline-verification and entitlement paths
-carry deliberate-defect mutation tests that must fail the build if the check is ever weakened.
+The repository contains project-authored adversarial regression tests for offline licence
+verification, webhook handling, entitlement, terminal output, rate limiting, secret handling and
+the release supply chain. Those tests are useful evidence about the commit that ran them; they are
+not a third-party penetration test, a certification, or proof about a deployed service. Verify the
+specific release and its CI evidence before relying on them.
 
 ## Design properties we intend to hold
 

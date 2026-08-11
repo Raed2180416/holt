@@ -28,6 +28,7 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { readStableRegularFile } from './stable-file.mjs';
 
 /** git subcommands that touch nothing. */
 const SAFE = new Set([
@@ -802,11 +803,11 @@ export async function resolveTimeout(cwd, timeout) {
  * @param {string[]} argv
  * @param {{ cwd?: string, timeout?: number, allowObjectWrite?: boolean,
  *           allowMutation?: boolean, env?: Record<string, string|undefined>,
- *           executable?: string, executableArgs?: string[] }} [opts]
+ *           executable?: string, executableArgs?: string[], stdin?: string|Buffer }} [opts]
  */
 export async function git(argv, {
   cwd, timeout = DEFAULT_TIMEOUT_MS, allowObjectWrite = true, allowMutation = false, env,
-  executable = 'git', executableArgs = [],
+  executable = 'git', executableArgs = [], stdin,
 } = {}) {
   const verdict = classify(argv, { allowMutation });
   if (!verdict.allowed) {
@@ -831,7 +832,7 @@ export async function git(argv, {
     ...withCommandConfig(hardenGitArgv(argv), commandContext.configArgs)];
 
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       executable,
       childArgv,
       {
@@ -856,6 +857,12 @@ export async function git(argv, {
         });
       },
     );
+    if (stdin !== undefined && child.stdin) {
+      // A fast refusal may close stdin before Node finishes the write. The callback above owns the
+      // process verdict; EPIPE on this auxiliary channel must not become an unhandled exception.
+      child.stdin.on('error', () => {});
+      child.stdin.end(stdin);
+    }
   });
 }
 
@@ -1369,9 +1376,9 @@ let snapCounter = 0;
 export async function readWorktreeFile(root, relPath) {
   try {
     const abs = path.join(root, relPath);
-    const st = await fs.lstat(abs);
-    if (!st.isFile() || st.size > 2 * 1024 * 1024) return null;
-    const buf = await fs.readFile(abs);
+    const stable = await readStableRegularFile(abs, { maxBytes: 2 * 1024 * 1024 });
+    if (!stable.ok) return null;
+    const buf = stable.bytes;
     if (buf.includes(0)) return null;
     const text = buf.toString('utf8');
     // LFS pointer files are small text files that stand in for large binaries. Without this check,

@@ -17,6 +17,8 @@
  * rest of holt exists to clean up.
  */
 
+import { compileLinearGlobTokens } from './linear-glob.mjs';
+
 /**
  * Tiny union-find over an arbitrary token space. Used below to merge directories that a
  * conflicting pair of workstreams both touch — see partitionPlan for why this has to operate
@@ -71,19 +73,22 @@ export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], co
     // task context is data, never a command. `**` crosses directories; `*` and `?` stay within
     // one. A literal directory anchor (for example `src`) owns its descendants; globs retain
     // normal exact-match semantics so `src/*.js` does not silently claim `src/deep/x.js`.
-    let source = '';
+    if (selector.length > 8192) return null;
+    const hasGlob = /[?*]/.test(selector);
+    if (!hasGlob) {
+      return Object.freeze({ test: (file) => file === selector || file.startsWith(`${selector}/`) });
+    }
+    const tokens = [];
     for (let i = 0; i < selector.length; i++) {
       const ch = selector[i];
       if (ch === '*' && selector[i + 1] === '*') {
-        if (selector[i + 2] === '/') { source += '(?:.*/)?'; i += 2; }
-        else { source += '.*'; i += 1; }
-      } else if (ch === '*') source += '[^/]*';
-      else if (ch === '?') source += '[^/]';
-      else if (/[.+^${}()|[\]\\]/.test(ch)) source += `\\${ch}`;
-      else source += ch;
+        tokens.push({ kind: 'star', crossSlash: true });
+        i += selector[i + 2] === '/' ? 2 : 1;
+      } else if (ch === '*') tokens.push({ kind: 'star', crossSlash: false });
+      else if (ch === '?') tokens.push({ kind: 'one', crossSlash: false });
+      else tokens.push({ kind: 'literal', value: ch });
     }
-    const directorySuffix = !/[?*]/.test(selector) ? '(?:/.*)?' : '';
-    try { return new RegExp(`^(?:${source})${directorySuffix}$`); } catch { return null; }
+    return compileLinearGlobTokens(tokens);
   };
   const selectors = anchors.map((anchor) => [anchor, compileAnchor(anchor)]);
   const matches = (file, selector) => selector?.test(file) === true;

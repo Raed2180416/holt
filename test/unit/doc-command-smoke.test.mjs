@@ -65,6 +65,24 @@ function deriveFlags(src) {
   return flags;
 }
 
+/**
+ * Global terminal flags are complete CLI invocations: `holt --version` and `holt --help` do not
+ * have a subcommand token. Derive them from the branches that set the two early-exit options,
+ * rather than teaching this doc gate a hand-maintained exception list. Keeping these separate
+ * from ordinary flags also prevents a value-taking option such as bare `holt --cwd` from being
+ * accepted merely because parseArgs recognises its spelling.
+ */
+function deriveTerminalFlags(src) {
+  const flags = new Set();
+  for (const line of src.split('\n')) {
+    if (!/opts\.(?:version|help)\s*=\s*true/.test(line)) continue;
+    for (const match of line.matchAll(/case\s+'(-{1,2}[a-zA-Z][a-zA-Z-]*)':/g)) {
+      flags.add(match[1]);
+    }
+  }
+  return flags;
+}
+
 /* --------------------------------------------------------------- extracting doc commands ---- */
 
 /** Markdown files this repository ships or maintains. Walked fresh each run — a new doc under
@@ -175,6 +193,7 @@ test('DOC SMOKE: every `holt ...` command shown in the docs is a real command wi
   const src = await fs.readFile(CLI_SOURCE, 'utf8');
   const commands = deriveCommands(src);
   const flags = deriveFlags(src);
+  const terminalFlags = deriveTerminalFlags(src);
 
   // Anti-vacuity: if this ever comes back near-empty, the regex has drifted from bin/holt.mjs's
   // own shape (a refactor to a Map, a different case-statement style) and the test would pass by
@@ -183,6 +202,8 @@ test('DOC SMOKE: every `holt ...` command shown in the docs is a real command wi
     `only ${commands.size} commands derived from bin/holt.mjs — extraction has drifted from the CLI's shape`);
   assert.ok(flags.size >= 15,
     `only ${flags.size} flags derived from bin/holt.mjs — extraction has drifted from the CLI's shape`);
+  assert.ok(terminalFlags.size >= 4,
+    `only ${terminalFlags.size} terminal flags derived from bin/holt.mjs — global flag extraction has drifted`);
 
   const files = await markdownFiles();
   assert.ok(files.length >= 8, `only found ${files.length} markdown files to check — glob has drifted`);
@@ -203,6 +224,18 @@ test('DOC SMOKE: every `holt ...` command shown in the docs is a real command wi
         const tokens = tokenize(invocation);
         const [, sub, ...rest] = tokens;
         if (!sub) continue; // bare "holt" with nothing after it, already filtered by the regex
+
+        // Standard CLI UX puts these at argv[0], where there deliberately is no subcommand:
+        // `holt --version`, `holt -v`, `holt -V`, `holt --help`, and `holt -h`. The former checker
+        // called the first flag a command and rejected a public invocation the binary executes.
+        if (terminalFlags.has(sub)) {
+          for (const tok of rest) {
+            if (tok.startsWith('-') && !flags.has(tok)) {
+              failures.push(`${rel}:${line}: \`${invocation}\` — flag '${tok}' is not recognised by parseArgs`);
+            }
+          }
+          continue;
+        }
 
         if (!commands.has(sub) && !['help', 'version'].includes(sub)) {
           failures.push(`${rel}:${line}: \`${invocation}\` — '${sub}' is not a command bin/holt.mjs dispatches on`);
@@ -272,4 +305,16 @@ test('DOC SMOKE: the command/flag extraction can actually fail — proven agains
   const rest = tokenize(inv2).slice(2);
   assert.ok(rest.includes('--force'));
   assert.equal(flags.has('--force'), false, 'the planted removed-flag case must be a miss, proving the check can fail');
+
+  const terminalSrc = `
+    switch (a) {
+      case '-v': case '--version': opts.version = true; break;
+      case '-h': case '--help': opts.help = true; break;
+    }
+  `;
+  const terminalFlags = deriveTerminalFlags(terminalSrc);
+  assert.deepEqual(terminalFlags, new Set(['-v', '--version', '-h', '--help']),
+    'global terminal flags must be derived from their actual early-exit branches');
+  assert.equal(terminalFlags.has('--versoin'), false,
+    'a planted typo must remain invalid rather than being accepted as any leading flag');
 });

@@ -50,6 +50,30 @@ export const MAX_ENTRIES = 25;
 export const MAX_PATHS = 400;
 
 /**
+ * Canonical recovery guidance for content that still exists only in refs/stash.
+ *
+ * `holt rescue` captures bytes from a worktree. It does not read a stash entry into that
+ * worktree, so presenting it as an alternative to `git stash apply` turns a safety instruction
+ * into a successful no-op. Keep the ordering in one place for the guard, terminal report, agent
+ * brief, and MCP surface: apply first; only then can either a commit or a worktree rescue make the
+ * bytes durably reachable from a non-stash ref.
+ *
+ * @param {{ rescueStep?: string }} [options]
+ */
+export function stashRecoveryGuidance({
+  rescueStep = 'run `holt rescue <worktree-id> --include-primary` on that worktree',
+} = {}) {
+  return '`git stash apply` first; then commit the applied work or '
+    + `${rescueStep}. The rescue step captures only bytes already present in a worktree; `
+    + 'it cannot capture an unapplied stash entry.';
+}
+
+/** Git's actual `stash pop` conflict contract, shared with the guard diagnostic. */
+export const STASH_POP_CONFLICT_GUIDANCE =
+  '`git stash pop` removes the entry only after a successful apply; if the apply conflicts, Git '
+  + 'keeps the stash entry and the conflicted worktree contains both sides.';
+
+/**
  * `git stash list`, without `git stash`.
  *
  * @param {string} cwd

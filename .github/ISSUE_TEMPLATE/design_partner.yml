@@ -1,0 +1,61 @@
+name: Design-partner workflow
+description: Share a concrete parallel-agent repository workflow for a possible Holt design partnership
+title: "[Design partner] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for considering a Holt design partnership. This issue is public: do not include
+        credentials, proprietary source, customer data, or non-public repository details. For a
+        private conversation, email research.contrare@outlook.com instead.
+
+  - type: input
+    id: team
+    attributes:
+      label: Team or project
+      description: A public name or short description is enough.
+      placeholder: Five-person platform team using Claude Code and Codex
+    validations:
+      required: true
+
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Parallel-agent workflow
+      description: Describe the agents, worktrees or workspaces, hosts, and repository shape involved.
+      placeholder: We routinely run three agents across linked Git worktrees...
+    validations:
+      required: true
+
+  - type: textarea
+    id: coordination-moment
+    attributes:
+      label: Highest-value coordination moment
+      description: Name the cleanup, handoff, merge, interruption, or recovery moment where stronger repository intelligence would create the most leverage.
+      placeholder: After an interrupted run, we want an immediate map of which worktree holds unique uncommitted work...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proof
+    attributes:
+      label: What Holt would need to prove
+      description: Give one successful workflow and one resilience scenario the proof should withstand.
+      placeholder: It should preserve the only copy of a change and stay recoverable when a merge base is unavailable...
+    validations:
+      required: true
+
+  - type: input
+    id: contact
+    attributes:
+      label: Preferred contact path
+      description: Optional. Share only a public handle or address you are comfortable publishing.
+      placeholder: GitHub @handle
+
+  - type: checkboxes
+    id: public-boundary
+    attributes:
+      label: Public-information boundary
+      options:
+        - label: I have not included secrets, proprietary source, customer data, or private repository details.
+          required: true

@@ -42,6 +42,7 @@ import { deepDuplicates } from '../deep.mjs';
 import { loadConfig, ConfigError } from '../config.mjs';
 import { assertUsablePath, samePathAsync } from '../paths.mjs';
 import { resolveActor, setAmbientActor } from '../actor.mjs';
+import { stashRecoveryGuidance } from '../stash.mjs';
 
 /**
  * @modelcontextprotocol/sdk is an OPTIONAL dependency (see package.json optionalDependencies). A
@@ -893,7 +894,9 @@ async function dispatch(name, args, cwd, limit) {
           total: stash.length,
           note: 'these entries hold content NO ref holds. No worktree shows this work, so deleting '
             + 'worktrees will not lose it — `git stash drop`/`clear` will, irreversibly. '
-            + '`git stash apply` then commit, or holt_rescue, makes it reachable.',
+            + stashRecoveryGuidance({
+              rescueStep: 'call `holt_rescue` for the linked worktree that now holds it',
+            }),
           // NAMED SEPARATELY FROM `truncated` BELOW, WHICH MEANS SOMETHING ELSE. `truncated` says
           // holt's SCAN stopped at MAX_ENTRIES, so entries beyond it were never examined. This says
           // the scan saw them and the RESPONSE cut them. A reader who conflates the two either

@@ -13,6 +13,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { discover, repoAbsenceError } from '../src/discover.mjs';
+import { readStableRegularFile } from '../src/stable-file.mjs';
 // fileURLToPath, never URL.pathname: on Windows the latter yields "/C:/x", which is not a path.
 // The CI matrix exists because that exact bug shipped once.
 import { fileURLToPath } from 'node:url';
@@ -38,6 +39,7 @@ import { impact, detectRipgrep } from '../src/impact.mjs';
 import {
   integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext, mcpTargets,
 } from '../src/integrate/adapters.mjs';
+import { clearReceipt } from '../src/integrate/receipt.mjs';
 import { documentedNativeTool } from '../src/integrate/native-tools.mjs';
 import {
   inspectActivationIntegrity, activationIntegrityLines,
@@ -1280,18 +1282,13 @@ async function documentedEditWholeFile(toolInput, cwd) {
   if (!toolInput || typeof toolInput !== 'object' || Array.isArray(toolInput)
     || typeof toolInput.file_path !== 'string' || typeof toolInput.old_string !== 'string'
     || toolInput.old_string.length === 0) return false;
-  let stat;
   const file = path.resolve(cwd, toolInput.file_path);
-  try { stat = await fs.stat(file); } catch { return false; }
-  if (!stat.isFile()) return false;
   const expectedBytes = Buffer.byteLength(toolInput.old_string, 'utf8');
-  if (expectedBytes !== stat.size) return false;
-  if (stat.size > NATIVE_EDIT_COMPARE_MAX) return 'unknown';
-  try {
-    return await fs.readFile(file, 'utf8') === toolInput.old_string;
-  } catch {
-    return 'unknown';
-  }
+  if (expectedBytes > NATIVE_EDIT_COMPARE_MAX) return 'unknown';
+  const stable = await readStableRegularFile(file, { maxBytes: NATIVE_EDIT_COMPARE_MAX });
+  if (!stable.ok) return stable.reason === 'path-unavailable' ? false : 'unknown';
+  if (stable.bytes.length !== expectedBytes) return false;
+  return stable.bytes.equals(Buffer.from(toolInput.old_string, 'utf8'));
 }
 
 /**
@@ -1920,6 +1917,39 @@ async function confirm(question) {
   return answer === 'y' || answer === 'yes';
 }
 
+/**
+ * The exact checkout set an integration lifecycle operation must visit.
+ *
+ * `discover().root` is the checkout the caller stood in, not necessarily the primary. Git's
+ * worktree list is repository-wide, so start with the caller and then add every other recorded
+ * checkout. Canonicalisation closes the `/tmp` vs `/private/tmp`, symlink and short-name aliases
+ * that otherwise run one checkout twice. Windows paths are additionally case-folded; macOS paths
+ * must retain case because APFS can be configured case-sensitive.
+ */
+async function integrationCheckoutTargets(disc) {
+  const candidates = [
+    { id: path.basename(disc.root), path: disc.root },
+    ...(disc.workstreams ?? []),
+  ];
+  const seen = new Set();
+  const out = [];
+  for (const candidate of candidates) {
+    if (!candidate?.path) continue;
+    // Quarantine is a recovery object, not an active checkout. Rewriting its project files would
+    // invalidate the exact bytes Holt promised to restore. Prunable/transitional registrations
+    // likewise are not stable lifecycle targets. The caller checkout is the first synthetic row
+    // above and remains addressable when a user deliberately stands there.
+    if (candidate.quarantined || candidate.quarantineTransition || candidate.prunable) continue;
+    // eslint-disable-next-line no-await-in-loop -- a small, ordered filesystem identity set
+    const canonical = await fs.realpath(path.resolve(candidate.path)).catch(() => path.resolve(candidate.path));
+    const key = process.platform === 'win32' ? canonical.toLowerCase() : canonical;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ id: candidate.id ?? path.basename(candidate.path), path: candidate.path });
+  }
+  return out;
+}
+
 async function cmdIntegrate(opts) {
   const disc = await discover(opts.cwd, opts);
   if (!disc.root) {
@@ -1934,8 +1964,56 @@ async function cmdIntegrate(opts) {
   // only removes the package — it does not touch the hooks/MCP entries wired into every repo
   // integrate ever ran in, which would otherwise fail on every tool call forever.
   if (opts.remove) {
-    const results = await uninstall(disc.root, { scope });
-    if (opts.json) return emitJson({ scope, results });
+    const targets = await integrationCheckoutTargets(disc);
+    const worktrees = [];
+    const failures = [];
+    for (let i = 0; i < targets.length; i++) {
+      const target = targets[i];
+      try {
+        // Keep the shared receipt until every checkout has had a chance to remove byte-owned
+        // files. Clearing it after the first checkout makes every peer look unowned and strands
+        // the exact stale hook/config files this command exists to remove.
+        // eslint-disable-next-line no-await-in-loop -- ordered receipt-backed reconciliation
+        const targetResults = await uninstall(target.path, {
+          scope: i === 0 ? scope : 'project',
+          finalizeReceipt: false,
+        });
+        worktrees.push({ worktree: target.id, path: target.path, results: targetResults });
+        for (const result of targetResults.filter((row) => row.ok === false)) {
+          failures.push({
+            worktree: target.id,
+            path: result.path ?? target.path,
+            error: result.action,
+          });
+        }
+      } catch (error) {
+        const failure = {
+          worktree: target.id,
+          path: target.path,
+          error: error?.message ?? String(error),
+        };
+        worktrees.push({ ...failure, results: [] });
+        failures.push(failure);
+      }
+    }
+    if (failures.length === 0) {
+      const cleared = await clearReceipt(disc.root);
+      if (!cleared) {
+        failures.push({
+          worktree: path.basename(disc.root),
+          path: disc.root,
+          error: 'integration files were reconciled, but the shared install receipt could not be cleared; retry uninstall before removing the package',
+        });
+      }
+    }
+    const results = worktrees.flatMap((row) => row.results.map((result) => ({
+      ...result,
+      worktree: row.worktree,
+    })));
+    if (opts.json) {
+      if (failures.length > 0) process.exitCode = 2;
+      return emitJson({ scope, results, worktrees, failures });
+    }
 
     out(paint('bold', 'holt uninstall') + paint('grey', `  (${scope} scope)`));
     out('');
@@ -1944,7 +2022,9 @@ async function cmdIntegrate(opts) {
     }
     for (const r of results) {
       const left = /left in place/.test(r.action);
-      const mark = left ? paint('grey', '·') : paint('green', '✓');
+      const mark = r.ok === false
+        ? paint('red', '!')
+        : (left ? paint('grey', '·') : paint('green', '✓'));
       const label = r.host ? `${r.host}${r.scope ? ` [${r.scope}]` : ''} ` : '';
       out(`  ${mark} ${(r.adapter + '            ').slice(0, 12)} ${label}${paint('grey', r.action)}`);
       out(paint('grey', `      ${r.path}`));
@@ -1964,7 +2044,15 @@ async function cmdIntegrate(opts) {
     if (leftAlone.length) {
       out(paint('grey', `  ${leftAlone.length} file(s) were left untouched — holt could not prove that content was its own.`));
     }
-    out(paint('grey', '  Everything else was edited in place: holt\'s entries removed, the rest of each file kept.'));
+    if (failures.length) {
+      for (const failure of failures) {
+        out(paint('red', `  ! ${failure.worktree}: ${failure.error}`));
+      }
+      out(paint('yellow', '  Uninstall is incomplete. The shared receipt was retained so a retry can finish safely.'));
+      process.exitCode = 2;
+    } else {
+      out(paint('grey', '  Everything else was edited in place: holt\'s entries removed, the rest of each file kept.'));
+    }
     out('');
     return;
   }
@@ -2048,6 +2136,7 @@ async function cmdIntegrate(opts) {
     return;
   }
 
+  const targets = await integrationCheckoutTargets(disc);
   const { detected, configuredHosts, results } = await integrate(disc.root, {
     bin: opts.bin, scope, allHosts: opts.allHosts,
   });
@@ -2066,7 +2155,7 @@ async function cmdIntegrate(opts) {
   //
   // Project scope only for the extras: the user-scope work is machine-wide and was already done
   // once above, and repeating it per worktree would rewrite $HOME configs N times.
-  const linked = (disc.workstreams ?? []).filter((w) => !w.isPrimary && w.path);
+  const linked = targets.slice(1);
   const worktreeResults = [];
   for (const w of linked) {
     try {
@@ -2080,10 +2169,16 @@ async function cmdIntegrate(opts) {
     }
   }
 
-  if (opts.json) return emitJson({
-    detected, configuredHosts, allHosts: opts.allHosts, scope, results,
-    worktrees: worktreeResults,
-  });
+  const worktreeFailures = worktreeResults.filter((row) => row.error);
+
+  if (opts.json) {
+    if (worktreeFailures.length > 0) process.exitCode = 2;
+    return emitJson({
+      detected, configuredHosts, allHosts: opts.allHosts, scope, results,
+      worktrees: worktreeResults,
+      failures: worktreeFailures,
+    });
+  }
 
   out(paint('bold', 'holt integrate') + paint('grey', `  (${scope} scope)`));
   out('');
@@ -2102,10 +2197,13 @@ async function cmdIntegrate(opts) {
   }
   out('');
   if (worktreeResults.length) {
-    const failed = worktreeResults.filter((w) => w.error);
-    out(paint('grey', `  + wired ${worktreeResults.length - failed.length} linked worktree(s) — `
+    out(paint('grey', `  + wired ${worktreeResults.length - worktreeFailures.length} linked worktree(s) — `
       + 'agents run there, and a host reads its config relative to where it runs.'));
-    for (const f of failed) out(paint('yellow', `  ! ${f.worktree}: ${f.error}`));
+    for (const f of worktreeFailures) out(paint('red', `  ! ${f.worktree}: ${f.error}`));
+    if (worktreeFailures.length > 0) {
+      out(paint('yellow', '  Integration is incomplete. Existing writes and the shared receipt were retained so a retry can converge safely.'));
+      process.exitCode = 2;
+    }
     out('');
   }
   out(paint('grey', '  AGENTS.md and MCP are advisory surfaces; configured blocking hooks add enforcement where supported.'));

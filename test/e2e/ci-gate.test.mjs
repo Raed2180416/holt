@@ -37,6 +37,14 @@ const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 
 function ciEnv(homeless) {
   return {
     ...process.env,
+    // This is a synthetic local repository. PR authority from the runner hosting the test belongs
+    // to Holt's checkout, not to this fixture. Keep the supported provider list aligned with
+    // src/team/policy.mjs CI_BASE_VARS or the fixture becomes a false POLICY_NO_AUTHORITY case.
+    GITHUB_BASE_REF: '',
+    CHANGE_TARGET: '',
+    CI_MERGE_REQUEST_TARGET_BRANCH_NAME: '',
+    BITBUCKET_PR_DESTINATION_BRANCH: '',
+    SYSTEM_PULLREQUEST_TARGETBRANCH: '',
     HOLT_LICENSE: '',
     HOME: homeless,
     XDG_CONFIG_HOME: path.join(homeless, 'config'),

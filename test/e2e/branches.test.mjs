@@ -19,12 +19,27 @@ import { readJournal, appendEvent } from '../../src/journal.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
-function sh(cmd, args, cwd) {
+// These fixtures model repositories created locally inside the test. A hosted test runner may
+// itself be executing a pull request, but its target branch is authority for THIS repository,
+// not for the synthetic repository below. Letting those variables cross the process boundary
+// makes Holt correctly refuse a self-judging base and turns a valid fixture into
+// POLICY_NO_AUTHORITY. Keep the list in lockstep with src/team/policy.mjs CI_BASE_VARS.
+const LOCAL_AUTHORITY_ENV = {
+  GITHUB_BASE_REF: '',
+  CHANGE_TARGET: '',
+  CI_MERGE_REQUEST_TARGET_BRANCH_NAME: '',
+  BITBUCKET_PR_DESTINATION_BRANCH: '',
+  SYSTEM_PULLREQUEST_TARGETBRANCH: '',
+  GITHUB_HEAD_REF: '',
+};
+
+function sh(cmd, args, cwd, ambientEnv = process.env) {
   return new Promise((resolve) => {
     execFile(cmd, args, {
       cwd, timeout: 60_000, maxBuffer: 16 * 1024 * 1024,
       env: {
-        ...process.env,
+        ...ambientEnv,
+        ...LOCAL_AUTHORITY_ENV,
         GIT_AUTHOR_NAME: 'holt test', GIT_AUTHOR_EMAIL: 't@holt.invalid',
         GIT_COMMITTER_NAME: 'holt test', GIT_COMMITTER_EMAIL: 't@holt.invalid',
         GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', LC_ALL: 'C',
@@ -220,6 +235,19 @@ test('CI GATE: report-only by default; policy flags fail honestly; ignore exempt
 
   const exempt = await sh(process.execPath, [BIN, 'ci', '--fail-on-unlanded', '--ignore', 'wip', '--json', '--cwd', fx.root], fx.root);
   assert.equal(exempt.code, 0, `an exempted branch must not fail the gate: ${exempt.stdout}`);
+});
+
+test('CI FIXTURE AUTHORITY: every parent-provider base variable is isolated from a synthetic local repo', async (t) => {
+  const fx = await graveyardFixture();
+  t.after(() => fx.cleanup());
+
+  for (const name of Object.keys(LOCAL_AUTHORITY_ENV).filter((key) => key !== 'GITHUB_HEAD_REF')) {
+    const injected = { ...process.env, [name]: 'main', GITHUB_HEAD_REF: 'feature/parent-runner' };
+    const r = await sh(process.execPath, [BIN, 'ci', '--json', '--cwd', fx.root], fx.root, injected);
+    assert.equal(r.code, 0,
+      `${name} belongs to the parent runner, not the synthetic repo: ${r.stdout}${r.stderr}`);
+    assert.equal(JSON.parse(r.stdout).ok, true);
+  }
 });
 
 /**

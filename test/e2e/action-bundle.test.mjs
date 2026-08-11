@@ -50,6 +50,15 @@ function actionEnv(workspace, extra = {}) {
   const privateHome = path.join(workspace, 'home');
   return {
     ...process.env,
+    // The action runs against the synthetic repository below. A PR target declared by the parent
+    // test runner is not authority for that repository; leaking it makes the bundle correctly
+    // refuse a self-judging `main` base. Keep these in sync with policy.mjs CI_BASE_VARS.
+    GITHUB_BASE_REF: '',
+    CHANGE_TARGET: '',
+    CI_MERGE_REQUEST_TARGET_BRANCH_NAME: '',
+    BITBUCKET_PR_DESTINATION_BRANCH: '',
+    SYSTEM_PULLREQUEST_TARGETBRANCH: '',
+    GITHUB_HEAD_REF: '',
     HOME: privateHome,
     USERPROFILE: privateHome,
     XDG_CONFIG_HOME: path.join(privateHome, '.config'),

@@ -228,11 +228,11 @@ Two independent things make that checkable rather than promised:
 ### Executes
 
 `git`, and — only if present and only for the feature that needs them — `jj`, `ctags`, `enry`,
-`rg`, `jscpd`, `tar`, `sh`, `holt`, `go`, `mount`, `where`. Every one is listed in `holt audit --json`
+`rg`, `jscpd`, `tar`, `sh`, `holt`, `go`, `mount`, `where`, `node`. Every one is listed in `holt audit --json`
 under `checks[].detail`, including the call sites where the executable is a **variable** rather than a
 literal, which is the half a string scan cannot see.
 
-Three of those are worth stating plainly rather than burying:
+Four of those are worth stating plainly rather than burying:
 
 - **`holt verify --run "<cmd>"` executes the command you give it.** That is the feature: it runs
   *your* test suite against a speculative merge. It runs nothing you did not type.
@@ -243,6 +243,11 @@ Three of those are worth stating plainly rather than burying:
   install enry through your own approved toolchain to avoid that path. `mount` is used on macOS/Unix to detect network filesystems (NFS/SMB/SSHFS)
   for timeout escalation. On Windows, `powershell` `-Command Expand-Archive` extracts the ctags zip
   (listed as a dynamic call site in `bin/install-ctags.mjs`, after checksum verification).
+- **The Team audit sink starts one fixed `node` child using `process.execPath`.** It runs the same
+  shipped `src/team/audit-sink.mjs` module in a private anchored-writer mode with fixed argv. The
+  child uses the already-verified sink directory as its working directory so a concurrent parent
+  pathname replacement cannot redirect the write. It cannot select an operator command, another
+  executable, or another module.
 
 ### Reads
 

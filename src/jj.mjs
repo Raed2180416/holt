@@ -35,6 +35,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import os from 'node:os';
+import { readStableRegularFile } from './stable-file.mjs';
 
 function jj(args, cwd, timeout = 20_000) {
   return new Promise((resolve) => {
@@ -136,7 +137,9 @@ async function resolveRepoDir(start) {
       if (st.isFile()) {
         // A linked workspace: the file holds a path (relative to the workspace's .jj/) to the
         // main repo's .jj/repo.
-        const rel = (await fs.readFile(marker, 'utf8')).trim();
+        const stable = await readStableRegularFile(marker, { maxBytes: 64 * 1024 });
+        if (!stable.ok) return null;
+        const rel = stable.bytes.toString('utf8').trim();
         const resolved = path.resolve(path.join(dir, '.jj'), rel);
         const st2 = await fs.stat(resolved).catch(() => null);
         if (st2?.isDirectory()) return resolved;

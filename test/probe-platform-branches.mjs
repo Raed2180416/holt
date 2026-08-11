@@ -7,7 +7,15 @@ const load = async (platform) => {
   const real = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { value: platform, configurable: true });
   // fresh module instance so nothing platform-dependent is cached from a previous load
-  const m = await import(`/home/raed/grove/src/agent.mjs?p=${platform}-${Math.random()}`);
+  const source = new URL('../src/agent.mjs', import.meta.url);
+  source.searchParams.set('platform-proof', `${platform}-${Math.random()}`);
+  let m;
+  try {
+    m = await import(source.href);
+  } catch (error) {
+    Object.defineProperty(process, 'platform', real);
+    throw error;
+  }
   return { m, restore: () => Object.defineProperty(process, 'platform', real) };
 };
 
@@ -27,7 +35,14 @@ const first = (m, cmd) => (m.resolveFileTargets(cmd)[0] ?? {}).raw;
   assert.equal(first(m, 'rm a\\$b.txt'), 'a$b.txt', 'POSIX: escaped dollar is a literal dollar');
   assert.equal(first(m, 'rm foo\\ bar.txt'), 'foo bar.txt', 'POSIX: escaped space is part of the name');
   restore();
-  console.log('posix branch  OK');
+  console.log('linux branch OK');
+}
+{
+  const { m, restore } = await load('darwin');
+  assert.equal(first(m, 'rm a\\$b.txt'), 'a$b.txt', 'macOS: escaped dollar is a POSIX literal dollar');
+  assert.equal(first(m, 'rm foo\\ bar.txt'), 'foo bar.txt', 'macOS: escaped space is part of the name');
+  restore();
+  console.log('darwin branch OK');
 }
 
 // ANTI-VACUITY. If the two branches expected the SAME string, the platform split would be

@@ -52,6 +52,9 @@ const managedPointerFileMode = (authority) => authority === 'system' ? 0o644 : 0
 
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const lexicalCompare = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+const sameEntryIdentity = (left, right) => left && right
+  && String(left.dev) === String(right.dev)
+  && String(left.ino) === String(right.ino);
 
 function assertStoreRoot(storeRoot) {
   if (typeof storeRoot !== 'string' || !storeRoot || storeRoot.includes('\0')) {
@@ -168,7 +171,7 @@ async function readRegularFile(file, label, maxBytes, expectedUid = /** @type {n
 async function fsyncDirectory(directory) {
   let handle;
   try {
-    handle = await fs.open(directory, fsConstants.O_RDONLY);
+    handle = await fs.open(directory, READ_FLAGS);
     await handle.sync();
   } catch (error) {
     // Windows does not expose directory fsync. Never suppress a durability failure on platforms
@@ -763,23 +766,43 @@ async function inspectStagedGeneration(
 }
 
 async function fsyncTree(root) {
-  const directories = [];
   const walk = async (directory) => {
-    directories.push(directory);
-    const entries = await fs.readdir(directory);
-    for (const name of entries) {
-      const absolute = path.join(directory, name);
-      const stat = await fs.lstat(absolute);
-      if (stat.isSymbolicLink()) managedPolicyRefuse('MANAGED_POLICY_SYMLINK', `${absolute} became a symlink during fsync`);
-      if (stat.isDirectory()) await walk(absolute);
-      else if (stat.isFile()) {
+    const directoryHandle = await fs.open(directory, READ_FLAGS);
+    try {
+      const openedDirectory = await directoryHandle.stat();
+      const namedDirectory = await fs.lstat(directory);
+      if (!openedDirectory.isDirectory() || namedDirectory.isSymbolicLink()
+        || !sameEntryIdentity(openedDirectory, namedDirectory)) {
+        managedPolicyRefuse('MANAGED_POLICY_RACE', `${directory} changed while the tree was being synced`);
+      }
+      const entries = await fs.readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        const absolute = path.join(directory, entry.name);
+        if (entry.isSymbolicLink()) managedPolicyRefuse('MANAGED_POLICY_SYMLINK', `${absolute} became a symlink during fsync`);
+        if (entry.isDirectory()) {
+          await walk(absolute);
+          continue;
+        }
         const handle = await fs.open(absolute, READ_FLAGS | (fsConstants.O_NONBLOCK ?? 0));
-        try { await handle.sync(); } finally { await handle.close(); }
-      } else managedPolicyRefuse('MANAGED_POLICY_LAYOUT', `${absolute} became a special file during fsync`);
+        try {
+          const opened = await handle.stat();
+          const named = await fs.lstat(absolute);
+          if (!opened.isFile() || named.isSymbolicLink() || !sameEntryIdentity(opened, named)) {
+            managedPolicyRefuse('MANAGED_POLICY_RACE', `${absolute} changed while the tree was being synced`);
+          }
+          await handle.sync();
+        } finally { await handle.close(); }
+      }
+      const namedAfter = await fs.lstat(directory);
+      if (namedAfter.isSymbolicLink() || !sameEntryIdentity(openedDirectory, namedAfter)) {
+        managedPolicyRefuse('MANAGED_POLICY_RACE', `${directory} changed while the tree was being synced`);
+      }
+    } finally {
+      await directoryHandle.close();
     }
+    await fsyncDirectory(directory);
   };
   await walk(root);
-  for (const directory of directories.reverse()) await fsyncDirectory(directory);
 }
 
 async function makeGenerationReadOnly(root, authority = 'user') {
@@ -790,22 +813,33 @@ async function makeGenerationReadOnly(root, authority = 'user') {
     const directoryHandle = await fs.open(directory, READ_FLAGS);
     try {
       const directoryStat = await directoryHandle.stat();
-      if (!directoryStat.isDirectory()) managedPolicyRefuse('MANAGED_POLICY_LAYOUT', `${directory} is not a directory`);
-      for (const name of await fs.readdir(directory)) {
-        const absolute = path.join(directory, name);
-        const stat = await fs.lstat(absolute);
-        if (stat.isSymbolicLink()) managedPolicyRefuse('MANAGED_POLICY_SYMLINK', `${absolute} became a symlink during hardening`);
-        if (stat.isDirectory()) await walk(absolute);
-        else if (stat.isFile()) {
-          const handle = await fs.open(absolute, READ_FLAGS);
-          try {
-            const opened = await handle.stat();
-            if (!opened.isFile()) managedPolicyRefuse('MANAGED_POLICY_LAYOUT', `${absolute} is not a regular file`);
-            await handle.chmod(fileMode);
-          } finally {
-            await handle.close();
+      const namedDirectory = await fs.lstat(directory);
+      if (!directoryStat.isDirectory() || namedDirectory.isSymbolicLink()
+        || !sameEntryIdentity(directoryStat, namedDirectory)) {
+        managedPolicyRefuse('MANAGED_POLICY_RACE', `${directory} changed while the tree was being hardened`);
+      }
+      for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+        const absolute = path.join(directory, entry.name);
+        if (entry.isSymbolicLink()) managedPolicyRefuse('MANAGED_POLICY_SYMLINK', `${absolute} became a symlink during hardening`);
+        if (entry.isDirectory()) {
+          await walk(absolute);
+          continue;
+        }
+        const handle = await fs.open(absolute, READ_FLAGS | (fsConstants.O_NONBLOCK ?? 0));
+        try {
+          const opened = await handle.stat();
+          const named = await fs.lstat(absolute);
+          if (!opened.isFile() || named.isSymbolicLink() || !sameEntryIdentity(opened, named)) {
+            managedPolicyRefuse('MANAGED_POLICY_RACE', `${absolute} changed while the tree was being hardened`);
           }
-        } else managedPolicyRefuse('MANAGED_POLICY_LAYOUT', `${absolute} became a special file during hardening`);
+          await handle.chmod(fileMode);
+        } finally {
+          await handle.close();
+        }
+      }
+      const namedAfter = await fs.lstat(directory);
+      if (namedAfter.isSymbolicLink() || !sameEntryIdentity(directoryStat, namedAfter)) {
+        managedPolicyRefuse('MANAGED_POLICY_RACE', `${directory} changed while the tree was being hardened`);
       }
       await directoryHandle.chmod(directoryMode);
     } finally {

@@ -16,12 +16,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { newRepo } from '../fixtures.mjs';
 import {
   protect, unprotect, rescue, rescues, clean, discard, auto, quarantines, restoreQuarantine,
-  purgeQuarantine,
+  purgeQuarantine, verifyHeadLeaf,
 } from '../../src/actions.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
@@ -59,6 +60,71 @@ const escapeRegex = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$
 const gitPorcelainPath = (value) => process.platform === 'win32'
   ? String(value).replaceAll('\\', '/')
   : String(value);
+
+test('RESTORE IDENTITY: verification binds executable mode to the same descriptor as bytes', async (t) => {
+  if (process.platform === 'win32') return t.skip('Git executable mode is not represented by Windows chmod');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-head-leaf-mode-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'tool.sh');
+  const replacement = path.join(root, 'replacement');
+  const content = Buffer.from('#!/bin/sh\nexit 0\n');
+  await fs.writeFile(file, content, { mode: 0o755 });
+
+  await assert.rejects(
+    () => verifyHeadLeaf(file, 'tool.sh', { mode: '100755', content }, {
+      onAfterInitialObservation: async () => {
+        await fs.writeFile(replacement, content, { mode: 0o644 });
+        await fs.chmod(replacement, 0o644);
+        await fs.rename(replacement, file);
+      },
+    }),
+    /executable mode differs|changed during verification/,
+    'same bytes on a replacement inode must not inherit executable identity from the old inode',
+  );
+});
+
+test('RESTORE IDENTITY: same bytes and mode on a replacement inode still fail closed', async (t) => {
+  if (process.platform === 'win32') return t.skip('Git executable mode is not represented by Windows chmod');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-head-leaf-inode-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'tool.sh');
+  const replacement = path.join(root, 'replacement');
+  const content = Buffer.from('#!/bin/sh\nexit 0\n');
+  await fs.writeFile(file, content, { mode: 0o755 });
+  await fs.chmod(file, 0o755);
+
+  await assert.rejects(
+    () => verifyHeadLeaf(file, 'tool.sh', { mode: '100755', content }, {
+      onAfterInitialObservation: async () => {
+        await fs.writeFile(replacement, content, { mode: 0o755 });
+        await fs.chmod(replacement, 0o755);
+        await fs.rename(replacement, file);
+      },
+    }),
+    /changed during verification/,
+    'matching bytes and mode on another inode must not satisfy the original path observation',
+  );
+});
+
+test('RESTORE IDENTITY: in-place chmod cannot inherit executable mode from the earlier path observation', async (t) => {
+  if (process.platform === 'win32') return t.skip('Git executable mode is not represented by Windows chmod');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-head-leaf-chmod-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'tool.sh');
+  const content = Buffer.from('#!/bin/sh\nexit 0\n');
+  await fs.writeFile(file, content, { mode: 0o755 });
+  await fs.chmod(file, 0o755);
+
+  await assert.rejects(
+    () => verifyHeadLeaf(file, 'tool.sh', { mode: '100755', content }, {
+      onAfterInitialObservation: async () => {
+        await fs.chmod(file, 0o644);
+      },
+    }),
+    /executable mode differs/,
+    'mode must come from the descriptor-bound observation even when the inode and bytes are stable',
+  );
+});
 
 /* ============================================== the mutation boundary ==== */
 

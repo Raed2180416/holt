@@ -35,6 +35,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { pmap, catFileBatch } from './git.mjs';
 import { ensureOnPath } from './toolchain.mjs';
+import { readStableRegularFile } from './stable-file.mjs';
 
 /* ------------------------------------------------------------------ ctags ---- */
 
@@ -1056,9 +1057,9 @@ export function scratchDir() {
 // path's own. See content-identity.mjs `pathContentKey` for the class.
 async function readTextIfSmall(abs) {
   try {
-    const st = await fs.lstat(abs);
-    if (!st.isFile() || st.size > MAX_TEXT_BYTES) return null;
-    const buf = await fs.readFile(abs);
+    const stable = await readStableRegularFile(abs, { maxBytes: MAX_TEXT_BYTES });
+    if (!stable.ok) return null;
+    const buf = stable.bytes;
     if (buf.includes(0)) return null; // binary
     return buf.toString('utf8');
   } catch {

@@ -35,6 +35,7 @@ import {
 import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
+import { readStableRegularFile } from './stable-file.mjs';
 
 const LOCK_PREFIX = 'holt:';
 
@@ -1091,7 +1092,13 @@ async function filesystemManifest(abs, logicalPath, out = [], emptyDirectories =
   } else if (before.isFile()) {
     type = 'file';
     mode = (before.mode & 0o111) !== 0 ? '100755' : '100644';
-    bytes = await fs.readFile(abs);
+    const stable = await readStableRegularFile(abs);
+    if (!stable.ok
+      || String(before.dev) !== String(stable.stat.dev)
+      || String(before.ino) !== String(stable.stat.ino)) {
+      throw new Error(`'${logicalPath}' changed while it was being captured`);
+    }
+    bytes = stable.bytes;
   } else {
     throw new Error(`'${logicalPath}' changed to an unsupported filesystem type during capture`);
   }
@@ -1115,30 +1122,35 @@ const sameManifest = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 async function hashRawManifestLeaf(cwd, stageRoot, leaf) {
   const source = path.join(stageRoot, ...leaf.path.split('/'));
-  let hashPath = source;
-  /** @type {string|null} */
-  let temp = null;
+  let bytes;
   if (leaf.type === 'symlink') {
-    temp = scratchIndexPath(cwd, 'discard-link-blob');
-    const target = Buffer.from(await fs.readlink(source, { encoding: 'buffer' }));
-    await fs.writeFile(temp, target, { flag: 'wx' });
-    hashPath = temp;
-  }
-  try {
-    const r = await gitOk(['hash-object', '-w', '--no-filters', '--', hashPath],
-      { cwd, allowMutation: true });
-    const oid = r.stdout.trim();
-    // Object-format independent: SHA-1 repositories return 40 hex bytes, SHA-256 repositories
-    // return 64. A successful process with missing/malformed evidence is still a failed
-    // instrument; do not hand an empty oid to update-index and report the later parser error as if
-    // it were the cause.
-    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) {
-      throw new Error(`git hash-object returned an invalid object id for '${leaf.path}'`);
+    const before = await fs.lstat(source);
+    if (!before.isSymbolicLink()) throw new Error(`'${leaf.path}' changed before raw capture`);
+    bytes = Buffer.from(await fs.readlink(source, { encoding: 'buffer' }));
+    const after = await fs.lstat(source);
+    if (!after.isSymbolicLink() || String(before.dev) !== String(after.dev)
+      || String(before.ino) !== String(after.ino) || before.mtimeMs !== after.mtimeMs) {
+      throw new Error(`'${leaf.path}' changed during raw capture`);
     }
-    return { ...leaf, oid };
-  } finally {
-    if (temp) await fs.rm(temp, { force: true }).catch(() => {});
+  } else {
+    const stable = await readStableRegularFile(source);
+    if (!stable.ok) throw new Error(`'${leaf.path}' raw capture is ${stable.reason}`);
+    bytes = stable.bytes;
   }
+  if (createHash('sha256').update(bytes).digest('hex') !== leaf.sha256) {
+    throw new Error(`'${leaf.path}' bytes changed after the manifest was captured`);
+  }
+  const r = await gitOk(['hash-object', '-w', '--no-filters', '--stdin'],
+    { cwd, allowMutation: true, stdin: bytes });
+  const oid = r.stdout.trim();
+  // Object-format independent: SHA-1 repositories return 40 hex bytes, SHA-256 repositories
+  // return 64. A successful process with missing/malformed evidence is still a failed
+  // instrument; do not hand an empty oid to update-index and report the later parser error as if
+  // it were the cause.
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid)) {
+    throw new Error(`git hash-object returned an invalid object id for '${leaf.path}'`);
+  }
+  return { ...leaf, oid };
 }
 
 async function hydrateBlobEntries(cwd, entries) {
@@ -1166,18 +1178,39 @@ async function materialiseHeadLeaf(abs, relPath, entry) {
   }
 }
 
-async function verifyHeadLeaf(abs, relPath, entry) {
+/**
+ * @param {string} abs
+ * @param {string} relPath
+ * @param {any} entry
+ * @param {{onAfterInitialObservation?: ((detail:any)=>any)|null}} [options]
+ */
+export async function verifyHeadLeaf(abs, relPath, entry, { onAfterInitialObservation = null } = {}) {
   const st = await fs.lstat(abs);
+  if (onAfterInitialObservation) await onAfterInitialObservation({ abs, relPath, stat: st });
   if (entry.mode === '120000') {
     if (!st.isSymbolicLink()) throw new Error(`restored '${relPath}' is not a symbolic link`);
     const target = Buffer.from(await fs.readlink(abs, { encoding: 'buffer' }));
+    const after = await fs.lstat(abs);
+    if (!after.isSymbolicLink() || String(after.dev) !== String(st.dev)
+      || String(after.ino) !== String(st.ino) || after.mtimeMs !== st.mtimeMs
+      || after.ctimeMs !== st.ctimeMs) {
+      throw new Error(`restored '${relPath}' changed during symbolic-link verification`);
+    }
     if (!target.equals(entry.content)) throw new Error(`restored '${relPath}' link target differs from HEAD`);
     return;
   }
   if (!st.isFile() || st.isSymbolicLink()) throw new Error(`restored '${relPath}' is not a regular file`);
-  if (!(await fs.readFile(abs)).equals(entry.content)) throw new Error(`restored '${relPath}' bytes differ from HEAD`);
+  const stable = await readStableRegularFile(abs);
+  if (!stable.ok || String(stable.stat.dev) !== String(st.dev)
+    || String(stable.stat.ino) !== String(st.ino)
+    || !stable.bytes.equals(entry.content)) {
+    throw new Error(`restored '${relPath}' bytes differ from HEAD or changed during verification`);
+  }
   if (process.platform !== 'win32') {
-    const executable = (st.mode & 0o111) !== 0;
+    // Mode and bytes must come from the same descriptor-bound observation. The earlier lstat is
+    // only a path-shape preflight; a same-byte replacement between it and open must not inherit
+    // the old inode's executable identity.
+    const executable = (stable.stat.mode & 0o111) !== 0;
     if (executable !== (entry.mode === '100755')) {
       throw new Error(`restored '${relPath}' executable mode differs from HEAD`);
     }
@@ -2465,11 +2498,11 @@ export async function quarantines(cwd, opts = {}) {
 
 async function readCleanRecoveryMarker(markerPath) {
   if (!markerPath || !path.isAbsolute(markerPath)) throw new Error('quarantine marker path is unavailable');
-  const st = await fs.lstat(markerPath);
-  if (!st.isFile() || st.isSymbolicLink() || st.size > 64 * 1024) {
+  const stable = await readStableRegularFile(markerPath, { maxBytes: 64 * 1024 });
+  if (!stable.ok) {
     throw new Error('quarantine marker is not a bounded physical file');
   }
-  const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
+  const marker = JSON.parse(stable.bytes.toString('utf8'));
   if (marker?.version !== 1 || marker?.kind !== 'holt-clean-quarantine'
       || marker?.state !== 'quarantined') {
     throw new Error('quarantine marker no longer records a completed quarantine');

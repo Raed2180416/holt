@@ -17,6 +17,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { canonicalPath, foldCase, samePathSync } from './paths.mjs';
 import { screenOverrides, declinedMessage } from './saferegex.mjs';
+import { readStableRegularFile } from './stable-file.mjs';
 
 /**
  * Build the error every "this call needed disc.root and it was null" call site throws.
@@ -94,9 +95,9 @@ async function cleanQuarantineRecord(wtPath, lockReason) {
     if (!name.startsWith(HOLT_CLEAN_QUARANTINE_MARKER_PREFIX) || !name.endsWith('.json')) continue;
     try {
       const markerPath = path.join(adminDir, name);
-      const st = await fs.lstat(markerPath);
-      if (!st.isFile() || st.isSymbolicLink() || st.size > 64 * 1024) continue;
-      const marker = JSON.parse(await fs.readFile(markerPath, 'utf8'));
+      const stable = await readStableRegularFile(markerPath, { maxBytes: 64 * 1024 });
+      if (!stable.ok) continue;
+      const marker = JSON.parse(stable.bytes.toString('utf8'));
       if (marker?.version !== 1 || marker?.kind !== 'holt-clean-quarantine') continue;
       // A completed restore remains durable evidence, but it is not an active quarantine and
       // must never make the restored worktree terminal merely because its original path matches.

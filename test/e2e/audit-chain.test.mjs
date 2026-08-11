@@ -33,7 +33,7 @@ import { protect, unprotect } from '../../src/actions.mjs';
 import { summarizeJournal } from '../../src/roi.mjs';
 import { parseCheckpoint, verifyNote, formatCheckpoint, merkleRoot, entryLeaf } from '../../src/attest.mjs';
 import { exportJournal } from '../../src/siem.mjs';
-import { sinkExport, EntitlementError } from '../../src/team/audit-sink.mjs';
+import { sinkExport, cursorPath, EntitlementError } from '../../src/team/audit-sink.mjs';
 import { fleetAudit, journalEvidenceState } from '../../src/team/fleet.mjs';
 
 const CLI = fileURLToPath(new URL('../../bin/holt.mjs', import.meta.url));
@@ -634,6 +634,66 @@ test('PAID: the sink emits once, then is idempotent — a SIEM is not double-bil
   const all = (await fs.readFile(dest, 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(all.length, 5);
   assert.equal(all[4].api.operation, 'unprotect');
+});
+
+test('PAID: sink and cursor symlinks cannot redirect audit bytes outside their governed files', async (t) => {
+  if (process.platform === 'win32') return t.skip('symlink creation requires platform-specific privileges on Windows');
+  const fx = await repoWithJournal(2, 'sink-no-follow');
+  const directory = path.dirname(fx.root);
+  const external = path.join(directory, 'external.txt');
+  const destination = path.join(directory, 'sink-link.ndjson');
+  await fs.writeFile(external, 'do-not-touch\n', 'utf8');
+  await fs.symlink(external, destination);
+
+  await assert.rejects(
+    () => sinkExport(fx.root, { to: destination, ...PAID }),
+    (error) => error.code === 'EDESTINATION' && /must not be a symlink|changed while/.test(error.message),
+  );
+  assert.equal(await fs.readFile(external, 'utf8'), 'do-not-touch\n');
+
+  await fs.unlink(destination);
+  await sinkExport(fx.root, { to: destination, ...PAID });
+  const cursor = await cursorPath(fx.root, destination);
+  await fs.unlink(cursor);
+  await fs.symlink(external, cursor);
+  await assert.rejects(() => sinkExport(fx.root, { to: destination, ...PAID }), /cursor is unreadable/);
+  assert.equal(await fs.readFile(external, 'utf8'), 'do-not-touch\n');
+});
+
+test('PAID: replacing the destination parent cannot redirect an in-flight audit transaction', async (t) => {
+  if (process.platform === 'win32') {
+    return t.skip('Windows prevents renaming a directory held as a child-process cwd');
+  }
+  const fx = await repoWithJournal(2, 'sink-parent-anchor');
+  const container = path.dirname(fx.root);
+  const parent = path.join(container, 'sink-parent');
+  const movedParent = path.join(container, 'sink-parent-original');
+  const attackerParent = path.join(container, 'sink-parent-replacement');
+  await fs.mkdir(parent);
+  await fs.mkdir(attackerParent);
+  await fs.writeFile(path.join(attackerParent, 'sentinel'), 'untouched\n');
+  const destination = path.join(parent, 'audit.ndjson');
+  let hookRan = false;
+
+  await assert.rejects(
+    () => sinkExport(fx.root, {
+      to: destination,
+      ...PAID,
+      onDestinationWriterReady: async () => {
+        hookRan = true;
+        await fs.rename(parent, movedParent);
+        await fs.symlink(attackerParent, parent, 'dir');
+      },
+    }),
+    (error) => error.code === 'EDESTINATION' && /parent.*changed|directory.*changed/.test(error.message),
+    'a destination-parent swap must refuse instead of following the replacement',
+  );
+  assert.equal(hookRan, true, 'the deterministic parent-swap seam was not reached');
+  assert.equal(await fs.readFile(path.join(attackerParent, 'sentinel'), 'utf8'), 'untouched\n');
+  assert.equal(await fs.access(path.join(attackerParent, 'audit.ndjson')).then(() => true, () => false), false,
+    'audit records were redirected into the replacement directory');
+  assert.equal(await fs.access(path.join(movedParent, 'audit.ndjson')).then(() => true, () => false), true,
+    'the descriptor-anchored transaction did not retain its bytes in the original directory');
 });
 
 test('PAID: the sink REFUSES a journal that does not verify, and writes nothing', async () => {

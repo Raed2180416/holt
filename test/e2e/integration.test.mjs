@@ -2735,7 +2735,10 @@ test('EXPAND: expandForLoops binds the variable and never invents a body', () =>
   // Unit-level, so the binding rule is pinned independently of the guard.
   assert.deepEqual(expandForLoops('for d in ../wt-*; do rm -rf $d; done'), ['rm -rf ../wt-*']);
   assert.deepEqual(expandForLoops('for d in ../wt-*; do rm -rf "$d"; done'), ['rm -rf ../wt-*']);
+  assert.deepEqual(expandForLoops('for d in ../wt-*; do rm -rf "${d}"; done'), ['rm -rf ../wt-*']);
   assert.deepEqual(expandForLoops('for i in 1 2 3; do echo $i; done'), ['echo 1 2 3']);
+  assert.deepEqual(expandForLoops('for i in 1 2 3; do echo $item $i; done'), ['echo $item 1 2 3'],
+    'a loop identifier is not a prefix match for a different shell variable');
   assert.deepEqual(expandForLoops('rm -rf x'), [], 'a command with no for-loop expands to nothing');
 });
 

@@ -1,20 +1,29 @@
 ---
 name: Feature request
-about: Suggest an idea for this project
+about: Propose a concrete Holt workflow or safety improvement
 title: ''
-labels: ''
+labels: 'enhancement'
 assignees: ''
 
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+## Workflow and problem
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+What are you trying to do, with which Git/worktree/jj and agent-host setup? What currently happens?
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+## Desired outcome
 
-**Additional context**
-Add any other context or screenshots about the feature request here.
+Describe the outcome rather than prescribing an implementation when possible.
+
+## Safety boundary
+
+What evidence should Holt require before it acts? What missing, malformed, offline, permission,
+or partial-install case should make it refuse or report unknown?
+
+## Acceptance example
+
+Give one concrete success case and one deliberately broken or ambiguous case that must not pass.
+
+## Alternatives
+
+What do you use today, and why is it insufficient?
