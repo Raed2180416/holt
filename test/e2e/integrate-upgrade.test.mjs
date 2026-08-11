@@ -34,7 +34,7 @@ import {
   installQwenCodeHooks, preCommitHook,
 } from '../../src/integrate/adapters.mjs';
 import { receiptPath } from '../../src/integrate/receipt.mjs';
-import { samePathAsync, samePathSync } from '../../src/paths.mjs';
+import { canonicalPath, samePathAsync } from '../../src/paths.mjs';
 
 /**
  * Real git, at module scope. '/dev/null' NOT os.devNull — git-for-windows is MSYS and translates
@@ -184,12 +184,13 @@ test('UPGRADE: a real prior-release stale MCP file (.cline/mcp.json, shipped in 
   // is raw string equality over native paths, and two paths spelled by different code disagree on
   // Windows (case, 8.3 short names) and macOS (/var vs /private/var) — so `!includes` would be
   // trivially true there and this precondition would assert nothing on the two platforms holt is
-  // least proven on. samePathSync folds case, and the non-empty check pins that there was a list
+  // least proven on. Canonical identity plus the non-empty check pins that there was a real list
   // to search at all. Found by `npm run lint:paths`.
   const legacyCline = path.join(dir, '.cline', 'mcp.json');
   assert.ok(current.length > 0,
     'PRECONDITION: mcpTargets must return project targets for the negative below to mean anything');
-  assert.ok(!current.some((f) => samePathSync(f, legacyCline)),
+  const legacyMatches = await Promise.all(current.map((file) => samePathAsync(file, legacyCline)));
+  assert.ok(!legacyMatches.some(Boolean),
     'PRECONDITION: .cline/mcp.json must not be a current mcpTargets entry');
 
   const results = await retireLegacyMcp(dir, { scope: 'project' });
@@ -364,7 +365,8 @@ test('WORKTREES: uninstall removes the shared Holt git hook from a linked worktr
 
   const installed = await installGitHooks(linked, { bin: 'holt' });
   const sharedHook = path.join(repo, '.git', 'hooks', 'pre-commit');
-  assert.equal(installed.path, sharedHook, 'precondition: linked install targets the shared git dir');
+  assert.ok(await samePathAsync(installed.path, sharedHook),
+    'precondition: linked install targets the shared git dir');
   await fs.access(sharedHook);
 
   const results = await uninstall(linked);
@@ -1262,11 +1264,11 @@ test('JSONC: a file holt CANNOT parse is left byte-for-byte alone, and says so',
 
   assert.equal(await fs.readFile(file, 'utf8'), broken,
     'an unparseable config must not be touched at all');
-  // samePathSync, not `===`: `file` is this test's path.join and `r.path` is whatever installMcp
-  // reported, so the two are spelled by different code. They agree today; the day one side starts
-  // canonicalising, a raw `===` turns this into "the file was never reported on" — a failure that
-  // blames the product for the harness's spelling. Found by `npm run lint:paths`.
-  const row = results.find((r) => samePathSync(r.path, file));
+  // `file` is this test's path.join and `r.path` is whatever installMcp reported, so the two are
+  // spelled by different code. Canonical identity prevents /var vs /private/var, case aliases, or
+  // a future realpath boundary from blaming the product for the harness's spelling.
+  const rowMatches = await Promise.all(results.map((result) => samePathAsync(result.path, file)));
+  const row = results[rowMatches.findIndex(Boolean)];
   assert.ok(row, `the file must still be reported on: ${JSON.stringify(results)}`);
   assert.match(row.action, /could not parse|left alone/i,
     `and the report must say why rather than claiming success: ${row.action}`);
@@ -1401,7 +1403,11 @@ test('WORKTREES: remove from a linked worktree unwires the primary and every pee
   const report = JSON.parse(removed.stdout);
   assert.equal(report.worktrees.length, 3,
     `remove must report the complete worktree set: ${removed.stdout}`);
-  assert.deepEqual(new Set(report.worktrees.map((row) => row.path)), new Set([repo, agentA, agentB]));
+  const [reportedRoots, expectedRoots] = await Promise.all([
+    Promise.all(report.worktrees.map((row) => canonicalPath(row.path))),
+    Promise.all([repo, agentA, agentB].map((root) => canonicalPath(root))),
+  ]);
+  assert.deepEqual(new Set(reportedRoots), new Set(expectedRoots));
   for (const root of [repo, agentA, agentB]) {
     await assert.rejects(fs.access(path.join(root, 'AGENTS.md')),
       `${root} must not retain a Holt-owned advice file after package-safe uninstall`);
