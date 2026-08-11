@@ -14,6 +14,22 @@ cleanup, merge, or landing decision.**
 
 </div>
 
+<!-- HOLT:SOCIAL-PROOF:BEGIN
+Social proof stays commented out until the numbers can carry it: 500 stars, whichever lands
+first. scripts/milestone.mjs switches this block on by itself.
+
+<div align="center">
+
+[![stars](https://img.shields.io/github/stars/raed2180416/holt?style=for-the-badge&color=e2a154&labelColor=0a0b0d)](https://github.com/raed2180416/holt/stargazers)
+[![CI](https://img.shields.io/github/actions/workflow/status/raed2180416/holt/ci.yml?style=for-the-badge&labelColor=0a0b0d)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
+
+<a href="https://star-history.com/#raed2180416/holt&Date">
+  <img alt="Star history" width="600" src="https://api.star-history.com/svg?repos=raed2180416/holt&type=Date&theme=dark">
+</a>
+
+</div>
+HOLT:SOCIAL-PROOF:END -->
+
 > **Current status:** The free, local, single-repository core is available in the v0.3.1 source
 > tree. Team and Enterprise are not being sold or activated in this launch. Design-partner work
 > described in [the program](docs/launch/DESIGN-PARTNER-PROGRAM.md) is a proposed validation path,
@@ -166,7 +182,7 @@ The security and data boundary is in [docs/SECURITY-QUESTIONNAIRE.md](docs/SECUR
 
 The free/core product is the only public offer in this launch. Team and Enterprise code remains in
 the repository for audit and future work, but there is no public paid price, checkout, service
-commitment, data-processing agreement, SSO/SCIM offer, or production SLA in this README.
+commitment, data-processing agreement, enterprise identity offer, or production SLA in this README.
 
 ### Proposed next proof slice
 
