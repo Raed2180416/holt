@@ -31,9 +31,7 @@ first. scripts/milestone.mjs switches this block on by itself.
 HOLT:SOCIAL-PROOF:END -->
 
 > **Current status:** The free, local, single-repository core is available in the v0.3.1 source
-> tree. Team and Enterprise are not being sold or activated in this launch. Design-partner work
-> described in [the program](docs/launch/DESIGN-PARTNER-PROGRAM.md) is a proposed validation path,
-> not a production-readiness or customer-traction claim.
+> tree. Team and Enterprise are not being sold or activated in this launch. 
 
 ## The short version
 
@@ -138,8 +136,7 @@ it is not a universal compatibility certificate.
 | CI and merge queues | Test and order committed changes | Protect valuable pre-PR state and investigate specific interactions before work is shared. |
 | Hosted agent/cloud sandboxes | Run work away from a local machine | Local locks do not reach cloud or ephemeral agents by default; no cloud enforcement claim is made. |
 
-The category is intentionally narrow: **Holt is not “42 Git commands,” an all-in-one DevOps suite,
-or a managed fleet control plane. It is the integrity layer around parallel agent transactions.**
+**Holt is the integrity layer around parallel agent transactions.**
 
 ## Integration coverage
 
@@ -167,17 +164,7 @@ for the exact executable evidence, independent oracles, denominators, and remain
 No current test count or mutation score is published. A number becomes eligible only when the
 complete, linked release and mutation evidence meets the repository's publication contract.
 
-That evidence is deliberately not stretched into claims it cannot support:
 
-| Claim | Current status |
-|---|---|
-| Local free/core product exists | **Available in the current source boundary.** The package describes v0.3.1 and exposes the CLI. |
-| Core analysis/action behavior | **Automated evidence exists** in the repository and release/evaluation artifacts. Re-run the relevant proof on the exact artifact you install. |
-| Linux/macOS/Windows core behavior | **CI-matrix evidence is recorded.** This does not prove every repository shape or every agent host on each OS. |
-| Real host enforcement | **Unproven in the broad claim.** Host contracts and some filesystem fixtures exist, but no public claim is made that every host has been driven through a destructive deny and failure-injection run. |
-| Cloud/ephemeral-agent enforcement | **Not available by default.** Cloud rows are advisory or Git-only unless that environment separately provisions and runs Holt. |
-| Performance, productivity lift, or avoided-loss rate | **No universal number published.** A retained six-trial agent run is a historical qualitative corpus, not a rate or lift claim; the open evaluator requires 20 valid trials per treatment before publishing a comparative rate. |
-| Customers, revenue, paid pilots, or market adoption | **Not claimed in this repository.** Design-partner outreach is the next validation step. |
 
 The full publication contract is in [BENCHMARKS.md](BENCHMARKS.md) and [eval/README.md](eval/README.md).
 The security and data boundary is in [docs/SECURITY-QUESTIONNAIRE.md](docs/SECURITY-QUESTIONNAIRE.md);
@@ -203,31 +190,16 @@ The free/core product is the only public offer in this launch. Team and Enterpri
 the repository for audit and future work, but there is no public paid price, checkout, service
 commitment, data-processing agreement, enterprise identity offer, or production SLA in this README.
 
-### Proposed next proof slice
-
-The next stage is not a feature-count race. It is a narrow transaction loop exercised by real teams:
-
-1. `start → watch → finish/recover` around a real multi-agent workstream.
-2. Exact recovery evidence at the action boundary, including crash/interruption cases.
-3. Boringly consistent installation and semantics on Linux, macOS, and Windows.
-4. One GitHub/CI path and one editor or agent-host notification path, chosen with design partners.
-5. Repeated usage, incident records, and references that show Holt sits on a consequential seam.
-
-These are design goals, not shipped claims. See [DESIGN-PARTNER-PROGRAM.md](docs/launch/DESIGN-PARTNER-PROGRAM.md)
-for participation and acceptance criteria.
 
 ## For investors and early design partners
 
 The most useful next conversation is concrete. Bring a repository where several agents or worktrees
-make cleanup, handoff, or landing hard to trust. We want the smallest reproducible incident—not a
-generic feature request—and we will record whether Holt changed the selected action.
+make cleanup, handoff, or landing hard to trust. We want the smallest reproducible incident, or a
+feature request—and we will take appropriate action
 
-- [Pre-seed brief](docs/launch/PRESEED-BRIEF.md) — thesis, evidence boundary, financing route, and
-  falsifiers.
 - [Design-partner program](docs/launch/DESIGN-PARTNER-PROGRAM.md) — who should participate,
   what the trial asks, and what counts as a useful result.
-- [Fundraising application pack](docs/launch/FUNDRAISING-APPLICATION-PACK.md) — application copy,
-  current program caveats, diligence links, and the no-traction narrative.
+
 
 Holt is part of [Contrare Research](https://github.com/Raed2180416). Product and research queries:
 [research.contrare@outlook.com](mailto:research.contrare@outlook.com).
@@ -250,5 +222,4 @@ authority.
 - Team and Enterprise implementations under `src/team/` are source-available under their
   [commercial license](src/team/LICENSE). They are not part of the public free/core offer above.
 
-Read the license files for the exact boundary. This README is product positioning, not a legal
-interpretation or a promise of future availability.
+
