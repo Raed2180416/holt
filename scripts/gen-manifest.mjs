@@ -19,16 +19,16 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildManifest, treeDigest, shippedFiles, MANIFEST_FILE } from '../src/supply-chain.mjs';
+import { buildManifest, treeDigest, integrityCoveredFiles, MANIFEST_FILE } from '../src/supply-chain.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const target = path.join(ROOT, MANIFEST_FILE);
 const argv = process.argv.slice(2);
 
-const files = shippedFiles(ROOT);
+const files = integrityCoveredFiles(ROOT);
 const body = buildManifest(ROOT, files);
 const digest = treeDigest(body);
-/** Covered = every shipped file except the manifest and its detached signature. */
+/** Covered = every executable/configuration/machine-contract file in the shipped package. */
 const covered = body.split('\n').filter(Boolean).length;
 
 if (argv.includes('--digest')) {

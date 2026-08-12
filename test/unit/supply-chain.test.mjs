@@ -33,6 +33,7 @@ import {
   fileCapabilities, importedBuiltins, spawnTargets, envReads, computedEnvReadIdentifiers,
   stripComments, executableCode, strippedIsSafe,
   CAPABILITIES, MODULE_LEDGER, MANIFEST_FILE, MANIFEST_SIG_FILE, RELEASE_PUBLIC_KEYS_B64,
+  integrityCoveredFiles,
 } from '../../src/supply-chain.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -574,6 +575,22 @@ test('MANIFEST.sha256 is shipped — an integrity file left out of the tarball c
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
   assert.ok(pkg.files.includes(MANIFEST_FILE), `package.json "files" must include ${MANIFEST_FILE}`);
   assert.ok(shippedFiles(ROOT).includes(MANIFEST_FILE));
+});
+
+test('documentation is shipped but cannot stale the executable integrity boundary', async () => {
+  const dir = await sandbox();
+  try {
+    assert.ok(shippedFiles(dir).includes('README.md'), 'README remains part of the user package');
+    assert.equal(integrityCoveredFiles(dir).includes('README.md'), false,
+      'README prose must not control executable integrity or later CI');
+    const before = fs.readFileSync(path.join(dir, MANIFEST_FILE), 'utf8');
+    fs.appendFileSync(path.join(dir, 'README.md'), '\ncopy edit only\n');
+    assert.equal(buildManifest(dir), before, 'a prose edit must leave the executable tree digest unchanged');
+    assert.equal(verifyIntegrity({ root: dir, publicKeysB64: [] }).ok, true,
+      'installed runtime integrity remains verified after a documentation-only edit');
+  } finally {
+    await cleanup(dir);
+  }
 });
 
 test('THE REAL TARBALL SELF-VERIFIES — the manifest must describe what npm actually packs', async () => {

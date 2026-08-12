@@ -7,7 +7,59 @@ name: ci
 on:
   push:
     branches: [main]
+    paths:
+      # Runtime, executable contracts, tests, and release machinery only. Prose and the website
+      # are deliberately absent: site/** is owned by pages.yml; docs/README need no 15-job build.
+      - 'bin/**'
+      - 'src/**'
+      - 'server/**'
+      - 'scripts/**'
+      - 'test/**'
+      - 'eval/**'
+      - 'dist/**'
+      - 'action.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'npm-shrinkwrap.json'
+      - 'server.json'
+      - 'tsconfig.json'
+      - 'stryker.conf.json'
+      - '.typecheck-baseline'
+      - '.holtrc.json'
+      - '.npmignore'
+      - 'MANIFEST.sha256'
+      - 'MANIFEST.sha256.sig'
+      - '.github/guard-corpus.txt'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/dco.yml'
+      - '.github/workflows/milestone.yml'
+      - '.github/workflows/release-*.yml'
   pull_request:
+    paths:
+      - 'bin/**'
+      - 'src/**'
+      - 'server/**'
+      - 'scripts/**'
+      - 'test/**'
+      - 'eval/**'
+      - 'dist/**'
+      - 'action.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'npm-shrinkwrap.json'
+      - 'server.json'
+      - 'tsconfig.json'
+      - 'stryker.conf.json'
+      - '.typecheck-baseline'
+      - '.holtrc.json'
+      - '.npmignore'
+      - 'MANIFEST.sha256'
+      - 'MANIFEST.sha256.sig'
+      - '.github/guard-corpus.txt'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/dco.yml'
+      - '.github/workflows/milestone.yml'
+      - '.github/workflows/release-*.yml'
   workflow_dispatch:
 
 # Avoid duplicate push/PR runs racing over the same checkout and leaving a cancelled matrix cell

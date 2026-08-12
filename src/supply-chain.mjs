@@ -690,6 +690,32 @@ export const MANIFEST_FILE = 'MANIFEST.sha256';
 export const MANIFEST_SIG_FILE = 'MANIFEST.sha256.sig';
 
 /**
+ * Human-facing prose ships beside Holt, but it is not executable product state. Keeping README,
+ * licence/support prose, and docs in the release manifest made a GitHub copy edit invalidate the
+ * next code build even though no runnable byte changed. The integrity boundary therefore covers
+ * runtime, configuration, dependency, and machine-readable contract bytes only.
+ *
+ * This is an explicit boundary, not an extension-based shortcut: a JavaScript file under docs/
+ * is documentation; a licence nested inside src/ is still part of the runtime tree and remains
+ * covered. The packed-artifact test proves that covered files still match the real npm tarball.
+ */
+export function isIntegrityCoveredFile(rel) {
+  const normalized = String(rel).split(path.sep).join('/');
+  if (normalized === MANIFEST_FILE || normalized === MANIFEST_SIG_FILE) return false;
+  // npm 10/11 may pack this explicit file while npm 12 omits it. It remains a CI/release input
+  // and the final tarball attestation covers whichever bytes npm actually emits, but it cannot
+  // participate in a cross-npm installed-tree manifest without making one supported npm fail.
+  if (normalized === 'npm-shrinkwrap.json') return false;
+  if (normalized.startsWith('docs/')) return false;
+  return !/^(?:README(?:\.[^/]+)?|LICENSE(?:-NOTICE)?(?:\.[^/]+)?|SUPPLY-CHAIN\.md)$/i.test(normalized);
+}
+
+/** Exact shipped subset whose bytes can change installed behaviour or machine contracts. */
+export function integrityCoveredFiles(root) {
+  return shippedFiles(root).filter(isIntegrityCoveredFile);
+}
+
+/**
  * Ed25519 public keys trusted to sign a release manifest, newest first, SPKI base64 — the same
  * shape and the same rotation rule as src/license.mjs.
  *
@@ -714,9 +740,9 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
  * its detached signature. Its integrity comes from outside: its digest is a subject of the
  * release provenance attestation.
  */
-export function buildManifest(root, files = shippedFiles(root)) {
+export function buildManifest(root, files = integrityCoveredFiles(root)) {
   const lines = files
-    .filter((f) => f !== MANIFEST_FILE && f !== MANIFEST_SIG_FILE)
+    .filter(isIntegrityCoveredFile)
     .map((f) => `${sha256(fs.readFileSync(path.join(root, f)))}  ${f}`);
   return `${lines.join('\n')}\n`;
 }
@@ -815,7 +841,7 @@ export function verifyIntegrity({ root = '.', requireSignature = false, publicKe
     else modified.push({ file: rel, expected: want, actual: got });
   }
 
-  const onDisk = new Set(shippedFiles(root).filter((f) => f !== MANIFEST_FILE && f !== MANIFEST_SIG_FILE));
+  const onDisk = new Set(integrityCoveredFiles(root));
   const unexpected = [...onDisk].filter((f) => !parsed.map.has(f));
 
   const ok = modified.length === 0 && missing.length === 0 && unexpected.length === 0;
