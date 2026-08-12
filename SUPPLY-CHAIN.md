@@ -21,8 +21,15 @@ $ holt audit
 # then reports each integrity and capability check by name
 ```
 
-`MANIFEST.sha256` ships inside the package and lists a SHA-256 for every other shipped file.
-`holt audit` recomputes all of them. A modified file, a deleted file, an **added** file, a
+`MANIFEST.sha256` ships inside the package and lists a SHA-256 for every runtime,
+configuration, dependency, and machine-readable contract file. Human-facing prose
+(`README*`, top-level licence/supply-chain documents, and `docs/**`) is deliberately outside
+this executable integrity boundary: changing documentation cannot change Holt's behaviour and
+cannot invalidate a later code build. `npm-shrinkwrap.json` remains a mandatory release input,
+but npm versions disagree on whether it is emitted into a packed CLI; the release tarball
+attestation covers the actual artifact while the cross-npm installed-tree manifest omits that
+non-runtime file. `holt audit` recomputes every covered byte. A modified
+file, a deleted file, an **added covered** file, a
 missing manifest or an unparseable one are each a **failure with a non-zero exit code** — never a
 pass with a note. The manifest cannot cover itself; that is what §1b is for.
 

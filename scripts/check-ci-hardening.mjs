@@ -89,6 +89,41 @@ export const FEATURE_PROOF_PUBLICATION_COMMAND = 'node scripts/run-feature-proof
 /** Run 31477499554 measured 59m08s through proof retention; this is 25% headroom, not a guess. */
 export const FULL_JOB_TIMEOUT_MINUTES = 75;
 
+/** Inputs that are allowed to spend the heavyweight CI budget. Human prose and site/** are
+ * intentionally absent; pages.yml owns the website lane. */
+export const REQUIRED_CI_TRIGGER_PATHS = [
+  'bin/**', 'src/**', 'server/**', 'scripts/**', 'test/**', 'eval/**', 'dist/**',
+  'action.yml', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'server.json',
+  'tsconfig.json', 'stryker.conf.json', '.typecheck-baseline', '.holtrc.json', '.npmignore',
+  'MANIFEST.sha256', 'MANIFEST.sha256.sig', '.github/guard-corpus.txt',
+  '.github/workflows/ci.yml', '.github/workflows/dco.yml',
+  '.github/workflows/milestone.yml', '.github/workflows/release-*.yml',
+];
+
+/** Read one block-style event's path list from the top-level `on:` map. */
+export function workflowEventPaths(text, eventName) {
+  const lines = String(text ?? '').split(/\r?\n/);
+  const onAt = lines.findIndex((line) => /^on:\s*(?:#.*)?$/.test(line));
+  if (onAt < 0) return null;
+  const eventAt = lines.findIndex((line, i) => i > onAt && new RegExp(`^  ${eventName}:\\s*(?:#.*)?$`).test(line));
+  if (eventAt < 0) return null;
+  let pathsAt = -1;
+  for (let i = eventAt + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^  \S/.test(line)) break;
+    if (/^    paths:\s*(?:#.*)?$/.test(line)) { pathsAt = i; break; }
+  }
+  if (pathsAt < 0) return null;
+  const paths = [];
+  for (let i = pathsAt + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^ {0,4}\S/.test(line)) break;
+    const match = /^      -\s+['"]?([^'"#]+?)['"]?\s*(?:#.*)?$/.exec(line);
+    if (match) paths.push(match[1].trim());
+  }
+  return paths;
+}
+
 /** The omission check must run before the core smoke against the isolated installed package. */
 export const OMIT_OPTIONAL_PROOF = 'node scripts/check-omit-optional-install.mjs --prefix "$OPTIONAL_PREFIX"';
 
@@ -596,6 +631,26 @@ export async function checkAll(root = REPO_ROOT) {
   // package smoke and installed-artifact run under one measured prerequisite. Executable lines
   // only: a comment saying "Git 2.45" is not a runtime check.
   const ciJobs = allJobs.filter((job) => job.file === '.github/workflows/ci.yml');
+  const ciText = workflowTexts.get('.github/workflows/ci.yml') ?? '';
+  const pushPaths = workflowEventPaths(ciText, 'push');
+  const pullRequestPaths = workflowEventPaths(ciText, 'pull_request');
+  const requiredTriggerSet = new Set(REQUIRED_CI_TRIGGER_PATHS);
+  const forbiddenTrigger = (candidate) => candidate === '**'
+    || candidate === 'README.md'
+    || candidate === 'site/**'
+    || candidate === 'docs/**'
+    || candidate === '.github/workflows/pages.yml';
+  if (!pushPaths || !pullRequestPaths
+      || pushPaths.some(forbiddenTrigger) || pullRequestPaths.some(forbiddenTrigger)
+      || pushPaths.length !== requiredTriggerSet.size
+      || pullRequestPaths.length !== requiredTriggerSet.size
+      || pushPaths.some((item) => !requiredTriggerSet.has(item))
+      || pullRequestPaths.some((item) => !requiredTriggerSet.has(item))) {
+    v.push({
+      rule: 'trigger-scope', file: '.github/workflows/ci.yml', line: null,
+      message: 'heavy CI must use the exact executable/release path allowlist on push and pull_request; README, docs/**, site/**, pages.yml, and broad catch-all patterns belong outside this matrix',
+    });
+  }
   for (const job of ciJobs) {
     const commands = executableRunLines(job.body).map((line) => line.text);
     const npmCiAt = commands.findIndex((line) => /(^|\s)npm\s+ci(?:\s|$)/.test(line));
@@ -840,6 +895,15 @@ export async function selfTest() {
 
   /** @type {{name:string, rule:string, mutate:(d:string)=>Promise<void>}[]} */
   const plants = [
+    {
+      name: 'documentation is added back to the heavyweight CI trigger',
+      rule: 'trigger-scope',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace("      - 'bin/**'", "      - 'README.md'\n      - 'bin/**'"));
+      },
+    },
     {
       name: 'a workflow with no permissions: block',
       rule: 'permissions',
