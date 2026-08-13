@@ -21,8 +21,8 @@ trusting the repository.
 
 That is why I built Holt.
 
-Holt is a local, Git-native integrity layer for parallel agent work. It relates the state that is
-usually scattered across worktrees:
+Holt is the local transaction and recoverability layer for parallel coding-agent work. It relates
+the state that is usually scattered across worktrees:
 
 - commits and branches;
 - staged and unstaged edits;
@@ -47,8 +47,8 @@ restore command. The same evidence is available through the CLI, a TUI, an inter
 project-scoped MCP and supported host hooks.
 
 Holt is not an orchestrator and does not pretend to launch a managed fleet of agents. It protects
-and explains the repository state that your existing tools already create. That is the gap I could
-not find another tool filling.
+and explains the repository state that your existing tools already create. I could not get one
+repository-wide, content-grounded recoverability verdict from the tools already in my workflow.
 
 I used Holt while building Holt. The free core is local, has no account or hosted code upload, and
 is source-available under FSL-1.1-MIT. The benchmark protocol is public and open to independent
@@ -116,7 +116,7 @@ should handle.
 
 **Title**
 
-`Show HN: Holt – recovery-first integrity for parallel coding-agent worktrees`
+`Show HN: Holt – transactions and recovery for parallel coding-agent worktrees`
 
 **Submission text / first comment**
 
@@ -186,7 +186,7 @@ the evidence arrived too late to matter.
 
 **Description**
 
-Holt is a local, Git-native integrity layer for parallel coding-agent work.
+Holt is the local transaction and recoverability layer for parallel coding-agent work.
 
 It relates commits, staged edits, local files, ignored paths, conflicts and dependencies across
 linked worktrees, then helps people and supported agent integrations decide what is unique,

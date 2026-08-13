@@ -35,7 +35,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { globMatches, wordPattern } from '../../src/agent.mjs';
+import { assessCommand, globMatches, wordPattern } from '../../src/agent.mjs';
+import {
+  compileLinearGlobTokens, createGlobWorkBudget, DEFAULT_GLOB_WORK_BUDGET,
+} from '../../src/linear-glob.mjs';
 
 const exec = promisify(execFile);
 
@@ -128,18 +131,126 @@ test('NEVER THROWS: no bracket expression, however malformed, escapes as an exce
   }
 });
 
-test('LINEAR GLOB: adversarial wildcard input stays bounded in an isolated process', async () => {
-  const pattern = `${'a*'.repeat(5000)}b`;
-  const subject = `${'a'.repeat(5000)}c`;
+test('TOTAL GLOB BUDGET: one meter spans multiple candidate subjects and overflows conservatively', () => {
+  // Four stars keep the whole prefix active; the trailing z makes `aa` an exact non-match. The
+  // first candidate fits: initial state costs 11 units and two characters cost 16 each = 43.
+  // Only seven units remain, so the next candidate cannot even initialise its 11-cell state and
+  // must take the destructive matcher’s conservative `true` result.
+  const tokens = [
+    ...Array.from({ length: 4 }, () => ({ kind: 'star', crossSlash: true })),
+    { kind: 'literal', value: 'z' },
+  ];
+  const budget = createGlobWorkBudget(50);
+  const matcher = compileLinearGlobTokens(tokens, {
+    workBudget: budget,
+    overflowMatches: true,
+  });
+
+  assert.equal(matcher.test('aa'), false, 'the exact result is retained while work fits');
+  assert.equal(budget.used, 43);
+  assert.equal(budget.exhausted, false);
+  assert.equal(matcher.test('aa'), true, 'the second candidate exhausts the shared destructive budget');
+  assert.equal(budget.exhausted, true);
+  const usedAtOverflow = budget.used;
+  assert.equal(matcher.test(''), true, 'all later candidates stay conservatively matched');
+  assert.equal(budget.used, usedAtOverflow, 'exhaustion is terminal and deterministic');
+
+  const advisoryBudget = createGlobWorkBudget(10);
+  const advisory = compileLinearGlobTokens(tokens, {
+    workBudget: advisoryBudget,
+    overflowMatches: false,
+  });
+  assert.equal(advisory.test('aa'), false, 'generic/advisory matching conservatively selects nothing');
+  assert.equal(advisoryBudget.exhausted, true);
+});
+
+test('TOTAL GLOB BUDGET: the largest admitted pattern and subject cannot restart pattern×subject work', () => {
+  const pattern = `${'a*'.repeat(4095)}b?`;
+  const subject = 'a'.repeat(32_768);
+  assert.equal(pattern.length, 8192, 'exercise the path matcher at its exact admitted maximum');
+
+  const tokens = [
+    ...Array.from({ length: 8191 }, () => ({ kind: 'star', crossSlash: true })),
+    { kind: 'literal', value: 'z' },
+  ];
+  const budget = createGlobWorkBudget();
+  const matcher = compileLinearGlobTokens(tokens, {
+    workBudget: budget,
+    overflowMatches: true,
+  });
+  assert.equal(matcher.test(subject), true,
+    'an exact non-match becomes a conservative match when deterministic work is exhausted');
+  assert.equal(budget.exhausted, true);
+  assert.ok(budget.used <= DEFAULT_GLOB_WORK_BUDGET, 'executed work never crosses the total cap');
+  assert.equal(globMatches(pattern, subject), true,
+    'the destructive path matcher carries the same conservative overflow contract');
+});
+
+test('TOTAL GLOB BUDGET: candidate-set exhaustion reaches the destructive refusal path', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-glob-budget-refusal-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await exec('git', ['init', '-q', '-b', 'main', '.'], { cwd: root });
+  await exec('git', ['config', 'user.email', 'glob-budget@example.invalid'], { cwd: root });
+  await exec('git', ['config', 'user.name', 'Glob Budget'], { cwd: root });
+  await fs.writeFile(path.join(root, 'base.txt'), 'base\n');
+  await exec('git', ['add', 'base.txt'], { cwd: root });
+  await exec('git', ['commit', '-q', '-m', 'base', '--no-verify'], { cwd: root });
+
+  // Each long candidate is an exact non-match for the trailing `b?`. The first spends most of the
+  // operation-wide meter; the second cannot restart it and is conservatively treated as reached.
+  const first = `${'a'.repeat(239)}x`;
+  const second = `${'a'.repeat(239)}y`;
+  await fs.writeFile(path.join(root, first), 'unique one\n');
+  await fs.writeFile(path.join(root, second), 'unique two\n');
+  // Leave room for the absolute worktree prefix used by the separate worktree-layer matcher, so
+  // this exercises cumulative candidate work rather than the already-covered 8,192 length guard.
+  const pattern = `${'a*'.repeat(3999)}b?`;
+  assert.equal(pattern.length, 8000);
+  const verdict = await assessCommand(`rm ${pattern}`, root);
+
+  assert.equal(verdict.decision, 'deny', verdict.reason);
+  assert.ok(verdict.files?.includes(second) || verdict.files?.includes(first),
+    'the exhausted matcher must carry a concrete at-risk candidate into the refusal');
+});
+
+test('TOTAL GLOB BUDGET: bracket member work is charged before the callback runs', () => {
+  let calls = 0;
+  const budget = createGlobWorkBudget(100);
+  const matcher = compileLinearGlobTokens([{
+    kind: 'class',
+    work: 1000,
+    matches: () => { calls++; return false; },
+  }], { workBudget: budget, overflowMatches: true });
+
+  assert.equal(matcher.test('x'), true);
+  assert.equal(budget.exhausted, true);
+  assert.equal(calls, 0, 'an oversized bracket scan is refused before hidden callback work begins');
+});
+
+test('TOTAL GLOB BUDGET: adversarial wildcard input stays bounded in an isolated process', async () => {
+  // Timing is deliberately secondary to the exact counter assertions above. This child-process
+  // ceiling catches accidental work outside the meter (module load included) without defining the
+  // algorithmic contract in wall-clock terms.
+  const pattern = `${'a*'.repeat(4095)}b?`;
+  const subject = 'a'.repeat(32_768);
   const moduleUrl = new URL('../../src/agent.mjs', import.meta.url).href;
   const source = `import { globMatches } from ${JSON.stringify(moduleUrl)};`
     + `process.stdout.write(String(globMatches(${JSON.stringify(pattern)}, ${JSON.stringify(subject)})));`;
-  const started = Date.now();
-  const result = await exec(process.execPath, ['--input-type=module', '-e', source], {
-    timeout: 1500, maxBuffer: 1024 * 1024,
-  });
-  assert.equal(result.stdout, 'true', 'over-budget destructive globs must degrade to the conservative match');
-  assert.ok(Date.now() - started < 1500, 'glob execution exceeded its isolated hard budget');
+  // Keep the adversarial payload in a temporary module rather than argv. Windows rejects the
+  // equivalent `node -e <source>` invocation with ENAMETOOLONG before Holt gets to execute it.
+  const probeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-glob-budget-probe-'));
+  const probe = path.join(probeDir, 'probe.mjs');
+  try {
+    await fs.writeFile(probe, source, 'utf8');
+    const started = Date.now();
+    const result = await exec(process.execPath, [probe], {
+      timeout: 1500, maxBuffer: 1024 * 1024,
+    });
+    assert.equal(result.stdout, 'true', 'over-budget destructive globs must degrade to the conservative match');
+    assert.ok(Date.now() - started < 1500, 'glob execution exceeded its isolated hard budget');
+  } finally {
+    await fs.rm(probeDir, { recursive: true, force: true });
+  }
 });
 
 test('NULLGLOB IS OFF: a pattern that matches nothing is passed through LITERALLY', async (t) => {

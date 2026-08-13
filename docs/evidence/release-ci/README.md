@@ -9,6 +9,21 @@ Repository settings changed afterward. The update immediately below supersedes o
 live release-control findings; it does not turn the dirty candidate, hosted CI, artifact integrity,
 branch governance or published v0.3.0 rows green.
 
+## Release-control update — observed 2026-08-13 10:23:30 +05:30
+
+The latest sanitized point-in-time snapshot is
+[`release-controls-20260813.json`](release-controls-20260813.json), with its adjacent SHA-256
+sidecar. It records immutable releases enabled; the `release` environment restricted to `v*` tags;
+administrator environment bypass disabled; the two required environment-secret names present; no
+repository-scoped secrets; and verified v0.3.1 immutable-release plus detached-signature evidence.
+No secret value was requested or retained.
+
+The same snapshot also records the remaining boundaries at that instant: `main` was unprotected,
+there was no repository ruleset, the environment had no independent reviewer, and v0.3.1 had no
+discoverable SLSA provenance. The repository-scoped duplicate signing key had been removed before
+the observation. This snapshot supersedes earlier live-control rows only; it does not prove the
+uncommitted candidate, hosted checks, a future release, or controls after the timestamp.
+
 ## Release-control update — observed 2026-08-05 04:39:02 +05:30
 
 Authenticated read-back now reports:

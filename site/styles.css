@@ -6,7 +6,7 @@
   --paper-deep: #e8e2d5;
   --ink: #17241f;
   --ink-soft: #526057;
-  --ink-faint: #758178;
+  --ink-faint: #5c685f;
   --line: #d3cdc0;
   --line-strong: #b7b0a2;
   --night: #121c18;
@@ -29,7 +29,7 @@
 }
 
 *, *::before, *::after { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
+html { scroll-behavior: smooth; scroll-padding-top: 80px; }
 body {
   min-width: 320px;
   margin: 0;
@@ -57,7 +57,9 @@ img { display: block; max-width: 100%; }
 a { color: inherit; text-decoration: none; }
 button { border: 0; font: inherit; }
 button, a { -webkit-tap-highlight-color: transparent; }
-:focus-visible { outline: 3px solid var(--signal-bright); outline-offset: 4px; }
+:focus-visible { outline: 3px solid var(--signal); outline-offset: 4px; }
+main:focus { outline: none; }
+.button-primary:focus-visible { outline-color: var(--white); box-shadow: 0 0 0 6px var(--signal); }
 h1, h2, h3, p, ul, ol, figure { margin: 0; }
 ul, ol { padding: 0; list-style: none; }
 code, pre { font-family: var(--mono); }
@@ -416,10 +418,12 @@ code { overflow-wrap: anywhere; }
 .partner-card p { max-width: 670px; margin-top: 20px; color: #634c41; font-size: 17px; line-height: 1.65; }
 .partner-side { display: grid; gap: 12px; }
 .partner-side .button { width: 100%; }
-.partner-side small { color: #806457; font-size: 12px; line-height: 1.45; text-align: center; }
+.partner-side small { color: #76574b; font-size: 12px; line-height: 1.45; text-align: center; }
 .partner-side small[data-state="copied"] { color: var(--leaf-dark); font-weight: 700; }
 .partner-side small a { color: #583c30; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
 .partner-side small a:hover { color: var(--ink); }
+.partner-prep { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; gap: 8px; color: #704e41; font-family: var(--mono); font-size: 11px; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+.partner-prep:hover { color: var(--ink); }
 .install-block { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, .7fr); gap: 58px; align-items: start; padding-top: 70px; }
 .install-copy, .install-aside, .partner-card > *, .gap-layout > * { min-width: 0; }
 .install-copy h2 { max-width: 590px; margin-top: 18px; color: var(--ink); font-family: var(--display); font-size: clamp(2.1rem, 4vw, 3.35rem); font-weight: 400; letter-spacing: -.055em; line-height: 1.02; }

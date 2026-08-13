@@ -143,7 +143,7 @@ test('site: install copy action has a fallback and never fails silently', async 
 
 test('site: leads with Holt strengths instead of defensive or gotcha framing', async () => {
   const html = await fs.readFile(SITE, 'utf8');
-  assert.match(html, /See every workstream\. Preserve every valuable change\. Keep agents moving\./,
+  assert.match(html, /See every workstream\. Surface work found nowhere else\. Keep agents moving\./,
     'the repository-intelligence section must lead with the operational benefit');
   assert.match(html, /Explore the system/,
     'adoption guidance should invite technical depth instead of warning the reader away');
@@ -161,8 +161,8 @@ test('site: product proof is a real Holt capture, never an invented interface', 
 
   assert.match(html, /src="product\/controlled-tui-120x36\.png"/,
     'the hero must render the checked-in Holt TUI evidence capture');
-  assert.match(html, /Actual product \/ production renderer/,
-    'the capture must be identified as real product output, not decoration');
+  assert.match(html, /Real product renderer \/ controlled Git fixture/,
+    'the capture must be identified as real product output with its evidence boundary, not decoration');
   assert.match(html, /holt tui --snapshot/,
     'the page must name the exact public command that produced the product surface');
   assert.match(html, /docs\/evidence\/tui-graph/,

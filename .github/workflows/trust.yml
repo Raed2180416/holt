@@ -1,0 +1,51 @@
+name: public trust
+
+# This lightweight lane runs on every proposed change. The heavyweight product matrix is scoped to
+# executable inputs, but claims, installation copy, security prose and workflow policy can still
+# mislead a user without changing a runtime byte.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: holt-public-trust-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  claims:
+    name: public trust and claims
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - name: install exact dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: verify public claims, documentation, site and install contract
+        run: >-
+          node --test
+          test/unit/doc-command-smoke.test.mjs
+          test/unit/install-url.test.mjs
+          test/unit/pricing-cta.test.mjs
+          test/unit/public-trust.test.mjs
+          test/unit/published-numbers-gate.test.mjs
+          test/unit/published-numbers.test.mjs
+          test/unit/release-body.test.mjs
+          test/unit/site-accessibility.test.mjs
+          test/unit/site-layout.test.mjs
+          test/unit/site-self-contained.test.mjs
+          test/unit/trust-workflow.test.mjs
+      - name: verify workflow policy and checked-in release bodies
+        run: |
+          node scripts/check-ci-hardening.mjs
+          node scripts/check-release-body.mjs --all

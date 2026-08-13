@@ -29,11 +29,14 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  installClaudeCode, claudeCodeHooks, integrate, uninstall,
+  installAgentsMd, installClaudeCode, claudeCodeHooks, integrate, uninstall,
   legacyMcpTargets, retireLegacyMcp, mcpTargets, installMcp, installGitHooks, installOpenCode,
   installQwenCodeHooks, preCommitHook,
 } from '../../src/integrate/adapters.mjs';
-import { receiptPath } from '../../src/integrate/receipt.mjs';
+import {
+  clearReceiptIfUnchanged, openIntegrationFileTransaction, openReceiptSnapshot,
+  readReceipt, receiptPath, recordCreated,
+} from '../../src/integrate/receipt.mjs';
 import { canonicalPath, samePathAsync } from '../../src/paths.mjs';
 
 /**
@@ -448,6 +451,350 @@ test('SHARED HOOK RACE: byte-identical replacement inode does not inherit prior 
     'content equality must not transfer a prior inode observation onto a replacement');
   assert.ok(results.some((row) => row.adapter === 'git-hooks' && row.ok === false),
     `the inode substitution must fail closed: ${JSON.stringify(results)}`);
+});
+
+test('PROJECT FILE RACE: exclusive creation never overwrites a file that appeared after inspection', async (t) => {
+  const dir = await tmp('project-create-race');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  const file = path.join(dir, 'AGENTS.md');
+  const concurrent = '# Team policy created concurrently\n';
+
+  await assert.rejects(
+    () => installAgentsMd(dir, {
+      onBeforeFileMutation: async ({ file: target, action }) => {
+        assert.equal(target, file);
+        assert.equal(action, 'create');
+        await fs.writeFile(file, concurrent);
+      },
+    }),
+    (error) => error?.code === 'EINTEGRATIONRACE',
+  );
+  assert.equal(await fs.readFile(file, 'utf8'), concurrent,
+    'a file created after the absence observation must win unchanged');
+});
+
+test('PROJECT FILE RACE: reconciliation preserves a replacement after parsing the older inode', async (t) => {
+  const dir = await tmp('project-reconcile-race');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  const configDir = path.join(dir, '.claude');
+  const file = path.join(configDir, 'settings.json');
+  const replacement = path.join(configDir, 'settings.concurrent.json');
+  const stale = {
+    hooks: {
+      PreToolUse: [{
+        matcher: 'Bash',
+        hooks: [{ type: 'command', command: 'holt-old hook pre-tool-use --host claude-code', timeout: 120 }],
+      }],
+    },
+  };
+  const concurrent = `${JSON.stringify({ theme: 'team-owned-concurrent-replacement' }, null, 2)}\n`;
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(file, `${JSON.stringify(stale, null, 2)}\n`);
+
+  let failure;
+  try {
+    await installClaudeCode(dir, {
+      bin: 'holt-new',
+      onBeforeFileMutation: async ({ file: target, action }) => {
+        assert.equal(target, file);
+        assert.equal(action, 'replace');
+        await fs.writeFile(replacement, concurrent);
+        await fs.rename(replacement, file);
+      },
+    });
+    assert.fail('the inode substitution must fail reconciliation');
+  } catch (error) {
+    failure = error;
+  }
+  assert.equal(failure?.code, 'EINTEGRATIONRACE', String(failure));
+  assert.equal(await fs.readFile(file, 'utf8'), concurrent,
+    'the concurrent writer remains authoritative at the active config path');
+  assert.equal(typeof failure?.recoveryPath, 'string',
+    'a moved race participant must retain an explicit recovery path');
+  assert.equal(await fs.readFile(failure.recoveryPath, 'utf8'), concurrent,
+    'recovery names the exact inode displaced while detecting the race');
+});
+
+test('PROJECT FILE RACE: uninstall never deletes a replacement after receipt ownership was checked', async (t) => {
+  const dir = await tmp('project-delete-race');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  const file = path.join(dir, 'AGENTS.md');
+  const replacement = path.join(dir, 'AGENTS.concurrent.md');
+  const concurrent = '# Concurrent team guidance\n';
+  await installAgentsMd(dir);
+  const storedReceipt = await receiptPath(dir);
+  await fs.access(storedReceipt);
+
+  let replaced = false;
+  const results = await uninstall(dir, {
+    onBeforeFileMutation: async ({ file: target, action }) => {
+      if (replaced || !(await samePathAsync(target, file))) return;
+      replaced = true;
+      assert.equal(action, 'delete');
+      await fs.writeFile(replacement, concurrent);
+      await fs.rename(replacement, file);
+    },
+  });
+
+  assert.equal(replaced, true, 'the adversarial substitution hook must exercise AGENTS.md');
+  assert.equal(await fs.readFile(file, 'utf8'), concurrent,
+    'the replacement must stay reachable instead of inheriting the older deletion decision');
+  assert.ok(results.some((row) => row.adapter === 'agents-md' && row.ok === false
+      && row.recoveryPath),
+  `the failed compare-and-swap and its recovery path must be reported: ${JSON.stringify(results)}`);
+  await fs.access(storedReceipt);
+});
+
+test('PROJECT FILE RACE: uninstall never rewrites a replacement after parsing older user content', async (t) => {
+  const dir = await tmp('project-uninstall-rewrite-race');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  const file = path.join(dir, 'AGENTS.md');
+  const replacement = path.join(dir, 'AGENTS.concurrent.md');
+  const concurrent = '# New policy from another process\n';
+  await fs.writeFile(file, '# Existing user guidance\n');
+  await installAgentsMd(dir);
+
+  let replaced = false;
+  const results = await uninstall(dir, {
+    finalizeReceipt: false,
+    onBeforeFileMutation: async ({ file: target, action }) => {
+      if (replaced || !(await samePathAsync(target, file))) return;
+      replaced = true;
+      assert.equal(action, 'replace');
+      await fs.writeFile(replacement, concurrent);
+      await fs.rename(replacement, file);
+    },
+  });
+
+  assert.equal(await fs.readFile(file, 'utf8'), concurrent,
+    'uninstall may strip only the descriptor-bound bytes it parsed, never a later replacement');
+  assert.ok(results.some((row) => row.adapter === 'agents-md' && row.ok === false),
+    `the rewrite race must be an incomplete uninstall: ${JSON.stringify(results)}`);
+});
+
+test('PROJECT FILE RECEIPT: a byte-identical later inode cannot inherit whole-file deletion authority', async (t) => {
+  const dir = await tmp('project-receipt-identity');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  const file = path.join(dir, 'AGENTS.md');
+  const replacement = path.join(dir, 'AGENTS.replacement.md');
+  await installAgentsMd(dir);
+  const bytes = await fs.readFile(file);
+  const original = await fs.lstat(file);
+  await fs.writeFile(replacement, bytes);
+  await fs.rename(replacement, file);
+  const later = await fs.lstat(file);
+  assert.notEqual(String(original.ino), String(later.ino), 'the adversary must substitute an inode');
+
+  const receipt = await readReceipt(dir);
+  const entries = receipt.created['AGENTS.md'];
+  assert.ok(Array.isArray(entries) && entries.some((entry) => entry?.ino === String(original.ino)),
+    `receipt must name the authored identity, not just its bytes: ${JSON.stringify(entries)}`);
+  const results = await uninstall(dir, { finalizeReceipt: false });
+  const after = await fs.readFile(file, 'utf8');
+  assert.match(after, /Instructions for AI coding agents working in this repository/,
+    'a same-byte replacement is another file and must survive whole-file deletion');
+  assert.doesNotMatch(after, /BEGIN holt/,
+    'structured Holt content may still be removed without claiming the whole file');
+  assert.ok(results.some((row) => row.adapter === 'agents-md' && /block removed/.test(row.action)),
+    `legacy/content appearance may strip Holt's block but cannot delete the file: ${JSON.stringify(results)}`);
+});
+
+test('PROJECT FILE RECEIPT: legacy hash-only entries remain readable but authorize no deletion', async (t) => {
+  const dir = await tmp('project-legacy-receipt');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  const file = path.join(dir, 'AGENTS.md');
+  const replacement = path.join(dir, 'AGENTS.legacy-replacement.md');
+  await installAgentsMd(dir);
+  const bytes = await fs.readFile(file);
+  const rp = await receiptPath(dir);
+  const receipt = JSON.parse(await fs.readFile(rp, 'utf8'));
+  const current = receipt.created['AGENTS.md'][0];
+  receipt.version = 2;
+  receipt.created['AGENTS.md'] = [current.sha256];
+  await fs.writeFile(rp, `${JSON.stringify(receipt, null, 2)}\n`);
+  await fs.writeFile(replacement, bytes);
+  await fs.rename(replacement, file);
+
+  await uninstall(dir, { finalizeReceipt: false });
+  assert.equal(typeof await fs.readFile(file, 'utf8'), 'string',
+    'content hashes from older receipts cannot authorize deleting the current inode');
+});
+
+test('PROJECT FILE RECEIPT: recording cannot adopt a same-byte replacement after commit', async (t) => {
+  const dir = await tmp('project-post-commit-receipt-race');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  const file = path.join(dir, 'AGENTS.md');
+  const replacement = path.join(dir, 'AGENTS.post-commit.md');
+  let substituted = false;
+
+  await assert.rejects(
+    () => installAgentsMd(dir, {
+      onBeforeReceiptMutation: async () => {
+        if (substituted) return;
+        substituted = true;
+        await fs.writeFile(replacement, await fs.readFile(file));
+        await fs.rename(replacement, file);
+      },
+    }),
+    (error) => error?.code === 'EINTEGRATIONRECEIPT',
+  );
+  assert.equal(substituted, true, 'the race hook must land after file publication');
+  const replacementStat = await fs.lstat(file);
+  const receipt = await readReceipt(dir);
+  assert.ok(!receipt.created['AGENTS.md'].some((entry) => entry?.ino === String(replacementStat.ino)),
+    'the receipt must never adopt the path occupant re-read after transaction commit');
+  await uninstall(dir, { finalizeReceipt: false });
+  assert.equal(typeof await fs.readFile(file, 'utf8'), 'string',
+    'the unrecorded replacement must remain outside uninstall authority');
+});
+
+test('PROJECT FILE RECEIPT: concurrent publishers merge rather than lose either worktree file', async (t) => {
+  const dir = await tmp('project-receipt-publishers');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  const publications = [];
+  for (const rel of ['first.json', 'second.json']) {
+    const transaction = await openIntegrationFileTransaction(dir, path.join(dir, rel));
+    const mutation = await transaction.commit(`${rel}\n`);
+    publications.push({ path: rel, token: mutation.publication });
+  }
+
+  let arrivals = 0;
+  let release;
+  const together = new Promise((resolve) => { release = resolve; });
+  const collideOnce = async () => {
+    if (arrivals >= 2) return;
+    arrivals++;
+    if (arrivals === 2) release();
+    await together;
+  };
+  const results = await Promise.all(publications.map((record) => recordCreated(dir, {
+    files: [record],
+    onBeforeReceiptMutation: collideOnce,
+  })));
+  assert.deepEqual(results, [true, true], 'both writers must converge through CAS retry');
+  const receipt = await readReceipt(dir);
+  for (const { path: rel, token } of publications) {
+    assert.ok(receipt.created[rel].some((entry) => entry?.ino === token.ino),
+      `concurrent receipt update lost ${rel}: ${JSON.stringify(receipt.created)}`);
+  }
+});
+
+test('PROJECT FILE RECEIPT: linked worktrees retain separate current identities', async (t) => {
+  const dir = await tmp('project-receipt-worktrees');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const repo = path.join(dir, 'repo');
+  const linked = path.join(dir, 'linked');
+  await fs.mkdir(repo);
+  await gitIn(['init', '-q', '-b', 'main'], repo);
+  await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
+  await gitIn(['add', '--', 'base.txt'], repo);
+  await gitIn(['commit', '-qm', 'base'], repo);
+  await gitIn(['worktree', 'add', '-q', '--detach', linked], repo);
+  await installAgentsMd(repo);
+  await installAgentsMd(linked);
+
+  const receipt = await readReceipt(repo);
+  const entries = receipt.created['AGENTS.md'];
+  assert.equal(entries.length, 2, `one current identity is required per worktree: ${JSON.stringify(entries)}`);
+  const worktrees = new Set(entries.map((entry) => entry.worktree));
+  assert.equal(worktrees.size, 2, `worktree identities must not collapse: ${JSON.stringify(entries)}`);
+  assert.ok(worktrees.has('main'));
+  assert.ok([...worktrees].some((entry) => entry.startsWith('worktrees/')),
+    `linked Git administrative identity is missing: ${JSON.stringify(entries)}`);
+
+  await uninstall(repo, { finalizeReceipt: false });
+  await uninstall(linked, { finalizeReceipt: false });
+  await assert.rejects(fs.access(path.join(repo, 'AGENTS.md')));
+  await assert.rejects(fs.access(path.join(linked, 'AGENTS.md')));
+});
+
+test('PROJECT FILE RECEIPT: repeated concurrent replacement makes publication fail closed', async (t) => {
+  const dir = await tmp('project-receipt-publish-fail-closed');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  await installAgentsMd(dir);
+  const file = path.join(dir, 'extra.json');
+  const transaction = await openIntegrationFileTransaction(dir, file);
+  const mutation = await transaction.commit('{}\n');
+  const rp = await receiptPath(dir);
+  const competitor = await readReceipt(dir);
+  competitor.created['concurrent-owner'] = ['legacy-evidence-only'];
+  let replacements = 0;
+
+  const recorded = await recordCreated(dir, {
+    files: [{ path: 'extra.json', token: mutation.publication }],
+    onAfterReceiptPublish: async () => {
+      replacements++;
+      const replacement = path.join(path.dirname(rp), `receipt-competitor-${replacements}.json`);
+      await fs.writeFile(replacement, `${JSON.stringify(competitor, null, 2)}\n`);
+      await fs.rename(replacement, rp);
+    },
+  });
+  assert.equal(recorded, false, 'bounded CAS contention must fail instead of clobbering a winner');
+  assert.equal(replacements, 8, 'the retry bound must be exercised by the planted replacement');
+  const active = await readReceipt(dir);
+  assert.deepEqual(active.created['concurrent-owner'], ['legacy-evidence-only']);
+  assert.equal(active.created['extra.json'], undefined,
+    'a failed publisher must not report or leave its stale view as authoritative');
+});
+
+test('RECEIPT RACE: a byte-identical replacement cannot inherit the checked receipt inode', async (t) => {
+  const dir = await tmp('receipt-clear-race');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  await installAgentsMd(dir);
+  const snapshot = await openReceiptSnapshot(dir);
+  const receipt = snapshot.receipt;
+  const file = await receiptPath(dir);
+  const replacement = path.join(path.dirname(file), 'install-receipt.concurrent.json');
+  const bytes = await fs.readFile(file);
+
+  const cleared = await clearReceiptIfUnchanged(dir, receipt, {
+    transaction: snapshot.transaction,
+    onBeforeMutation: async ({ file: target, action }) => {
+      assert.equal(target, file);
+      assert.equal(action, 'delete');
+      await fs.writeFile(replacement, bytes);
+      await fs.rename(replacement, file);
+    },
+  });
+
+  assert.equal(cleared.ok, false, 'content equality alone cannot authorise deleting another inode');
+  assert.equal(await fs.readFile(file, 'utf8'), bytes.toString('utf8'),
+    'the concurrently published receipt remains active and byte-exact');
+  assert.equal(typeof cleared.recoveryPath, 'string',
+    'the displaced receipt identity remains available for explicit recovery');
+});
+
+test('RECEIPT RACE: uninstall snapshot detects a later same-inode idempotent publication', async (t) => {
+  const dir = await tmp('receipt-same-inode-race');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await gitIn(['init', '-q', '-b', 'main'], dir);
+  await installAgentsMd(dir);
+  const snapshot = await openReceiptSnapshot(dir);
+  const file = await receiptPath(dir);
+  const bytes = await fs.readFile(file);
+
+  // Re-publish the exact bytes through the same inode and force a distinct durable mtime. Content
+  // equality is intentional: a concurrent idempotent integrate is still a newer lifecycle owner.
+  await fs.writeFile(file, bytes);
+  const future = new Date(Date.now() + 10_000);
+  await fs.utimes(file, future, future);
+  const cleared = await clearReceiptIfUnchanged(dir, snapshot.receipt, {
+    transaction: snapshot.transaction,
+  });
+
+  assert.equal(cleared.ok, false, 'the later publication must stop the old uninstall from clearing');
+  assert.equal(await fs.readFile(file, 'utf8'), bytes.toString('utf8'),
+    'the newer idempotent receipt remains active and unchanged');
 });
 
 test('SHARED HOOK TYPE: install and uninstall refuse a FIFO without waiting for a writer', async (t) => {
@@ -1537,6 +1884,66 @@ test('WORKTREES: a linked install failure is partial state and exits nonzero for
   assert.match(human.stdout, /Integration is incomplete/);
   assert.doesNotMatch(human.stdout, /\+ wired 1 linked worktree/,
     'a failed peer must not be counted as successfully wired');
+});
+
+test('WORKTREES RECEIPT RACE: CLI removal cannot clear a semantically identical receipt republication', async (t) => {
+  const dir = await tmp('unwire-concurrent-republish');
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const repo = path.join(dir, 'repo');
+  const linked = path.join(dir, 'linked');
+  await fs.mkdir(repo);
+  await gitIn(['init', '-q', '-b', 'main'], repo);
+  await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
+  await gitIn(['add', '--', 'base.txt'], repo);
+  await gitIn(['commit', '-qm', 'base'], repo);
+  await gitIn(['worktree', 'add', '-q', '--detach', linked], repo);
+  await installAgentsMd(repo);
+  await installAgentsMd(linked);
+  const primaryAgents = path.join(repo, 'AGENTS.md');
+  const storedReceipt = await receiptPath(repo);
+  // A newer writer is allowed to canonicalize forward-compatible/unknown metadata. Both receipt
+  // parsers produce the same ownership state, while the raw file publication is a new lifecycle.
+  const forwardCompatible = JSON.parse(await fs.readFile(storedReceipt, 'utf8'));
+  forwardCompatible.futureMetadata = { ignoredByV3: true };
+  await fs.writeFile(storedReceipt, `${JSON.stringify(forwardCompatible, null, 2)}\n`);
+  const initialSemanticReceipt = await readReceipt(repo);
+
+  // holtBin starts execFile before returning its promise. Once the primary AGENTS.md has moved
+  // out of service, the CLI has already taken its initial receipt snapshot and passed that file.
+  // Publish the same semantic receipt through the ordinary CAS writer. Content comparison cannot
+  // distinguish this newer lifecycle: only the initial transaction's inode observation can.
+  const removal = holtBin(['uninstall', '--json', '--cwd', repo], repo);
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const present = await fs.access(primaryAgents).then(() => true).catch(() => false);
+    if (!present) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await assert.rejects(fs.access(primaryAgents),
+    'precondition: the running uninstall must pass the primary AGENTS.md before republication');
+  const beforeBytes = await fs.readFile(storedReceipt);
+  const beforeStat = await fs.stat(storedReceipt);
+  assert.equal(await recordCreated(repo), true, 'the concurrent receipt publication must succeed');
+  const afterBytes = await fs.readFile(storedReceipt);
+  const afterStat = await fs.stat(storedReceipt);
+  assert.notDeepEqual(afterBytes, beforeBytes,
+    'the ordinary writer must canonicalize the ignored forward-compatible metadata');
+  assert.deepEqual(await readReceipt(repo), initialSemanticReceipt,
+    'the race must be invisible to the parsed receipt comparison used by final clearing');
+  assert.notEqual(String(afterStat.ino), String(beforeStat.ino),
+    'the concurrent lifecycle must publish a new receipt inode');
+
+  const raced = await removal;
+  assert.equal(raced.code, 2, `${raced.stdout}${raced.stderr}`);
+  const report = JSON.parse(raced.stdout);
+  assert.ok(report.failures.some((row) => /initial shared install receipt changed/.test(row.error)),
+    `the old lifecycle must report the newer receipt instead of erasing it: ${raced.stdout}`);
+  await fs.access(storedReceipt);
+
+  const retried = await holtBin(['uninstall', '--json', '--cwd', repo], repo);
+  assert.equal(retried.code, 0, `${retried.stdout}${retried.stderr}`);
+  await assert.rejects(fs.access(storedReceipt),
+    'a fresh lifecycle can clear the receipt it actually observed');
 });
 
 test('UNINSTALL PERMISSIONS: unreadable host config fails honestly and is retryable', {

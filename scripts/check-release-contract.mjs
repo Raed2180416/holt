@@ -47,7 +47,7 @@ const neededBy = (body, ids) => {
 /**
  * @param {{action:string, actionBuildScript:string, actionBundle:string, actionNotices:string,
  *          workflow:string, packageJson:string, lock:string, shrinkwrap:string,
- *          runtimeScript:string, supplyChain:string}} input
+ *          runtimeScript:string, supplyChain:string, alternateReleaseWorkflows?:Record<string,string>}} input
  * @returns {Problem[]}
  */
 export function releaseContractProblems(input) {
@@ -59,6 +59,7 @@ export function releaseContractProblems(input) {
   const actionNotices = String(input.actionNotices ?? '');
   const workflow = String(input.workflow ?? '');
   const runtimeScript = String(input.runtimeScript ?? '');
+  const alternateReleaseWorkflows = input.alternateReleaseWorkflows ?? {};
   let pkg = {};
   try { pkg = JSON.parse(input.packageJson); } catch { add('package', 'package.json is not valid JSON'); }
 
@@ -331,6 +332,14 @@ export function releaseContractProblems(input) {
   if (String(input.lock ?? '') !== String(input.shrinkwrap ?? '')) {
     add('package', 'package-lock.json and the publishable npm-shrinkwrap.json describe different trees');
   }
+  for (const [name, alternate] of Object.entries(alternateReleaseWorkflows)) {
+    const text = String(alternate ?? '');
+    if (/gh\s+release\s+(?:create|upload|edit)\b/.test(text)
+        || /actions\/attest@/.test(text)
+        || /HOLT_RELEASE_SIGNING_KEY/.test(text)) {
+      add('release-path', `${name} defines a second publishing, signing, or attestation path outside the checked release-artifact workflow`);
+    }
+  }
   return p;
 }
 
@@ -348,7 +357,12 @@ async function readInput(root = ROOT) {
     read('scripts/check-git-runtime.mjs'),
     read('src/supply-chain.mjs'),
   ]);
-  return { action, actionBuildScript, actionBundle, actionNotices, workflow, packageJson, lock, shrinkwrap, runtimeScript, supplyChain };
+  const alternateReleaseWorkflows = {};
+  for (const name of await fs.readdir(path.join(root, '.github', 'workflows'))) {
+    if (!/^release-.*\.ya?ml$/.test(name) || name === 'release-artifact.yml') continue;
+    alternateReleaseWorkflows[name] = await read(`.github/workflows/${name}`);
+  }
+  return { action, actionBuildScript, actionBundle, actionNotices, workflow, packageJson, lock, shrinkwrap, runtimeScript, supplyChain, alternateReleaseWorkflows };
 }
 
 /** Prove representative rules can go red; unit tests exercise every individual old false-green. */
@@ -395,6 +409,10 @@ export async function selfTest() {
     }],
     ['release verification inherits runner Git', 'git-runtime', (x) => ({ ...x, workflow: x.workflow.replace(`        run: ${GIT_RUNTIME_CHECK}`, '        run: echo git-runtime-check-removed') })],
     ['Git minimum removed from package metadata', 'package', (x) => ({ ...x, packageJson: x.packageJson.replace(',\n    "git": ">=2.45.0"', '') })],
+    ['second publishing path added outside the checked graph', 'release-path', (x) => ({
+      ...x,
+      alternateReleaseWorkflows: { ...x.alternateReleaseWorkflows, 'release-emergency.yml': 'steps:\n  - run: gh release create "$TAG"\n' },
+    })],
   ];
   const lines = [];
   let ok = true;

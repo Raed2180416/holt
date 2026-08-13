@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "observedAt": "2026-08-13T10:23:30+05:30",
+  "repository": "Raed2180416/holt",
+  "immutableReleases": {
+    "enabled": true,
+    "enforcedByOwner": false
+  },
+  "releaseEnvironment": {
+    "name": "release",
+    "canAdminsBypass": false,
+    "requiredReviewers": [],
+    "deploymentBranchPolicy": {
+      "protectedBranches": false,
+      "customBranchPolicies": true
+    },
+    "customPolicies": [
+      {
+        "name": "v*",
+        "type": "tag"
+      }
+    ],
+    "secretNames": [
+      "HOLT_RELEASE_ADMIN_TOKEN",
+      "HOLT_RELEASE_SIGNING_KEY"
+    ]
+  },
+  "repositorySecretNames": [],
+  "defaultBranchProtection": {
+    "branch": "main",
+    "protected": false,
+    "rulesets": []
+  },
+  "releaseEvidence": {
+    "v0.3.1ImmutableReleaseVerified": true,
+    "v0.3.1DetachedManifestSignatureVerified": true,
+    "v0.3.1DiscoverableSlsaProvenance": false
+  },
+  "notes": [
+    "Secret values were not requested or retained; GitHub exposes names only.",
+    "The repository-scoped signing-key duplicate was removed before this observation; the environment-scoped signing key remains.",
+    "Administrator environment bypass is disabled. No independent required reviewer is configured.",
+    "Main remained unprotected at observation time; the candidate universal merge gate had not yet been landed or observed on a pull request.",
+    "Live control-plane state can drift and is not an artifact property."
+  ]
+}

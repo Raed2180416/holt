@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /logo-prototype.html
+Disallow: /logo-prototype-v2.html
+Disallow: /logo-prototype-v3.html
+Disallow: /logo-prototype-v4.html
+
+Sitemap: https://raed2180416.github.io/holt/sitemap.xml

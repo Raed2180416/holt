@@ -50,7 +50,7 @@ import { budget, provenanceLines } from './untrusted.mjs';
 import {
   ensurePrivateDirectory, readStableRegularFile, writePrivateFileAtomic,
 } from './stable-file.mjs';
-import { compileLinearGlobTokens } from './linear-glob.mjs';
+import { compileLinearGlobTokens, createGlobWorkBudget } from './linear-glob.mjs';
 
 /* ------------------------------------------------------------------ cache ---- */
 
@@ -2480,7 +2480,12 @@ async function targetWorkstreams(report, target, cwd) {
   // Forward-slash space so the glob matches on Windows too — see rootsReachedFromAbove.
   const fwd = (p) => p.replace(/\\/g, '/');
   const absF = fwd(abs);
-  const matcher = suffix ? pathMatcher(`${escapeGlob(absF)}/${suffix}`.replace(/\/+/g, '/')) : null;
+  // One meter for every workstream path and ancestor considered for this target. Restarting the
+  // budget per candidate would recreate the same availability hole across a large roots list.
+  const globWorkBudget = createGlobWorkBudget();
+  const matcher = suffix ? pathMatcher(`${escapeGlob(absF)}/${suffix}`.replace(/\/+/g, '/'), {
+    workBudget: globWorkBudget,
+  }) : null;
   const out = [];
   for (const s of report.safe) {
     if (!s.path) continue;
@@ -4718,7 +4723,8 @@ function bracketMatches(bracket, char, icase) {
  * grammar the program uses, and there is one compiler rather than two.
  *
  * @param {string} rel a PATTERN (see escapeGlob): `\x` is the literal character x.
- * @param {{pathspec?: boolean, icase?: boolean}} [mode]
+ * @param {{pathspec?: boolean, icase?: boolean,
+ *   workBudget?:ReturnType<typeof createGlobWorkBudget>}} [mode]
  * @returns {{literal: string|null, lit: string, icase: boolean, re: {test:(value:string)=>boolean}}}
  *   `literal` keeps its old meaning — non-null only when the target is a plain path, which is the
  *   fact `destroys` uses to decide that a directory encloses a dirty path.
@@ -4762,13 +4768,22 @@ function pathMatcher(rel, mode = {}) {
       // not a thrown SyntaxError out of the guard's critical path, which is how `rm -rf 'x[z-a]'`
       // exited 1 and, under the PreToolUse contract, ran.
       if (!b) return literalOf(rel);
-      tokens.push({ kind: 'class', matches: (char, icase) => bracketMatches(b, char, icase) });
+      tokens.push({
+        kind: 'class',
+        matches: (char, icase) => bracketMatches(b, char, icase),
+        // The callback scans the bracket members; one NFA token is not one unit of work here.
+        work: Math.max(1, b.items.length),
+      });
       i = b.end;
     } else tokens.push({ kind: 'literal', value: c });
   }
   return {
     literal: null, lit: unescapeGlob(rel).replace(/\/+$/, ''), icase: !!mode.icase,
-    re: compileLinearGlobTokens(tokens, { icase: !!mode.icase, overflowMatches: true }),
+    re: compileLinearGlobTokens(tokens, {
+      icase: !!mode.icase,
+      overflowMatches: true,
+      workBudget: mode.workBudget,
+    }),
   };
 }
 
@@ -4927,11 +4942,13 @@ function deepestRoot(roots, abs) {
  *
  * @param abs   the canonical, glob-free directory prefix of the target
  * @param suffix the globby remainder of the raw target after that prefix ('' when there is none)
+ * @param {ReturnType<typeof createGlobWorkBudget>|null} [workBudget] total meter shared by the
+ *   candidate roots/ancestors in this operation
  * @returns the roots the command reaches from above — precise, not "every root under the prefix":
  *   a glob is matched against each root (and its ancestors, since rm -rf of a matched directory
  *   takes everything under it) so `../wt-*` hits wt-a and wt-b but never their sibling `base`.
  */
-function rootsReachedFromAbove(roots, abs, suffix) {
+function rootsReachedFromAbove(roots, abs, suffix, workBudget = null) {
   if (!suffix) {
     // A plain directory target (`rm -rf ..`) destroys every worktree inside it.
     return roots.filter((r) => underOrEqual(r, abs));
@@ -4948,7 +4965,9 @@ function rootsReachedFromAbove(roots, abs, suffix) {
   // separator; `suffix` IS a pattern and its escapes must survive, so it is never folded.
   const fwd = (p) => p.replace(/\\/g, '/');
   const absF = fwd(abs);
-  const matcher = pathMatcher(`${escapeGlob(absF)}/${suffix}`.replace(/\/+/g, '/'));
+  const matcher = pathMatcher(`${escapeGlob(absF)}/${suffix}`.replace(/\/+/g, '/'), {
+    workBudget: workBudget ?? createGlobWorkBudget(),
+  });
   return roots.filter((r) => {
     for (let p = fwd(r); p.length >= absF.length; p = p.replace(/\/[^/]*$/, '')) {
       if (matchesPath(matcher, p)) return true;
@@ -4996,6 +5015,12 @@ async function assessFileTargets(targets, cwd, ctx) {
   }
   if (!roots.length) return null;
 
+  // TOTAL means the entire destructive candidate set: every target matcher, worktree root,
+  // ancestor, dirty path, find -name filter and find -path filter below spends from this one
+  // meter. Once exhausted, every compiled destructive matcher returns true, conservatively
+  // bringing the candidate into the ask/deny path instead of timing out and falling open.
+  const globWorkBudget = createGlobWorkBudget();
+
   // Resolve each target to the worktree that owns it. Anything outside every worktree — /tmp,
   // a sibling project, $HOME — is not holt's to defend and is dropped here, which is also what
   // keeps `rm -rf /tmp/scratch` off the expensive path entirely.
@@ -5040,14 +5065,15 @@ async function assessFileTargets(targets, cwd, ctx) {
       const suffix = GLOBBY.test(raw)
         ? raw.slice((globFreePrefix(raw) === '.' && !raw.startsWith('.')) ? 0 : globFreePrefix(raw).length).replace(/^\/+/, '')
         : '';
-      for (const reached of rootsReachedFromAbove(roots, abs, suffix)) {
+      for (const reached of rootsReachedFromAbove(roots, abs, suffix, globWorkBudget)) {
         items.push({
           ...t,
           root: reached,
           rel: '**',
-          matcher: pathMatcher('**'),
-          nameMatcher: t.nameGlob ? pathMatcher(t.nameGlob) : null,
-          pathMatcherFilter: t.pathGlob ? pathMatcher(t.pathGlob, { pathspec: true }) : null,
+          matcher: pathMatcher('**', { workBudget: globWorkBudget }),
+          nameMatcher: t.nameGlob ? pathMatcher(t.nameGlob, { workBudget: globWorkBudget }) : null,
+          pathMatcherFilter: t.pathGlob
+            ? pathMatcher(t.pathGlob, { pathspec: true, workBudget: globWorkBudget }) : null,
           // `-maxdepth 0` names the ROOT and nothing under it, so a root reached from ABOVE is
           // reached by the root path itself, not by anything inside it.
           rootOnly: false,
@@ -5118,11 +5144,16 @@ async function assessFileTargets(targets, cwd, ctx) {
       ...t,
       root,
       rel,
-      matcher: pathMatcher(rel || '**', { pathspec: t.pathspec === true, icase: t.icase === true }),
+      matcher: pathMatcher(rel || '**', {
+        pathspec: t.pathspec === true,
+        icase: t.icase === true,
+        workBudget: globWorkBudget,
+      }),
       // find's `-name` matches a BASENAME with the shell's own rule; its `-path` matches the whole
       // printed path and its `*` DOES cross `/` (find(1)), which is the pathspec mode.
-      nameMatcher: t.nameGlob ? pathMatcher(t.nameGlob) : null,
-      pathMatcherFilter: t.pathGlob ? pathMatcher(t.pathGlob, { pathspec: true }) : null,
+      nameMatcher: t.nameGlob ? pathMatcher(t.nameGlob, { workBudget: globWorkBudget }) : null,
+      pathMatcherFilter: t.pathGlob
+        ? pathMatcher(t.pathGlob, { pathspec: true, workBudget: globWorkBudget }) : null,
     });
   }
   if (!items.length) return null;

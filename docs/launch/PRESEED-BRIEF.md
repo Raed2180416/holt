@@ -1,13 +1,14 @@
 # Holt pre-seed brief
 
-**Date:** 2026-08-11
+**Date:** 2026-08-13
 **Status:** Application and design-partner narrative; not a funding forecast, traction report, or
 production-readiness certificate.
 
-## The company in one sentence
+## The product in one sentence
 
-**Holt is the transaction and recoverability layer for parallel coding agents: it makes in-flight
-repository work observable, recoverable, and safe to act on before cleanup, merge, or landing.**
+**Holt is the local transaction and recoverability layer for parallel coding agents: it makes
+in-flight repository work observable and gives declared cleanup and landing paths explicit
+recovery evidence.**
 
 ## The change in the environment
 
@@ -36,14 +37,15 @@ observe → classify exact content and relationships → protect → gate the ac
 
 The category is deliberately narrower than orchestration or DevOps. Holt does not choose an
 agent's task, replace Git, run a hosted fleet, or claim semantic certainty from a symbol match. It
-owns the integrity decision and the recovery path; it integrates with the tools that already create,
-test, and land code.
+targets the transaction verdict and recovery path; it integrates with the tools that already
+create, test, and land code.
 
 ### Positioning statement
 
 > For engineering and platform teams running multiple coding agents in real Git repositories,
 > Holt is the transaction and recoverability layer that shows what a cleanup or landing action can
-> lose, preserves unique work, and returns evidence for the next decision. Unlike a worktree
+> lose, refuses or quarantines unsupported cleanup through declared paths, and returns evidence
+> for the next decision. Unlike a worktree
 > manager, merge queue, or agent orchestrator, Holt relates committed and uncommitted repository
 > state across worktrees and keeps exact destructive authority separate from advisory coordination
 > signals.
@@ -55,9 +57,10 @@ landing decisions.
 
 ## What exists now
 
-The current public offer is the free, local, single-repository core in the v0.3.1 source boundary.
-It requires Node 22/24/26-compatible runtime versions and Git 2.45+, and it runs on
-customer-controlled storage without an account, hosted code upload, or telemetry.
+The latest published artifact is v0.3.1. The current source contains later unreleased work and must
+not be presented as the published package until its release gates pass. The public offer remains the
+free, local, single-repository core. It requires a compatible Node 22/24/26 runtime and Git 2.45+,
+and it runs on customer-controlled storage without an account, hosted code upload, or telemetry.
 
 | Current capability | Evidence boundary |
 |---|---|
@@ -76,13 +79,13 @@ what a feature proof means; this brief does not promote a fixture into customer 
 
 | Question | Current answer |
 |---|---|
-| Does a local product exist? | Yes, in the current source boundary and package manifest. |
+| Does a local product exist? | Yes. v0.3.1 is the latest public artifact; later current-source work remains candidate evidence until a new release passes its contract. |
 | Is core behavior exercised? | Automated unit, end-to-end, filesystem, Git, protocol, and mutation evidence is retained in the repository and release/evaluation material. Re-run the relevant proof on the exact artifact being evaluated. |
 | Is the core cross-platform? | Core safety and CLI flows have recorded Linux/macOS/Windows CI-matrix coverage. That is not evidence for every repository shape or every host integration. |
 | Are all agent hosts protected? | No such claim is made. Host contracts and selected filesystem paths are tested; broad real-host destructive-deny, lifecycle, failure-injection, and upgrade evidence remains incomplete. |
 | Do cloud agents inherit local protection? | No. Cloud and ephemeral agents do not receive local Git locks by default; their rows are advisory or Git-only unless separately provisioned. |
 | Is there measured productivity or avoided-loss lift? | No universal rate is published. The retained six-trial agent run is a historical qualitative failure corpus, not a comparative rate. The open evaluator requires 20 valid trials per treatment before publishing a rate. |
-| Is there customer traction, revenue, or a paid pilot? | Not claimed here. The next proof is repeated design-partner use and independently observed incidents. |
+| Is there customer traction, revenue, or a paid pilot? | No. Distribution has not begun. The next proof is outside installation, repeated use, and independently observed incidents. |
 | Is this enterprise-ready? | No. There is no public paid checkout, SLA, DPA, SSO/SCIM offer, hosted control plane, or claim of production support in this launch. |
 
 This distinction is a feature of the company thesis. A safety product that hides its unmeasured
@@ -90,15 +93,21 @@ boundaries is not demonstrating the behavior it sells.
 
 ## The 12-week proof route
 
-This is a proposed operating route, not a promise of outcome or schedule.
+This is a proposed operating route, not a promise of outcome or schedule. The funnel vocabulary is
+fixed throughout the investor material:
+
+```text
+qualified conversation -> trial approved -> installed -> consequential incident
+-> changed action -> repeated weekly use -> paid evaluation
+```
 
 | Window | Work | Pass condition | Falsifier or pivot |
 |---|---|---|---|
-| Days 0–14 | Repair the release gate and run the smallest cross-platform install/conformance slice. | One exact-head, artifact-linked run on Linux, macOS, and Windows with no known release bypass. | Any ordinary install needs manual repair, or the aggregate cannot identify exact commit/runtime/shard. |
-| Days 7–28 | Exercise `start → watch → finish/recover` around real multi-agent incidents. | Five externally observed incidents, with at least three cases where Holt changed the selected action. | People inspect status but do not let Holt sit on a consequential action seam. |
-| Days 21–49 | Recruit 5–10 design-partner teams running at least three agents/worktrees. | Three teams use Holt weekly for two consecutive weeks; two agree to a written reference or paid-evaluation conversation. | No repeated use, or false holds exceed a mutually acceptable threshold. |
-| Days 35–63 | Add one GitHub/CI path and one editor/agent-host notification path with partners. | A new user installs and completes a protected transaction without founder intervention on each declared OS. | Permissions or lifecycle fail in ordinary repositories; make integration reliable before adding breadth. |
-| Days 50–84 | Run targeted accelerator, angel, and infrastructure-fund conversations. | 30–50 targeted conversations, 8+ qualified follow-ups, 3+ partner/customer references, and at least one paid evaluation or signed pilot. | Weak conversion means refine the wedge or buyer; adding another subsystem is not the default response. |
+| Days 0–14 | Publish the next exact-head release only after cross-platform install/conformance and release contracts pass. | One artifact-linked run on Linux, macOS, and Windows with no known release bypass. | Any ordinary install needs manual repair, or the aggregate cannot identify exact commit/runtime/shard. |
+| Days 1–28 | Run 10 qualified conversations and request approved trials on repositories with a recurring action seam. | Three outside installations. | Teams cannot name a consequential cleanup/landing seam or will not approve a bounded trial. |
+| Days 14–56 | Exercise the transaction around approved real incidents. | Five witnessed incidents and three cases where Holt changes the selected action. | People inspect status but do not let Holt affect a consequential decision, or false holds exceed an agreed threshold. |
+| Days 35–70 | Support repeated use and one partner-driven integration path. | One outside team repeats weekly; a new user completes the bounded transaction without founder repair. | Permissions, lifecycle, or usability prevent independent repetition. |
+| Days 56–84 | Convert the repeated seam into a commercial acceptance boundary. | One paid evaluation with a written acceptance test and one permissioned reference. | No buyer accepts a budgeted evaluation boundary after observed repeat use. |
 
 The route is designed to generate a decision either way. If teams repeatedly place Holt on a
 critical seam, the evidence supports a fundable infrastructure company. If they do not, the same
@@ -113,8 +122,9 @@ recovery, signed policy, fleet evidence, and supported integrations. Pricing, su
 identity, and data-processing terms should be set only after repeated usage identifies a budget
 owner and an acceptance boundary.
 
-The likely value metric is the number of active repositories where concurrent agent work creates
-integrity risk—not seats—but this is a packaging hypothesis to validate, not a price card.
+Pricing and value metric are unvalidated. Existing entitlement code uses seats for testing and is
+not a commercial offer. Repository-, fleet-, support-, or seat-based packaging should be selected
+only after repeated buyer evidence.
 
 ## Why this can become a company
 
@@ -151,12 +161,12 @@ Linux/macOS/Windows workflows, support a small design-partner cohort, and turn o
 into a repeatable sales and trust story. It is not “add every integration” or “scale a hosted
 platform” before the local wedge is proven.
 
-See the [fundraising application pack](FUNDRAISING-APPLICATION-PACK.md) for application-ready
-answers, target-program caveats, a diligence list, and the current no-traction language.
+See the [public investor diligence brief](FUNDRAISING-APPLICATION-PACK.md) for the exact artifact
+boundary, reproducible proof, fixed validation funnel, risks, and current no-traction language.
 
 ### Direct raise hypothesis (proposal, not a current fact)
 
-A reasonable direct-raise proposal is **$1M for approximately 18 months**. The intended proof
+A reasonable **18-month direct-raise hypothesis** is **$1M**. The intended proof
 milestones are 10 design-partner teams, 3 paid evaluations or pilots with written acceptance tests,
 a real `start → watch → finish/recover` transaction loop, and an independently rerunnable
 Linux/macOS/Windows release contract. The amount, instrument, valuation, runway model, and hiring
@@ -200,7 +210,6 @@ for that evidence.
 - [Provider adapter evidence](../PROVIDER-ADAPTERS.md)
 - [Security questionnaire](../SECURITY-QUESTIONNAIRE.md)
 - [Benchmark publication contract](../../BENCHMARKS.md)
-- [YC FAQ](https://www.ycombinator.com/faq/?source=post_page---------------------------)
-- [Techstars Founder Catalyst](https://www.techstars.com/founder-catalyst)
-- [Sequoia Arc](https://sequoiacap.com/arc/)
-- [First Round PMF Method](https://www.firstround.com/pmf)
+- [Public investor diligence brief](FUNDRAISING-APPLICATION-PACK.md)
+- [Design-partner program](DESIGN-PARTNER-PROGRAM.md)
+- [Market, technical-gap, and future-direction sweep](../research/2026-08-13-holt-market-and-future-gap-sweep.md)

@@ -39,7 +39,7 @@ import { impact, detectRipgrep } from '../src/impact.mjs';
 import {
   integrate, uninstall, detectHosts, hostsReport, formatVerdict, formatContext, mcpTargets,
 } from '../src/integrate/adapters.mjs';
-import { clearReceipt } from '../src/integrate/receipt.mjs';
+import { clearReceiptIfUnchanged, openReceiptSnapshot } from '../src/integrate/receipt.mjs';
 import { documentedNativeTool } from '../src/integrate/native-tools.mjs';
 import {
   inspectActivationIntegrity, activationIntegrityLines,
@@ -1964,6 +1964,11 @@ async function cmdIntegrate(opts) {
   // only removes the package — it does not touch the hooks/MCP entries wired into every repo
   // integrate ever ran in, which would otherwise fail on every tool call forever.
   if (opts.remove) {
+    // One receipt observation owns the WHOLE removal lifecycle. Reopening only after every
+    // worktree has been visited lets a concurrent integrate recreate files and publish an
+    // identical receipt in the gap, then have this older uninstall erase that new ownership.
+    // The conditional clear below therefore retires only this initial inode/content snapshot.
+    const initialReceipt = await openReceiptSnapshot(disc.root);
     const targets = await integrationCheckoutTargets(disc);
     const worktrees = [];
     const failures = [];
@@ -1977,6 +1982,7 @@ async function cmdIntegrate(opts) {
         const targetResults = await uninstall(target.path, {
           scope: i === 0 ? scope : 'project',
           finalizeReceipt: false,
+          receiptSnapshot: initialReceipt,
         });
         worktrees.push({ worktree: target.id, path: target.path, results: targetResults });
         for (const result of targetResults.filter((row) => row.ok === false)) {
@@ -1997,12 +2003,15 @@ async function cmdIntegrate(opts) {
       }
     }
     if (failures.length === 0) {
-      const cleared = await clearReceipt(disc.root);
-      if (!cleared) {
+      const cleared = await clearReceiptIfUnchanged(disc.root, initialReceipt.receipt, {
+        transaction: initialReceipt.transaction,
+      });
+      if (!cleared.ok) {
         failures.push({
           worktree: path.basename(disc.root),
           path: disc.root,
-          error: 'integration files were reconciled, but the shared install receipt could not be cleared; retry uninstall before removing the package',
+          error: 'integration files were reconciled, but the initial shared install receipt changed or could not be cleared; retry uninstall before removing the package',
+          ...(cleared.recoveryPath ? { recoveryPath: cleared.recoveryPath } : {}),
         });
       }
     }
