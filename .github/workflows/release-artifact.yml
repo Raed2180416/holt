@@ -152,6 +152,8 @@ jobs:
           sudo apt-get install -y universal-ctags bubblewrap
           go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
           cargo install --locked jj-cli --version 0.43.0 --root "$HOME/.local"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           test "$(npm view opencode-ai@1.18.13 dist.integrity)" = "sha512-HYmBizm5vyAqqYuKzhpleRdEKwh7TeFSeA4f/Edl0F8OSPnbLi3DaXNMtmtsL13e2/994M9JoIz11yrVNdoAfA=="
