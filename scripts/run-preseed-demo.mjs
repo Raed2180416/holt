@@ -79,6 +79,20 @@ function byId(rows, id) {
   return (rows ?? []).find((row) => row.id === id);
 }
 
+// The recovery ledger is serialized by different Git/path layers on Windows: one may retain
+// forward slashes while another returns the native separator (and case is not identity on the
+// default filesystem). Compare the same physical path, not its presentation spelling.
+function samePath(left, right) {
+  if (typeof left !== 'string' || typeof right !== 'string') return false;
+  const normalize = (value) => {
+    const resolved = path.resolve(value);
+    return process.platform === 'win32'
+      ? resolved.replace(/[\\/]+/g, '\\').toLowerCase()
+      : path.normalize(resolved);
+  };
+  return normalize(left) === normalize(right);
+}
+
 const alarming = 'DELETEME-old-experiment';
 const reassuring = 'IMPORTANT-do-not-delete';
 const fixture = await newRepo('preseed-name-independence');
@@ -159,7 +173,7 @@ try {
     restoreRecipeReturned: Array.isArray(applied?.restoreArgv) && applied.restoreArgv.length > 0,
     quarantineMoveObserved: originalAbsentDuringQuarantine && quarantinePresent,
     quarantineInventoryObserved: quarantineInventory.code === 0
-      && inventoried?.quarantinePath === quarantinePath,
+      && samePath(inventoried?.quarantinePath, quarantinePath),
     quarantineBytesMatchBefore: quarantineDigest === beforeDigest,
     restoreSucceeded: restore.code === 0 && restore.parsed?.ok === true
       && restore.parsed?.restored === true,

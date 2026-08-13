@@ -236,12 +236,21 @@ test('TOTAL GLOB BUDGET: adversarial wildcard input stays bounded in an isolated
   const moduleUrl = new URL('../../src/agent.mjs', import.meta.url).href;
   const source = `import { globMatches } from ${JSON.stringify(moduleUrl)};`
     + `process.stdout.write(String(globMatches(${JSON.stringify(pattern)}, ${JSON.stringify(subject)})));`;
-  const started = Date.now();
-  const result = await exec(process.execPath, ['--input-type=module', '-e', source], {
-    timeout: 1500, maxBuffer: 1024 * 1024,
-  });
-  assert.equal(result.stdout, 'true', 'over-budget destructive globs must degrade to the conservative match');
-  assert.ok(Date.now() - started < 1500, 'glob execution exceeded its isolated hard budget');
+  // Keep the adversarial payload in a temporary module rather than argv. Windows rejects the
+  // equivalent `node -e <source>` invocation with ENAMETOOLONG before Holt gets to execute it.
+  const probeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-glob-budget-probe-'));
+  const probe = path.join(probeDir, 'probe.mjs');
+  try {
+    await fs.writeFile(probe, source, 'utf8');
+    const started = Date.now();
+    const result = await exec(process.execPath, [probe], {
+      timeout: 1500, maxBuffer: 1024 * 1024,
+    });
+    assert.equal(result.stdout, 'true', 'over-budget destructive globs must degrade to the conservative match');
+    assert.ok(Date.now() - started < 1500, 'glob execution exceeded its isolated hard budget');
+  } finally {
+    await fs.rm(probeDir, { recursive: true, force: true });
+  }
 });
 
 test('NULLGLOB IS OFF: a pattern that matches nothing is passed through LITERALLY', async (t) => {
