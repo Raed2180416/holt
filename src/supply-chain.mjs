@@ -736,9 +736,9 @@ const sha256 = (buf) => createHash('sha256').update(buf).digest('hex');
 /**
  * The manifest body: `<sha256>  <path>` per file, sorted, newline-terminated.
  *
- * The manifest cannot contain its own hash, so it covers every shipped file EXCEPT itself and
- * its detached signature. Its integrity comes from outside: its digest is a subject of the
- * release provenance attestation.
+ * The manifest cannot contain its own hash. It covers the executable/configuration subset selected
+ * by isIntegrityCoveredFile(), while the release provenance attestation covers the packed artifact
+ * as a whole. The manifest's own integrity comes from outside: its digest is an attestation subject.
  */
 export function buildManifest(root, files = integrityCoveredFiles(root)) {
   const lines = files
@@ -852,7 +852,7 @@ export function verifyIntegrity({ root = '.', requireSignature = false, publicKe
     treeDigest: treeDigest(body),
     files: { total: parsed.map.size, matched, modified, missing, unexpected },
     reason: ok
-      ? `all ${matched} shipped files match the manifest`
+      ? `all ${matched} integrity-covered files match the manifest`
       : `${modified.length} modified, ${missing.length} missing, ${unexpected.length} unexpected`,
   };
 }

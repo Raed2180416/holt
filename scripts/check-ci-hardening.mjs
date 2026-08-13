@@ -51,6 +51,11 @@
  *      path structurally exceed its job timeout. Publication consumes the retained, checksummed
  *      denominators, and the measured job envelope is pinned with explicit runner headroom.
  *
+ *   9. ABSENT REQUIRED CHECKS. Workflow-level path filters meant a docs/site-only PR emitted no
+ *      `required CI aggregate` at all. A stable branch-protection check cannot be conditionally
+ *      absent. CI now starts universally, an always-running fail-closed classifier gates the
+ *      expensive jobs, and the aggregate requires either all-success or proven all-skipped.
+ *
  * A GATE WITH NO POSITIVE CONTROL HAS PROVEN NOTHING. `--self-test` copies the real workflow tree
  * to a scratch directory, plants one violation of each rule, and requires the checker to go RED on
  * every one of them and GREEN on the untouched copy. If any planted violation is NOT caught, the
@@ -59,6 +64,8 @@
  * Usage:
  *   node scripts/check-ci-hardening.mjs             # check this repository, exit 1 on violations
  *   node scripts/check-ci-hardening.mjs --self-test # prove every rule can go RED, then check
+ *   node scripts/check-ci-hardening.mjs --classifier-self-test
+ *   node scripts/check-ci-hardening.mjs --classify-paths-nul <file> [--github-output <file>]
  */
 
 import fs from 'node:fs/promises';
@@ -89,28 +96,193 @@ export const FEATURE_PROOF_PUBLICATION_COMMAND = 'node scripts/run-feature-proof
 /** Run 31477499554 measured 59m08s through proof retention; this is 25% headroom, not a guess. */
 export const FULL_JOB_TIMEOUT_MINUTES = 75;
 
-/** Inputs that are allowed to spend the heavyweight CI budget. Human prose and site/** are
- * intentionally absent; pages.yml owns the website lane. */
-export const REQUIRED_CI_TRIGGER_PATHS = [
-  'bin/**', 'src/**', 'server/**', 'scripts/**', 'test/**', 'eval/**', 'dist/**',
-  'action.yml', 'package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'server.json',
-  'tsconfig.json', 'stryker.conf.json', '.typecheck-baseline', '.holtrc.json', '.npmignore',
-  'MANIFEST.sha256', 'MANIFEST.sha256.sig', '.github/guard-corpus.txt',
-  '.github/workflows/ci.yml', '.github/workflows/dco.yml',
-  '.github/workflows/milestone.yml', '.github/workflows/release-*.yml',
+/**
+ * The only inputs allowed to SKIP heavyweight CI. This is deliberately a light allowlist rather
+ * than a heavy allowlist: a new top-level runtime, package-manager definition, workflow, action,
+ * fixture, or configuration path must spend the full budget until explicitly reviewed. The
+ * universal trust lane still checks every change, including every path below.
+ */
+export const CI_LIGHT_PATHS = [
+  '*.md', 'docs/**', 'site/**', 'legal/**',
+  '.github/FUNDING.yml', '.github/ISSUE_TEMPLATE/**', '.github/releases/**',
 ];
 
-/** Read one block-style event's path list from the top-level `on:` map. */
-export function workflowEventPaths(text, eventName) {
+/** Every expensive CI job is classified once, gated identically, and observed by one aggregate. */
+export const REQUIRED_CI_HEAVY_JOBS = [
+  'matrix', 'bare', 'full', 'crossplat', 'static', 'package', 'supply-chain', 'business',
+];
+
+// Deliberately independent of CI_LIGHT_PATHS. The positive control must fail if somebody changes
+// the reviewed skip surface; deriving the expectation from the value under test would prove only
+// that an array agrees with itself.
+const EXPECTED_CI_LIGHT_PATHS = [
+  '*.md', 'docs/**', 'site/**', 'legal/**',
+  '.github/FUNDING.yml', '.github/ISSUE_TEMPLATE/**', '.github/releases/**',
+];
+
+/** @param {string} value */
+function regexEscape(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Match one repository-relative path against the deliberately small allowlist grammar. `/**`
+ * means descendants of exactly that directory; a single `*` cannot cross `/`.
+ *
+ * @param {string} candidate
+ * @param {string} pattern
+ */
+export function matchesRequiredCiPath(candidate, pattern) {
+  if (pattern.endsWith('/**')) {
+    const prefix = pattern.slice(0, -3);
+    return candidate.startsWith(`${prefix}/`) && candidate.length > prefix.length + 1;
+  }
+  if (!pattern.includes('*')) return candidate === pattern;
+  const source = pattern.split('*').map(regexEscape).join('[^/]*');
+  return new RegExp(`^${source}$`).test(candidate);
+}
+
+/** @param {unknown} candidate */
+function validChangedPath(candidate) {
+  if (typeof candidate !== 'string' || candidate.length === 0) return false;
+  if (candidate.startsWith('/') || candidate.includes('\\') || candidate.includes('//')) return false;
+  if (/[\x00-\x1f\x7f]/.test(candidate)) return false;
+  return !candidate.split('/').some((part) => part === '' || part === '.' || part === '..');
+}
+
+/**
+ * Fail-closed classifier used by the always-running scope job. An unknown/empty/malformed change
+ * set spends the full CI budget; only a non-empty, valid set wholly covered by the reviewed light
+ * allowlist may skip.
+ *
+ * @param {readonly unknown[]} paths
+ * @param {{lightAllowlist?: readonly string[], forceHeavyReason?: string|null}} [options]
+ * @returns {{heavy:boolean,reason:string,changedCount:number,matchedCount:number}}
+ */
+export function classifyRequiredCiPaths(paths, options = {}) {
+  const lightAllowlist = options.lightAllowlist ?? CI_LIGHT_PATHS;
+  const changedCount = paths.length;
+  if (options.forceHeavyReason) {
+    return { heavy: true, reason: 'forced-full-ci', changedCount, matchedCount: 0 };
+  }
+  if (paths.length === 0) {
+    return { heavy: true, reason: 'empty-change-set', changedCount, matchedCount: 0 };
+  }
+  if (paths.some((candidate) => !validChangedPath(candidate))) {
+    return { heavy: true, reason: 'invalid-change-path', changedCount, matchedCount: 0 };
+  }
+  const candidates = /** @type {string[]} */ ([...new Set(paths)]);
+  const lightCount = candidates.filter((candidate) => lightAllowlist.some(
+    (pattern) => matchesRequiredCiPath(candidate, pattern),
+  )).length;
+  const heavyCount = candidates.length - lightCount;
+  return heavyCount > 0
+    ? { heavy: true, reason: 'runtime-or-unclassified-change', changedCount, matchedCount: heavyCount }
+    : { heavy: false, reason: 'reviewed-non-runtime-change-only', changedCount, matchedCount: 0 };
+}
+
+/** @param {string} pattern */
+function classifierControlPath(pattern) {
+  if (pattern.endsWith('/**')) return `${pattern.slice(0, -3)}/classifier-positive-control`;
+  return pattern.replace('*', 'classifier-positive-control');
+}
+
+/**
+ * Positive and negative controls for the classifier itself. The allowlist is injectable solely so
+ * unit tests can prove that omission/broadening plants actually make this control go red.
+ *
+ * @param {readonly string[]} [lightAllowlist]
+ * @returns {{ok:boolean,lines:string[]}}
+ */
+export function classifierSelfTest(lightAllowlist = CI_LIGHT_PATHS) {
+  let ok = true;
+  const lines = [];
+  const exact = lightAllowlist.length === EXPECTED_CI_LIGHT_PATHS.length
+    && lightAllowlist.every((item, index) => item === EXPECTED_CI_LIGHT_PATHS[index]);
+  if (exact) lines.push('  GREEN: classifier light allowlist is the reviewed exact set');
+  else {
+    ok = false;
+    lines.push('  FAILED: classifier allowlist differs from the reviewed exact set');
+  }
+
+  for (const pattern of EXPECTED_CI_LIGHT_PATHS) {
+    const candidate = classifierControlPath(pattern);
+    if (classifyRequiredCiPaths([candidate], { lightAllowlist }).heavy) {
+      ok = false;
+      lines.push(`  FAILED: reviewed light-path control was classified heavy: ${pattern}`);
+    }
+  }
+
+  const heavyControls = [
+    'src/changed.mjs', 'bin/holt.mjs', 'Formula/holt.rb', 'bucket/holt.json',
+    '.github/workflows/pages.yml', '.github/actions/upload-pages-artifact/action.yml',
+    'new-runtime/entry.mjs', '.gitignore', 'action.yml', 'package.json',
+  ];
+  const heavy = classifyRequiredCiPaths(heavyControls, { lightAllowlist });
+  if (!heavy.heavy) {
+    ok = false;
+    lines.push('  FAILED: runtime, workflow, package-manager, or unknown controls were classified light');
+  } else lines.push('  GREEN: runtime, workflow, package-manager, and unknown controls stay heavy');
+
+  if (!classifyRequiredCiPaths(['README.md', 'src/changed.mjs'], { lightAllowlist }).heavy) {
+    ok = false;
+    lines.push('  FAILED: a mixed runtime/prose change bypassed heavy CI');
+  }
+  if (!classifyRequiredCiPaths([], { lightAllowlist }).heavy
+      || !classifyRequiredCiPaths(['/absolute'], { lightAllowlist }).heavy
+      || !classifyRequiredCiPaths(['docs/../src/changed.mjs'], { lightAllowlist }).heavy
+      || !classifyRequiredCiPaths(['docs\\changed.md'], { lightAllowlist }).heavy
+      || !classifyRequiredCiPaths(['README.md'], { lightAllowlist, forceHeavyReason: 'control' }).heavy) {
+    ok = false;
+    lines.push('  FAILED: an unknown, malformed, or forced change set did not fail closed');
+  } else lines.push('  GREEN: unknown, malformed, and forced change sets fail closed');
+
+  if (ok) lines.push(`  GREEN: all ${EXPECTED_CI_LIGHT_PATHS.length} reviewed light-path controls skip and every unknown path runs heavy`);
+  return { ok, lines };
+}
+
+/** Return the lines belonging to one block-style event in the top-level `on:` map. */
+function workflowEventBlock(text, eventName) {
   const lines = String(text ?? '').split(/\r?\n/);
   const onAt = lines.findIndex((line) => /^on:\s*(?:#.*)?$/.test(line));
   if (onAt < 0) return null;
-  const eventAt = lines.findIndex((line, i) => i > onAt && new RegExp(`^  ${eventName}:\\s*(?:#.*)?$`).test(line));
+  const eventAt = lines.findIndex((line, index) => index > onAt
+    && new RegExp(`^  ${regexEscape(eventName)}:\\s*(?:#.*)?$`).test(line));
   if (eventAt < 0) return null;
+  const block = [lines[eventAt]];
+  for (let index = eventAt + 1; index < lines.length; index++) {
+    if (/^  \S/.test(lines[index])) break;
+    if (/^\S/.test(lines[index])) break;
+    block.push(lines[index]);
+  }
+  return block;
+}
+
+/** @param {string} text @param {string} eventName */
+export function workflowHasEvent(text, eventName) {
+  return workflowEventBlock(text, eventName) !== null;
+}
+
+/** @param {string} text @param {string} eventName */
+export function workflowEventHasPathFilter(text, eventName) {
+  return (workflowEventBlock(text, eventName) ?? [])
+    .some((line) => /^    paths(?:-ignore)?:\s*(?:#.*)?$/.test(line));
+}
+
+/** @param {string} text @param {string} eventName */
+function workflowEventSettings(text, eventName) {
+  return (workflowEventBlock(text, eventName) ?? []).slice(1)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'));
+}
+
+/** Read one block-style event's path list from the top-level `on:` map. */
+export function workflowEventPaths(text, eventName) {
+  const lines = workflowEventBlock(text, eventName);
+  if (!lines) return null;
   let pathsAt = -1;
-  for (let i = eventAt + 1; i < lines.length; i++) {
+  for (let i = 1; i < lines.length; i++) {
     const line = lines[i];
-    if (/^  \S/.test(line)) break;
     if (/^    paths:\s*(?:#.*)?$/.test(line)) { pathsAt = i; break; }
   }
   if (pathsAt < 0) return null;
@@ -632,23 +804,73 @@ export async function checkAll(root = REPO_ROOT) {
   // only: a comment saying "Git 2.45" is not a runtime check.
   const ciJobs = allJobs.filter((job) => job.file === '.github/workflows/ci.yml');
   const ciText = workflowTexts.get('.github/workflows/ci.yml') ?? '';
-  const pushPaths = workflowEventPaths(ciText, 'push');
-  const pullRequestPaths = workflowEventPaths(ciText, 'pull_request');
-  const requiredTriggerSet = new Set(REQUIRED_CI_TRIGGER_PATHS);
-  const forbiddenTrigger = (candidate) => candidate === '**'
-    || candidate === 'README.md'
-    || candidate === 'site/**'
-    || candidate === 'docs/**'
-    || candidate === '.github/workflows/pages.yml';
-  if (!pushPaths || !pullRequestPaths
-      || pushPaths.some(forbiddenTrigger) || pullRequestPaths.some(forbiddenTrigger)
-      || pushPaths.length !== requiredTriggerSet.size
-      || pullRequestPaths.length !== requiredTriggerSet.size
-      || pushPaths.some((item) => !requiredTriggerSet.has(item))
-      || pullRequestPaths.some((item) => !requiredTriggerSet.has(item))) {
+  const pushSettings = workflowEventSettings(ciText, 'push');
+  const pullRequestSettings = workflowEventSettings(ciText, 'pull_request');
+  if (!workflowHasEvent(ciText, 'push') || !workflowHasEvent(ciText, 'pull_request')
+      || !workflowHasEvent(ciText, 'workflow_dispatch')
+      || pushSettings.length !== 1 || pushSettings[0] !== 'branches: [main]'
+      || pullRequestSettings.length !== 0
+      || workflowEventHasPathFilter(ciText, 'push')
+      || workflowEventHasPathFilter(ciText, 'pull_request')) {
     v.push({
       rule: 'trigger-scope', file: '.github/workflows/ci.yml', line: null,
-      message: 'heavy CI must use the exact executable/release path allowlist on push and pull_request; README, docs/**, site/**, pages.yml, and broad catch-all patterns belong outside this matrix',
+      message: 'ci.yml must start for every pull_request and every main push (no suppressing event/path filters), plus workflow_dispatch, so the stable required aggregate is never absent',
+    });
+  }
+
+  const ciJobById = new Map(ciJobs.map((job) => [job.id, job]));
+  const scopeJob = ciJobById.get('scope');
+  if (!scopeJob
+      || !scopeJob.body.includes('name: classify required CI scope')
+      || !scopeJob.body.includes('heavy: ${{ steps.classify.outputs.heavy }}')
+      || !scopeJob.body.includes('fetch-depth: 0')
+      || !scopeJob.body.includes('persist-credentials: false')
+      || !scopeJob.body.includes('id: classify')
+      || !runsCommand(scopeJob.body, 'node scripts/check-ci-hardening.mjs --classifier-self-test')
+      || !runsCommand(scopeJob.body, '--classify-paths-nul "$changed_file"')
+      || !runsCommand(scopeJob.body, '--github-output "$GITHUB_OUTPUT"')
+      || !scopeJob.body.includes('git diff --name-only --no-renames -z')
+      || !scopeJob.body.includes('force_reason=')
+      || !scopeJob.body.includes('PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}')
+      || !scopeJob.body.includes('PUSH_BEFORE_SHA: ${{ github.event.before }}')) {
+    v.push({
+      rule: 'scope-classifier', file: '.github/workflows/ci.yml', line: null,
+      message: 'the always-running scope job must self-test the fail-closed classifier, diff immutable event SHAs with NUL-delimited paths, expose heavy, and force full CI when the change set cannot be proven',
+    });
+  }
+
+  const heavySet = new Set(REQUIRED_CI_HEAVY_JOBS);
+  const unexpectedJobs = ciJobs.filter((job) => job.id !== 'scope' && job.id !== 'required'
+    && !heavySet.has(job.id));
+  let scopeGateBroken = unexpectedJobs.length > 0;
+  for (const id of REQUIRED_CI_HEAVY_JOBS) {
+    const job = ciJobById.get(id);
+    if (!job
+        || !/^ {4}needs:\s*scope\s*(?:#.*)?$/m.test(job.body)
+        || !/^ {4}if:\s*\$\{\{\s*needs\.scope\.outputs\.heavy\s*==\s*'true'\s*\}\}\s*(?:#.*)?$/m.test(job.body)) {
+      scopeGateBroken = true;
+    }
+  }
+  if (scopeGateBroken) {
+    v.push({
+      rule: 'scope-gate', file: '.github/workflows/ci.yml', line: null,
+      message: `every heavyweight job (${REQUIRED_CI_HEAVY_JOBS.join(', ')}) must need scope and run only when its exact heavy output is true; unclassified or unexpected jobs are refused`,
+    });
+  }
+
+  const requiredJob = ciJobById.get('required');
+  const requiredNeeds = `[scope, ${REQUIRED_CI_HEAVY_JOBS.join(', ')}]`;
+  if (!requiredJob
+      || !requiredJob.body.includes('name: required CI aggregate')
+      || !requiredJob.body.includes('if: ${{ always() }}')
+      || !requiredJob.body.includes(`needs: ${requiredNeeds}`)
+      || !runsCommand(requiredJob.body, "needs.scope?.result !== 'success'")
+      || !runsCommand(requiredJob.body, "heavy !== 'true' && heavy !== 'false'")
+      || !runsCommand(requiredJob.body, "heavy === 'true' ? 'success' : 'skipped'")
+      || !runsCommand(requiredJob.body, "name !== 'scope' && value?.result !== expected")) {
+    v.push({
+      rule: 'scope-aggregate', file: '.github/workflows/ci.yml', line: null,
+      message: 'required CI aggregate must always observe scope plus every heavyweight job, require scope success, and accept heavy jobs as success only for heavy changes or skipped only for proven light changes',
     });
   }
   for (const job of ciJobs) {
@@ -896,12 +1118,45 @@ export async function selfTest() {
   /** @type {{name:string, rule:string, mutate:(d:string)=>Promise<void>}[]} */
   const plants = [
     {
-      name: 'documentation is added back to the heavyweight CI trigger',
+      name: 'pull requests regain a paths filter that can suppress the required aggregate',
       rule: 'trigger-scope',
       mutate: async (d) => {
         const p = path.join(d, '.github', 'workflows', 'ci.yml');
         const t = await fs.readFile(p, 'utf8');
-        await fs.writeFile(p, t.replace("      - 'bin/**'", "      - 'README.md'\n      - 'bin/**'"));
+        await fs.writeFile(p, t.replace('  pull_request:\n', '  pull_request:\n    paths:\n      - README.md\n'));
+      },
+    },
+    {
+      name: 'the always-running scope job stops executing classifier positive controls',
+      rule: 'scope-classifier',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          'node scripts/check-ci-hardening.mjs --classifier-self-test',
+          'echo classifier-positive-controls-bypassed',
+        ));
+      },
+    },
+    {
+      name: 'one heavyweight job can run without the shared scope verdict',
+      rule: 'scope-gate',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace('    needs: scope', '    needs: []'));
+      },
+    },
+    {
+      name: 'the aggregate accepts success even when light changes should skip heavyweight jobs',
+      rule: 'scope-aggregate',
+      mutate: async (d) => {
+        const p = path.join(d, '.github', 'workflows', 'ci.yml');
+        const t = await fs.readFile(p, 'utf8');
+        await fs.writeFile(p, t.replace(
+          "heavy === 'true' ? 'success' : 'skipped'",
+          "heavy === 'true' ? 'success' : 'success'",
+        ));
       },
     },
     {
@@ -1262,8 +1517,63 @@ export async function selfTest() {
   return { ok, lines };
 }
 
+/** @param {string} flag */
+function commandLineValue(flag) {
+  const at = process.argv.indexOf(flag);
+  if (at < 0) return null;
+  const value = process.argv[at + 1];
+  if (!value || value.startsWith('--')) throw new Error(`${flag} requires a value`);
+  return value;
+}
+
+/**
+ * Read `git diff --name-only -z` without ever treating newline-delimited or lossy-decoded input as
+ * a proven path set. Callers convert any error into forced full CI.
+ *
+ * @param {string} file
+ * @returns {Promise<string[]>}
+ */
+async function readNulPathFile(file) {
+  const raw = await fs.readFile(file);
+  if (raw.length === 0) return [];
+  if (raw[raw.length - 1] !== 0) throw new Error('changed-path input is not NUL terminated');
+  const decoded = raw.toString('utf8');
+  if (!Buffer.from(decoded, 'utf8').equals(raw)) throw new Error('changed-path input is not valid UTF-8');
+  return decoded.slice(0, -1).split('\0');
+}
+
 /* c8 ignore start — CLI wrapper */
 if (process.argv[1]?.endsWith('check-ci-hardening.mjs')) {
+  if (process.argv.includes('--classifier-self-test')) {
+    const { ok, lines } = classifierSelfTest();
+    for (const line of lines) console.log(line);
+    if (!ok) console.error('::error::required-CI path classifier failed its positive controls');
+    process.exit(ok ? 0 : 1);
+  }
+
+  if (process.argv.includes('--classify-paths-nul')) {
+    const input = commandLineValue('--classify-paths-nul');
+    const output = commandLineValue('--github-output');
+    const requestedForce = commandLineValue('--force-heavy');
+    let paths = [];
+    let inputFailure = null;
+    try {
+      paths = await readNulPathFile(/** @type {string} */ (input));
+    } catch (error) {
+      inputFailure = 'classifier-input-unavailable';
+      console.error(`::warning::${error instanceof Error ? error.message : String(error)}; forcing full CI`);
+    }
+    const result = classifyRequiredCiPaths(paths, {
+      forceHeavyReason: inputFailure ?? requestedForce,
+    });
+    if (output) {
+      await fs.appendFile(output,
+        `heavy=${result.heavy ? 'true' : 'false'}\nreason=${result.reason}\nchanged_count=${result.changedCount}\nmatched_count=${result.matchedCount}\n`);
+    }
+    console.log(JSON.stringify(result));
+    process.exit(0);
+  }
+
   let bad = false;
   if (process.argv.includes('--self-test')) {
     console.log('positive control — every rule must be able to go RED:');
@@ -1284,7 +1594,7 @@ if (process.argv[1]?.endsWith('check-ci-hardening.mjs')) {
     console.error(`\n${violations.length} CI hardening violation(s).`);
     bad = true;
   } else {
-    console.log('CI hardening: least privilege, immutable executable inputs, measured Git, cross-platform ownership, retained feature proof, and real omit-optional isolation verified on ' + REQUIRED_OS.join(', ') + '.');
+    console.log('CI hardening: universal fail-closed required aggregate, least privilege, immutable executable inputs, measured Git, cross-platform ownership, retained feature proof, and real omit-optional isolation verified on ' + REQUIRED_OS.join(', ') + '.');
   }
   process.exit(bad ? 1 : 0);
 }

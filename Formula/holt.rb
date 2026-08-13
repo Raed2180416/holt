@@ -19,8 +19,8 @@ require "language/node"
 class Holt < Formula
   desc "Coordinate, preserve, and safely clean parallel agent worktrees"
   homepage "https://raed2180416.github.io/holt/"
-  url "https://github.com/Raed2180416/holt/releases/download/v0.3.0/holt.tgz"
-  sha256 "097af7ad10b52e44fd8bd5ca86f7e2efb584b0071ec3574edc1c62adcf15a663"
+  url "https://github.com/Raed2180416/holt/releases/download/v0.3.1/holt.tgz"
+  sha256 "008fdffc96968d4288a6bc0b1ad84e9803d1c399a0b10eb05a5a474a9a9a5800"
   # The tarball contains FSL-1.1-MIT core files and separately licensed commercial Team files.
   # See LICENSE-NOTICE.md in the installed package for the per-path terms.
   license :cannot_represent

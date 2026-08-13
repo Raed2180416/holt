@@ -36,19 +36,61 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { constants as FSC } from 'node:fs';
 import { ensurePrivateDirectory, readStableRegularFile } from '../stable-file.mjs';
 import { execFile } from 'node:child_process';
 
-const RECEIPT_VERSION = 2;
+const RECEIPT_VERSION = 3;
 const NOFOLLOW = FSC.O_NOFOLLOW ?? 0;
+
+const emptyReceipt = () => ({ version: RECEIPT_VERSION, created: {}, shared: {}, dirs: [] });
+
+function normalizedReceipt(value) {
+  if (!value || typeof value !== 'object') return null;
+  return {
+    version: Number(value.version) || RECEIPT_VERSION,
+    created: (value.created && typeof value.created === 'object') ? value.created : {},
+    shared: (value.shared && typeof value.shared === 'object') ? value.shared : {},
+    dirs: Array.isArray(value.dirs) ? value.dirs : [],
+  };
+}
+
+function receiptFromBytes(bytes) {
+  try {
+    return normalizedReceipt(JSON.parse(Buffer.from(bytes).toString('utf8')));
+  } catch {
+    return null;
+  }
+}
 
 function commonDir(cwd) {
   return new Promise((resolve) => {
     execFile('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, timeout: 10_000 },
       (err, stdout) => resolve(err ? null : String(stdout).trim() || null));
   });
+}
+
+function gitDir(cwd) {
+  return new Promise((resolve) => {
+    execFile('git', ['rev-parse', '--path-format=absolute', '--git-dir'], { cwd, timeout: 10_000 },
+      (err, stdout) => resolve(err ? null : String(stdout).trim() || null));
+  });
+}
+
+/**
+ * Stable-enough namespace for one worktree within its shared receipt. Main is `main`; linked
+ * worktrees use Git's common-dir-relative administrative path (`worktrees/<id>`). The token is not
+ * deletion evidence by itself — inode/content still must match — but it lets a reinstall replace
+ * this worktree's prior identity without erasing identities belonging to sibling worktrees.
+ */
+async function worktreeReceiptKey(cwd) {
+  const [common, git] = await Promise.all([commonDir(cwd), gitDir(cwd)]);
+  if (!common || !git) return null;
+  const rel = path.relative(path.resolve(common), path.resolve(git));
+  if (rel === '') return 'main';
+  if (rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
+  return rel.split(path.sep).join('/');
 }
 
 /** The receipt's location, or null when this is not a git repository holt can address. */
@@ -71,7 +113,7 @@ export async function fileHash(abs) {
  * A `created` entry is a LIST of accepted hashes; receipts written before that change carry a bare
  * string, and both forms are read everywhere (see recordCreated and ownershipOf).
  *
- * @returns {Promise<{version: number, created: Record<string, string|string[]|null>, shared: Record<string, string|string[]|null>, dirs: string[]}|null>}
+ * @returns {Promise<{version: number, created: Record<string, any>, shared: Record<string, any>, dirs: string[]}|null>}
  *   `null` means holt could not read it — which callers MUST treat as "own nothing", not "own all".
  */
 export async function readReceipt(repoRoot) {
@@ -81,29 +123,18 @@ export async function readReceipt(repoRoot) {
   // recorded. Returning `null` here instead conflated "nowhere to keep a receipt" with "a receipt
   // I could not parse", and that froze uninstall in plain directories — a regression caught by
   // two pre-existing tests that uninstall from a non-git temp dir.
-  if (!p) return { version: RECEIPT_VERSION, created: {}, shared: {}, dirs: [] };
+  if (!p) return emptyReceipt();
   let raw;
   try {
     raw = await fs.readFile(p, 'utf8');
   } catch (e) {
     // ENOENT is a real answer: holt has never installed here, so it created nothing. Any other
     // error is "could not look", and must not be reported as an empty receipt.
-    if (e && e.code === 'ENOENT') return { version: RECEIPT_VERSION, created: {}, shared: {}, dirs: [] };
+    if (e && e.code === 'ENOENT') return emptyReceipt();
     return null;
   }
-  try {
-    const j = JSON.parse(raw);
-    if (!j || typeof j !== 'object') return null;
-    return {
-      version: Number(j.version) || RECEIPT_VERSION,
-      created: (j.created && typeof j.created === 'object') ? j.created : {},
-      shared: (j.shared && typeof j.shared === 'object') ? j.shared : {},
-      dirs: Array.isArray(j.dirs) ? j.dirs : [],
-    };
-  } catch {
-    // Corrupt JSON is "could not look". Deleting on a guess is exactly what this file prevents.
-    return null;
-  }
+  // Corrupt JSON is "could not look". Deleting on a guess is exactly what this file prevents.
+  return receiptFromBytes(raw);
 }
 
 /**
@@ -112,55 +143,71 @@ export async function readReceipt(repoRoot) {
  * Merges into whatever is already there — integrate is re-run routinely, and a second run that
  * creates one new file must not erase the record of the first run's five.
  *
+ * Current callers must provide the exact publication token returned by the file transaction.
+ * Bare string paths are retained in the accepted input shape only so an older caller fails closed
+ * (`false`) instead of being silently upgraded through a pathname re-read.
+ *
  * @param {string} repoRoot
- * @param {{files?: string[], dirs?: string[]}} made  repo-relative paths holt brought into being
+ * @param {{files?: Array<string|{path:string,token:any}>, dirs?: string[],
+ *   onBeforeReceiptMutation?:((details:{file:string,action:'create'|'replace'|'delete'})=>any)|null,
+ *   onAfterReceiptPublish?:(()=>any)|null}} made
  */
-export async function recordCreated(repoRoot, { files = [], dirs = [] } = {}) {
-  const p = await receiptPath(repoRoot);
-  if (!p) return false;
-  const existing = await readReceipt(repoRoot);
-  // An unreadable receipt is not licence to start a fresh one — that would silently forget
-  // everything an earlier install created, and those files would then never be cleaned up.
-  if (existing === null) return false;
-
-  const created = { ...existing.created };
-  for (const rel of files) {
-    // The hash is taken AFTER writing, so it is the content holt is responsible for. If the user
-    // edits the file later, the hash stops matching and holt no longer claims it.
-    //
-    // A LIST, NOT ONE HASH, and the reason is holt's own subject matter. `integrate` runs per
-    // worktree against a receipt shared through the git common dir, last-writer-wins, so a single
-    // slot means worktree 2's write erases worktree 1's hash — and worktree 1's byte-identical
-    // copy then reads as edited-by-the-user. Safe in the delete direction, wrong in the risk
-    // direction, and it would have made the P0-1 fix stop working at exactly two worktrees.
-    // Capped and deduped so a hundred re-runs cannot grow the receipt without bound. Reading is
-    // backward-compatible by construction (see ownershipOf's Array.isArray), so a receipt written
-    // by an older holt keeps working untouched.
-    const prior = Array.isArray(existing.created?.[rel])
-      ? existing.created[rel]
-      : (existing.created?.[rel] ? [existing.created[rel]] : []);
-    const now = await fileHash(path.join(repoRoot, rel));
-    // flatMap, not filter: a boolean-returning filter does not narrow the element type, so the
-    // result would still read as possibly-null and the receipt's own contract would not typecheck.
-    const hashes = [...prior, now].flatMap((h) => (typeof h === 'string' && h ? [h] : []));
-    created[rel] = [...new Set(hashes)].slice(-8);
-  }
-  const dirSet = new Set([...existing.dirs, ...dirs]);
-
-  try {
-    await fs.mkdir(path.dirname(p), { recursive: true });
-    await fs.writeFile(p, `${JSON.stringify({
-      version: RECEIPT_VERSION, created, shared: existing.shared ?? {}, dirs: [...dirSet],
-    }, null, 2)}\n`, 'utf8');
-    return true;
-  } catch {
+export async function recordCreated(repoRoot, {
+  files = [], dirs = [], onBeforeReceiptMutation = null, onAfterReceiptPublish = null,
+} = {}) {
+  const records = files.flatMap((entry) => (
+    entry && typeof entry === 'object' && typeof entry.path === 'string'
+      ? [{ path: entry.path, token: entry.token }]
+      : []
+  ));
+  // Never reconstruct deletion authority from a later pathname read. If any caller omitted the
+  // commit token, publish nothing — a partial receipt is more dangerous than a failed install.
+  if (records.length !== files.length || records.some(({ token }) => !projectTokenShape(token))) {
     return false;
   }
+  const verify = () => verifyProjectCreationRecords(repoRoot, records);
+  return publishReceiptUpdate(repoRoot, (existing) => {
+    const created = { ...existing.created };
+    for (const { path: rel, token } of records) {
+      const prior = Array.isArray(existing.created?.[rel])
+        ? existing.created[rel]
+        : (existing.created?.[rel] ? [existing.created[rel]] : []);
+      // Keep legacy hashes readable for risk/reproducibility classification, but they no longer
+      // authorise deletion. Among current identity entries retain siblings and replace exactly
+      // this worktree's prior identity, so linked worktrees coexist without accumulating stale
+      // deletion authority for repeated installs in one tree.
+      created[rel] = [
+        ...prior.filter((entry) => typeof entry === 'string'
+          || !entry || typeof entry !== 'object' || entry.worktree !== token.worktree),
+        token,
+      ];
+    }
+    return {
+      version: RECEIPT_VERSION,
+      created,
+      shared: existing.shared ?? {},
+      dirs: [...new Set([...existing.dirs, ...dirs])],
+    };
+  }, {
+    verify,
+    onBeforeMutation: onBeforeReceiptMutation,
+    onAfterPublish: onAfterReceiptPublish,
+  });
 }
 
 const sameInode = (left, right) => left && right
   && String(left.dev) === String(right.dev)
   && String(left.ino) === String(right.ino);
+// rename changes ctime on common filesystems, so ctime cannot survive the retirement primitive.
+// mtime, size, mode and ownership do survive it and expose a same-inode rewrite/chmod that a
+// byte-only comparison can miss (notably a concurrent idempotent receipt publication).
+const sameRetiredObservation = (left, right) => sameInode(left, right)
+  && Number(left.size) === Number(right.size)
+  && Number(left.mtimeMs) === Number(right.mtimeMs)
+  && Number(left.mode) === Number(right.mode)
+  && String(left.uid) === String(right.uid)
+  && String(left.gid) === String(right.gid)
+  && Number(left.nlink) === Number(right.nlink);
 const hashBytes = (bytes) => createHash('sha256').update(bytes).digest('hex');
 const identityToken = (sha256, stat) => ({
   sha256,
@@ -169,29 +216,35 @@ const identityToken = (sha256, stat) => ({
   size: Number(stat.size),
   ctimeMs: Number(stat.ctimeMs),
 });
+const projectIdentityToken = (sha256, stat, worktree) => ({
+  ...identityToken(sha256, stat),
+  worktree,
+});
 const tokenMatches = (token, sha256, stat) => !!token
   && token.sha256 === sha256
   && token.dev === String(stat.dev)
   && token.ino === String(stat.ino)
   && token.size === Number(stat.size)
   && token.ctimeMs === Number(stat.ctimeMs);
+const projectTokenShape = (token) => !!token
+  && typeof token === 'object'
+  && typeof token.worktree === 'string'
+  && token.worktree.length > 0
+  && typeof token.sha256 === 'string'
+  && typeof token.dev === 'string'
+  && typeof token.ino === 'string'
+  && Number.isFinite(token.size)
+  && Number.isFinite(token.ctimeMs);
+const projectTokenMatches = (token, observation) => projectTokenShape(token)
+  && observation?.state === 'present'
+  && token.worktree === observation.worktree
+  && tokenMatches(token, observation.sha256, observation.stat);
 // Shared-file ownership was introduced together with v2 identity receipts; no released v1
 // receipt contained this namespace. A bare legacy/content hash is therefore evidence of bytes,
 // not authority over the current inode, and must fail closed instead of being "upgraded" by use.
 const receiptEntryMatches = (entry, sha256, stat) => !!entry
   && typeof entry === 'object'
   && tokenMatches(entry, sha256, stat);
-
-async function writeReceiptAtomic(file, value) {
-  const dir = path.dirname(file);
-  const temp = path.join(dir, `.install-receipt.${process.pid}.${randomUUID()}.tmp`);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-  // A successful rename consumes the unique temporary pathname. On failure retain it rather than
-  // issuing a later path-based delete: another process must never be able to substitute a leaf
-  // between our failed publication and cleanup and have Holt erase that substitute.
-  await fs.rename(temp, file);
-}
 
 /** Create one shared regular file exclusively and return the exact identity Holt authored. */
 export async function createSharedRegularFileExclusive(absPath, bytes, { mode = 0o755 } = {}) {
@@ -222,42 +275,27 @@ export async function createSharedRegularFileExclusive(absPath, bytes, { mode = 
  * another file and cannot inherit deletion authority.
  */
 export async function recordSharedCreated(repoRoot, key, absPath, expectedToken) {
-  const p = await receiptPath(repoRoot);
-  if (!p) return false;
-  const existing = await readReceipt(repoRoot);
-  if (existing === null) return false;
-  const observed = await readStableRegularFile(absPath, {
-    maxBytes: 1024 * 1024,
-    requireSingleLink: true,
-    requireOwner: true,
-  });
-  if (!observed.ok) return false;
-  const now = hashBytes(observed.bytes);
-  if (!tokenMatches(expectedToken, now, observed.stat)) return false;
-  const exactRecord = identityToken(now, observed.stat);
-  const shared = {
-    ...(existing.shared ?? {}),
-    // A shared pathname has one active inode. Retaining prior inode identities expands deletion
-    // authority without helping the current file, and silently capping that history makes the
-    // receipt appear complete when it is not. Publish only the exact current identity.
-    [key]: exactRecord,
-  };
-  try {
-    await writeReceiptAtomic(p, {
-      version: RECEIPT_VERSION,
-      created: existing.created ?? {},
-      shared,
-      dirs: existing.dirs ?? [],
-    });
-    const after = await readStableRegularFile(absPath, {
+  const exactRecord = identityToken(expectedToken?.sha256, expectedToken ?? {});
+  if (!tokenMatches(expectedToken, exactRecord.sha256, expectedToken ?? {})) return false;
+  const verify = async () => {
+    const observed = await readStableRegularFile(absPath, {
       maxBytes: 1024 * 1024,
       requireSingleLink: true,
       requireOwner: true,
     });
-    return after.ok && tokenMatches(exactRecord, hashBytes(after.bytes), after.stat);
-  } catch {
-    return false;
-  }
+    return observed.ok && tokenMatches(exactRecord, hashBytes(observed.bytes), observed.stat);
+  };
+  return publishReceiptUpdate(repoRoot, (existing) => ({
+      version: RECEIPT_VERSION,
+      created: existing.created ?? {},
+      shared: {
+        ...(existing.shared ?? {}),
+        // A shared pathname has one active inode. Retaining prior inode identities expands
+        // deletion authority without helping the current file.
+        [key]: exactRecord,
+      },
+      dirs: existing.dirs ?? [],
+    }), { verify });
 }
 
 /** True only when this receipt owns the exact current bytes of a shared generated file. */
@@ -275,6 +313,346 @@ export async function holtOwnsSharedFile(repoRoot, key, absPath, receipt) {
   const now = hashBytes(observed.bytes);
   return (Array.isArray(recorded) ? recorded : [recorded])
     .some((entry) => receiptEntryMatches(entry, now, observed.stat));
+}
+
+/**
+ * Does a worktree-file receipt own one already-stable observation?
+ *
+ * This is deliberately separate from `holtOwnsFile`: callers which are about to mutate a file
+ * must ask about the descriptor-bound bytes they actually parsed, not re-read the pathname and
+ * accidentally authorise a different inode. Legacy receipts contain content hashes; those remain
+ * readable for reproducibility/risk classification, but cannot authorise deletion because a later
+ * byte-identical replacement is indistinguishable by content alone. Current entries must match
+ * bytes, inode metadata, and the worktree namespace observed by the transaction.
+ */
+export function receiptOwnsFileObservation(receipt, relPath, observation) {
+  if (!receipt || !observation || observation.state !== 'present') return false;
+  const recorded = receipt.created?.[relPath];
+  if (!recorded) return false;
+  return (Array.isArray(recorded) ? recorded : [recorded])
+    .some((entry) => projectTokenMatches(entry, observation));
+}
+
+/**
+ * Read the install receipt once and retain the same file transaction for final clearing.
+ * Ownership decisions and receipt deletion therefore share one inode/content observation across
+ * the whole uninstall instead of reopening the path after every adapter has already been visited.
+ */
+export async function openReceiptSnapshot(repoRoot) {
+  const p = await receiptPath(repoRoot);
+  if (!p) return { receipt: emptyReceipt(), transaction: null };
+  try {
+    const transaction = await openIntegrationFileTransaction(repoRoot, p);
+    if (transaction.state === 'absent') {
+      return { receipt: emptyReceipt(), transaction };
+    }
+    if (!Buffer.isBuffer(transaction.bytes)) return { receipt: null, transaction };
+    return { receipt: receiptFromBytes(transaction.bytes), transaction };
+  } catch {
+    return { receipt: null, transaction: null };
+  }
+}
+
+async function integrationRecoveryDirectory(repoRoot, absPath) {
+  const receiptFile = await receiptPath(repoRoot);
+  if (receiptFile) {
+    const root = await ensurePrivateDirectory(path.join(path.dirname(receiptFile), 'recovery'));
+    const [sourceParent, recovery] = await Promise.all([
+      fs.stat(path.dirname(absPath)),
+      fs.stat(root),
+    ]);
+    // rename is the identity-preserving primitive. Use the central Holt recovery namespace only
+    // when it is on the same filesystem as the file; linked worktrees and user-scope configs can
+    // legitimately live on another device.
+    if (String(sourceParent.dev) === String(recovery.dev)) {
+      const dir = await fs.mkdtemp(path.join(root, 'integration-file-'));
+      if (process.platform !== 'win32') await fs.chmod(dir, 0o700);
+      return dir;
+    }
+  }
+
+  // Cross-device and non-repository fallback. The directory is a unique, private sibling so the
+  // first move remains an atomic same-filesystem rename. It is intentionally retained: deleting
+  // a later pathname occupant would recreate the exact TOCTOU this transaction exists to close.
+  const dir = await fs.mkdtemp(path.join(path.dirname(absPath), '.holt-recovery-'));
+  if (process.platform !== 'win32') await fs.chmod(dir, 0o700);
+  return dir;
+}
+
+/**
+ * @param {string} message
+ * @param {string|null} [recoveryPath]
+ * @param {unknown} [cause]
+ * @returns {Error & {code:string,recoveryPath?:string}}
+ */
+function integrationRaceError(message, recoveryPath = null, cause = undefined) {
+  return Object.assign(new Error(message, cause === undefined ? undefined : { cause }), {
+    code: 'EINTEGRATIONRACE',
+    ...(recoveryPath ? { recoveryPath } : {}),
+  });
+}
+
+async function restoreIntegrationBytesExclusively(absPath, observed) {
+  try {
+    await createSharedRegularFileExclusive(absPath, observed.bytes, {
+      mode: observed.stat.mode & 0o777,
+    });
+    return true;
+  } catch {
+    // A new file at the active pathname belongs to the concurrent writer. Never overwrite it.
+    return false;
+  }
+}
+
+/**
+ * Open one compare-and-swap transaction for an integration-owned regular-file pathname.
+ *
+ * The transaction binds parsing, receipt ownership, and the eventual mutation to one stable
+ * descriptor observation. `commit(null)` retires the file; `commit(bytes)` replaces or creates
+ * it. Existing bytes are moved to a private recovery path and verified by inode+content before
+ * the active pathname is changed. Publication is exclusive, so a concurrent replacement wins
+ * and is preserved. Recovery bytes are retained even after success because portable filesystems
+ * have no "unlink only if this path still names inode X" primitive.
+ *
+ * @param {string} repoRoot
+ * @param {string} absPath
+ * @param {{maxBytes?:number}} [options]
+ */
+export async function openIntegrationFileTransaction(repoRoot, absPath, {
+  maxBytes = 64 * 1024 * 1024,
+} = {}) {
+  const [stable, worktree] = await Promise.all([
+    readStableRegularFile(absPath, {
+      maxBytes,
+      requireSingleLink: true,
+      requireOwner: true,
+    }),
+    worktreeReceiptKey(repoRoot),
+  ]);
+  if (!stable.ok && stable.code !== 'ENOENT') {
+    const error = Object.assign(
+      new Error(`integration file is not one stable owned regular file (${stable.reason})`),
+      { code: stable.code ?? 'EINTEGRATIONUNAVAILABLE' },
+    );
+    throw error;
+  }
+
+  const present = stable.ok;
+  const observation = present ? {
+    state: 'present',
+    bytes: stable.bytes,
+    stat: stable.stat,
+    sha256: hashBytes(stable.bytes),
+    worktree,
+  } : {
+    state: 'absent', bytes: null, stat: null, sha256: null, worktree,
+  };
+  let committed = false;
+
+  return {
+    ...observation,
+    /**
+     * @param {Buffer|string|null} replacement null means remove from the active pathname
+     * @param {{mode?:number,onBeforeMutation?:((details:{file:string,action:'create'|'replace'|'delete'})=>any)|null,onAfterPublish?:(()=>any)|null}} [commitOptions]
+     */
+    async commit(replacement, {
+      mode = present ? (stable.stat.mode & 0o777) : 0o666,
+      onBeforeMutation = null,
+      onAfterPublish = null,
+    } = {}) {
+      if (committed) throw new Error(`integration file transaction already committed: ${absPath}`);
+      committed = true;
+      const desired = replacement === null ? null : Buffer.from(replacement);
+      if (present && desired && desired.equals(stable.bytes)) {
+        const publication = worktree
+          ? projectIdentityToken(observation.sha256, stable.stat, worktree)
+          : null;
+        return { state: 'unchanged', creation: null, publication, recoveryPath: null };
+      }
+      if (!present && desired === null) {
+        const current = await readStableRegularFile(absPath, {
+          maxBytes, requireSingleLink: true, requireOwner: true,
+        });
+        if (!current.ok && current.code === 'ENOENT') {
+          return { state: 'absent', creation: null, publication: null, recoveryPath: null };
+        }
+        throw integrationRaceError(
+          'integration file appeared after the absence observation; left it untouched',
+        );
+      }
+
+      const action = !present ? 'create' : desired === null ? 'delete' : 'replace';
+      if (typeof onBeforeMutation === 'function') {
+        await onBeforeMutation({ file: absPath, action });
+      }
+
+      if (!present) {
+        try {
+          const creation = await createSharedRegularFileExclusive(absPath, desired, { mode });
+          if (typeof onAfterPublish === 'function') await onAfterPublish();
+          const published = await readStableRegularFile(absPath, {
+            maxBytes, requireSingleLink: true, requireOwner: true,
+          });
+          if (!published.ok
+            || !tokenMatches(creation, hashBytes(published.bytes), published.stat)) {
+            throw integrationRaceError(
+              'integration file changed after exclusive creation; replacement was not adopted',
+            );
+          }
+          const publication = worktree
+            ? projectIdentityToken(creation.sha256, creation, worktree)
+            : null;
+          return { state: 'created', creation, publication, recoveryPath: null };
+        } catch (cause) {
+          if (cause?.code === 'EINTEGRATIONRACE') throw cause;
+          throw integrationRaceError(
+            'integration file appeared or changed before exclusive creation; left it untouched',
+            null,
+            cause,
+          );
+        }
+      }
+
+      const stagingDir = await integrationRecoveryDirectory(repoRoot, absPath);
+      const stagedPath = path.join(stagingDir, path.basename(absPath));
+      try {
+        await fs.rename(absPath, stagedPath);
+      } catch (cause) {
+        throw integrationRaceError(
+          `integration file could not be moved into recovery at ${stagedPath}`,
+          stagedPath,
+          cause,
+        );
+      }
+
+      const moved = await readStableRegularFile(stagedPath, {
+        maxBytes, requireSingleLink: true, requireOwner: true,
+      });
+      if (!moved.ok || !sameRetiredObservation(stable.stat, moved.stat)
+        || hashBytes(moved.bytes) !== observation.sha256) {
+        const restored = moved.ok && await restoreIntegrationBytesExclusively(absPath, moved);
+        throw integrationRaceError(
+          `integration file changed before mutation${restored ? '; raced bytes were restored' : ''}; retained at ${stagedPath}`,
+          stagedPath,
+        );
+      }
+
+      if (desired === null) {
+        return { state: 'deleted', creation: null, publication: null, recoveryPath: stagedPath };
+      }
+
+      let creation;
+      try {
+        creation = await createSharedRegularFileExclusive(absPath, desired, { mode });
+        if (typeof onAfterPublish === 'function') await onAfterPublish();
+        const published = await readStableRegularFile(absPath, {
+          maxBytes, requireSingleLink: true, requireOwner: true,
+        });
+        if (!published.ok
+          || !tokenMatches(creation, hashBytes(published.bytes), published.stat)) {
+          throw integrationRaceError(
+            `integration replacement changed after publication; prior bytes retained at ${stagedPath}`,
+            stagedPath,
+          );
+        }
+      } catch (cause) {
+        if (cause?.code === 'EINTEGRATIONRACE') throw cause;
+        const restored = await restoreIntegrationBytesExclusively(absPath, moved);
+        throw integrationRaceError(
+          `integration replacement could not be published without overwriting another file${restored ? '; prior bytes were restored' : ''}; retained at ${stagedPath}`,
+          stagedPath,
+          cause,
+        );
+      }
+      const publication = worktree
+        ? projectIdentityToken(creation.sha256, creation, worktree)
+        : null;
+      return { state: 'replaced', creation, publication, recoveryPath: stagedPath };
+    },
+  };
+}
+
+function safeReceiptRelative(rel) {
+  if (typeof rel !== 'string' || !rel || path.isAbsolute(rel) || rel.includes('\\')) return false;
+  const parts = rel.split('/');
+  return !parts.some((part) => part === '' || part === '.' || part === '..');
+}
+
+async function verifyProjectCreationRecords(repoRoot, records) {
+  const worktree = await worktreeReceiptKey(repoRoot);
+  if (!worktree) return false;
+  for (const { path: rel, token } of records) {
+    if (!safeReceiptRelative(rel) || token.worktree !== worktree) return false;
+    const observed = await readStableRegularFile(path.join(repoRoot, rel), {
+      maxBytes: 64 * 1024 * 1024,
+      requireSingleLink: true,
+      requireOwner: true,
+    });
+    if (!observed.ok || !tokenMatches(token, hashBytes(observed.bytes), observed.stat)) return false;
+  }
+  return true;
+}
+
+/**
+ * Publish a merged receipt with compare-and-swap semantics. Every attempt binds parsing and
+ * replacement to one receipt inode. If another integrate wins, its receipt is preserved and this
+ * writer reopens/merges it; malformed state, unverifiable authored files, or repeated contention
+ * returns false without overwriting the winner.
+ *
+ * @param {string} repoRoot
+ * @param {(existing:any)=>any} update
+ * @param {{verify?:(()=>Promise<boolean>)|null,
+ *   onBeforeMutation?:((details:{file:string,action:'create'|'replace'|'delete'})=>any)|null,
+ *   onAfterPublish?:(()=>any)|null,maxAttempts?:number}} [options]
+ */
+async function publishReceiptUpdate(repoRoot, update, {
+  verify = null, onBeforeMutation = null, onAfterPublish = null, maxAttempts = 8,
+} = {}) {
+  const p = await receiptPath(repoRoot);
+  if (!p) return false;
+  try {
+    await ensurePrivateDirectory(path.dirname(p));
+  } catch {
+    return false;
+  }
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    let transaction;
+    try {
+      transaction = await openIntegrationFileTransaction(repoRoot, p, { maxBytes: 4 * 1024 * 1024 });
+    } catch {
+      // Another publisher exposes at most a bounded absent/in-progress window while its exclusive
+      // file is written and synced. Never interpret that transient as an empty/corrupt receipt.
+      await new Promise((resolve) => setTimeout(resolve, Math.min(2 ** attempt, 20)));
+      continue;
+    }
+    const existing = transaction.state === 'absent'
+      ? emptyReceipt()
+      : (Buffer.isBuffer(transaction.bytes) ? receiptFromBytes(transaction.bytes) : null);
+    // An unreadable receipt is not licence to replace it with a partial view.
+    if (!existing) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(2 ** attempt, 20)));
+      continue;
+    }
+    if (verify && !(await verify())) return false;
+    const next = normalizedReceipt(update(existing));
+    if (!next) return false;
+    try {
+      await transaction.commit(`${JSON.stringify(next, null, 2)}\n`, {
+        mode: 0o600,
+        onBeforeMutation,
+        onAfterPublish,
+      });
+    } catch (error) {
+      if (error?.code === 'EINTEGRATIONRACE') continue;
+      return false;
+    }
+    // The file token was the only authority supplied by the caller. Re-check after durable receipt
+    // publication so a substitution during the publish window cannot be reported as installed.
+    if (verify && !(await verify())) return false;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -453,14 +831,12 @@ export async function holtOwnsFile(repoRoot, relPath, receipt) {
   const r = receipt ?? await readReceipt(repoRoot);
   if (!r) return false;                              // could not look -> own nothing
   if (!(relPath in r.created)) return false;         // never created it -> not ours
-  const recorded = r.created[relPath];
-  if (!recorded) return false;                       // no hash recorded -> cannot prove it is ours
-  const now = await fileHash(path.join(repoRoot, relPath));
-  if (now === null) return false;                    // gone or unreadable -> nothing to delete
-  // A receipt entry is a LIST of accepted hashes (see recordCreated); older receipts hold a bare
-  // string. Both are read here, so an in-place upgrade never makes holt forget what it owns —
-  // which would strand its own files as undeletable on exactly the uninstall that needed them gone.
-  return (Array.isArray(recorded) ? recorded : [recorded]).includes(now);
+  try {
+    const observation = await openIntegrationFileTransaction(repoRoot, path.join(repoRoot, relPath));
+    return receiptOwnsFileObservation(r, relPath, observation);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -489,7 +865,7 @@ export async function holtOwnsFile(repoRoot, relPath, receipt) {
  *
  * @param {string} wtPath  the worktree the paths live in — NOT necessarily the repo root
  * @param {string[]} rels
- * @param {{created?: Record<string, string|string[]|null>}|null} receipt
+ * @param {{created?: Record<string, any>}|null} receipt
  *   already-read receipt, or null for "could not look"
  * @returns {Promise<Map<string, 'MINE_UNTOUCHED'|'MINE_EDITED'|'NOT_MINE'|'UNKNOWN'>>}
  */
@@ -507,7 +883,13 @@ export async function ownershipOf(wtPath, rels, receipt) {
     // makes MINE_UNTOUCHED unreachable and this whole fix stops working the moment there are two
     // worktrees, which is holt's entire subject matter.
     const accepted = Array.isArray(rec) ? rec : [rec];
-    out.set(f, accepted.includes(now) ? 'MINE_UNTOUCHED' : 'MINE_EDITED');
+    // Risk classification asks whether the bytes are reproducible, not whether deletion is
+    // authorised. Legacy hashes remain meaningful for that narrower question; identity entries
+    // contribute their bound hash without weakening uninstall's object-only authority rule.
+    const reproducible = accepted.some((entry) => (
+      typeof entry === 'string' ? entry === now : entry?.sha256 === now
+    ));
+    out.set(f, reproducible ? 'MINE_UNTOUCHED' : 'MINE_EDITED');
   }
   return out;
 }
@@ -519,14 +901,68 @@ export async function holtOwnsDir(repoRoot, relDir, receipt) {
   return r.dirs.includes(relDir);
 }
 
-/** Forget everything — called at the end of a successful uninstall. */
-export async function clearReceipt(repoRoot) {
+/**
+ * Forget everything at the end of a successful uninstall, but only if no concurrent integrate
+ * changed the receipt after uninstall took its ownership snapshot.
+ */
+/**
+ * @param {string} repoRoot
+ * @param {any} [expectedReceipt]
+ * @param {{onBeforeMutation?:((details:{file:string,action:'create'|'replace'|'delete'})=>any)|null,
+ *   transaction?:any}} [options]
+ */
+async function clearReceiptResult(repoRoot, expectedReceipt = undefined, {
+  onBeforeMutation = null, transaction: suppliedTransaction = null,
+} = {}) {
   const p = await receiptPath(repoRoot);
-  if (!p) return false;
+  if (!p) return { ok: false, recoveryPath: null };
   try {
-    await fs.rm(p, { force: true });
-    return true;
-  } catch {
-    return false;
+    const transaction = suppliedTransaction
+      ?? await openIntegrationFileTransaction(repoRoot, p);
+    if (transaction.state === 'absent') {
+      if (expectedReceipt !== undefined
+        && JSON.stringify(expectedReceipt) !== JSON.stringify(emptyReceipt())) {
+        return { ok: false, recoveryPath: null };
+      }
+      const mutation = await transaction.commit(null, { onBeforeMutation });
+      return { ok: true, recoveryPath: mutation.recoveryPath };
+    }
+    if (expectedReceipt !== undefined) {
+      let current;
+      try {
+        const receiptBytes = transaction.bytes;
+        if (!Buffer.isBuffer(receiptBytes)) return { ok: false, recoveryPath: null };
+        current = receiptFromBytes(receiptBytes);
+      } catch {
+        return { ok: false, recoveryPath: null };
+      }
+      if (!current) return { ok: false, recoveryPath: null };
+      if (JSON.stringify(current) !== JSON.stringify(expectedReceipt)) {
+        return { ok: false, recoveryPath: null };
+      }
+    }
+    const mutation = await transaction.commit(null, { onBeforeMutation });
+    return { ok: true, recoveryPath: mutation.recoveryPath };
+  } catch (error) {
+    return {
+      ok: false,
+      recoveryPath: typeof error?.recoveryPath === 'string' ? error.recoveryPath : null,
+    };
   }
+}
+
+/** Forget the current receipt, preserving the historical boolean API used by the CLI. */
+export async function clearReceipt(repoRoot) {
+  return (await clearReceiptResult(repoRoot)).ok;
+}
+
+/**
+ * Clear only the receipt whose parsed snapshot the caller already used for ownership decisions.
+ * @param {string} repoRoot
+ * @param {any} expectedReceipt
+ * @param {{onBeforeMutation?:((details:{file:string,action:'create'|'replace'|'delete'})=>any)|null,
+ *   transaction?:any}} [options]
+ */
+export async function clearReceiptIfUnchanged(repoRoot, expectedReceipt, options = {}) {
+  return clearReceiptResult(repoRoot, expectedReceipt, options);
 }

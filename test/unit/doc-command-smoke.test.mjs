@@ -89,6 +89,14 @@ function deriveTerminalFlags(src) {
  * these roots is covered automatically, nothing to register by hand. */
 async function markdownFiles() {
   const files = [];
+  async function walkMarkdown(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      const target = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walkMarkdown(target);
+      else if (entry.isFile() && entry.name.endsWith('.md')) files.push(target);
+    }
+  }
   const rootEntries = await fs.readdir(ROOT, { withFileTypes: true });
   for (const e of rootEntries) {
     if (e.isFile() && e.name.endsWith('.md')) {
@@ -101,9 +109,7 @@ async function markdownFiles() {
     }
   }
   for (const dir of ['docs', '.github/releases', 'legal']) {
-    const abs = path.join(ROOT, dir);
-    const entries = await fs.readdir(abs, { withFileTypes: true }).catch(() => []);
-    for (const e of entries) if (e.isFile() && e.name.endsWith('.md')) files.push(path.join(abs, e.name));
+    await walkMarkdown(path.join(ROOT, dir));
   }
   return files;
 }
@@ -206,7 +212,10 @@ test('DOC SMOKE: every `holt ...` command shown in the docs is a real command wi
     `only ${terminalFlags.size} terminal flags derived from bin/holt.mjs — global flag extraction has drifted`);
 
   const files = await markdownFiles();
-  assert.ok(files.length >= 8, `only found ${files.length} markdown files to check — glob has drifted`);
+  assert.ok(files.length >= 40,
+    `only found ${files.length} markdown files to check — recursive documentation walk has drifted`);
+  assert.ok(files.some((file) => path.relative(ROOT, file).startsWith(`docs${path.sep}launch${path.sep}`)),
+    'docs/launch is absent from the recursive command-smoke corpus');
 
   const failures = [];
   let invocationsChecked = 0;

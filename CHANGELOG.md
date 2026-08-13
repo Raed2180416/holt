@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.4.0
+
+**Transactional recovery, bounded analysis, and a release boundary that matches the public
+product.** This release promotes the post-0.3.1 safety and coordination work through the normal
+signed-artifact path; it does not claim customer adoption or universal host enforcement.
+
+**Integration transactions**
+
+- Integration writes and removals are bound to the path identity and content observed at the
+  start of the operation. A concurrent user or agent edit is preserved rather than overwritten or
+  deleted, including across multi-worktree uninstall and receipt cleanup.
+- JSONC and third-party configuration ownership remains exact: Holt changes only entries it can
+  identify as its own, and an unreadable configuration is left byte-for-byte alone.
+
+**Bounded and content-grounded analysis**
+
+- Glob matching now charges bracket parsing and candidate traversal to one deterministic total
+  work budget. Adversarial candidate sets fail conservatively instead of turning an individually
+  linear matcher into unbounded aggregate work.
+- Git filters, index flags, path aliases, sparse worktrees, ignored files, and platform path rules
+  are isolated or measured so repository configuration cannot silently substitute different bytes
+  for the evidence Holt grades.
+- Task-scoped context, collision, duplicate, impact, order, and partition signals remain advisory;
+  exact content and recoverability evidence alone authorizes destructive action.
+
+**Recovery and portability**
+
+- Quarantine keeps its protection when a move fails, successful cleanup returns an explicit
+  restore route, and the supported transaction can be independently checked before quarantine,
+  while quarantined, and after restore.
+- The guard, action paths, installed CLI, supply-chain audit, and relevant fixtures retain their
+  Linux, macOS, and Windows contracts, including spaces, newlines, aliases, and Windows-native
+  destructive forms.
+
+**Public trust and release integrity**
+
+- Pull requests and main-branch pushes now always emit a fail-closed aggregate check. Only a small
+  reviewed prose/site/legal surface may skip the heavyweight matrix; unknown paths run it.
+- A separate universal trust lane verifies installation copy, release bodies, security claims,
+  website accessibility, and public evidence boundaries.
+- The alternate privileged fast-publish workflow was removed. One protected tag workflow now owns
+  quality, signing, installed-artifact verification, provenance, and immutable publication.
+- Public documentation distinguishes exact current capability, contract-tested integration,
+  current limitations, future paid hypotheses, and the absence of customer traction.
+
 ## 0.3.1
 
 **Safety and correctness fixes across the guard, integration, and analysis paths.** Every item

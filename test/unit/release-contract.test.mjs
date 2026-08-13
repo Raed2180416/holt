@@ -32,7 +32,12 @@ async function actual() {
     read('scripts/check-git-runtime.mjs'),
     read('src/supply-chain.mjs'),
   ]);
-  return { action, actionBuildScript, actionBundle, actionNotices, workflow, packageJson, lock, shrinkwrap, runtimeScript, supplyChain };
+  const alternateReleaseWorkflows = {};
+  for (const name of await fs.readdir(path.join(ROOT, '.github', 'workflows'))) {
+    if (!/^release-.*\.ya?ml$/.test(name) || name === 'release-artifact.yml') continue;
+    alternateReleaseWorkflows[name] = await read(`.github/workflows/${name}`);
+  }
+  return { action, actionBuildScript, actionBundle, actionNotices, workflow, packageJson, lock, shrinkwrap, runtimeScript, supplyChain, alternateReleaseWorkflows };
 }
 
 const rules = (input) => releaseContractProblems(input).map((x) => x.rule);
@@ -44,6 +49,18 @@ const expectRule = (input, rule, label) => {
 
 test('release contract: the real action, workflow, package and locks are green', async () => {
   assert.deepEqual(releaseContractProblems(await actual()), []);
+});
+
+test('release contract: a second publishing or signing workflow is rejected', async () => {
+  for (const body of [
+    'steps:\n  - run: gh release create "$TAG"\n',
+    'steps:\n  - uses: actions/attest@' + 'a'.repeat(40) + '\n',
+    'env:\n  HOLT_RELEASE_SIGNING_KEY: ${{ secrets.HOLT_RELEASE_SIGNING_KEY }}\n',
+  ]) {
+    const x = await actual();
+    x.alternateReleaseWorkflows['release-emergency.yml'] = body;
+    expectRule(x, 'release-path', body);
+  }
 });
 
 test('package-manager manifests point at a real release digest and parse SHA256SUMS order', async () => {
@@ -421,7 +438,7 @@ test('SBOM contract: root identity is the package, not the checkout directory ba
   assert.notEqual(cdx.metadata.component.name, path.basename(fixtureRoot),
     'SBOM root identity leaked the checkout directory name again');
   assert.equal(spdxRoot?.name, 'holt');
-  assert.equal(spdxRoot?.versionInfo, '0.3.1');
+  assert.equal(spdxRoot?.versionInfo, '0.4.0');
   assert.notEqual(spdxRoot?.name, path.basename(fixtureRoot),
     'SPDX root identity leaked the checkout directory name again');
   assert.ok(cdx.components.some((x) => x.name === 'hono' && x.version === '4.12.34'));

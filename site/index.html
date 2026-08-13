@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#121c18">
+  <meta name="robots" content="index,follow">
   <meta name="description" content="Holt is the local-first transaction and recoverability layer between parallel coding agents and Git. Inspect in-flight work, protect what is unique, and make cleanup recoverable.">
   <link rel="canonical" href="https://raed2180416.github.io/holt/">
   <meta property="og:type" content="website">
@@ -12,11 +13,14 @@
   <meta property="og:title" content="Holt — the transaction layer between coding agents and Git">
   <meta property="og:description" content="Local-first evidence, protection, and recovery for parallel agent work in Git worktrees.">
   <meta property="og:image" content="https://raed2180416.github.io/holt/brand/holt-lockup.png">
-  <meta property="og:image:alt" content="Holt wordmark">
+  <meta property="og:image:alt" content="Holt logo and wordmark">
+  <meta property="og:image:width" content="1079">
+  <meta property="og:image:height" content="392">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Holt — the transaction layer between coding agents and Git">
   <meta name="twitter:description" content="Local-first evidence, protection, and recovery for parallel agent work in Git worktrees.">
   <meta name="twitter:image" content="https://raed2180416.github.io/holt/brand/holt-lockup.png">
+  <meta name="twitter:image:alt" content="Holt logo and wordmark">
   <title>Holt — the transaction layer between coding agents and Git</title>
   <link rel="icon" type="image/png" href="brand/holt-mark-transparent.png">
   <link rel="stylesheet" href="styles.css">
@@ -51,16 +55,17 @@
     </div>
   </header>
 
-  <main id="main">
+  <main id="main" tabindex="-1">
     <section class="hero" id="top">
       <div class="container hero-inner">
         <div class="hero-copy">
           <img class="hero-wordmark" src="brand/holt-wordmark-transparent.png" alt="Holt" width="220" height="71">
           <span class="eyebrow inverse">Local-first / recoverability</span>
           <h1>The transaction layer between <em>coding agents</em> and Git.</h1>
-          <p>Parallel agents create valuable work faster than branches, pull requests, and merge queues can describe it. Holt turns the live state across Git worktrees into one coordinated map—what exists, what overlaps, what is uniquely valuable, and how every cleanup can preserve a route back.</p>
+          <p>Parallel agents create valuable work faster than branches, pull requests, and merge queues can describe it. Holt turns the live state across Git worktrees into one coordinated map—what exists, what overlaps, what is uniquely valuable, and how supported cleanup paths can preserve a route back.</p>
           <div class="button-row">
-            <a class="button button-primary" href="#contact">Discuss a design partnership <span class="button-arrow" aria-hidden="true">↓</span></a>
+            <a class="button button-primary" href="#install">Try Holt read-only <span class="button-arrow" aria-hidden="true">↓</span></a>
+            <a class="button button-secondary" href="#contact">Discuss a design partnership <span class="button-arrow" aria-hidden="true">↓</span></a>
             <a class="button button-secondary" href="https://github.com/Raed2180416/holt">Read the repository <span class="button-arrow" aria-hidden="true">↗</span></a>
           </div>
           <div class="hero-note" aria-label="Holt operating principles">
@@ -72,7 +77,7 @@
 
         <figure class="hero-visual-wrap">
           <a class="hero-product-link" href="https://github.com/Raed2180416/holt/blob/main/docs/evidence/tui-graph/run-2026-08-05-final/controlled-tui-120x36.png" aria-label="Open the full-size Holt TUI evidence capture">
-            <span class="product-shot-label">Actual product / production renderer</span>
+            <span class="product-shot-label">Real product renderer / controlled Git fixture</span>
             <img class="hero-product-shot" src="product/controlled-tui-120x36.png" width="1120" height="760" alt="Actual Holt terminal interface classifying ten Git worktrees as at risk, holding, or disposable, with unique-work evidence and a recoverable rescue command for the selected worktree.">
           </a>
           <figcaption class="visual-caption"><code>holt tui --snapshot</code>, rendered by the same production code as the interactive TUI against a controlled real-Git fixture. <a href="https://github.com/Raed2180416/holt/tree/main/docs/evidence/tui-graph">Inspect the reproducible evidence ↗</a></figcaption>
@@ -85,17 +90,17 @@
         <div class="gap-layout">
           <div class="gap-copy">
             <span class="eyebrow">Repository intelligence</span>
-            <h2>See every workstream. Preserve every valuable change. Keep agents moving.</h2>
+            <h2>See every workstream. Surface work found nowhere else. Keep agents moving.</h2>
             <p>Git gives each worktree powerful primitives. Holt connects them into a live operating picture for agent teams: identity, overlap, uniqueness, landing order, protection, and recovery in one local decision surface.</p>
           </div>
-          <ol class="transaction-steps">
+          <ol class="transaction-steps" role="list">
             <li class="transaction-step">
               <span class="step-no">01</span>
               <div><h3>Relate</h3><p>Connect committed, staged, untracked, ignored, and reachable state across every linked worktree into one intelligible map.</p></div>
             </li>
             <li class="transaction-step">
               <span class="step-no">02</span>
-              <div><h3>Protect</h3><p>Identify work found nowhere else and preserve it automatically, with the exact evidence and recovery route kept beside the decision.</p></div>
+              <div><h3>Protect</h3><p>Identify work found nowhere else, refuse unsafe cleanup through supported Holt action paths, and preserve or quarantine it through explicit actions—with the evidence and recovery route kept beside the decision.</p></div>
             </li>
             <li class="transaction-step">
               <span class="step-no">03</span>
@@ -117,8 +122,8 @@
       <div class="container">
         <div class="section-heading">
           <span class="eyebrow">Available now</span>
-          <h2>A complete local coordination surface for the agent-to-Git workflow.</h2>
-          <p>Holt is useful today wherever agents share a local Git repository: inspect the whole workstream set, understand relationships, protect unique work, choose a landing order, and make cleanup recoverable.</p>
+          <h2>A working local coordination surface for the agent-to-Git workflow.</h2>
+          <p>Holt is useful today on supported local Git and jj repository shapes: inspect the workstream set, understand relationships, identify unique work, choose a landing order, and make Holt-mediated cleanup recoverable. Unconfigured hosts, cloud workspaces, and arbitrary filesystem actions remain outside its enforcement boundary.</p>
         </div>
         <div class="now-grid">
           <article class="now-card">
@@ -134,7 +139,7 @@
           <article class="now-card">
             <span class="card-index">03 / ACCESS</span>
             <h3>Agent surfaces</h3>
-            <p>Reach the same repository intelligence through the CLI, TUI, project-scoped MCP with 16 decision-oriented tools, and supported host integrations. <code>holt hosts</code> keeps observed coverage visible.</p>
+            <p>Reach the same repository intelligence through the CLI, TUI, project-scoped MCP with 16 decision-oriented tools, and host adapters. <code>holt hosts</code> separates live-observed, contract-tested, advisory, and unwired coverage.</p>
           </article>
           <article class="now-card">
             <span class="card-index">04 / LOCAL-FIRST</span>
@@ -155,11 +160,11 @@
         </div>
         <div class="boundary">
           <div><h3>Coverage you can see and extend</h3><p>Holt makes its operating map explicit, so teams can adopt the proven local core and extend the same evidence contract to the environments they run.</p></div>
-          <ul class="boundary-list">
+          <ul class="boundary-list" role="list">
             <li>Local agents gain immediate worktree intelligence beside the repository they modify.</li>
             <li>Project-scoped host adapters bring the same decision contract into supported agent environments.</li>
             <li>Windows, large repositories, LFS, submodules, and sparse-checkout can be exercised through repeatable workflow evaluations.</li>
-            <li>Ignored, unique, and partially observed bytes remain protected until the repository proves they are represented elsewhere.</li>
+            <li>Ignored, unique, and partially observed bytes remain non-disposable in Holt's verdict until the repository proves they are represented elsewhere.</li>
           </ul>
         </div>
       </div>
@@ -209,31 +214,36 @@
           <div class="partner-side">
             <a class="button button-dark" id="start-contact" href="mailto:research.contrare@outlook.com?subject=Holt%20design-partner%20conversation">Start the conversation <span class="button-arrow" aria-hidden="true">↗</span></a>
             <a class="button button-secondary" href="https://github.com/Raed2180416/holt/issues/new?template=design_partner.yml">Share a public workflow <span class="button-arrow" aria-hidden="true">↗</span></a>
+            <a class="button button-secondary" href="https://github.com/Raed2180416/holt/blob/main/docs/launch/PRESEED-BRIEF.md">Read the investor brief <span class="button-arrow" aria-hidden="true">↗</span></a>
             <small id="contact-status" aria-live="polite">research.contrare@outlook.com · clicking the primary action also copies this address</small>
+            <a class="partner-prep" href="thanks.html">What to include in the first workflow note <span aria-hidden="true">→</span></a>
           </div>
         </div>
 
         <div class="install-block" id="install">
           <div class="install-copy">
             <span class="eyebrow">Try the local core</span>
-            <h2>Map your repository in minutes.</h2>
-            <p>Install from the official GitHub release, point Holt at a repository, and begin with read-only status. The same surface can then protect valuable work, coordinate landing order, and move verified cleanup into recoverable quarantine.</p>
+            <h2>Start with a read-only repository map.</h2>
+            <p>Install from the official GitHub release, point Holt at a repository, and begin with read-only inspection. Requires Node <code>^22.22.2 || ^24.15.0 || &gt;=26.0.0</code> and Git 2.45 or newer. Protection and quarantine remain separate, explicit actions after you review the evidence.</p>
             <div class="code-card">
-              <div class="code-head"><span>quick start / local repository</span><button class="copy-button" id="copy-install" type="button" aria-live="polite">Copy</button></div>
+              <div class="code-head"><span>read-only first look / local repository</span><button class="copy-button" id="copy-install" type="button" aria-live="polite">Copy</button></div>
               <pre id="install-command"><span class="prompt">$</span> npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz
 <span class="prompt">$</span> cd your-repo
+<span class="prompt">$</span> holt --version
+<span class="prompt">$</span> holt doctor
 <span class="prompt">$</span> holt status
-<span class="prompt">$</span> holt protect
-<span class="prompt">$</span> holt clean --apply <span class="comment"># fresh-check, then locked quarantine</span></pre>
+<span class="prompt">$</span> holt risk <span class="comment"># inspect only; no locks or cleanup</span></pre>
             </div>
           </div>
           <aside class="install-aside">
             <h3>Explore the system</h3>
             <p>Go from a five-minute local map to the full coordination and evidence model:</p>
-            <ul>
+            <ul role="list">
               <li><a href="https://github.com/Raed2180416/holt/blob/main/HOSTS.md">Host integration map</a> for every supported agent surface.</li>
               <li><a href="https://github.com/Raed2180416/holt/blob/main/eval/README.md">Evaluation method</a> for reproducible product evidence.</li>
               <li><a href="https://github.com/Raed2180416/holt/blob/main/docs/FEATURE-PROOF-MATRIX.md">Feature proof matrix</a> for the live capability map.</li>
+              <li><a href="https://github.com/Raed2180416/holt/blob/main/docs/SECURITY-QUESTIONNAIRE.md">Security boundary</a> for local storage, execution, network, and host limits.</li>
+              <li><a href="https://github.com/Raed2180416/holt/releases/latest">Latest release</a> for the exact artifact, notes, checksums, signatures, and SBOMs.</li>
               <li><a href="https://github.com/Raed2180416/holt">GitHub</a> for source, issues, and release notes.</li>
             </ul>
           </aside>
@@ -249,6 +259,7 @@
         <nav class="footer-links" aria-label="Footer navigation">
           <a href="https://github.com/Raed2180416/holt">GitHub</a>
           <a href="https://github.com/Raed2180416/holt/blob/main/LICENSE.md">License</a>
+          <a href="https://github.com/Raed2180416/holt/blob/main/docs/launch/PRESEED-BRIEF.md">Investor brief</a>
           <a href="mailto:research.contrare@outlook.com">Contact</a>
         </nav>
       </div>
@@ -260,7 +271,7 @@
   <script>
   (function () {
     var button = document.getElementById('copy-install');
-    var command = 'npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz\ncd your-repo\nholt status\nholt protect\nholt clean --apply';
+    var command = 'npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz\ncd your-repo\nholt --version\nholt doctor\nholt status\nholt risk';
     if (!button) return;
     var resetLabel = function () {
       window.setTimeout(function () { button.textContent = 'Copy'; }, 1600);

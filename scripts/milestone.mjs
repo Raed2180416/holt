@@ -4,8 +4,8 @@
  *
  * A README that displays "8 stars" argues against the project. Below a
  * credible threshold, showing nothing is strictly better than showing the truth badly. So the
- * marketing block lives in the README as an HTML comment from day one and switches itself on,
- * once, when the numbers can carry it.
+ * marketing block lives in the README as an HTML comment from day one. The scheduled workflow is
+ * report-only; a maintainer may deliberately run --apply once the numbers can carry the claim.
  *
  * THRESHOLD:
  *   - 500 GitHub stars
@@ -50,7 +50,7 @@ export function isDisabled(readme) {
 /**
  * Switch the block on by closing the comment immediately after the BEGIN marker and opening it
  * again immediately before the END marker. Idempotent: enabling an already-enabled README is a
- * no-op, which matters because this runs on a schedule.
+ * no-op, which matters when a maintainer deliberately runs --apply more than once.
  */
 export function enable(readme) {
   if (!readme.includes(BEGIN)) return { changed: false, readme, reason: 'no social-proof block found' };

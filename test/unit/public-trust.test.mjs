@@ -103,7 +103,7 @@ test('community entrypoints describe this CLI and make support/security limits e
 });
 
 test('historical release notes keep tagged artifacts but never endorse the bare registry name', async () => {
-  for (const version of ['0.2.0', '0.3.0', '0.3.1']) {
+  for (const version of ['0.2.0', '0.3.0', '0.3.1', '0.4.0']) {
     const notes = await fs.readFile(path.join(ROOT, '.github', 'releases', `v${version}.md`), 'utf8');
     assert.match(notes,
       new RegExp(`npm install -g https://github\\.com/Raed2180416/holt/releases/download/v${version}/holt(?:-${version.replace(/\./g, '\\.')})?\\.tgz`),

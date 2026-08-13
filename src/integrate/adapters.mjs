@@ -32,12 +32,54 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { HOSTS, getHost, strengthLabel, CLOUD_CAVEAT } from './hosts.mjs';
 import {
-  recordCreated, recordSharedCreated, readReceipt, receiptPath, holtOwnsFile,
+  recordCreated, recordSharedCreated, readReceipt, receiptPath,
   createSharedRegularFileExclusive, quarantineReceiptOwnedSharedFile,
   retainQuarantinedSharedFile,
-  restoreQuarantinedSharedFile, clearReceipt,
+  restoreQuarantinedSharedFile, clearReceiptIfUnchanged,
+  openIntegrationFileTransaction, openReceiptSnapshot, receiptOwnsFileObservation,
 } from './receipt.mjs';
 import { relativeWithinAsync, samePathAsync } from '../paths.mjs';
+
+/** Return the descriptor-bound bytes of a present integration transaction or fail closed. */
+function integrationFileBytes(transaction) {
+  if (!transaction || transaction.state !== 'present' || !Buffer.isBuffer(transaction.bytes)) {
+    throw Object.assign(new Error('integration file is absent or unavailable'), { code: 'ENOENT' });
+  }
+  return transaction.bytes;
+}
+
+/** @typedef {(details:{file:string,action:'create'|'replace'|'delete'})=>any} IntegrationFileMutationHook */
+
+/**
+ * Persist only descriptor-bound publication tokens returned by the transactions that authored the
+ * files. A receipt failure makes integration incomplete; it must never be hidden as a successful
+ * install whose files cannot later be identified safely.
+ * @param {string} repoRoot
+ * @param {Array<{rel:string,mutation:any}>} records
+ * @param {string[]} [dirs]
+ * @param {{onBeforeReceiptMutation?:IntegrationFileMutationHook|null,
+ *   onAfterReceiptPublish?:(()=>any)|null}} [options]
+ */
+async function recordProjectFiles(repoRoot, records, dirs = [], {
+  onBeforeReceiptMutation = null, onAfterReceiptPublish = null,
+} = {}) {
+  // Direct adapter use in a plain directory remains supported. There is no durable receipt
+  // namespace there, so no whole-file deletion authority is granted; uninstall can only strip
+  // Holt's own structured slice. A real Git repository with a receipt path must publish or fail.
+  if (!(await receiptPath(repoRoot))) return;
+  const ok = await recordCreated(repoRoot, {
+    files: records.map(({ rel, mutation }) => ({ path: rel, token: mutation?.publication })),
+    dirs,
+    onBeforeReceiptMutation,
+    onAfterReceiptPublish,
+  });
+  if (!ok) {
+    throw Object.assign(new Error(
+      `integration files were published but their exact identities could not be recorded; `
+      + 'the install is incomplete and whole-file deletion authority was not granted',
+    ), { code: 'EINTEGRATIONRECEIPT' });
+  }
+}
 
 /**
  * jsonc-parser is an exact required runtime dependency. It remains dynamically loaded and cached
@@ -188,14 +230,17 @@ export function stripHoltBlock(text) {
  * integrate any number of times converges to the same file — the user's rules first, holt's block
  * last, no duplication, no growth.
  */
-export async function installAgentsMd(repoRoot, { bin = 'holt', filename = 'AGENTS.md' } = {}) {
+/** @param {string} repoRoot @param {{bin?:string,filename?:string,
+ * onBeforeFileMutation?:IntegrationFileMutationHook|null,
+ * onBeforeReceiptMutation?:IntegrationFileMutationHook|null,onAfterReceiptPublish?:(()=>any)|null}} [options] */
+export async function installAgentsMd(repoRoot, {
+  bin = 'holt', filename = 'AGENTS.md', onBeforeFileMutation = null,
+  onBeforeReceiptMutation = null, onAfterReceiptPublish = null,
+} = {}) {
   const file = path.join(repoRoot, filename);
-  let existing = '';
-  let created = true;
-  try {
-    existing = await fs.readFile(file, 'utf8');
-    created = false;
-  } catch { /* new file */ }
+  const transaction = await openIntegrationFileTransaction(repoRoot, file);
+  const created = transaction.state === 'absent';
+  const existing = created ? '' : integrationFileBytes(transaction).toString('utf8');
 
   const userContent = stripHoltBlock(existing).replace(/\s+$/, '');
   const block = agentsMdBlock(bin);
@@ -206,16 +251,20 @@ export async function installAgentsMd(repoRoot, { bin = 'holt', filename = 'AGEN
     ? `${header}${userContent}\n\n${block}\n`
     : `${header}${block}\n`;
 
-  await fs.writeFile(file, next, 'utf8');
+  const mutation = await transaction.commit(next, { onBeforeMutation: onBeforeFileMutation });
   // RECORD, DO NOT INFER. uninstall runs in a different process and cannot see `created` unless
   // it is written down. Inferring ownership from the residue instead deleted a user's own
   // AGENTS.md that happened to be byte-identical to holt's preamble. See src/integrate/receipt.mjs.
-  if (created) await recordCreated(repoRoot, { files: [filename] });
+  if (created) await recordProjectFiles(repoRoot, [{ rel: filename, mutation }], [], {
+    onBeforeReceiptMutation,
+    onAfterReceiptPublish,
+  });
   const hadBlock = existing.includes(HOLT_BEGIN);
   return {
     adapter: 'agents-md', path: file, created,
     action: created ? 'created' : hadBlock ? 'refreshed holt block' : 'appended holt block (kept your content)',
     preservedUserContent: !created && !!userContent,
+    ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
   };
 }
 
@@ -392,13 +441,18 @@ export function legacyMcpTargets(repoRoot, home = os.homedir()) {
  * window a since-corrected path was live), and reporting "nothing here" on every run would bury
  * the rare real finding in noise.
  */
-export async function retireLegacyMcp(repoRoot, { home = os.homedir(), scope = 'project' } = {}) {
+/** @param {string} repoRoot @param {{home?:string,scope?:string,onBeforeFileMutation?:IntegrationFileMutationHook|null}} [options] */
+export async function retireLegacyMcp(repoRoot, {
+  home = os.homedir(), scope = 'project', onBeforeFileMutation = null,
+} = {}) {
   const results = [];
   for (const t of legacyMcpTargets(repoRoot, home)) {
     if (t.scope === 'user' && scope === 'project') continue; // never touch HOME unless asked
-    let cfg, rawText;
+    let cfg, rawText, transaction;
     try {
-      rawText = await fs.readFile(t.file, 'utf8');
+      transaction = await openIntegrationFileTransaction(repoRoot, t.file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      rawText = transaction.bytes.toString('utf8');
       cfg = readJsoncOrThrow(rawText);
     } catch {
       continue; // no file (the common case) — nothing to retire, nothing to say
@@ -409,16 +463,21 @@ export async function retireLegacyMcp(repoRoot, { home = os.homedir(), scope = '
     if (Object.keys(cfg[t.key]).length === 0) delete cfg[t.key];
 
     if (Object.keys(cfg).length === 0) {
-      await fs.rm(t.file, { force: true });
-      results.push({ adapter: 'mcp-retire', host: t.host, scope: t.scope, path: t.file, action: `removed — ${t.reason}` });
+      const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+      results.push({
+        adapter: 'mcp-retire', host: t.host, scope: t.scope, path: t.file,
+        action: `removed — ${t.reason}`,
+        ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+      });
     } else {
       // JSONC-PRESERVING WRITE: surgically remove the holt key, preserving comments.
       let output = jsoncWrite(rawText, [[[t.key], cfg[t.key] ?? undefined]], { tabSize: 2, insertSpaces: true });
       if (!output.endsWith('\n')) output += '\n';
-      await fs.writeFile(t.file, output, 'utf8');
+      const mutation = await transaction.commit(output, { onBeforeMutation: onBeforeFileMutation });
       results.push({
         adapter: 'mcp-retire', host: t.host, scope: t.scope, path: t.file,
         action: `holt's entry removed, your other settings kept — ${t.reason}`,
+        ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
       });
     }
   }
@@ -707,10 +766,12 @@ export function tomlWithoutHoltServer(existing) {
  */
 /**
  * @param {string} repoRoot
- * @param {{bin?: string, home?: string, scope?: string, hosts?: string[]|null}} [opts]
+ * @param {{bin?: string, home?: string, scope?: string, hosts?: string[]|null,
+ *   onBeforeFileMutation?:((details:{file:string,action:'create'|'replace'|'delete'})=>any)|null}} [opts]
  */
 export async function installMcp(repoRoot, {
   bin = 'holt', home = os.homedir(), scope = 'project', hosts = null,
+  onBeforeFileMutation = null,
 } = {}) {
   const results = [];
   for (const t of mcpTargets(repoRoot, home, { scope, hosts })) {
@@ -718,30 +779,42 @@ export async function installMcp(repoRoot, {
     // TOML hosts (Codex CLI) merge textually, preserving every setting holt does not understand.
     if (t.format === 'toml') {
       let existing = '';
-      let hadFile = true;
+      let transaction;
       try {
-        existing = await fs.readFile(t.file, 'utf8');
-      } catch {
-        hadFile = false;
-        if (t.scope === 'user') {
-          results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'skipped (no user config)' });
-          continue;
-        }
+        transaction = await openIntegrationFileTransaction(repoRoot, t.file);
+      } catch (error) {
+        results.push({
+          adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+          action: `left alone — holt could not read one stable regular file (${error?.message ?? error})`,
+        });
+        continue;
+      }
+      const hadFile = transaction.state === 'present';
+      if (hadFile) existing = transaction.bytes.toString('utf8');
+      if (!hadFile && t.scope === 'user') {
+        results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'skipped (no user config)' });
+        continue;
       }
       const had = /^\s*\[mcp_servers\.holt\]\s*$/m.test(existing);
       await fs.mkdir(path.dirname(t.file), { recursive: true });
-      await fs.writeFile(t.file, tomlWithHoltServer(existing, bin), 'utf8');
+      const mutation = await transaction.commit(tomlWithHoltServer(existing, bin), {
+        onBeforeMutation: onBeforeFileMutation,
+      });
       // Record creation so uninstall can prove this file is holt's rather than inferring it.
-      if (!hadFile) { const rel = await relativeWithinAsync(repoRoot, t.file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
+      if (!hadFile) {
+        const rel = await relativeWithinAsync(repoRoot, t.file);
+        await recordProjectFiles(repoRoot, [{ rel, mutation }], ancestorDirs(rel));
+      }
       results.push({
         adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
         action: !hadFile ? 'created' : had ? 'updated' : 'added',
+        ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
       });
       continue;
     }
 
     let cfg = {};
-    let exists = true;
+    let transaction;
     /** @type {string|null} */
     let rawText = null;
     // ABSENT AND UNREADABLE ARE NOT THE SAME STATE, and only one of them makes it safe to write.
@@ -749,11 +822,16 @@ export async function installMcp(repoRoot, {
     // their MCP servers: the parse threw, `exists` went false, and project scope CREATED the file
     // it had just failed to read. A config holt cannot understand is somebody's configuration.
     try {
-      rawText = await fs.readFile(t.file, 'utf8');
-    } catch {
-      rawText = null;
-      exists = false;
+      transaction = await openIntegrationFileTransaction(repoRoot, t.file);
+      rawText = transaction.state === 'present' ? transaction.bytes.toString('utf8') : null;
+    } catch (error) {
+      results.push({
+        adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+        action: `left alone — holt could not read one stable regular file (${error?.message ?? error})`,
+      });
+      continue;
     }
+    const exists = transaction.state === 'present';
     if (rawText !== null) {
       const parsed = parseJsonc(rawText);
       if (!parsed.ok) {
@@ -793,11 +871,15 @@ export async function installMcp(repoRoot, {
     } else {
       output = `${JSON.stringify(cfg, null, 2)}\n`;
     }
-    await fs.writeFile(t.file, output, 'utf8');
-    if (!exists) { const rel = await relativeWithinAsync(repoRoot, t.file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
+    const mutation = await transaction.commit(output, { onBeforeMutation: onBeforeFileMutation });
+    if (!exists) {
+      const rel = await relativeWithinAsync(repoRoot, t.file);
+      await recordProjectFiles(repoRoot, [{ rel, mutation }], ancestorDirs(rel));
+    }
     results.push({
       adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
       action: !exists ? 'created' : already ? 'updated' : 'added',
+      ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
     });
   }
   return results;
@@ -1022,7 +1104,10 @@ const CURSOR_EVENT_SUBCOMMAND = {
   sessionEnd: 'session-end',
 };
 
-export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
+/** @param {string} repoRoot @param {{bin?:string,onBeforeFileMutation?:IntegrationFileMutationHook|null}} [options] */
+export async function installCursorHooks(repoRoot, {
+  bin = 'holt', onBeforeFileMutation = null,
+} = {}) {
   const file = path.join(repoRoot, '.cursor', 'hooks.json');
   /** @type {string|null} */
   /** @type {string|null} */
@@ -1030,12 +1115,20 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   let rawText = null;
   /** @type {any} */
   let cfg = {};
-  let created = true;
+  let transaction;
   try {
-    rawText = await fs.readFile(file, 'utf8');
-    cfg = readJsoncOrThrow(rawText);
-    created = false;
-  } catch { /* new file */ }
+    transaction = await openIntegrationFileTransaction(repoRoot, file);
+    if (transaction.state === 'present') {
+      rawText = transaction.bytes.toString('utf8');
+      cfg = readJsoncOrThrow(rawText);
+    }
+  } catch (error) {
+    return {
+      adapter: 'cursor', path: file, created: false,
+      action: `skipped (existing hook config is unreadable: ${error?.message ?? error})`,
+    };
+  }
+  const created = transaction.state === 'absent';
 
   cfg.version ??= 1;
   cfg.hooks ??= {};
@@ -1096,7 +1189,7 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   } else {
     output = `${JSON.stringify(cfg, null, 2)}\n`;
   }
-  await fs.writeFile(file, output, 'utf8');
+  const mutation = await transaction.commit(output, { onBeforeMutation: onBeforeFileMutation });
   const action = installed && !reconciled && !unchanged ? 'installed'
     : reconciled ? `reconciled ${reconciled} stale hook(s)${installed ? `, installed ${installed} new` : ''}`
     : installed ? `installed ${installed} new hook(s) (rest already present)`
@@ -1104,8 +1197,14 @@ export async function installCursorHooks(repoRoot, { bin = 'holt' } = {}) {
   // `cfg.version ??= 1` is a NO-OP when the user already set it, so it leaves holt no trace of
   // whether that key is holt's default or theirs. The receipt is that trace. Without it, uninstall
   // deleted a user's own git-tracked hooks.json whose content was exactly {"version": 1}.
-  if (created) { const rel = await relativeWithinAsync(repoRoot, file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
-  return { adapter: 'cursor', path: file, created, installed, reconciled, unchanged, action };
+  if (created) {
+    const rel = await relativeWithinAsync(repoRoot, file);
+    await recordProjectFiles(repoRoot, [{ rel, mutation }], ancestorDirs(rel));
+  }
+  return {
+    adapter: 'cursor', path: file, created, installed, reconciled, unchanged, action,
+    ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+  };
 }
 
 /* ----------------------------------------- current project hook surfaces (shared JSON) ---- */
@@ -1382,24 +1481,28 @@ function reconcileProjectHookEntries(existing, wanted, subcommand) {
   return { entries: kept, installed: missing.length > 0, reconciled: touched };
 }
 
-async function installProjectJsonHooks(repoRoot, spec, { bin = 'holt' } = {}) {
+async function installProjectJsonHooks(repoRoot, spec, {
+  bin = 'holt', onBeforeFileMutation = null,
+} = {}) {
   const file = path.join(repoRoot, spec.rel);
   let rawText = '';
   let cfg = null;
-  let created = false;
+  let transaction;
   try {
-    rawText = await fs.readFile(file, 'utf8');
-    cfg = readJsoncOrThrow(rawText);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      return {
-        adapter: spec.host, path: file, created: false,
-        action: `skipped (existing hook config is unreadable: ${error?.message ?? error})`,
-      };
+    transaction = await openIntegrationFileTransaction(repoRoot, file);
+    if (transaction.state === 'present') {
+      rawText = transaction.bytes.toString('utf8');
+      cfg = readJsoncOrThrow(rawText);
+    } else {
+      cfg = spec.build(bin);
     }
-    created = true;
-    cfg = spec.build(bin);
+  } catch (error) {
+    return {
+      adapter: spec.host, path: file, created: false,
+      action: `skipped (existing hook config is unreadable: ${error?.message ?? error})`,
+    };
   }
+  const created = transaction.state === 'absent';
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
     return {
       adapter: spec.host, path: file, created: false,
@@ -1433,7 +1536,7 @@ async function installProjectJsonHooks(repoRoot, spec, { bin = 'holt' } = {}) {
   const rel = await relativeWithinAsync(repoRoot, file);
   const receiptBefore = created ? null : await readReceipt(repoRoot);
   const ownedBefore = !created && receiptBefore
-    ? await holtOwnsFile(repoRoot, rel, receiptBefore)
+    ? receiptOwnsFileObservation(receiptBefore, rel, transaction)
     : false;
 
   let output;
@@ -1451,14 +1554,19 @@ async function installProjectJsonHooks(repoRoot, spec, { bin = 'holt' } = {}) {
   }
 
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, output, 'utf8');
+  const mutation = await transaction.commit(output, { onBeforeMutation: onBeforeFileMutation });
   if (created || ownedBefore) {
-    await recordCreated(repoRoot, { files: [rel], dirs: created ? ancestorDirs(rel) : [] });
+    await recordProjectFiles(
+      repoRoot, [{ rel, mutation }], created ? ancestorDirs(rel) : [],
+    );
   }
   const action = reconciled
     ? `reconciled ${reconciled} stale hook event(s)${installed ? `, installed ${installed}` : ''}`
     : installed ? 'installed' : 'already present';
-  return { adapter: spec.host, path: file, created, installed, reconciled, action };
+  return {
+    adapter: spec.host, path: file, created, installed, reconciled, action,
+    ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+  };
 }
 
 function projectJsonHookSpec(host) {
@@ -1485,20 +1593,22 @@ function isAntigravityHoltHook(value) {
 }
 
 /** Install only Antigravity's non-authoritative proactive context hook. */
-export async function installAntigravityHooks(repoRoot, { bin = 'holt' } = {}) {
+/** @param {string} repoRoot @param {{bin?:string,onBeforeFileMutation?:IntegrationFileMutationHook|null}} [options] */
+export async function installAntigravityHooks(repoRoot, {
+  bin = 'holt', onBeforeFileMutation = null,
+} = {}) {
   const file = path.join(repoRoot, '.agents', 'hooks.json');
   const wanted = antigravityHooks(bin)[ANTIGRAVITY_HOOK_KEY];
   /** @type {string|null} */
   let rawText = null;
-  let created = false;
+  let transaction;
   try {
-    rawText = await fs.readFile(file, 'utf8');
+    transaction = await openIntegrationFileTransaction(repoRoot, file);
+    if (transaction.state === 'present') rawText = transaction.bytes.toString('utf8');
   } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      return { adapter: 'antigravity', path: file, action: `left alone — could not read hooks.json (${error?.message ?? error})` };
-    }
-    created = true;
+    return { adapter: 'antigravity', path: file, action: `left alone — could not read hooks.json (${error?.message ?? error})` };
   }
+  const created = transaction.state === 'absent';
 
   let cfg = {};
   if (rawText != null) {
@@ -1528,12 +1638,15 @@ export async function installAntigravityHooks(repoRoot, { bin = 'holt' } = {}) {
     if (!output.endsWith('\n')) output += '\n';
   }
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, output, 'utf8');
+  const mutation = await transaction.commit(output, { onBeforeMutation: onBeforeFileMutation });
   if (created) {
     const rel = await relativeWithinAsync(repoRoot, file);
-    await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) });
+    await recordProjectFiles(repoRoot, [{ rel, mutation }], ancestorDirs(rel));
   }
-  return { adapter: 'antigravity', path: file, action: created ? 'created' : 'reconciled' };
+  return {
+    adapter: 'antigravity', path: file, action: created ? 'created' : 'reconciled',
+    ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+  };
 }
 
 export async function installDevinCliHooks(repoRoot, opts = {}) {
@@ -1578,23 +1691,27 @@ function isCopilotHoltEntry(entry) {
   return entry?.env?.HOLT_INTEGRATION === COPILOT_MARKER;
 }
 
-export async function installCopilotHooks(repoRoot, { bin = 'holt' } = {}) {
+/** @param {string} repoRoot @param {{bin?:string,onBeforeFileMutation?:IntegrationFileMutationHook|null}} [options] */
+export async function installCopilotHooks(repoRoot, {
+  bin = 'holt', onBeforeFileMutation = null,
+} = {}) {
   const file = path.join(repoRoot, '.github', 'hooks', 'holt.json');
   const wanted = copilotHooks(bin);
   // Empty is only the not-yet-created sentinel; the existing-file branch always replaces it.
   let rawText = '';
   /** @type {any} */
   let cfg = {};
-  let created = false;
+  let transaction;
   try {
-    rawText = await fs.readFile(file, 'utf8');
-    cfg = readJsoncOrThrow(rawText);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') {
-      return { adapter: 'copilot', path: file, action: `skipped (existing hook config is unreadable: ${error?.message ?? error})` };
+    transaction = await openIntegrationFileTransaction(repoRoot, file);
+    if (transaction.state === 'present') {
+      rawText = transaction.bytes.toString('utf8');
+      cfg = readJsoncOrThrow(rawText);
     }
-    created = true;
+  } catch (error) {
+    return { adapter: 'copilot', path: file, action: `skipped (existing hook config is unreadable: ${error?.message ?? error})` };
   }
+  const created = transaction.state === 'absent';
   if (!cfg || typeof cfg !== 'object' || Array.isArray(cfg)) {
     return { adapter: 'copilot', path: file, action: 'skipped (existing hook config is not a JSON object; left it untouched)' };
   }
@@ -1621,14 +1738,21 @@ export async function installCopilotHooks(repoRoot, { bin = 'holt' } = {}) {
 
   const rel = await relativeWithinAsync(repoRoot, file);
   const receiptBefore = created ? null : await readReceipt(repoRoot);
-  const ownedBefore = !created && receiptBefore ? await holtOwnsFile(repoRoot, rel, receiptBefore) : false;
+  const ownedBefore = !created && receiptBefore
+    ? receiptOwnsFileObservation(receiptBefore, rel, transaction)
+    : false;
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, output, 'utf8');
-  if (created || ownedBefore) await recordCreated(repoRoot, { files: [rel], dirs: created ? ancestorDirs(rel) : [] });
+  const mutation = await transaction.commit(output, { onBeforeMutation: onBeforeFileMutation });
+  if (created || ownedBefore) {
+    await recordProjectFiles(
+      repoRoot, [{ rel, mutation }], created ? ancestorDirs(rel) : [],
+    );
+  }
   const unchanged = ours.length === 1 && JSON.stringify(ours[0]) === JSON.stringify(wanted.hooks.PreToolUse[0]);
   return {
     adapter: 'copilot', path: file, created,
     action: created ? 'installed' : unchanged ? 'already present' : ours.length ? 'reconciled stale hook' : 'installed',
+    ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
   };
 }
 
@@ -1656,19 +1780,35 @@ export function goosePlugin(bin = 'holt') {
 
 async function mayReplaceGeneratedFile(repoRoot, file, wantedText) {
   try {
-    const existing = await fs.readFile(file, 'utf8');
-    if (existing === wantedText) return { ok: true, created: false, unchanged: true, ownedBefore: false };
+    const transaction = await openIntegrationFileTransaction(repoRoot, file);
+    if (transaction.state === 'absent') {
+      return {
+        ok: true, created: true, unchanged: false, ownedBefore: false, transaction,
+      };
+    }
+    const existing = integrationFileBytes(transaction).toString('utf8');
+    if (existing === wantedText) {
+      return {
+        ok: true, created: false, unchanged: true, ownedBefore: false, transaction,
+      };
+    }
     const rel = await relativeWithinAsync(repoRoot, file);
     const receipt = await readReceipt(repoRoot);
-    const ownedBefore = receipt ? await holtOwnsFile(repoRoot, rel, receipt) : false;
-    return { ok: ownedBefore, created: false, unchanged: false, ownedBefore };
+    const ownedBefore = receipt
+      ? receiptOwnsFileObservation(receipt, rel, transaction)
+      : false;
+    return {
+      ok: ownedBefore, created: false, unchanged: false, ownedBefore, transaction,
+    };
   } catch (error) {
-    if (error?.code === 'ENOENT') return { ok: true, created: true, unchanged: false, ownedBefore: false };
     return { ok: false, created: false, unchanged: false, ownedBefore: false, error };
   }
 }
 
-export async function installGooseHooks(repoRoot, { bin = 'holt' } = {}) {
+/** @param {string} repoRoot @param {{bin?:string,onBeforeFileMutation?:IntegrationFileMutationHook|null}} [options] */
+export async function installGooseHooks(repoRoot, {
+  bin = 'holt', onBeforeFileMutation = null,
+} = {}) {
   const root = path.join(repoRoot, '.agents', 'plugins', 'holt');
   const pluginFile = path.join(root, 'plugin.json');
   const hooksFile = path.join(root, 'hooks', 'hooks.json');
@@ -1688,18 +1828,25 @@ export async function installGooseHooks(repoRoot, { bin = 'holt' } = {}) {
 
   const madeFiles = [];
   const madeDirs = [];
+  const recoveryPaths = [];
   for (let i = 0; i < files.length; i++) {
     const [file, text] = files[i];
     await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, text, 'utf8');
+    const mutation = await checks[i].transaction.commit(text, {
+      onBeforeMutation: onBeforeFileMutation,
+    });
+    if (mutation.recoveryPath) recoveryPaths.push(mutation.recoveryPath);
     const rel = await relativeWithinAsync(repoRoot, file);
-    if (checks[i].created || checks[i].ownedBefore) madeFiles.push(rel);
+    if (checks[i].created || checks[i].ownedBefore) madeFiles.push({ rel, mutation });
     if (checks[i].created) madeDirs.push(...ancestorDirs(rel));
   }
-  if (madeFiles.length) await recordCreated(repoRoot, { files: madeFiles, dirs: [...new Set(madeDirs)] });
+  if (madeFiles.length) {
+    await recordProjectFiles(repoRoot, madeFiles, [...new Set(madeDirs)]);
+  }
   return {
     adapter: 'goose', path: root,
     action: checks.every((check) => check.unchanged) ? 'already present' : 'installed',
+    ...(recoveryPaths.length ? { recoveryPaths } : {}),
   };
 }
 
@@ -1709,7 +1856,10 @@ export function clineHookScript(bin = 'holt') {
   return `#!/bin/sh\n${CLINE_HOOK_MARKER}\nexec ${bin} hook pre-tool-use --host cline\n`;
 }
 
-export async function installClineHooks(repoRoot, { bin = 'holt' } = {}) {
+/** @param {string} repoRoot @param {{bin?:string,onBeforeFileMutation?:IntegrationFileMutationHook|null}} [options] */
+export async function installClineHooks(repoRoot, {
+  bin = 'holt', onBeforeFileMutation = null,
+} = {}) {
   const file = path.join(repoRoot, '.clinerules', 'hooks', 'PreToolUse');
   const wanted = clineHookScript(bin);
   const check = await mayReplaceGeneratedFile(repoRoot, file, wanted);
@@ -1719,14 +1869,22 @@ export async function installClineHooks(repoRoot, { bin = 'holt' } = {}) {
       action: 'skipped (a PreToolUse hook already exists and holt cannot prove it owns that executable)',
     };
   }
+  if (!check.transaction) throw new Error(`integration transaction unavailable: ${file}`);
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, wanted, { mode: 0o755 });
-  await fs.chmod(file, 0o755);
+  const mutation = await check.transaction.commit(wanted, {
+    mode: 0o755,
+    onBeforeMutation: onBeforeFileMutation,
+  });
   const rel = await relativeWithinAsync(repoRoot, file);
   if (check.created || check.ownedBefore) {
-    await recordCreated(repoRoot, { files: [rel], dirs: check.created ? ancestorDirs(rel) : [] });
+    await recordProjectFiles(
+      repoRoot, [{ rel, mutation }], check.created ? ancestorDirs(rel) : [],
+    );
   }
-  return { adapter: 'cline', path: file, action: check.unchanged ? 'already present' : 'installed' };
+  return {
+    adapter: 'cline', path: file, action: check.unchanged ? 'already present' : 'installed',
+    ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+  };
 }
 
 /* ------------------------------------------------------------------ Claude Code ---- */
@@ -1810,18 +1968,24 @@ function isLegacyClaudeShellOnlyEntry(event, entry, canonicalCommands) {
  * JSONC PRESERVATION. Comments in the settings file are preserved using jsonc-parser's surgical
  * edit API — the same library VSCode uses for its own settings.json editor.
  */
-export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
+/** @param {string} repoRoot @param {{bin?:string,onBeforeFileMutation?:IntegrationFileMutationHook|null}} [options] */
+export async function installClaudeCode(repoRoot, {
+  bin = 'holt', onBeforeFileMutation = null,
+} = {}) {
   const file = path.join(repoRoot, '.claude', 'settings.json');
   /** @type {string|null} */
   let rawText = null;
   /** @type {any} */
   let cfg = {};
-  let created = true;
-  try {
-    rawText = await fs.readFile(file, 'utf8');
+  let transaction;
+  transaction = await openIntegrationFileTransaction(repoRoot, file);
+  if (transaction.state === 'present') {
+    rawText = transaction.bytes.toString('utf8');
+    // A malformed existing Claude config is partial integration, not a successful "skip". The
+    // caller must retain the receipt and report the exact failed worktree so a retry can converge.
     cfg = readJsoncOrThrow(rawText);
-    created = false;
-  } catch { /* new file */ }
+  }
+  const created = transaction.state === 'absent';
 
   cfg.hooks ??= {};
   const wanted = claudeCodeHooks(bin);
@@ -2000,8 +2164,11 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
   } else {
     output = `${JSON.stringify(cfg, null, 2)}\n`;
   }
-  await fs.writeFile(file, output, 'utf8');
-  if (created) { const rel = await relativeWithinAsync(repoRoot, file); await recordCreated(repoRoot, { files: [rel], dirs: ancestorDirs(rel) }); }
+  const mutation = await transaction.commit(output, { onBeforeMutation: onBeforeFileMutation });
+  if (created) {
+    const rel = await relativeWithinAsync(repoRoot, file);
+    await recordProjectFiles(repoRoot, [{ rel, mutation }], ancestorDirs(rel));
+  }
   const retiredNote = retired ? `retired ${retired} hook(s) on event(s) holt no longer uses` : '';
   const action = [
     installed && !reconciled && !unchanged ? 'installed'
@@ -2010,7 +2177,10 @@ export async function installClaudeCode(repoRoot, { bin = 'holt' } = {}) {
       : 'already present',
     retiredNote,
   ].filter(Boolean).join(', ');
-  return { adapter: 'claude-code', path: file, created, installed, reconciled, unchanged, retired, action };
+  return {
+    adapter: 'claude-code', path: file, created, installed, reconciled, unchanged, retired, action,
+    ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+  };
 }
 
 /* --------------------------------------------------------------------- OpenCode ---- */
@@ -2152,7 +2322,10 @@ async function repoIsEsm(repoRoot) {
   return false;                            // no package.json anywhere -> Node treats .js as CommonJS
 }
 
-export async function installOpenCode(repoRoot, { bin = 'holt' } = {}) {
+/** @param {string} repoRoot @param {{bin?:string,onBeforeFileMutation?:IntegrationFileMutationHook|null}} [options] */
+export async function installOpenCode(repoRoot, {
+  bin = 'holt', onBeforeFileMutation = null,
+} = {}) {
   // `.opencode/plugins/` — plural. The singular form is silently ignored by opencode, which is
   // the worst kind of wrong: the file exists, looks installed, and never runs.
   const file = path.join(repoRoot, '.opencode', 'plugins', 'holt.js');
@@ -2169,16 +2342,22 @@ export async function installOpenCode(repoRoot, { bin = 'holt' } = {}) {
       dialect: esm ? 'esm' : 'commonjs',
     };
   }
+  if (!check.transaction) throw new Error(`integration transaction unavailable: ${file}`);
   await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, wanted, 'utf8');
+  const mutation = await check.transaction.commit(wanted, {
+    onBeforeMutation: onBeforeFileMutation,
+  });
   const rel = await relativeWithinAsync(repoRoot, file);
   if (check.created || check.ownedBefore) {
-    await recordCreated(repoRoot, { files: [rel], dirs: check.created ? ancestorDirs(rel) : [] });
+    await recordProjectFiles(
+      repoRoot, [{ rel, mutation }], check.created ? ancestorDirs(rel) : [],
+    );
   }
   return {
     adapter: 'opencode', path: file,
     action: check.unchanged ? 'already present' : check.ownedBefore ? 'reconciled' : 'installed',
     dialect: esm ? 'esm' : 'commonjs',
+    ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
   };
 }
 
@@ -2606,10 +2785,12 @@ async function foreignHookReport(repoRoot, scope) {
 
 /**
  * @param {string} repoRoot
- * @param {{bin?: string, home?: string, hosts?: string[]|null, scope?: string, allHosts?: boolean}} [opts]
+ * @param {{bin?: string, home?: string, hosts?: string[]|null, scope?: string, allHosts?: boolean,
+ *   onBeforeFileMutation?:((details:{file:string,action:'create'|'replace'|'delete'})=>any)|null}} [opts]
  */
 export async function integrate(repoRoot, {
   bin = 'holt', home = os.homedir(), hosts = null, scope = 'project', allHosts = false,
+  onBeforeFileMutation = null,
 } = {}) {
   const rawDetected = hosts ?? await detectHosts(repoRoot, home);
   const detected = Array.isArray(rawDetected)
@@ -2626,28 +2807,28 @@ export async function integrate(repoRoot, {
   // repository shipped is surfaced whether or not the rest of the integration succeeds.
   results.push(...await foreignHookReport(repoRoot, scope));
 
-  results.push(await installAgentsMd(repoRoot, { bin }));
+  results.push(await installAgentsMd(repoRoot, { bin, onBeforeFileMutation }));
   results.push(...await installMcp(repoRoot, {
-    bin, home, scope, hosts: allHosts ? null : present,
+    bin, home, scope, hosts: allHosts ? null : present, onBeforeFileMutation,
   }));
   // UPGRADE SAFETY: clean up locations a PAST version of holt wrote that are now known wrong,
   // before anything else gets a chance to read them. See legacyMcpTargets for the proven case
   // this closes (v0.3.0 itself shipped a wrong `.cline/mcp.json` for one commit).
-  results.push(...await retireLegacyMcp(repoRoot, { home, scope }));
+  results.push(...await retireLegacyMcp(repoRoot, { home, scope, onBeforeFileMutation }));
 
-  if (present.includes('claude-code')) results.push(await installClaudeCode(repoRoot, { bin }));
+  if (present.includes('claude-code')) results.push(await installClaudeCode(repoRoot, { bin, onBeforeFileMutation }));
   // Cursor blocks deterministically now that its hook schema is confirmed rather than guessed.
-  if (present.includes('cursor')) results.push(await installCursorHooks(repoRoot, { bin }));
-  if (present.includes('opencode')) results.push(await installOpenCode(repoRoot, { bin }));
-  if (present.includes('codex')) results.push(await installCodexHooks(repoRoot, { bin }));
-  if (present.includes('qwen-code')) results.push(await installQwenCodeHooks(repoRoot, { bin }));
-  if (present.includes('antigravity')) results.push(await installAntigravityHooks(repoRoot, { bin }));
-  if (present.includes('copilot')) results.push(await installCopilotHooks(repoRoot, { bin }));
-  if (present.includes('goose')) results.push(await installGooseHooks(repoRoot, { bin }));
-  if (present.includes('cline')) results.push(await installClineHooks(repoRoot, { bin }));
-  if (present.includes('devin-cli')) results.push(await installDevinCliHooks(repoRoot, { bin }));
+  if (present.includes('cursor')) results.push(await installCursorHooks(repoRoot, { bin, onBeforeFileMutation }));
+  if (present.includes('opencode')) results.push(await installOpenCode(repoRoot, { bin, onBeforeFileMutation }));
+  if (present.includes('codex')) results.push(await installCodexHooks(repoRoot, { bin, onBeforeFileMutation }));
+  if (present.includes('qwen-code')) results.push(await installQwenCodeHooks(repoRoot, { bin, onBeforeFileMutation }));
+  if (present.includes('antigravity')) results.push(await installAntigravityHooks(repoRoot, { bin, onBeforeFileMutation }));
+  if (present.includes('copilot')) results.push(await installCopilotHooks(repoRoot, { bin, onBeforeFileMutation }));
+  if (present.includes('goose')) results.push(await installGooseHooks(repoRoot, { bin, onBeforeFileMutation }));
+  if (present.includes('cline')) results.push(await installClineHooks(repoRoot, { bin, onBeforeFileMutation }));
+  if (present.includes('devin-cli')) results.push(await installDevinCliHooks(repoRoot, { bin, onBeforeFileMutation }));
   if (present.includes('cascade') || present.includes('devin-desktop')) {
-    results.push(await installCascadeHooks(repoRoot, { bin }));
+    results.push(await installCascadeHooks(repoRoot, { bin, onBeforeFileMutation }));
   }
   results.push(await installGitHooks(repoRoot, { bin }));
 
@@ -2698,15 +2879,31 @@ function uninstallFailure(results, adapter, file, error, operation = 'inspect', 
   results.push(row);
 }
 
+/**
+ * @param {string} repoRoot
+ * @param {{home?:string,scope?:string,finalizeReceipt?:boolean,
+ *   onBeforeSharedHookMutation?:(()=>any)|null,
+ *   onAfterSharedHookRecoveryPublish?:(()=>any)|null,
+ *   onBeforeFileMutation?:IntegrationFileMutationHook|null,
+ *   onBeforeReceiptMutation?:IntegrationFileMutationHook|null,
+ *   receiptSnapshot?:any}} [options]
+ */
 export async function uninstall(repoRoot, {
   home = os.homedir(), scope = 'project', finalizeReceipt = true,
   onBeforeSharedHookMutation = null, onAfterSharedHookRecoveryPublish = null,
+  onBeforeFileMutation = null, onBeforeReceiptMutation = null,
+  receiptSnapshot: suppliedReceiptSnapshot = null,
 } = {}) {
   const results = [];
   // OWNERSHIP COMES FROM THE RECEIPT, NOT FROM THE RESIDUE. `null` means holt could not read it,
   // which must mean "own nothing" — every unlink below is gated on a positive answer, so an
   // unreadable receipt leaves files in place rather than taking a guess at whose they are.
-  const receipt = await readReceipt(repoRoot);
+  // A multi-worktree CLI removal supplies the one snapshot it took before touching ANY checkout.
+  // Reopening the shared receipt here would let a concurrent integrate make a later worktree read
+  // transient/new lifecycle state, while the final clear was still correctly bound to the old
+  // lifecycle. Every ownership decision and final clearing step must share one observation.
+  const receiptSnapshot = suppliedReceiptSnapshot ?? await openReceiptSnapshot(repoRoot);
+  const receipt = receiptSnapshot.receipt;
   if (receipt === null) {
     results.push({
       adapter: 'receipt',
@@ -2720,7 +2917,9 @@ export async function uninstall(repoRoot, {
   {
     const file = path.join(repoRoot, 'AGENTS.md');
     try {
-      const existing = await fs.readFile(file, 'utf8');
+      const transaction = await openIntegrationFileTransaction(repoRoot, file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      const existing = integrationFileBytes(transaction).toString('utf8');
       if (existing.includes(HOLT_BEGIN)) {
         const stripped = stripHoltBlock(existing).trim();
         // Two failures live here, in opposite directions, and both were reproduced:
@@ -2731,13 +2930,21 @@ export async function uninstall(repoRoot, {
         //     git-tracked AGENTS.md that happened to be byte-identical to it.
         // The receipt answers the question both attempts were guessing at: did holt make this
         // file, and are these still holt's bytes?
-        const ours = await holtOwnsFile(repoRoot, 'AGENTS.md', receipt);
+        const ours = receiptOwnsFileObservation(receipt, 'AGENTS.md', transaction);
         if (ours) {
-          await fs.rm(file, { force: true });
-          results.push({ adapter: 'agents-md', path: file, action: 'removed (holt created it)' });
+          const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+          results.push({
+            adapter: 'agents-md', path: file, action: 'removed (holt created it)',
+            ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+          });
         } else {
-          await fs.writeFile(file, `${stripped}\n`, 'utf8');
-          results.push({ adapter: 'agents-md', path: file, action: "holt's block removed, your content kept" });
+          const mutation = await transaction.commit(`${stripped}\n`, {
+            onBeforeMutation: onBeforeFileMutation,
+          });
+          results.push({
+            adapter: 'agents-md', path: file, action: "holt's block removed, your content kept",
+            ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+          });
         }
       }
     } catch (error) {
@@ -2751,9 +2958,11 @@ export async function uninstall(repoRoot, {
     if (t.scope === 'user' && scope === 'project') continue;
 
     if (t.format === 'toml') {
-      let existing;
+      let existing, transaction;
       try {
-        existing = await fs.readFile(t.file, 'utf8');
+        transaction = await openIntegrationFileTransaction(repoRoot, t.file);
+        if (transaction.state === 'absent') continue;
+        existing = transaction.bytes.toString('utf8');
       } catch (error) {
         uninstallFailure(results, 'mcp', t.file, error, 'read TOML config');
         continue;
@@ -2761,20 +2970,34 @@ export async function uninstall(repoRoot, {
       if (!/^\s*\[mcp_servers\.holt\]\s*$/m.test(existing)) continue;
       const stripped = tomlWithoutHoltServer(existing);
       if (!stripped.trim()) {
-        await fs.rm(t.file, { force: true });
-        results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'removed (holt-only content)' });
+        const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+        results.push({
+          adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+          action: 'removed (holt-only content)',
+          ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+        });
       } else {
-        await fs.writeFile(t.file, stripped.endsWith('\n') ? stripped : `${stripped}\n`, 'utf8');
-        results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: "holt's entry removed, your other settings kept" });
+        const mutation = await transaction.commit(
+          stripped.endsWith('\n') ? stripped : `${stripped}\n`,
+          { onBeforeMutation: onBeforeFileMutation },
+        );
+        results.push({
+          adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+          action: "holt's entry removed, your other settings kept",
+          ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+        });
       }
       continue;
     }
 
     let cfg;
+    let transaction;
     /** @type {string | null} */
     let rawText = null;
     try {
-      rawText = await fs.readFile(t.file, 'utf8');
+      transaction = await openIntegrationFileTransaction(repoRoot, t.file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      rawText = transaction.bytes.toString('utf8');
       cfg = readJsoncOrThrow(rawText);
     } catch (error) {
       uninstallFailure(results, 'mcp', t.file, error, 'read JSON/JSONC config', rawText);
@@ -2811,17 +3034,26 @@ export async function uninstall(repoRoot, {
       // what integrate CREATED. Unlink when holt made the file and still owns its bytes, or when
       // the remaining text is provably nothing but holt's. Both conditions are positive evidence;
       // neither infers ownership from what the residue happens to look like.
-      const ownsMcpFile = await holtOwnsFile(repoRoot, await relativeWithinAsync(repoRoot, t.file), receipt);
+      const ownsMcpFile = receiptOwnsFileObservation(
+        receipt,
+        await relativeWithinAsync(repoRoot, t.file),
+        transaction,
+      );
       if (ownsMcpFile || (receipt !== null && emptied && nothingButAnEmptyObject(output))) {
-        await fs.rm(t.file, { force: true });
-        results.push({ adapter: 'mcp', host: t.host, scope: t.scope, path: t.file, action: 'removed (holt-only content)' });
+        const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+        results.push({
+          adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
+          action: 'removed (holt-only content)',
+          ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+        });
       } else {
-        await fs.writeFile(t.file, output, 'utf8');
+        const mutation = await transaction.commit(output, { onBeforeMutation: onBeforeFileMutation });
         results.push({
           adapter: 'mcp', host: t.host, scope: t.scope, path: t.file,
           action: emptied
             ? "holt's entry removed; the rest of the file is yours and was left in place"
             : "holt's entry removed, your other settings kept",
+          ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
         });
       }
     }
@@ -2833,7 +3065,9 @@ export async function uninstall(repoRoot, {
     /** @type {string | null} */
     let observedText = null;
     try {
-      const rawText = await fs.readFile(file, 'utf8');
+      const transaction = await openIntegrationFileTransaction(repoRoot, file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      const rawText = integrationFileBytes(transaction).toString('utf8');
       observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       let removed = 0;
@@ -2907,11 +3141,18 @@ export async function uninstall(repoRoot, {
           // user content that fs.rm destroys and a preserved text keeps.
           if (!result.endsWith('\n')) result += '\n';
           if (receipt !== null && nothingButAnEmptyObject(result)) {
-            await fs.rm(file, { force: true });
-            results.push({ adapter: 'claude-code', path: file, action: 'removed (holt-only content)' });
+            const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+            results.push({
+              adapter: 'claude-code', path: file, action: 'removed (holt-only content)',
+              ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+            });
           } else {
-            await fs.writeFile(file, result, 'utf8');
-            results.push({ adapter: 'claude-code', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+            const mutation = await transaction.commit(result, { onBeforeMutation: onBeforeFileMutation });
+            results.push({
+              adapter: 'claude-code', path: file,
+              action: `${removed} holt hook(s) removed, your settings kept`,
+              ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+            });
           }
         }
       }
@@ -2926,7 +3167,9 @@ export async function uninstall(repoRoot, {
     /** @type {string | null} */
     let observedText = null;
     try {
-      const rawText = await fs.readFile(file, 'utf8');
+      const transaction = await openIntegrationFileTransaction(repoRoot, file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      const rawText = integrationFileBytes(transaction).toString('utf8');
       observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       let removed = 0;
@@ -2963,13 +3206,24 @@ export async function uninstall(repoRoot, {
           // then made the repo self-detect as a Cursor host. The receipt says whether holt made
           // the file; a user's own identical file is not in it and is therefore kept.
           if (!result.endsWith('\n')) result += '\n';
-          const ownsCursorFile = await holtOwnsFile(repoRoot, await relativeWithinAsync(repoRoot, file), receipt);
+          const ownsCursorFile = receiptOwnsFileObservation(
+            receipt,
+            await relativeWithinAsync(repoRoot, file),
+            transaction,
+          );
           if (ownsCursorFile || (receipt !== null && nothingButAnEmptyObject(result))) {
-            await fs.rm(file, { force: true });
-            results.push({ adapter: 'cursor', path: file, action: 'removed (holt-only content)' });
+            const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+            results.push({
+              adapter: 'cursor', path: file, action: 'removed (holt-only content)',
+              ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+            });
           } else {
-            await fs.writeFile(file, result, 'utf8');
-            results.push({ adapter: 'cursor', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+            const mutation = await transaction.commit(result, { onBeforeMutation: onBeforeFileMutation });
+            results.push({
+              adapter: 'cursor', path: file,
+              action: `${removed} holt hook(s) removed, your settings kept`,
+              ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+            });
           }
         }
       }
@@ -2984,7 +3238,9 @@ export async function uninstall(repoRoot, {
     /** @type {string | null} */
     let observedText = null;
     try {
-      const rawText = await fs.readFile(file, 'utf8');
+      const transaction = await openIntegrationFileTransaction(repoRoot, file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      const rawText = integrationFileBytes(transaction).toString('utf8');
       observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       const entry = cfg?.[ANTIGRAVITY_HOOK_KEY];
@@ -2996,12 +3252,19 @@ export async function uninstall(repoRoot, {
         );
         if (!result.endsWith('\n')) result += '\n';
         const rel = await relativeWithinAsync(repoRoot, file);
-        if (await holtOwnsFile(repoRoot, rel, receipt)) {
-          await fs.rm(file, { force: true });
-          results.push({ adapter: 'antigravity', path: file, action: 'removed (holt-only content)' });
+        if (receiptOwnsFileObservation(receipt, rel, transaction)) {
+          const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+          results.push({
+            adapter: 'antigravity', path: file, action: 'removed (holt-only content)',
+            ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+          });
         } else {
-          await fs.writeFile(file, result, 'utf8');
-          results.push({ adapter: 'antigravity', path: file, action: 'Holt context hook removed, your other hooks kept' });
+          const mutation = await transaction.commit(result, { onBeforeMutation: onBeforeFileMutation });
+          results.push({
+            adapter: 'antigravity', path: file,
+            action: 'Holt context hook removed, your other hooks kept',
+            ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+          });
         }
       } else if (entry) {
         results.push({
@@ -3020,7 +3283,9 @@ export async function uninstall(repoRoot, {
     /** @type {string | null} */
     let observedText = null;
     try {
-      const rawText = await fs.readFile(file, 'utf8');
+      const transaction = await openIntegrationFileTransaction(repoRoot, file);
+      if (transaction.state === 'absent') continue;
+      const rawText = integrationFileBytes(transaction).toString('utf8');
       observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       const events = objectAt(cfg, spec.prefix);
@@ -3058,12 +3323,19 @@ export async function uninstall(repoRoot, {
       }
       if (!result.endsWith('\n')) result += '\n';
       const rel = await relativeWithinAsync(repoRoot, file);
-      if (await holtOwnsFile(repoRoot, rel, receipt)) {
-        await fs.rm(file, { force: true });
-        results.push({ adapter: spec.host, path: file, action: 'removed (holt-only content)' });
+      if (receiptOwnsFileObservation(receipt, rel, transaction)) {
+        const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+        results.push({
+          adapter: spec.host, path: file, action: 'removed (holt-only content)',
+          ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+        });
       } else {
-        await fs.writeFile(file, result, 'utf8');
-        results.push({ adapter: spec.host, path: file, action: `${removed} holt hook command(s) removed, your settings kept` });
+        const mutation = await transaction.commit(result, { onBeforeMutation: onBeforeFileMutation });
+        results.push({
+          adapter: spec.host, path: file,
+          action: `${removed} holt hook command(s) removed, your settings kept`,
+          ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+        });
       }
     } catch (error) {
       uninstallFailure(results, spec.host, file, error, 'read or reconcile hooks', observedText);
@@ -3076,7 +3348,9 @@ export async function uninstall(repoRoot, {
     /** @type {string | null} */
     let observedText = null;
     try {
-      const rawText = await fs.readFile(file, 'utf8');
+      const transaction = await openIntegrationFileTransaction(repoRoot, file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      const rawText = integrationFileBytes(transaction).toString('utf8');
       observedText = rawText;
       const cfg = readJsoncOrThrow(rawText);
       const entries = cfg.hooks?.PreToolUse;
@@ -3087,9 +3361,12 @@ export async function uninstall(repoRoot, {
         const removed = entries.length - kept.length;
         if (removed > 0) {
           const rel = await relativeWithinAsync(repoRoot, file);
-          if (await holtOwnsFile(repoRoot, rel, receipt)) {
-            await fs.rm(file, { force: true });
-            results.push({ adapter: 'copilot', path: file, action: 'removed (holt-only content)' });
+          if (receiptOwnsFileObservation(receipt, rel, transaction)) {
+            const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+            results.push({
+              adapter: 'copilot', path: file, action: 'removed (holt-only content)',
+              ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+            });
           } else {
             let result = jsoncWrite(
               rawText,
@@ -3097,8 +3374,12 @@ export async function uninstall(repoRoot, {
               { tabSize: 2, insertSpaces: true },
             );
             if (!result.endsWith('\n')) result += '\n';
-            await fs.writeFile(file, result, 'utf8');
-            results.push({ adapter: 'copilot', path: file, action: `${removed} holt hook(s) removed, your settings kept` });
+            const mutation = await transaction.commit(result, { onBeforeMutation: onBeforeFileMutation });
+            results.push({
+              adapter: 'copilot', path: file,
+              action: `${removed} holt hook(s) removed, your settings kept`,
+              ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+            });
           }
         }
       }
@@ -3111,12 +3392,17 @@ export async function uninstall(repoRoot, {
   {
     const file = path.join(repoRoot, '.clinerules', 'hooks', 'PreToolUse');
     try {
-      const text = await fs.readFile(file, 'utf8');
+      const transaction = await openIntegrationFileTransaction(repoRoot, file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
+      const text = integrationFileBytes(transaction).toString('utf8');
       if (text.includes(CLINE_HOOK_MARKER)) {
         const rel = await relativeWithinAsync(repoRoot, file);
-        if (await holtOwnsFile(repoRoot, rel, receipt)) {
-          await fs.rm(file, { force: true });
-          results.push({ adapter: 'cline', path: file, action: 'removed' });
+        if (receiptOwnsFileObservation(receipt, rel, transaction)) {
+          const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+          results.push({
+            adapter: 'cline', path: file, action: 'removed',
+            ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+          });
         } else {
           results.push({ adapter: 'cline', path: file, action: 'left in place (generated hook was modified or ownership could not be proved)' });
         }
@@ -3133,11 +3419,14 @@ export async function uninstall(repoRoot, {
     const files = rels.map((rel) => path.join(repoRoot, rel));
     let unreadable = false;
     const present = [];
+    const transactions = [];
     for (const file of files) {
       try {
-        await fs.readFile(file);
-        present.push(true);
+        const transaction = await openIntegrationFileTransaction(repoRoot, file);
+        transactions.push(transaction);
+        present.push(transaction.state === 'present');
       } catch (error) {
+        transactions.push(null);
         present.push(false);
         if (!isAbsent(error)) {
           unreadable = true;
@@ -3147,11 +3436,22 @@ export async function uninstall(repoRoot, {
     }
     const ownership = [];
     for (let i = 0; i < files.length && !unreadable; i++) {
-      ownership.push(await holtOwnsFile(repoRoot, rels[i], receipt));
+      ownership.push(receiptOwnsFileObservation(receipt, rels[i], transactions[i]));
     }
     if (!unreadable && present.every(Boolean) && ownership.every(Boolean)) {
-      for (const file of files) await fs.rm(file, { force: true });
-      results.push({ adapter: 'goose', path: root, action: 'removed' });
+      try {
+        const recoveryPaths = [];
+        for (const transaction of transactions) {
+          const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+          if (mutation.recoveryPath) recoveryPaths.push(mutation.recoveryPath);
+        }
+        results.push({
+          adapter: 'goose', path: root, action: 'removed',
+          ...(recoveryPaths.length ? { recoveryPaths } : {}),
+        });
+      } catch (error) {
+        uninstallFailure(results, 'goose', root, error, 'safely retire generated plugin');
+      }
     } else if (!unreadable && (present.some(Boolean) || ownership.some(Boolean))) {
       results.push({ adapter: 'goose', path: root, action: 'left in place (plugin install is partial, modified, or ownership is no longer complete)' });
     }
@@ -3161,11 +3461,15 @@ export async function uninstall(repoRoot, {
   {
     const file = path.join(repoRoot, '.opencode', 'plugins', 'holt.js');
     try {
-      await fs.readFile(file, 'utf8');
+      const transaction = await openIntegrationFileTransaction(repoRoot, file);
+      if (transaction.state === 'absent') throw Object.assign(new Error('absent'), { code: 'ENOENT' });
       const rel = await relativeWithinAsync(repoRoot, file);
-      if (await holtOwnsFile(repoRoot, rel, receipt)) {
-        await fs.rm(file, { force: true });
-        results.push({ adapter: 'opencode', path: file, action: 'removed (receipt-owned, unmodified)' });
+      if (receiptOwnsFileObservation(receipt, rel, transaction)) {
+        const mutation = await transaction.commit(null, { onBeforeMutation: onBeforeFileMutation });
+        results.push({
+          adapter: 'opencode', path: file, action: 'removed (receipt-owned, unmodified)',
+          ...(mutation.recoveryPath ? { recoveryPath: mutation.recoveryPath } : {}),
+        });
       } else {
         results.push({ adapter: 'opencode', path: file, action: 'left in place (modified or ownership could not be proved)' });
       }
@@ -3252,8 +3556,24 @@ export async function uninstall(repoRoot, {
     }
     if (finalizeReceipt && !results.some((result) => result.ok === false)) {
       const storedReceipt = await receiptPath(repoRoot);
-      if (storedReceipt && !(await clearReceipt(repoRoot))) {
-        uninstallFailure(results, 'receipt', storedReceipt, new Error('receipt could not be cleared'), 'clear install receipt');
+      if (storedReceipt) {
+        const cleared = await clearReceiptIfUnchanged(repoRoot, receipt, {
+          onBeforeMutation: onBeforeReceiptMutation,
+          transaction: receiptSnapshot.transaction,
+        });
+        if (!cleared.ok) {
+          const error = Object.assign(
+            new Error('receipt changed or could not be cleared'),
+            cleared.recoveryPath ? { recoveryPath: cleared.recoveryPath } : {},
+          );
+          uninstallFailure(results, 'receipt', storedReceipt, error, 'clear install receipt');
+        } else if (cleared.recoveryPath) {
+          results.push({
+            adapter: 'receipt', path: storedReceipt,
+            action: 'cleared after exact-snapshot verification (recovery retained)',
+            recoveryPath: cleared.recoveryPath,
+          });
+        }
       }
     }
   }

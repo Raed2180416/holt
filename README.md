@@ -10,18 +10,19 @@
 cleanup, merge, or landing decision.**
 
 [![license](https://img.shields.io/badge/license-FSL%20core%20%7C%20commercial%20Team-blue)](#license)
+[![release](https://img.shields.io/github/v/release/Raed2180416/holt?label=latest%20release)](https://github.com/Raed2180416/holt/releases/latest)
+[![CI](https://img.shields.io/github/actions/workflow/status/Raed2180416/holt/ci.yml?branch=main&label=core%20CI)](https://github.com/Raed2180416/holt/actions/workflows/ci.yml)
 [![docs](https://img.shields.io/badge/docs-site-blue)](https://raed2180416.github.io/holt/)
 
 </div>
 
 <!-- HOLT:SOCIAL-PROOF:BEGIN
-Social proof stays commented out until the numbers can carry it: 500 stars, whichever lands
-first. scripts/milestone.mjs switches this block on by itself.
+Social proof stays commented out until the published 500-star gate is met and a reviewed change
+enables it. scripts/milestone.mjs is report-only unless a maintainer deliberately runs --apply.
 
 <div align="center">
 
 [![stars](https://img.shields.io/github/stars/raed2180416/holt?style=for-the-badge&color=e2a154&labelColor=0a0b0d)](https://github.com/raed2180416/holt/stargazers)
-[![CI](https://img.shields.io/github/actions/workflow/status/raed2180416/holt/ci.yml?style=for-the-badge&labelColor=0a0b0d)](https://github.com/raed2180416/holt/actions/workflows/ci.yml)
 
 <a href="https://star-history.com/#raed2180416/holt&Date">
   <img alt="Star history" width="600" src="https://api.star-history.com/svg?repos=raed2180416/holt&type=Date&theme=dark">
@@ -30,8 +31,9 @@ first. scripts/milestone.mjs switches this block on by itself.
 </div>
 HOLT:SOCIAL-PROOF:END -->
 
-> **Current status:** The free, local, single-repository core is available in the v0.3.1 source
-> tree. Team and Enterprise are not being sold or activated in this launch. 
+> **Current status:** The latest published artifact is v0.3.1. This source checkout contains later,
+> unreleased work and must not be treated as the published package until its release gates pass.
+> Team and Enterprise are not being sold or activated in this launch.
 
 ## The short version
 
@@ -54,13 +56,18 @@ The core loop is:
 observe → classify → protect → gate → act → verify/recover
 ```
 
+[![Actual Holt TUI showing repository-wide worktree risk, unique-work evidence, and recovery guidance](docs/evidence/tui-graph/run-2026-08-05-final/controlled-tui-120x36.png)](docs/evidence/tui-graph/)
+
+<sub>Actual <code>holt tui --snapshot</code> output from the real renderer against a controlled
+real-Git fixture. The linked evidence packet contains the reproduction path and
+checksum.</sub>
+
 ## Install and try the core
 
 Holt currently requires Node `^22.22.2 || ^24.15.0 || >=26.0.0` and Git 2.45 or newer. Git 2.45
-is the safety floor for the local-object checks Holt performs. This source checkout describes
-v0.3.1. The stable URL below installs the latest version that has actually been published, which
-may differ until this checkout is released; verify `holt --version`, the release notes, and the
-checksums for the exact artifact you install.
+is the safety floor for the local-object checks Holt performs. The stable URL below installs the
+latest version that has actually been published, which may differ from this checkout; verify
+`holt --version`, the release notes, and the checksums for the exact artifact you install.
 
 ```bash
 npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz
@@ -70,11 +77,18 @@ holt auto        # perform reversible protection; make no deletion decision for 
 holt status      # inspect the evidence and remaining decisions
 ```
 
-For a no-global-install trial:
+To replay the repository's smallest adversarial proof from source—one empty worktree with a
+reassuring name beside a misleadingly named worktree holding modified, untracked, and ignored
+content—run:
 
 ```bash
-npx github:Raed2180416/holt status
+node scripts/run-preseed-demo.mjs --json
 ```
+
+The demo creates an isolated temporary Git repository, exercises both `gate` exit-code contracts,
+previews cleanup, applies quarantine only to the measured-empty worktree, inventories the recovery
+copy, restores it, and independently checks its HEAD and byte digest. It removes its own restored
+fixture after the proof; add `--keep` to inspect it.
 
 `holt clean` is a dry run. `holt clean --apply` re-checks candidates immediately before moving
 provably disposable worktrees into locked local quarantine; it does not delete files or branches
@@ -136,7 +150,7 @@ it is not a universal compatibility certificate.
 | CI and merge queues | Test and order committed changes | Protect valuable pre-PR state and investigate specific interactions before work is shared. |
 | Hosted agent/cloud sandboxes | Run work away from a local machine | Local locks do not reach cloud or ephemeral agents by default; no cloud enforcement claim is made. |
 
-**Holt is the integrity layer around parallel agent transactions.**
+**Holt is the local transaction and recoverability layer for parallel coding-agent work.**
 
 ## Integration coverage
 
@@ -193,12 +207,19 @@ commitment, data-processing agreement, enterprise identity offer, or production 
 
 ## For investors and early design partners
 
-The most useful next conversation is concrete. Bring a repository where several agents or worktrees
-make cleanup, handoff, or landing hard to trust. We want the smallest reproducible incident, or a
-feature request—and we will take appropriate action
+The most useful next conversation is concrete: bring a repository where several agents or
+worktrees make cleanup, handoff, or landing hard to trust. We want the smallest reproducible
+incident, one success case, and one adversarial control. Holt does not currently claim customers,
+revenue, repeat use, or paid pilots; the design-partner program exists to test whether this becomes
+a recurring and consequential team workflow.
 
 - [Design-partner program](docs/launch/DESIGN-PARTNER-PROGRAM.md) — who should participate,
   what the trial asks, and what counts as a useful result.
+- [Pre-seed brief](docs/launch/PRESEED-BRIEF.md) — the company thesis, current evidence boundary,
+  objections, 12-week proof route, and proposed use of funds.
+- [Market and future-gap sweep](docs/research/2026-08-13-holt-market-and-future-gap-sweep.md) —
+  official-source substitutes, where Holt lags, absorption risk, falsifiers, and an outcome-gated
+  technical roadmap.
 
 
 Holt is part of [Contrare Research](https://github.com/Raed2180416). Product and research queries:
@@ -221,5 +242,3 @@ authority.
 - Each FSL-covered release converts to MIT on its own second anniversary.
 - Team and Enterprise implementations under `src/team/` are source-available under their
   [commercial license](src/team/LICENSE). They are not part of the public free/core offer above.
-
-

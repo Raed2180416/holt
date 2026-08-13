@@ -37,25 +37,26 @@ The **tree digest** is one SHA-256 over the whole manifest. It is the single num
 against an attestation, to paste into a ticket, or to diff between two machines that are supposed
 to be running the same thing.
 
-### 1b. Authenticity — who built this, from which commit
+### 1b. Authenticity — what the exact release proves
 
-Integrity says the bytes are self-consistent. It cannot say who produced them. When a release
-actually carries a Sigstore provenance attestation, that separate artifact can bind the package to
-a workflow and commit without a long-lived signing key in this repository:
+Integrity says the bytes are self-consistent. It cannot by itself say which public release carried
+them. v0.3.1 has a valid detached Ed25519 manifest signature and GitHub immutable-release
+attestations. Verify those properties with:
 
 ```console
-# The published tarball, verified against the workflow and commit that built it
-$ HOLT_RELEASE_VERSION=X.Y.Z   # replace with the release you are evaluating
-$ gh release download --repo Raed2180416/holt --pattern "holt-${HOLT_RELEASE_VERSION}.tgz"
-$ gh attestation verify "holt-${HOLT_RELEASE_VERSION}.tgz" --repo Raed2180416/holt
+# The currently published release and downloaded assets
+$ gh release verify v0.3.1 --repo Raed2180416/holt
+$ gh release download v0.3.1 --repo Raed2180416/holt
+$ gh release verify-asset <downloaded-asset> --repo Raed2180416/holt
+$ holt audit --require-signature
 ```
 
-`gh attestation verify` prints the repository, the workflow file, the commit SHA and the runner
-that produced the artefact. If any of those is not what you expect, the package is not ours,
-whatever the version number says.
+Those checks prove the immutable release association and the pinned offline signing key. They are
+not SLSA build provenance. v0.3.1 has no discoverable SLSA provenance, and the default
+`gh attestation verify` command currently fails for that tarball.
 
-**Need offline artifact verification?** Download the attestation bundle on a connected machine
-and carry it in:
+When a future release actually carries discoverable Sigstore provenance, verify that exact
+artifact and then, if needed, download its bundle for offline use:
 
 ```console
 $ gh attestation download "holt-${HOLT_RELEASE_VERSION}.tgz" --repo Raed2180416/holt
@@ -150,11 +151,11 @@ is runtime evidence for that release job, not a claim about an untested Git dist
 | property | status |
 |---|---|
 | SLSA version | v1.0 build track |
-| **Configured target** | **SLSA Build L2** — the workflow requests GitHub artifact attestation from a GitHub-hosted runner. Configuration is not an attestation; verify the release artifact itself. |
+| **Configured target** | **SLSA Build L2** — the workflow requests GitHub artifact attestation from a GitHub-hosted runner. Configuration is not an attestation, and v0.3.1 has no discoverable SLSA provenance. |
 | Build L3 | **Not claimed.** The current single-repository workflow has no retained proof that it meets the current hardened-build requirements. Move build/provenance generation behind an appropriately isolated reusable workflow and assess the resulting builder against the [SLSA Build L3 requirements](https://slsa.dev/spec/v1.2/build-track-basics) before changing this row. |
 | Predicate | SLSA Provenance v1 in an in-toto Statement |
 | Transparency log | Sigstore public-good instance (Rekor) |
-| Release attestation | Workflow configured for GitHub artifact attestation; verify the downloaded release with `gh attestation verify` rather than assuming the asset is present. v0.3.0 has no discoverable attestation or attached SBOM assets. |
+| Release attestation | v0.3.1 has GitHub immutable-release attestations and a valid detached manifest signature, but no discoverable SLSA provenance. The workflow is configured to request provenance for a future release; verify the resulting artifact before claiming it. |
 
 The published level is what can be defended. A vendor claiming L3 from a plain workflow is telling you
 they have not read the specification, which is itself a useful signal about the rest of their
@@ -162,17 +163,17 @@ answers.
 
 ### Live release-control plane
 
-The repository controls below were observed through GitHub's authenticated API on
-**2026-08-05 04:39 +05:30**. They are live state, not properties of a commit, and can drift. The
+The repository controls below were re-observed through GitHub's authenticated API on
+**2026-08-13 10:23 +05:30**. They are live state, not properties of a commit, and can drift. The
 sanitised response summary and its digest are retained in
-[`docs/evidence/release-ci/release-controls-20260805.json`](docs/evidence/release-ci/release-controls-20260805.json).
+[`docs/evidence/release-ci/release-controls-20260813.json`](docs/evidence/release-ci/release-controls-20260813.json).
 
 | control | observed state | boundary |
 |---|---|---|
 | Immutable releases | **Enabled** for `Raed2180416/holt`; the release workflow also calls GitHub's live immutable-release endpoint before checkout or repository code | This does not make an untagged working tree immutable or retroactively add attestations to v0.3.0. [GitHub documents](https://docs.github.com/en/enterprise-cloud@latest/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository) the read check as requiring repository Administration read. |
-| Release environment | `release` exists with a selected **tag** policy `v*`; only jobs naming that environment receive its secrets | This is a ref restriction, not a claim of human approval: the API reports no required-reviewer rule and reports administrator bypass enabled. [GitHub's environment documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) distinguishes tag rules, reviewers and administrator bypass. |
-| Environment secrets | Names `HOLT_RELEASE_ADMIN_TOKEN` and `HOLT_RELEASE_SIGNING_KEY` exist | GitHub never returns secret values. Existence is not proof that a future job can use them; the release workflow fails closed on absence, API failure, wrong key type or a signing-key mismatch. |
-| Release signing key | One Ed25519 public key is pinned; its SPKI SHA-256 fingerprint is `fdc0f121ca21f23a6ae7d448f4cbb7f16a6c214d4bfae855f380cc54b4e170d8`. The locally retained private half derives the same fingerprint and is mode `0600`. | No private material is retained in this repository or the evidence artifact. The environment secret cannot be read back; the first successful release job must re-prove the match before signing. |
+| Release environment | `release` exists with a selected **tag** policy `v*`; administrator bypass is disabled; only jobs naming that environment receive its secrets | This is a ref restriction, not a claim of independent human approval: the API reports no required-reviewer rule. [GitHub's environment documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments) distinguishes tag rules, reviewers and administrator bypass. |
+| Environment secrets | Names `HOLT_RELEASE_ADMIN_TOKEN` and `HOLT_RELEASE_SIGNING_KEY` exist; the repository-level signing-key duplicate was removed | GitHub never returns secret values. Existence is not proof that a future job can use them; the remaining release workflow fails closed on absence, API failure, wrong key type or a signing-key mismatch. |
+| Release signing key | One Ed25519 public key is pinned; its SPKI SHA-256 fingerprint is `fdc0f121ca21f23a6ae7d448f4cbb7f16a6c214d4bfae855f380cc54b4e170d8`. v0.3.1's downloaded manifest signature verifies against it. | No private material is retained in this repository or the evidence artifact. v0.3.1 proves the key worked through the retired fast publisher; the next normal release must independently prove the remaining workflow path. |
 | Immutable-state reader token | The environment secret currently contains the maintainer's existing GitHub OAuth credential. Its observed scopes are `repo`, `workflow`, `read:org` and `gist`. | That is broader than the one API read. Rotate it to a fine-grained token or GitHub App token limited to this repository with **Administration: read**, following GitHub's [fine-grained-token permission reference](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens). Never print or retain the token value. |
 
 ---
@@ -315,8 +316,8 @@ security page.
 | gap | what it needs | who must do it |
 |---|---|---|
 | **Least-privilege immutable-state token** — the required environment secret exists and was populated from the maintainer's broader OAuth credential, which can read the API. GitHub does not permit read-back of the stored value. | Replace `HOLT_RELEASE_ADMIN_TOKEN` with a repository-scoped fine-grained PAT or GitHub App token granting only **Administration: read**. Re-run the preflight, then revoke the broader credential from this use. | repository owner |
-| **Signing-key custody and first live proof** — the environment secret exists and the retained private half matches the pinned public fingerprint, but GitHub does not permit secret read-back and no published release proves this new configuration yet. | Assign backup/rotation ownership, protect the private-key backup, and require the first release job plus `holt audit --require-signature` on its downloaded tarball to prove the configured secret. Never commit the private key. | repository owner |
-| **Environment approval policy** — the `v*` tag policy is live, but administrators can bypass environment protection and no required-reviewer rule is present. | Decide whether to disable administrator bypass and/or add required reviewers. Record that governance choice without describing the current tag restriction as a human approval. | repository owner |
+| **Signing-key custody and release-path proof** — v0.3.1 proves that the pinned signing key produced a valid detached manifest signature, but it was published through a now-retired fast path and does not prove the remaining release workflow's provenance path. | Assign backup/rotation ownership, protect the private-key backup, and require the next normal release job plus `holt audit --require-signature` and provenance verification on its downloaded tarball. Never commit the private key. | repository owner |
+| **Independent release approval** — the `v*` tag policy is live and administrator bypass is disabled, but no required-reviewer rule is present. | Add an independent required reviewer when a second trusted maintainer exists. Do not misdescribe the current tag restriction as human approval or self-lock a solo maintainer. | repository owner |
 | **SLSA Build L3** | Use and assess a hardened builder that satisfies the current L3 isolation and provenance-key requirements; an appropriately isolated reusable workflow is part of that migration. | maintainers |
 
 Generating the pair, for the record — run it on a machine you trust and never commit the private

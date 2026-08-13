@@ -127,7 +127,7 @@ Do not ask for upvotes. Ask people to try it and leave technical feedback.
 ## Indie Hackers
 
 ```text
-Title: I nearly lost the only copy of an agent's work, so I built a local integrity layer for Git worktrees
+Title: I nearly lost the only copy of an agent's work, so I built a transaction and recovery layer for Git worktrees
 
 I have been using multiple coding agents in parallel, each in its own Git worktree. The speed is real, but so is a less obvious failure mode: Git branches are only part of the state.
 
@@ -157,7 +157,7 @@ places and do not drop it into a general channel as an advertisement. Post it on
 evaluation, reliability, or project-feedback channel after checking with the moderators.
 
 ```text
-Technical feedback request: how should we prove a local integrity layer for parallel coding agents?
+Technical feedback request: how should we prove a local transaction and recovery layer for parallel coding agents?
 
 Disclosure: I build Holt. I am looking for adversarial practitioners, not launch votes.
 
@@ -194,7 +194,7 @@ to keep discussion vendor-neutral and avoid service or product marketing. If an 
 an explicit project-showcase channel, use this exact post there:
 
 ```text
-Disclosure: I maintain Holt, a local integrity layer for parallel coding-agent Git worktrees.
+Disclosure: I maintain Holt, a local transaction and recoverability layer for parallel coding-agent Git worktrees.
 
 I am sharing it here for feedback on one MCP design choice. Holt exposes twelve read-only evidence tools and four acting tools. The acting tools preserve, quarantine, restore or explicitly reclaim work, and destructive authority is kept separate from advisory similarity and dependency analysis.
 
@@ -212,7 +212,7 @@ This subreddit currently removes direct links in titles and post bodies. Submit 
 without a URL.
 
 ```text
-Title: I built a local integrity layer for parallel coding agents because branches were not the whole state
+Title: I built a local transaction and recovery layer for parallel coding agents because branches were not the whole state
 
 I kept running into a problem once I had several coding agents working in Git worktrees at the same time.
 
