@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+**Stable release proof runner repair.** The product bytes remain unchanged from 0.4.1; the
+stable-tag quality lane now installs its pinned Rust toolchain before building the measured
+Jujutsu backend, so release evidence does not depend on runner-global toolchain state.
+
 ## 0.4.1
 
 **Release-quality hermeticity patch.** The product bytes are unchanged from 0.4.0; this patch
