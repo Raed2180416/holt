@@ -212,7 +212,10 @@ test('DOC SMOKE: every `holt ...` command shown in the docs is a real command wi
     `only ${terminalFlags.size} terminal flags derived from bin/holt.mjs — global flag extraction has drifted`);
 
   const files = await markdownFiles();
-  assert.ok(files.length >= 40,
+  // The public checkout deliberately excludes private founder scratch and untracked operator
+  // notes. Keep a floor for the shipped corpus, but do not let those local-only files inflate the
+  // denominator and make a clean CI checkout fail.
+  assert.ok(files.length >= 35,
     `only found ${files.length} markdown files to check — recursive documentation walk has drifted`);
   assert.ok(files.some((file) => path.relative(ROOT, file).startsWith(`docs${path.sep}launch${path.sep}`)),
     'docs/launch is absent from the recursive command-smoke corpus');
