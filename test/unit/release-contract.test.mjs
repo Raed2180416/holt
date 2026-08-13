@@ -432,13 +432,14 @@ test('SBOM contract: root identity is the package, not the checkout directory ba
   });
   const cdx = JSON.parse(await fs.readFile(path.join(out, 'holt.cdx.json'), 'utf8'));
   const spdx = JSON.parse(await fs.readFile(path.join(out, 'holt.spdx.json'), 'utf8'));
+  const packageVersion = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8')).version;
   const described = new Set(spdx.documentDescribes ?? []);
   const spdxRoot = spdx.packages.find((x) => described.has(x.SPDXID));
   assert.equal(cdx.metadata.component.name, 'holt');
   assert.notEqual(cdx.metadata.component.name, path.basename(fixtureRoot),
     'SBOM root identity leaked the checkout directory name again');
   assert.equal(spdxRoot?.name, 'holt');
-  assert.equal(spdxRoot?.versionInfo, '0.4.0');
+  assert.equal(spdxRoot?.versionInfo, packageVersion);
   assert.notEqual(spdxRoot?.name, path.basename(fixtureRoot),
     'SPDX root identity leaked the checkout directory name again');
   assert.ok(cdx.components.some((x) => x.name === 'hono' && x.version === '4.12.34'));

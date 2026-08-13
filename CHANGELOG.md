@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+**Release-quality hermeticity patch.** The product bytes are unchanged from 0.4.0; this patch
+aligns the stable-tag quality runner with PR CI by isolating runner-global Git configuration and
+installing the bubblewrap capability required by the release evaluation sandbox.
+
 ## 0.4.0
 
 **Transactional recovery, bounded analysis, and a release boundary that matches the public
