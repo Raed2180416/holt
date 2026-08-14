@@ -185,8 +185,7 @@ export function releaseContractProblems(input) {
     'npm run action:check',
     'bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"',
     FEATURE_PROOF_COMMAND,
-    'npm test',
-    'npm run test:mutation',
+    'node scripts/run-feature-proof.mjs --verify-publication "$RUNNER_TEMP/feature-proof.json"',
     'npm run typecheck',
     'npm run hosts:check',
     'npm run lint:paths',
@@ -199,6 +198,11 @@ export function releaseContractProblems(input) {
   ];
   for (const command of qualityCommands) {
     if (!runsCommand(quality, command)) add('quality', `quality job does not execute: ${command}`);
+  }
+  const duplicateProofReruns = ['npm test', 'npm run test:mutation']
+    .filter((command) => runsCommand(quality, command));
+  if (duplicateProofReruns.length) {
+    add('feature-proof-budget', `release quality must consume retained feature-proof evidence instead of rerunning ${duplicateProofReruns.join(' and ')}`);
   }
   const featureProofRun = quality.indexOf(`run: ${FEATURE_PROOF_COMMAND}`);
   const featureProofUpload = quality.indexOf('uses: actions/upload-artifact@');
@@ -375,7 +379,13 @@ export async function selfTest() {
     ['action distribution path changed', 'action-local', (x) => ({ ...x, action: x.action.replace('dist/holt-action.mjs', 'bin/holt.mjs') })],
     ['mutable action bootstrap', 'action-mutable-install', (x) => ({ ...x, action: `${x.action}\nsteps:\n  - run: npm install -g github:example/holt#main\n` })],
     ['action reproducibility gate removed', 'quality', (x) => ({ ...x, workflow: x.workflow.replace('npm run action:check', 'echo action-check-removed') })],
-    ['mutation evidence removed', 'quality', (x) => ({ ...x, workflow: x.workflow.replace('npm run test:mutation', 'echo mutation-removed') })],
+    ['retained proof verification removed', 'quality', (x) => ({
+      ...x,
+      workflow: x.workflow.replace(
+        'node scripts/run-feature-proof.mjs --verify-publication "$RUNNER_TEMP/feature-proof.json"',
+        'echo publication-proof-removed',
+      ),
+    })],
     ['feature proof removed', 'feature-proof', (x) => ({ ...x, workflow: x.workflow.replace(FEATURE_PROOF_COMMAND, 'echo feature-proof-removed') })],
     ['feature proof retained only on success', 'feature-proof', (x) => ({ ...x, workflow: x.workflow.replace('        if: ${{ always() }}', '        if: ${{ success() }}') })],
     ['omit-optional absence check removed', 'omit-optional', (x) => ({ ...x, workflow: x.workflow.replace(`NODE_PATH= ${OMIT_OPTIONAL_PROOF}`, 'echo optional-absence-not-checked') })],

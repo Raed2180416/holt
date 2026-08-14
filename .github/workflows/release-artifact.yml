@@ -184,10 +184,11 @@ jobs:
           path: |
             ${{ runner.temp }}/feature-proof.json
             ${{ runner.temp }}/feature-proof.json.sha256
-      - name: complete test suite
-        run: npm test
-      - name: mutation suite, with anchor drift counted as failure
-        run: npm run test:mutation
+      - name: public claims match the retained proof denominators
+        # complete-test-corpus and mutation-fingerprint already ran inside the retained proof.
+        # Verify its write-once checksum and exact denominators instead of rerunning those two
+        # 70-minute-plus suites and timing out before signing can begin.
+        run: node scripts/run-feature-proof.mjs --verify-publication "$RUNNER_TEMP/feature-proof.json"
       - name: type safety ratchet
         run: npm run typecheck
       - name: generated host documentation is current

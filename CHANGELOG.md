@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.4
+
+**Release proof reuse.** Stable-tag quality now verifies the checksum-bound complete proof and its
+public denominators instead of rerunning the same 168-mutation and full-corpus suites after the
+proof has passed. This keeps the release gate fail-closed while preventing a proven timeout; it
+does not claim customer adoption, productivity gains, universal host enforcement, or a commercial
+service.
+
 ## 0.4.3
 
 **Complete stable-tag proof denominator.** The release-quality lane now installs the pinned
