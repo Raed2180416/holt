@@ -154,6 +154,7 @@ test('prior false-green: action executes one committed bundle and cannot install
 
 test('prior false-green: every release quality command is executable, not optional evidence', async () => {
   const commands = [
+    'npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1',
     'npm audit --omit=dev --audit-level=moderate',
     'npm run action:check',
     'bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"',

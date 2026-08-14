@@ -1,12 +1,12 @@
 {
   "name": "holt",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "holt",
-      "version": "0.4.2",
+      "version": "0.4.3",
       "license": "SEE LICENSE IN LICENSE-NOTICE.md",
       "dependencies": {
         "@modelcontextprotocol/sdk": "1.30.0",
