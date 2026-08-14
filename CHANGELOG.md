@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.3
+
+**Complete stable-tag proof denominator.** The release-quality lane now installs the pinned
+browser-proof dependency used by the complete TUI/graph corpus, so a missing local capability is
+not mistaken for a complete release proof. This is a release-process correction; it does not
+claim customer adoption, productivity gains, universal host enforcement, or a commercial service.
+
 ## 0.4.2
 
 **Stable release proof runner repair.** The product bytes remain unchanged from 0.4.1; the

@@ -180,6 +180,7 @@ export function releaseContractProblems(input) {
 
   const qualityCommands = [
     'npm ci',
+    'npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1',
     'npm audit --omit=dev --audit-level=moderate',
     'npm run action:check',
     'bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"',

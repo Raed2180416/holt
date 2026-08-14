@@ -161,6 +161,11 @@ jobs:
 
       - name: install the reviewed dependency tree
         run: npm ci
+      - name: install browser proof dependency (no browser download)
+        # The complete feature denominator includes the installed TUI/graph proof. Keep the
+        # browser package in the reviewed quality lane as PR CI does; otherwise that test
+        # truthfully skips and the release is ineligible despite the rest of the corpus passing.
+        run: npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1
       - name: no known shipped dependency advisory
         run: npm audit --omit=dev --audit-level=moderate
       - name: committed dependency-complete GitHub Action is reproducible
