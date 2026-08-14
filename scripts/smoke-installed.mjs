@@ -61,6 +61,11 @@ async function main() {
   await git(['config', 'user.email', 'smoke@holt.invalid'], repo);
   await git(['config', 'user.name', 'holt smoke'], repo);
   await git(['config', 'commit.gpgsign', 'false'], repo);
+  // The installed-artifact proof must be independent of a host's global Git line-ending
+  // policy. With core.autocrlf=true, Windows can check the two committed LF fixtures out as
+  // CRLF and report both as modified in the deliberately empty worktree, turning the negative
+  // control into false unique work. Keep the fixture's bytes stable on every runner.
+  await git(['config', 'core.autocrlf', 'false'], repo);
   await fs.writeFile(path.join(repo, 'README.md'), '# smoke\n');
   await fs.writeFile(path.join(repo, 'base.mjs'), 'export function baseline() { return 1; }\n');
   await git(['add', '-A'], repo);
