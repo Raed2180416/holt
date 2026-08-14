@@ -159,8 +159,7 @@ test('prior false-green: every release quality command is executable, not option
     'npm run action:check',
     'bash scripts/clone-fixtures.sh "$HOLT_REAL_REPOS"',
     'node scripts/run-feature-proof.mjs --out "$RUNNER_TEMP/feature-proof.json"',
-    'npm test',
-    'npm run test:mutation',
+    'node scripts/run-feature-proof.mjs --verify-publication "$RUNNER_TEMP/feature-proof.json"',
     'npm run typecheck',
     'npm run hosts:check',
     'npm run lint:paths',
@@ -175,6 +174,18 @@ test('prior false-green: every release quality command is executable, not option
     x.workflow = x.workflow.replace(command, `echo removed-${commands.indexOf(command)}`);
     expectRule(x, 'quality', `removing ${command}`);
   }
+});
+
+test('release quality reuses the retained proof instead of rerunning its expensive denominators', async () => {
+  const actualWorkflow = (await actual()).workflow;
+  assert.doesNotMatch(actualWorkflow, /^\s*run:\s*npm test\s*$/m);
+  assert.doesNotMatch(actualWorkflow, /^\s*run:\s*npm run test:mutation\s*$/m);
+  const duplicate = await actual();
+  duplicate.workflow = duplicate.workflow.replace(
+    'node scripts/run-feature-proof.mjs --verify-publication "$RUNNER_TEMP/feature-proof.json"',
+    'node scripts/run-feature-proof.mjs --verify-publication "$RUNNER_TEMP/feature-proof.json"\n      - name: accidental duplicate corpus\n        run: npm run test:mutation',
+  );
+  expectRule(duplicate, 'feature-proof-budget', 'restoring a redundant post-proof mutation rerun');
 });
 
 test('release evidence: feature proof is mandatory and retained even when the completed proof is invalid', async () => {
