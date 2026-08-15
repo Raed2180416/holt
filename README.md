@@ -31,8 +31,8 @@ enables it. scripts/milestone.mjs is report-only unless a maintainer deliberatel
 </div>
 HOLT:SOCIAL-PROOF:END -->
 
-> **Current status:** The latest published artifact is v0.3.1. This source checkout contains later,
-> unreleased work and must not be treated as the published package until its release gates pass.
+> **Current status:** The latest published artifact is v0.4.5. Verify the exact GitHub release
+> artifact and checksums; this source checkout may contain later, unreleased work.
 > Team and Enterprise are not being sold or activated in this launch.
 
 ## The short version
