@@ -1,6 +1,6 @@
 {
   "name": "holt",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "mcpName": "io.github.raed2180416/holt",
   "description": "Coordinate, preserve, and safely clean parallel coding-agent worktrees from one evidence model.",
   "type": "module",

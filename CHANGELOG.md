@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.5
+
+**Cross-platform installed proof.** The installed-artifact smoke fixture now pins its repository
+line-ending policy, so Windows host-global Git settings cannot turn the empty-worktree negative
+control into false unique work. This release also carries the retained-proof release gate from
+0.4.4. It does not claim customer adoption, productivity gains, universal host enforcement, or a
+commercial service.
+
 ## 0.4.4
 
 **Release proof reuse.** Stable-tag quality now verifies the checksum-bound complete proof and its
