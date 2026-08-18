@@ -33,7 +33,7 @@
     "tuf-js": "6.0.0"
   },
   "optionalDependencies": {
-    "jscpd": "5.0.14"
+    "jscpd": "5.0.15"
   },
   "devDependencies": {
     "@tufjs/repo-mock": "5.0.0",
