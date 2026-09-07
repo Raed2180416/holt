@@ -76,6 +76,46 @@ test('Codex apply_patch delete reaches fresh file evidence while Update File rem
       'ordinary patch updates must preserve Codex native permission handling without a scan prompt');
   });
 
+test('Codex broad matcher asks on an uncontracted MCP tool and enforces an exact configured contract',
+  async (t) => {
+    const fx = await newRepo('codex-tool-contract-hook');
+    t.after(() => fx.cleanup());
+    const only = await fx.write('mcp-only.txt', 'the only MCP copy\n');
+    const payload = {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'mcp__filesystem__delete_file',
+      tool_input: { path: only },
+      cwd: fx.root,
+    };
+
+    const unknown = await driveHook('codex', payload, fx.root);
+    assert.equal(unknown.code, 2, `${unknown.stdout}${unknown.stderr}`);
+    const unknownDecision = JSON.parse(unknown.stdout).hookSpecificOutput;
+    assert.equal(unknownDecision.permissionDecision, 'deny',
+      'Codex has no native ask decision; Holt must fail closed rather than emit an unsupported ask');
+    assert.match(unknownDecision.permissionDecisionReason, /no exact Holt tool contract/i);
+    assert.equal(await fs.readFile(only, 'utf8'), 'the only MCP copy\n');
+
+    await fx.write('.holtrc.json', JSON.stringify({ toolContracts: [{
+      host: 'codex', tool: 'mcp__filesystem__delete_file', pathField: 'path',
+      role: 'delete', kind: 'filesystem delete',
+    }] }));
+    const contracted = await driveHook('codex', payload, fx.root);
+    assert.equal(contracted.code, 2, `${contracted.stdout}${contracted.stderr}`);
+    const denied = JSON.parse(contracted.stdout).hookSpecificOutput;
+    assert.equal(denied.permissionDecision, 'deny');
+    assert.match(denied.permissionDecisionReason, /mcp-only\.txt/);
+    assert.equal(await fs.readFile(only, 'utf8'), 'the only MCP copy\n');
+
+    await fx.write('.holtrc.json', JSON.stringify({ unknownToolPolicy: 'audit' }));
+    const audited = await driveHook('codex', {
+      ...payload,
+      tool_name: 'mcp__filesystem__read_file',
+    }, fx.root);
+    assert.equal(audited.code, 0, `${audited.stdout}${audited.stderr}`);
+    assert.match(JSON.parse(audited.stdout).systemMessage, /unknownToolPolicy="audit"/);
+  });
+
 test('Claude Write and whole-file Edit ask with evidence; new writes and incremental Edit stay silent',
   async (t) => {
     const fx = await newRepo('claude-native-hook');

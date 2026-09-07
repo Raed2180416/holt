@@ -44,7 +44,7 @@ test('current host hook schemas use each product\'s documented project contract'
   assert.match(cursor.hooks.stop[0].command, /hook stop --host cursor$/);
 
   const codex = codexHooks('holt');
-  assert.equal(codex.hooks.PreToolUse[0].matcher, 'Bash|apply_patch');
+  assert.equal(codex.hooks.PreToolUse[0].matcher, 'Bash|apply_patch|.*');
   assert.match(codex.hooks.PreToolUse[0].hooks[0].command, /--host codex$/);
   assert.equal(codex.hooks.SessionStart[0].matcher, 'startup|resume|clear|compact');
   assert.match(codex.hooks.SessionStart[0].hooks[0].command,
@@ -294,7 +294,7 @@ test('shared hook upgrades repair the full matcher/action contract, not command 
   await installCodexHooks(dir, { bin: 'holt' });
   const cfg = JSON.parse(await fs.readFile(file, 'utf8'));
   const entries = cfg.hooks.PreToolUse;
-  assert.ok(entries.some((entry) => entry.matcher === 'Bash|apply_patch'
+  assert.ok(entries.some((entry) => entry.matcher === 'Bash|apply_patch|.*'
     && entry.hooks?.some((hook) => hook.command === 'holt hook pre-tool-use --host codex')),
   'the canonical Bash + apply_patch matcher must be installed even when the same command text existed elsewhere');
   assert.ok(entries.some((entry) => entry.matcher === 'Write'
@@ -351,7 +351,7 @@ test('current payload envelopes reach a refusal instead of the missing-command a
   }
 });
 
-test('a recognised shell hook with a missing command fails closed while non-shell tools stay silent', async (t) => {
+test('a recognised shell hook and an uncontracted Codex tool both fail closed', async (t) => {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-hook-missing-command-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
 
@@ -366,6 +366,8 @@ test('a recognised shell hook with a missing command fails closed while non-shel
   assert.equal(JSON.parse(cline.stdout).cancel, true);
 
   const read = await driveHook('codex', { tool_name: 'Read', tool_input: {}, cwd: dir }, dir);
-  assert.equal(read.code, 0, `non-shell tools need no command field: ${read.stderr}`);
-  assert.deepEqual(JSON.parse(read.stdout), {});
+  assert.equal(read.code, 2, `an uncontracted structured tool cannot become an allow: ${read.stderr}`);
+  assert.equal(JSON.parse(read.stdout).hookSpecificOutput.permissionDecision, 'deny');
+  assert.match(JSON.parse(read.stdout).hookSpecificOutput.permissionDecisionReason,
+    /no exact Holt tool contract/i);
 });

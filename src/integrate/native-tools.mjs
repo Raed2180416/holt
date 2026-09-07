@@ -11,7 +11,7 @@
  *
  * MCP and arbitrary local-function arguments are tool-specific in both hosts' hook contracts.
  * A field called `path` is not proof that a server removes a local repository path, so those calls
- * stay outside this parser until their exact tool contract is wired explicitly.
+ * stay outside this parser unless an exact project `toolContracts` entry wires the schema explicitly.
  */
 
 /** @typedef {{path:string, role:'delete'|'overwrite'|'move-src', kind:string,
@@ -21,6 +21,93 @@
 function documentedPath(value) {
   return typeof value === 'string' && value.length > 0 && !value.includes('\0')
     && !value.includes('\n') && !value.includes('\r');
+}
+
+/** Read one explicitly configured dotted field without interpreting arbitrary input as a path. */
+function contractField(input, field) {
+  if (typeof field !== 'string' || field.length === 0) return undefined;
+  let value = input;
+  for (const segment of field.split('.')) {
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(segment)
+      || !value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    value = value[segment];
+  }
+  return value;
+}
+
+/**
+ * Translate a user-declared exact host/tool contract. Exact identity is intentional: regexes,
+ * suffixes, and "any tool with a path field" would recreate the authority gap this registry closes.
+ *
+ * @param {{host:string, toolName:unknown, toolInput:unknown, toolContracts?:unknown[]}} event
+ * @param {Record<string, any>|null} input
+ * @returns {{matched:boolean, operations:ExplicitFileOperation[], issue:string|null}}
+ */
+function configuredToolContract(event, input) {
+  const contracts = Array.isArray(event.toolContracts) ? event.toolContracts : [];
+  /** @type {Record<string, any>|undefined} */
+  const contract = /** @type {Record<string, any>|undefined} */ (contracts.find((candidate) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false;
+    const row = /** @type {Record<string, any>} */ (candidate);
+    return row.host === event.host && row.tool === event.toolName;
+  }));
+  if (!contract) return { matched: false, operations: [], issue: null };
+
+  const role = contract.role;
+  const kind = typeof contract.kind === 'string' && contract.kind.length > 0
+    ? contract.kind
+    : `${event.host} ${String(event.toolName)} ${String(role ?? 'structured operation')}`;
+  if (role === 'ignore') return { matched: true, operations: [], issue: null };
+
+  const source = contractField(input, contract.pathField);
+  if (!documentedPath(source)) {
+    return {
+      matched: true,
+      operations: [],
+      issue: `the configured ${event.host}/${String(event.toolName)} contract could not read its exact pathField ${JSON.stringify(contract.pathField)}.`,
+    };
+  }
+  const promptOnRisk = typeof contract.promptOnRisk === 'boolean'
+    ? contract.promptOnRisk
+    : role === 'overwrite' || role === 'move';
+  if (role === 'delete' || role === 'overwrite') {
+    return {
+      matched: true,
+      operations: [{
+        path: source,
+        role,
+        kind,
+        ...(promptOnRisk ? { promptOnRisk } : {}),
+      }],
+      issue: null,
+    };
+  }
+  if (role === 'move') {
+    const destination = contractField(input, contract.destField);
+    if (!documentedPath(destination)) {
+      return {
+        matched: true,
+        operations: [],
+        issue: `the configured ${event.host}/${String(event.toolName)} contract could not read its exact destField ${JSON.stringify(contract.destField)}.`,
+      };
+    }
+    return {
+      matched: true,
+      operations: [
+        { path: source, dest: destination, role: 'move-src', kind },
+        {
+          path: destination,
+          role: 'overwrite',
+          kind: `${kind} destination overwrite`,
+          ...(promptOnRisk ? { promptOnRisk } : {}),
+        },
+      ],
+      issue: null,
+    };
+  }
+  // Config validation rejects this, but direct callers still receive uncertainty rather than an
+  // accidental allow if they bypass the loader.
+  return { matched: true, operations: [], issue: `unsupported configured tool-contract role ${JSON.stringify(role)}.` };
 }
 
 /**
@@ -126,7 +213,8 @@ export function codexApplyPatchOperations(command) {
  * `editWholeFile` is measured by the caller from the current file bytes; false means an ordinary
  * incremental Edit and therefore deliberately produces no operation.
  *
- * @param {{host:string, toolName:unknown, toolInput:unknown, editWholeFile?:boolean|'unknown'}} event
+ * @param {{host:string, toolName:unknown, toolInput:unknown, editWholeFile?:boolean|'unknown',
+ *   toolContracts?:unknown[]}} event
  * @returns {{handled:boolean, operations:ExplicitFileOperation[], issue:string|null}}
  */
 export function documentedNativeTool(event) {
@@ -134,6 +222,15 @@ export function documentedNativeTool(event) {
   const input = event.toolInput && typeof event.toolInput === 'object' && !Array.isArray(event.toolInput)
     ? /** @type {Record<string, any>} */ (event.toolInput)
     : null;
+
+  const configured = configuredToolContract(event, input);
+  if (configured.matched) {
+    return {
+      handled: true,
+      operations: configured.operations,
+      issue: configured.issue,
+    };
+  }
 
   if (event.host === 'codex' && event.toolName === 'apply_patch') {
     const parsed = codexApplyPatchOperations(input?.command);

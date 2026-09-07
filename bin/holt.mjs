@@ -270,7 +270,8 @@ OPTIONS
   --recovery-mode <complete|quarantine> --lock-token <token> --orphan <name>  explicit recovery inputs
 
 CONFIG (optional — see README.md#configuration)
-  .holtrc.json        in the repository root: familyOverrides, guardAllow, maintenanceFloor, maintenanceRatio
+  .holtrc.json        in the repository root: familyOverrides, guardAllow, maintenanceFloor,
+                      maintenanceRatio, toolContracts, unknownToolPolicy
                       absent is fine; present-and-invalid is a hard error (exit 2), never silent
 
   guardAllow          THE HUMAN ESCAPE HATCH for the guard. Each entry is a regex that must match
@@ -288,6 +289,13 @@ CONFIG (optional — see README.md#configuration)
                       past a refusal holt should not have made, add a bounded guardAllow entry
                       (see above); that path is reviewed and journalled, which is why it is the one
                       that exists.
+
+  toolContracts       exact host/tool declarations for structured local or MCP tools. Each entry
+                      names {host, tool, role} and, for delete/overwrite/move, a pathField (plus
+                      destField for move); ignore is only for a reviewed read-only tool. Codex
+                      asks on an uncontracted structured tool by default, so unknown mutation
+                      cannot silently proceed. unknownToolPolicy: "audit" is a deliberate,
+                      journalled fail-open choice and must be reviewed by a human.
 
 QUICK START
   holt setup                     # first run: install backends, wire agents, show what's at risk
@@ -1499,12 +1507,11 @@ async function cmdHook(opts) {
     hookCommandInFlight = command;
     hookCwdInFlight = cwd;
 
-    // Shell commands remain the broad guard. Three structured file-tool contracts are also precise
-    // enough to assess without guessing: Codex apply_patch, Claude Write/Edit, and Qwen Code
-    // write_file/edit. Arbitrary local
-    // functions and MCP arguments stay outside this branch because both hosts explicitly make
-    // those schemas tool-specific; a field that happens to be called `path` is not destructive
-    // authority over a local repository.
+    // Shell commands remain the broad guard. Three host-native structured file-tool contracts are
+    // precise enough to assess without guessing: Codex apply_patch, Claude Write/Edit, and Qwen
+    // Code write_file/edit. Exact project-declared contracts extend that same evidence gate to a
+    // reviewed MCP/local-function schema; uncontracted Codex tools are handled below as uncertainty,
+    // never as a silent allow.
     const shellish = !toolName
       || /^(Bash|Shell|Terminal|run_command|run_commands|run_shell_command|execute|execute_command|exec|developer__shell)$/i.test(toolName);
     let verdict;
@@ -1527,7 +1534,12 @@ async function cmdHook(opts) {
         verdict = internalErrorVerdict(command, error, { failOpen: process.env.HOLT_HOOK_FAIL_OPEN === '1' });
       }
     } else {
-      const exactToolInput = payload.tool_input;
+      const exactToolInput = payload.tool_input
+        ?? payload.toolInput
+        ?? payload.toolArgs
+        ?? payload.tool_call?.input
+        ?? payload.input
+        ?? null;
       const exactEdit = (opts.host === 'claude-code' && toolName === 'Edit')
         || (opts.host === 'qwen-code' && toolName === 'edit');
       const editWholeFile = exactEdit
@@ -1538,18 +1550,57 @@ async function cmdHook(opts) {
         toolName,
         toolInput: exactToolInput,
         editWholeFile,
+        toolContracts: opts.toolContracts,
       });
       if (!native.handled) {
-        if (opts.host !== 'claude-code') {
+        // Codex's broad PreToolUse matcher is only useful if an unknown local/MCP tool cannot
+        // silently become an allow. There is no honest way to infer a path field from arbitrary
+        // JSON, so the default is an ask. A human may deliberately choose `unknownToolPolicy:
+        // "audit"` for a repository whose non-file tools are known to be safe; that path stays
+        // visible and journalled instead of pretending to have checked the operation.
+        if (opts.host === 'codex') {
+          const policy = opts.unknownToolPolicy ?? 'ask';
+          operationText = `${toolName ?? 'structured tool'} (no exact Holt tool contract)`;
+          hookCommandInFlight = operationText;
+          const reason = `holt received ${toolName ?? 'a structured tool'} but has no exact Holt tool contract for it. `
+            + 'It could not verify whether the call mutates repository state. Add a reviewed '
+            + 'toolContracts entry or confirm this operation manually before proceeding.';
+          if (policy === 'audit') {
+            await appendEvent(cwd, {
+              action: 'unverified-tool', command: String(operationText).slice(0, 200),
+              reason, kind: 'uncontracted structured tool', targets: [], tool: toolName ?? null,
+            }, { actor }).catch(() => {});
+            const audited = {
+              decision: 'allow',
+              reason: null,
+              systemMessage: `${reason} Allowed because .holtrc.json sets unknownToolPolicy=\"audit\".`,
+            };
+            emitHookVerdict(audited, opts, { command: operationText, cwd });
+            return;
+          }
+          verdict = {
+            decision: 'ask',
+            kind: 'uncontracted structured tool',
+            targets: [],
+            files: [],
+            reason,
+          };
+        } else if (opts.host !== 'claude-code') {
           out(JSON.stringify(formatVerdict({ decision: 'allow', reason: null }, { host: opts.host })));
+          return;
+        } else {
+          // Claude's generated matcher names only its documented structured tools. If a caller
+          // invokes this CLI directly with another name, preserve the host's native handling.
+          return;
         }
-        return;
       }
-      operationText = native.operations.length
-        ? `${toolName}: ${native.operations.map((op) => `${op.role} ${op.path}`).join(', ')}`
-        : String(toolName ?? 'structured file tool');
-      hookCommandInFlight = operationText;
-      if (native.issue) {
+      if (native.handled) {
+        operationText = native.operations.length
+          ? `${toolName}: ${native.operations.map((op) => `${op.role} ${op.path}`).join(', ')}`
+          : String(toolName ?? 'structured file tool');
+        hookCommandInFlight = operationText;
+      }
+      if (native.handled && native.issue) {
         verdict = {
           decision: 'ask',
           kind: `${toolName ?? 'structured tool'} payload`,
@@ -1558,14 +1609,14 @@ async function cmdHook(opts) {
           reason: `holt could not verify this structured file operation: ${native.issue} `
             + 'Confirm the exact target and operation before proceeding.',
         };
-      } else if (native.operations.length === 0) {
+      } else if (native.handled && native.operations.length === 0) {
         // Codex Add/Update and a Claude Edit that preserves untouched file content are ordinary
         // edits. Silence is the feature here: they do not pay for a repository scan or prompt.
         if (opts.host !== 'claude-code') {
           out(JSON.stringify(formatVerdict({ decision: 'allow', reason: null }, { host: opts.host })));
         }
         return;
-      } else {
+      } else if (native.handled) {
         try {
           verdict = await assessExplicitFileOperations(native.operations, cwd);
         } catch (error) {
@@ -2442,7 +2493,8 @@ async function main() {
   // will never have one. But a file that EXISTS and fails to parse or validate must fail LOUDLY,
   // here, before any command runs — never fall back to defaults while pretending the config the
   // user wrote is in effect. Every command below gets whatever it declares (familyOverrides,
-  // maintenanceFloor, maintenanceRatio) folded into `opts`, which every command already receives.
+  // maintenanceFloor, maintenanceRatio, and exact structured-tool contracts) folded into `opts`,
+  // which every command already receives.
   //
   // EXCEPTION: safety-critical commands (hook, gate, rescue, doctor, context) must NEVER die on
   // a config error. The guard dying because of a typo in .holtrc.json is a self-inflicted wound
@@ -2457,6 +2509,8 @@ async function main() {
     if (cfg.config.guardAllow !== undefined) opts.guardAllow = cfg.config.guardAllow;
     if (cfg.config.maintenanceFloor !== undefined) opts.maintenanceFloor = cfg.config.maintenanceFloor;
     if (cfg.config.maintenanceRatio !== undefined) opts.maintenanceRatio = cfg.config.maintenanceRatio;
+    if (cfg.config.toolContracts !== undefined) opts.toolContracts = cfg.config.toolContracts;
+    if (cfg.config.unknownToolPolicy !== undefined) opts.unknownToolPolicy = cfg.config.unknownToolPolicy;
     // Surface warnings (unknown keys) to stderr — loud but non-fatal.
     for (const w of cfg.warnings) {
       process.stderr.write(paint('yellow', `holt: ${w.message}\n`));

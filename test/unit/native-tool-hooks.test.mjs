@@ -129,3 +129,77 @@ test('arbitrary local-function and MCP inputs are not reinterpreted as filesyste
     assert.deepEqual(parsed.operations, []);
   }
 });
+
+test('explicit tool contracts map exact MCP fields and never widen to a similar tool', () => {
+  const contract = {
+    host: 'codex',
+    tool: 'mcp__filesystem__delete_file',
+    pathField: 'path',
+    role: 'delete',
+    kind: 'filesystem delete',
+  };
+  const parsed = documentedNativeTool({
+    host: 'codex',
+    toolName: contract.tool,
+    toolInput: { path: '/repo/only.txt' },
+    toolContracts: [contract],
+  });
+  assert.equal(parsed.handled, true);
+  assert.equal(parsed.issue, null);
+  assert.deepEqual(parsed.operations, [{
+    path: '/repo/only.txt', role: 'delete', kind: 'filesystem delete',
+  }]);
+
+  const similar = documentedNativeTool({
+    host: 'codex',
+    toolName: 'mcp__filesystem__delete_directory',
+    toolInput: { path: '/repo/only.txt' },
+    toolContracts: [contract],
+  });
+  assert.equal(similar.handled, false,
+    'a contract for one exact MCP tool must not become a regex or suffix authority');
+});
+
+test('explicit tool contracts support read-only declarations and fail closed on missing fields', () => {
+  const observe = documentedNativeTool({
+    host: 'codex',
+    toolName: 'mcp__filesystem__read_file',
+    toolInput: { path: '/repo/only.txt' },
+    toolContracts: [{
+      host: 'codex', tool: 'mcp__filesystem__read_file', role: 'ignore', kind: 'filesystem read',
+    }],
+  });
+  assert.deepEqual(observe, { handled: true, operations: [], issue: null });
+
+  const missing = documentedNativeTool({
+    host: 'codex',
+    toolName: 'mcp__filesystem__delete_file',
+    toolInput: { filename: '/repo/only.txt' },
+    toolContracts: [{
+      host: 'codex', tool: 'mcp__filesystem__delete_file', pathField: 'path',
+      role: 'delete', kind: 'filesystem delete',
+    }],
+  });
+  assert.equal(missing.handled, true);
+  assert.deepEqual(missing.operations, []);
+  assert.match(missing.issue, /path/);
+});
+
+test('explicit move contracts read dotted source/destination fields and preserve destination evidence', () => {
+  const parsed = documentedNativeTool({
+    host: 'codex',
+    toolName: 'mcp__filesystem__move',
+    toolInput: { source: { path: '/repo/old.txt' }, destination: { path: '/repo/new.txt' } },
+    toolContracts: [{
+      host: 'codex', tool: 'mcp__filesystem__move', pathField: 'source.path',
+      destField: 'destination.path', role: 'move', kind: 'filesystem move',
+    }],
+  });
+  assert.equal(parsed.issue, null);
+  assert.deepEqual(parsed.operations.map(({ role, path, dest, promptOnRisk }) => (
+    { role, path, dest, promptOnRisk }
+  )), [
+    { role: 'move-src', path: '/repo/old.txt', dest: '/repo/new.txt', promptOnRisk: undefined },
+    { role: 'overwrite', path: '/repo/new.txt', dest: undefined, promptOnRisk: true },
+  ]);
+});

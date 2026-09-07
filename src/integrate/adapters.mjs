@@ -1217,11 +1217,11 @@ export function codexHooks(bin = 'holt') {
       PreToolUse: [
         {
           // Codex's current hook contract names apply_patch as a canonical PreToolUse path and
-          // passes its patch DSL in tool_input.command. That exact grammar lets Holt measure Delete
-          // File and rename-destination replacement without putting ordinary Update File hunks in
-          // the expensive scan path. Other local functions and MCP inputs are tool-specific and
-          // deliberately remain unclaimed.
-          matcher: 'Bash|apply_patch',
+          // passes its patch DSL in tool_input.command. The broad matcher is deliberate: Codex
+          // also routes MCP and other local function tools through PreToolUse, and a narrow matcher
+          // made those calls silently bypass Holt. cmdHook asks for an exact configured contract
+          // before allowing any non-shell tool; ordinary Update File hunks still stay cheap.
+          matcher: 'Bash|apply_patch|.*',
           hooks: [
             { type: 'command', command: `${bin} hook pre-tool-use --host codex`, timeout: 120 },
           ],
