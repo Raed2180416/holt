@@ -75,6 +75,45 @@ test('config: valid guardAllow patterns are parsed and returned', async (t) => {
   assert.deepEqual(r.config.guardAllow, ['^git status$', '^rm -rf /tmp/']);
 });
 
+test('config: exact tool contracts and unknown-tool policy are parsed', async (t) => {
+  const fx = await newRepo('config-tool-contracts');
+  t.after(() => fx.cleanup());
+  await fx.write(CONFIG_FILENAME, JSON.stringify({
+    unknownToolPolicy: 'ask',
+    toolContracts: [{
+      host: 'codex', tool: 'mcp__filesystem__delete_file', pathField: 'path',
+      role: 'delete', kind: 'filesystem delete',
+    }, {
+      host: 'codex', tool: 'mcp__filesystem__read_file', role: 'ignore', kind: 'filesystem read',
+    }],
+  }));
+
+  const r = await loadConfig(fx.root);
+  assert.equal(r.config.unknownToolPolicy, 'ask');
+  assert.deepEqual(r.config.toolContracts, [{
+    host: 'codex', tool: 'mcp__filesystem__delete_file', pathField: 'path',
+    role: 'delete', kind: 'filesystem delete',
+  }, {
+    host: 'codex', tool: 'mcp__filesystem__read_file', role: 'ignore', kind: 'filesystem read',
+  }]);
+});
+
+test('config: tool contracts reject ambiguous or unsafe declarations', async (t) => {
+  const fx = await newRepo('config-bad-tool-contracts');
+  t.after(() => fx.cleanup());
+  for (const value of [
+    [{ host: 'codex', tool: 'mcp__filesystem__delete_file', role: 'delete' }],
+    [{ host: 'codex', tool: 'mcp__filesystem__delete_file', pathField: 'path', role: 'regex:.*' }],
+    [{ host: 'codex', tool: 'mcp__filesystem__delete_file', pathField: 'input[0].path', role: 'delete' }],
+    [{ host: 'codex', tool: 'mcp__filesystem__delete_file', pathField: 'path', role: 'delete' },
+      { host: 'codex', tool: 'mcp__filesystem__delete_file', pathField: 'path', role: 'delete' }],
+    [{ host: 'codex', tool: 'apply_patch', role: 'ignore' }],
+  ]) {
+    await fx.write(CONFIG_FILENAME, JSON.stringify({ toolContracts: value }));
+    await assert.rejects(() => loadConfig(fx.root), ConfigError);
+  }
+});
+
 test('config: guardAllow must be an array of valid regex strings', async (t) => {
   const fx = await newRepo('config-bad-guard-allow');
   t.after(() => fx.cleanup());
