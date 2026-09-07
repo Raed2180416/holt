@@ -1,6 +1,6 @@
 {
   "name": "holt",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "mcpName": "io.github.raed2180416/holt",
   "description": "Coordinate, preserve, and safely clean parallel coding-agent worktrees from one evidence model.",
   "type": "module",
@@ -42,8 +42,9 @@
     "typescript": "^7.0.2"
   },
   "overrides": {
-    "fast-uri": "3.1.5",
-    "hono": "4.12.34"
+    "fast-uri": "3.1.7",
+    "hono": "4.12.34",
+    "qs": "6.16.0"
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.mjs\"",

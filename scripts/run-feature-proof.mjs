@@ -46,8 +46,8 @@ const EVIDENCE_ENV_OVERRIDES = Object.freeze({
 export const CLI_COMMANDS = [
   'status', 'risk', 'collisions', 'hotspots', 'duplicates', 'context', 'plan', 'impact',
   'order', 'partition', 'branches', 'journal', 'forensics', 'fleet', 'license', 'managed-policy', 'ci', 'graph',
-  'stash', 'gate', 'tui', 'setup', 'doctor', 'audit', 'auto', 'protect', 'unprotect', 'rescue',
-  'rescued', 'clean', 'quarantines', 'restore', 'purge', 'discard', 'verify', 'hosts', 'providers',
+  'stash', 'gate', 'tui', 'setup', 'doctor', 'base', 'audit', 'auto', 'protect', 'unprotect', 'rescue',
+  'rescued', 'clean', 'quarantines', 'restore', 'purge', 'discard', 'recover-discard', 'verify', 'hosts', 'providers',
   'integrate', 'uninstall', 'brief', 'mcp', 'hook',
 ];
 
@@ -134,7 +134,7 @@ export const FEATURES = [
   {
     id: 'bounded-analysis-and-honest-degradation', area: 'core-analysis',
     interfaces: ['contract:analysis-bounds', 'option:--limit', 'option:--no-symbols'],
-    tests: [T('test/e2e/no-symbols.test.mjs', '--no-symbols: safety decisions and Git-proven conflicts equal a full scan while symbol findings are explicitly absent'), T('test/e2e/no-symbols.test.mjs', '--no-symbols: a fresh CLI scan bypasses the planted symbol backend; the positive control reaches it'), T('test/e2e/break-it.test.mjs', 'ATTACK: a file too large to tag reads as "no symbols" instead of "not measured"'), T('test/e2e/stash-evidence.test.mjs', 'STASH: more than MAX_ENTRIES entries → truncated flag is set and describeStash warns'), T('test/e2e/mcp.test.mjs', 'MCP: every list-returning tool SAYS when it capped the list')],
+    tests: [T('test/e2e/no-symbols.test.mjs', '--no-symbols: safety decisions and Git-proven conflicts equal a full scan while symbol findings are explicitly absent'), T('test/e2e/no-symbols.test.mjs', '--no-symbols: a fresh CLI scan bypasses the planted symbol backend; the positive control reaches it'), T('test/e2e/break-it.test.mjs', 'ATTACK: a file too large to tag reads as "no symbols" instead of "not measured"'), T('test/e2e/break-it.test.mjs', 'ATTACK: ctags output beyond the memory budget is unmeasured, never partially trusted'), T('test/e2e/break-it.test.mjs', 'ATTACK: the ctags tag budget is global across chunks and stops later parser work'), T('test/e2e/break-it.test.mjs', 'ATTACK: the retained symbol budget also bounds the degraded fallback backend'), T('test/e2e/break-it.test.mjs', 'ATTACK: a failed base-symbol batch is named as unmeasured, never absent'), T('test/unit/cat-file-batch.test.mjs', 'catFileBatch: slow consumers are backpressured to a bounded callback count'), T('test/e2e/stash-evidence.test.mjs', 'STASH: more than MAX_ENTRIES entries → truncated flag is set and describeStash warns'), T('test/e2e/mcp.test.mjs', 'MCP: every list-returning tool SAYS when it capped the list')],
     oracle: 'Paired full/file-only scans over planted disposable, at-risk, duplicate, and conflicting work, plus a fresh-process symbol-backend boundary trap and fixtures that cross every named bound.',
     gap: '`--no-symbols` deliberately omits unique-symbol, semantic-overlap, duplicate, and impact evidence; the backend-bypass control proves avoided extraction work, not a universal wall-clock or token saving.',
     evidence: ['no-symbols-contract', 'complete-test-corpus'],
@@ -158,7 +158,7 @@ export const FEATURES = [
   {
     id: 'review-plan', area: 'coordination',
     interfaces: ['cli:plan', 'mcp:holt_landing_plan'],
-    tests: [T('test/e2e/detection.test.mjs', 'P5: the plan drops disposables, collapses duplicates, and orders the rest'), T('test/e2e/detection.test.mjs', 'P5 COLLAPSE: exact fan-out copies collapse only when every copy is durable')],
+    tests: [T('test/e2e/detection.test.mjs', 'P5: the plan drops disposables, collapses duplicates, and orders the rest'), T('test/e2e/detection.test.mjs', 'P5 COLLAPSE: exact fan-out copies collapse only when every copy is durable'), T('test/e2e/detection.test.mjs', 'P5 COLLAPSE: directional redundancy never hides the dirty worktree holding the copy')],
     oracle: 'Known disposable, exact durable duplicate, unique, and entangled workstreams in one fixture.',
     gap: 'The plan is advisory and cannot know product priority or reviewer intent.',
     evidence: ['complete-test-corpus'],
@@ -174,9 +174,9 @@ export const FEATURES = [
   {
     id: 'agent-partition', area: 'coordination',
     interfaces: ['cli:partition', 'mcp:holt_partition'],
-    tests: [T('test/unit/partition.test.mjs', 'partition: buckets are disjoint and cover every top-level segment'), T('test/unit/partition.test.mjs', 'partition: PROPERTY — no two conflicting workstreams land in different buckets')],
+    tests: [T('test/unit/partition.test.mjs', 'partition: buckets are disjoint and cover every top-level segment'), T('test/unit/partition.test.mjs', 'partition: no task context emits no actionable allocation by default'), T('test/unit/partition.test.mjs', 'partition: a giant indivisible conflict component is explicitly not feasible fan-out'), T('test/unit/partition.test.mjs', 'partition: public summaries bound directories and contested files while retaining totals'), T('test/unit/partition.test.mjs', 'partition: PROPERTY — no two conflicting workstreams land in different buckets')],
     oracle: 'Seeded random graphs checked for disjoint coverage, ownership, and conflict co-location.',
-    gap: 'Without explicit task paths/components, Holt returns `insufficient_task_context` and labels the output as an advanced structural view; even an anchored map does not infer a complete task decomposition or developer expertise.',
+    gap: 'Without explicit task paths/components, Holt returns `task-context-required` with no actionable allocation; even an anchored map cannot infer complete task decomposition or expertise.',
     evidence: ['complete-test-corpus'],
   },
   {
@@ -253,9 +253,9 @@ export const FEATURES = [
   },
   {
     id: 'guarded-discard', area: 'actions-recovery',
-    interfaces: ['cli:discard'],
-    tests: [T('test/e2e/actions.test.mjs', 'DISCARD: nested empty directories do not dead-end recoverable cleanup'), T('test/e2e/actions.test.mjs', 'DISCARD: a many-leaf generated tree is captured without exhausting object writers'), T('test/e2e/actions.test.mjs', 'DISCARD: binary content is captured byte-for-byte before removal'), T('test/e2e/actions.test.mjs', 'DISCARD RACE: a same-name replacement created after capture is never erased'), T('test/e2e/actions.test.mjs', 'DISCARD: restoring a tracked executable proves content, type, and executable mode')],
-    oracle: 'Pre-removal ref capture independently compared by bytes/type/mode/path across empty-directory shape, 384 sole-copy leaves, binary data, and post-capture replacement races.',
+    interfaces: ['cli:discard', 'cli:recover-discard', 'mcp:holt_discard'],
+    tests: [T('test/e2e/actions.test.mjs', 'DISCARD: nested empty directories do not dead-end recoverable cleanup'), T('test/e2e/actions.test.mjs', 'DISCARD: a many-leaf generated tree is captured without exhausting object writers'), T('test/e2e/actions.test.mjs', 'DISCARD: binary content is captured byte-for-byte before removal'), T('test/e2e/actions.test.mjs', 'DISCARD RACE: a same-name replacement created after capture is never erased'), T('test/e2e/actions.test.mjs', 'DISCARD TRANSACTION: one capture-identical recreation does not strand every sibling quarantine'), T('test/e2e/actions.test.mjs', 'DISCARD TRANSACTION: a durable interrupted capture is first-class and resumable'), T('test/e2e/actions.test.mjs', 'DISCARD TRANSACTION: a vanished pre-capture quarantine is never reported as rolled back'), T('test/e2e/actions.test.mjs', 'DISCARD TRANSACTION: recovery re-anchors a deleted capture ref to the exact recorded commit'), T('test/e2e/actions.test.mjs', 'DISCARD TRANSACTION: a tampered receipt cannot redirect recovery outside its worktree parent'), T('test/e2e/actions.test.mjs', 'DISCARD: restoring a tracked executable proves content, type, and executable mode'), T('test/e2e/mcp-protocol.test.mjs', 'MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over the wire')],
+    oracle: 'Pre-removal Git read-back plus durable transaction inventory, interruption resume, per-path conflicts, byte/type/mode/path checks, and protocol-level action inspection.',
     gap: 'Platform-specific ACLs and extended attributes are not represented by the Git object model.',
     evidence: ['complete-test-corpus', 'guard-corpus', 'mutation-fingerprint'],
   },
@@ -333,7 +333,7 @@ export const FEATURES = [
   },
   {
     id: 'mcp-action-tools', area: 'agent-integration',
-    interfaces: ['mcp:holt_clean', 'mcp:holt_rescue', 'mcp:holt_protect'],
+    interfaces: ['mcp:holt_clean', 'mcp:holt_discard', 'mcp:holt_rescue', 'mcp:holt_protect'],
     tests: [T('test/e2e/mcp.test.mjs', 'MCP: holt_clean declares the reversible quarantine contract'), T('test/e2e/mcp-protocol.test.mjs', 'MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over the wire')],
     oracle: 'Protocol calls followed by independent Git refs, locks, quarantine paths, and restore-state inspection.',
     gap: 'The host approval policy still decides whether non-read-only MCP calls may execute.',
@@ -530,8 +530,16 @@ export const FEATURES = [
     evidence: ['complete-test-corpus', 'git-runtime', 'host-manifest-sync'],
   },
   {
+    id: 'integration-base-authority', area: 'developer-experience',
+    interfaces: ['cli:base', 'option:--base'],
+    tests: [T('test/e2e/integration-base.test.mjs', 'integration base: explicit repository-local authority beats a stale conventional branch'), T('test/e2e/integration-base.test.mjs', 'integration base CLI: set/status/unset is reachable and rejects an unresolved ref')],
+    oracle: 'A real repository with a deliberately stale main branch and a separate named landing branch, checked through CLI and resolver outputs.',
+    gap: 'Holt cannot infer organizational intent; persisting the wrong but resolvable ref remains an explicit local authority mistake.',
+    evidence: ['complete-test-corpus'],
+  },
+  {
     id: 'machine-output-and-analysis-scope', area: 'developer-experience',
-    interfaces: ['option:--json', 'option:--include-primary', 'option:--all', 'option:--base', 'option:--family-window'],
+    interfaces: ['option:--json', 'option:--include-primary', 'option:--all', 'option:--family-window'],
     tests: [T('test/e2e/cli.test.mjs', 'CLI: --json output is parseable for every command that claims it'), T('test/e2e/cli.test.mjs', 'FIRST RUN: the solo-repo caveat — a dirty, unscanned primary is NAMED beside every all-clear'), T('test/e2e/cli.test.mjs', 'CLI: a numeric flag is parsed and never silently coerced')],
     oracle: 'Subprocess JSON parsing, planted dirty-primary scope controls, and malformed/boundary numeric option cases.',
     gap: 'Parseable JSON is not a versioned schema guarantee for every nested field; consumers must pin a Holt version.',

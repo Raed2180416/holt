@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.6
+
+**Resumable discard, trusted integration-base selection, and bounded large-repository analysis.**
+This safety and performance correction was driven by a real interrupted bulk cleanup. It does not
+claim zero risk, universal repository coverage, customer adoption, or productivity gains.
+
+- `discard` now creates durable private transaction state before moving paths. It finalizes each
+  path independently, retires completed physical quarantines, preserves only unresolved conflicts,
+  adopts an already-correct HEAD destination, and never overwrites a concurrent replacement.
+  `recover-discard` and the `holt_discard` MCP tool list or resume interrupted operations without
+  re-selecting mutable pathnames.
+- Bulk Git plumbing replaces process-per-path and process-per-leaf inspection, hashing, and index
+  updates. Linux open-handle detection pre-indexes selection roots instead of repeatedly resolving
+  every path for every descriptor.
+- A symlink selected as the leaf is captured as a link even when its target is outside the
+  worktree; a symlink in a parent path remains a fail-closed escape refusal. `--` now ends CLI
+  option parsing, and discard dry runs report exact revert/remove intent.
+- `base`, `base set <ref>`, and `base unset` provide explicit repository-local integration
+  authority in private Git-common state. A missing configured ref fails loudly instead of falling
+  back to a stale conventional branch.
+- Landing-plan collapse now requires exact durable safety on both sides; a dirty worktree can no
+  longer disappear behind a clean directional duplicate.
+- `partition` requires task paths/components by default, bounds directory and conflict output,
+  labels structurally infeasible fan-out, and reserves a full repository map for explicit
+  `--structural`/`--full` use.
+- Universal-ctags parsing streams under byte/tag/line caps, symbol work defaults to two concurrent
+  chunks, failed base batches remain explicitly unmeasured, and batched cat-file consumers are
+  backpressured. Resource failure lowers confidence instead of becoming an empty-symbol answer.
+- Published dependency locks override `fast-uri` 3.1.7 and `qs` 6.16.0 so the install graph is
+  clear of the host-confusion, SSRF, array-limit, and denial-of-service advisories affecting the
+  previously pinned transitive versions.
+- The MCP discard lifecycle is exercised over the real stdio protocol and the complete 17-tool
+  schema remains below the repository's bounded context-budget gate.
+
 ## 0.4.5
 
 **Cross-platform installed proof.** The installed-artifact smoke fixture now pins its repository

@@ -13,20 +13,22 @@
  *
  * TOOL SAFETY — read this before writing an auto-approval policy.
  *
- * MOST tools here are read-only and are annotated `readOnlyHint: true`. FOUR ARE NOT:
+ * MOST tools here are read-only and are annotated `readOnlyHint: true`. FIVE ARE NOT:
  *   holt_clean    previews, quarantines, inventories, or restores without deleting/overwriting
  *                 (mutating, destructiveHint: false; branch + restore argv retained)
  *   holt_purge    permanently removes one verified clean quarantine after anchoring exact HEAD
  *                 (mutating and destructive; dry-run unless apply:true; branch retained)
  *   holt_rescue   writes a ref capturing a worktree's work
  *   holt_protect  places git worktree locks
+ *   holt_discard  captures selected paths to a verified ref, then reverts/removes them; it can
+ *                 also list and resume interrupted discard transactions
  * Each carries honest annotations, because a host that auto-approves read-only tools must still
  * distinguish a local path move from analysis and from deletion. Do not grant blanket approval
  * on the basis of this file shipping
  * "diagnostics" — check the per-tool annotations, which are the contract.
  *
  * The ANALYSIS path cannot modify a repository: mutating git verbs are unreachable without an
- * explicit opt-in that only the four tools above pass — see src/git.mjs and
+ * explicit opt-in that only the five tools above pass — see src/git.mjs and
  * test/unit/safety.test.mjs, which proves a full scan changes nothing byte-for-byte.
  */
 
@@ -36,7 +38,7 @@ import { scan } from '../scan.mjs';
 import { analyze, contextDigest, directDeleteDecision } from '../analyze.mjs';
 import { landingOrder } from '../order.mjs';
 import { branchAudit } from '../branches.mjs';
-import { partitionPlan } from '../partition.mjs';
+import { partitionPlan, compactPartitionPlan, partitionContextRequired } from '../partition.mjs';
 import { listTrackedFiles, repoIdentity } from '../git.mjs';
 import { deepDuplicates } from '../deep.mjs';
 import { loadConfig, ConfigError } from '../config.mjs';
@@ -169,14 +171,14 @@ const TOOLS = [
     name: 'holt_landing_order',
     title: 'What order to land workstreams in',
     description:
-      'Landing order from the evidence graph: which workstreams can land in PARALLEL, and a sequence for the entangled rest with the later merges to watch at each step. Heuristic, never a certificate.',
+      'Orders independent workstreams in parallel and entangled ones sequentially, naming later merges to watch. Heuristic, not a safety certificate.',
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
     name: 'holt_branches',
     title: 'The branch graveyard, classified by content',
     description:
-      'Audits local branches checked out nowhere: landed (safe -d), content-landed (squash/cherry-pick — content present, ancestry broken; never auto-deleted), unlanded (files named), unknown (refused). Read-only.',
+      'Classifies unchecked-out branches as landed, content-landed after rewritten history, unlanded, or unknown. Never auto-deletes.',
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
@@ -190,6 +192,8 @@ const TOOLS = [
         agents: { type: 'number', minimum: 1, maximum: MAX_AGENTS },
         paths: { type: 'array', maxItems: 256, items: { type: 'string', maxLength: 4096 } },
         components: { type: 'array', maxItems: 256, items: { type: 'string', maxLength: 512 } },
+        structural: { type: 'boolean', description: 'Explicitly request a repository-shape view without task anchors.' },
+        limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max directory units and contested-file rows returned.' },
       },
       additionalProperties: false,
     },
@@ -198,14 +202,14 @@ const TOOLS = [
     name: 'holt_status',
     title: 'Parallel work status',
     description:
-      'The decision surface for all parallel workstreams (git worktrees / jj workspaces): how many hold work that exists nowhere else, how many collide, how many are disposable, and how much review is actually needed. Start here.',
+      'Start here: summarizes workstreams, unique work, collisions, disposable copies, and the reduced review queue.',
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
     name: 'holt_at_risk',
     title: 'Work that exists nowhere else',
     description:
-      'Workstreams holding unique work, ranked by risk, AND stash entries holding content no ref holds. Work existing only as UNCOMMITTED changes ranks highest because no git command can relate it — deleting that worktree destroys it silently.',
+      'Ranks worktrees and stashes holding content no durable ref holds. Uncommitted-only work ranks highest because deletion loses it silently.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max rows (default 10, at most 100).' } },
@@ -216,7 +220,7 @@ const TOOLS = [
     name: 'holt_check_workstream',
     title: 'Is this workstream safe to delete?',
     description:
-      'Single-workstream verdict before deleting or pruning it. Returns safe / holds-work / unknown with reasons. Fail-closed: a workstream that could not be scanned is "unknown", never "safe". Call this before any worktree removal.',
+      'Fresh pre-removal verdict: safe, holds-work, or unknown with reasons. Failed scans are unknown, never safe.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, id: { type: 'string', maxLength: 512, description: 'Workstream id (directory basename).' } },
@@ -228,7 +232,7 @@ const TOOLS = [
     name: 'holt_collisions',
     title: 'Workstreams that will fight',
     description:
-      'Pairs contesting the same content. Call BEFORE landing or merging, to sequence work that would conflict. "proven" = git merge-tree reports a real conflict; "predicted" = one side is uncommitted so merge-tree cannot see it, strongest when both added the same symbol.',
+      'Pairs contesting content before landing. Proven means merge-tree conflicted; predicted covers uncommitted evidence Git cannot merge-test.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max pairs (default 10, at most 100).' } },
@@ -239,7 +243,7 @@ const TOOLS = [
     name: 'holt_hotspots',
     title: 'Shared-file hotspots before partitioning',
     description:
-      'Aggregated low-evidence file overlap: which files multiple workstreams touch even when merge-tree cannot prove a conflict. Use before spawning agents or running holt_partition; this is not a merge-conflict certificate.',
+      'Shared-file overlap across workstreams before spawning or partitioning. Advisory, not a merge-conflict certificate.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max hotspots (default 12, at most 100).' } },
@@ -250,7 +254,7 @@ const TOOLS = [
     name: 'holt_duplicates',
     title: 'Workstreams that built the same thing',
     description:
-      'Pairs that produced overlapping work. Call BEFORE assigning work or landing a batch: two agents that built the same thing need one review, not two. Cross-dispatch overlap is waste; same-family is expected fan-out, not free. deep:true adds jscpd clones.',
+      'Finds overlapping work before assignment or landing. Distinguishes cross-dispatch waste from expected same-family fan-out; deep adds clones.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -265,7 +269,7 @@ const TOOLS = [
     name: 'holt_context',
     title: 'What my siblings are doing',
     description:
-      'For an agent working IN a workstream: which other workstreams contest its files, and which symbols it is about to build that already exist next door. This is the fix for context blindness — each agent otherwise sees the repo only as it was when it started.',
+      'Shows a workstream which siblings contest its files and which symbols already exist next door.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, id: { type: 'string', maxLength: 512, description: 'The workstream you are working in.' } },
@@ -277,7 +281,7 @@ const TOOLS = [
     name: 'holt_impact',
     title: 'Who depends on what another workstream changed',
     description:
-      'Producer/consumer pairs across workstreams: A defines a symbol, B references it, and they share no file — so collision detection cannot see it. This is a DEPENDENCY relationship, NOT a conflict: it does not tell you the interaction breaks anything. Use before landing a workstream to see whose code will start running against your changes.',
+      'Finds cross-workstream symbol producers and consumers that file collisions miss. A dependency is not proof of breakage or conflict.',
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max pairs (default 10, at most 100).' } },
@@ -296,10 +300,27 @@ const TOOLS = [
    * on their real risk rather than on a blanket claim.
    */
   {
+    name: 'holt_discard',
+    title: 'Discard selected paths with verified, resumable recovery',
+    description:
+      'Preview, capture then revert/remove paths, list interruptions, or recover one. Capture verifies first; concurrent replacements are never overwritten.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...REPO_ARG,
+        operation: { type: 'string', maxLength: 16, enum: ['preview', 'discard', 'list', 'recover'], description: 'Operation; recover also needs id, preview/discard need paths.' },
+        paths: { type: 'array', maxItems: 256, items: { type: 'string', maxLength: 4096 }, description: 'Paths in one worktree. Required for preview/discard.' },
+        id: { type: 'string', maxLength: 512, description: 'Interrupted transaction id for operation:recover.' },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  {
     name: 'holt_clean',
     title: 'Safely manage disposable worktrees and their recovery copies',
     description:
-      'Preview or move disposable worktrees into recoverable local quarantine, list copies, or restore one without overwriting or weakening prior protection. Returns restore argv; defaults to preview and never deletes files or branches.',
+      'Preview or move disposable worktrees into recoverable local quarantine; list copies with restore argv, or restore one without overwriting or weakening prior protection. Never deletes files or branches.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -316,7 +337,7 @@ const TOOLS = [
     name: 'holt_purge',
     title: 'Purge one clean quarantine',
     description:
-      'Dry-run by default. Apply anchors a re-verified HEAD, then uses non-forced Git removal. Dirty state is refused; it keeps the branch.',
+      'Dry-run by default. Apply re-verifies and anchors HEAD, then uses non-forced Git removal. Refuses dirt and keeps the branch.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -333,7 +354,7 @@ const TOOLS = [
     name: 'holt_rescue',
     title: 'Preserve a workstream\'s unique work to a verifiable ref',
     description:
-      'Captures a worktree\'s full state — tracked and untracked — as a commit on refs/holt/rescue/<id>, verifies it, and optionally releases holt\'s lock so the worktree becomes disposable. Fails loudly if the capture cannot be verified. Use when a worktree is locked and you need it gone; never disarm the lock by hand.',
+      'Captures tracked and untracked state to a verified rescue ref, then optionally releases Holt\'s lock. Use before removing a valuable worktree.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -351,7 +372,7 @@ const TOOLS = [
     name: 'holt_protect',
     title: 'Lock every workstream holding unique work',
     description:
-      'Applies git\'s own worktree lock to each workstream holding work found nowhere else, with a reason naming what is at stake. A locked worktree refuses `git worktree remove --force`. Does not stop `rm -rf`.',
+      'Git-locks worktrees holding unique work and records why. Stops worktree remove --force, but cannot stop direct filesystem deletion.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -366,7 +387,7 @@ const TOOLS = [
     name: 'holt_landing_plan',
     title: 'What to land, in what order',
     description:
-      'Reduces N workstreams to a review queue: drops provably-disposable ones, recommends measured exact durable supersededBy representatives, and orders the rest least-entangled-first. Never treats partial or uncommitted overlap as a collapse.',
+      'Drops proven disposables, collapses only exact durable copies, and orders remaining work least-entangled-first. Partial or dirty overlap never collapses.',
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
 ];
@@ -824,6 +845,10 @@ async function dispatch(name, args, cwd, limit) {
     }
 
     case 'holt_partition': {
+      const hasTaskAnchors = (args.paths?.length ?? 0) + (args.components?.length ?? 0) > 0;
+      if (!hasTaskAnchors && args.structural !== true) {
+        return partitionContextRequired({ agents: args.agents ?? 2 });
+      }
       const { report } = await getReport(cwd);
       const disc = await discover(cwd, {});
       const files = await listTrackedFiles(disc.root ?? cwd);
@@ -832,11 +857,11 @@ async function dispatch(name, args, cwd, limit) {
       // server into heap exhaustion and SIGABRT, and the long-lived process was gone for the rest
       // of the session. The bound is declared in the schema and enforced by validateArgs, which
       // is why there is no second hand-written clamp here to drift out of step with it.
-      return partitionPlan(report, files, {
+      return compactPartitionPlan(partitionPlan(report, files, {
         agents: args.agents ?? 2,
         paths: args.paths,
         components: args.components,
-      });
+      }), { limit });
     }
 
     case 'holt_status': {
@@ -1064,6 +1089,33 @@ async function dispatch(name, args, cwd, limit) {
       };
     }
 
+    case 'holt_discard': {
+      const { discard, discardTransactions, recoverDiscard } = await import('../actions.mjs');
+      const operation = args?.operation ?? 'preview';
+      if (operation === 'list') {
+        if (args?.paths !== undefined || args?.id !== undefined) {
+          throw new ToolArgumentError("holt_discard: operation 'list' accepts neither 'paths' nor 'id'");
+        }
+        return await discardTransactions(cwd);
+      }
+      if (operation === 'recover') {
+        if (!args?.id) throw new ToolArgumentError("holt_discard: operation 'recover' requires argument 'id'");
+        if (args?.paths !== undefined) {
+          throw new ToolArgumentError("holt_discard: argument 'paths' is not valid with operation 'recover'");
+        }
+        cache.clear();
+        return await recoverDiscard(cwd, args.id);
+      }
+      if (args?.id !== undefined) {
+        throw new ToolArgumentError("holt_discard: argument 'id' is only valid with operation 'recover'");
+      }
+      if (!args?.paths?.length) {
+        throw new ToolArgumentError(`holt_discard: operation '${operation}' requires a non-empty 'paths' array`);
+      }
+      cache.clear();
+      return await discard(cwd, args.paths, { dryRun: operation === 'preview' });
+    }
+
     case 'holt_clean': {
       const { clean, quarantines, restoreQuarantine } = await import('../actions.mjs');
       const operation = args?.operation ?? (args?.apply === true ? 'quarantine' : 'preview');
@@ -1286,7 +1338,7 @@ export async function createServer(opts = {}) {
   server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     const { name, arguments: args } = req.params;
 
-    // WHO IS CALLING. Four of these tools mutate the repository, and without this they would
+    // WHO IS CALLING. Five of these tools mutate the repository, and without this they would
     // write a journal line with no caller at all — an MCP-driven `holt_clean` was indistinguishable from
     // a human typing it.
     //

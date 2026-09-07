@@ -26,6 +26,7 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { newRepo } from '../fixtures.mjs';
 import { samePathAsync } from '../../src/paths.mjs';
+import { discard } from '../../src/actions.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -1117,6 +1118,130 @@ test('DISCARD: the human path prints the recovery route, not a pointer to nothin
   const show = await fx.git(['show', `${ref}:a.txt`]);
   assert.match(show, /an hour of hand edits/,
     `the printed ref must really hold the discarded content, got: ${JSON.stringify(show)}`);
+});
+
+test('DISCARD CLI: -- ends option parsing so a file literally named --help is an operand', async (t) => {
+  const fx = await newRepo('discard-option-sentinel');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('literal-option-file');
+  await fs.writeFile(path.join(wt, '--help'), 'literal option-shaped filename\n');
+
+  const r = await holt(['discard', '--', '--help'], wt);
+  assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+  assert.doesNotMatch(r.stdout, /^holt —/m, '`--help` after the sentinel must not invoke global help');
+  const payload = JSON.parse(r.stdout);
+  assert.equal(payload.ok, true, JSON.stringify(payload));
+  await assert.rejects(() => fs.lstat(path.join(wt, '--help')), { code: 'ENOENT' });
+  assert.equal((await fx.git(['show', `${payload.commit}:--help`])).trim(),
+    'literal option-shaped filename');
+});
+
+test('DISCARD CLI: plain dry-run names exact paths and the correct execution boundary', async (t) => {
+  const fx = await newRepo('discard-dry-run-plain');
+  t.after(() => fx.cleanup());
+  await fx.write('tracked.txt', 'baseline\n');
+  await fx.commit('dry-run base');
+  await fs.writeFile(path.join(fx.root, 'tracked.txt'), 'edited\n');
+  await fs.writeFile(path.join(fx.root, 'untracked.txt'), 'untracked\n');
+
+  const r = await holt([
+    'discard', 'tracked.txt', 'untracked.txt', '--dry-run', '--plain', '--cwd', fx.root,
+  ], fx.root);
+  assert.equal(r.code, 0, `${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /tracked\.txt/);
+  assert.match(r.stdout, /untracked\.txt/);
+  assert.match(r.stdout, /restore from HEAD/i);
+  assert.match(r.stdout, /remove/i);
+  assert.match(r.stdout, /re-run without --dry-run/i);
+  assert.doesNotMatch(r.stdout, /re-run with --apply/i,
+    'discard has no --apply boundary; the generic message was an unusable instruction');
+  assert.equal(await fs.readFile(path.join(fx.root, 'tracked.txt'), 'utf8'), 'edited\n');
+  assert.equal(await fs.readFile(path.join(fx.root, 'untracked.txt'), 'utf8'), 'untracked\n');
+});
+
+test('DISCARD CLI: interrupted transactions are listed and resumable through the public command', async (t) => {
+  const fx = await newRepo('discard-recover-cli');
+  t.after(() => fx.cleanup());
+  await fx.write('tracked.txt', 'baseline\n');
+  await fx.commit('discard recovery base');
+  const wt = await fx.worktree('recover-through-cli');
+  const file = path.join(wt, 'tracked.txt');
+  await fs.writeFile(file, 'captured edit\n');
+  const interrupted = await discard(fx.root, [file], {
+    onAfterCapture: async () => { throw new Error('simulated interruption'); },
+  });
+  assert.equal(interrupted.ok, false);
+
+  const listed = await holt(['recover-discard', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(listed.code, 0, `${listed.stdout}${listed.stderr}`);
+  const inventory = JSON.parse(listed.stdout);
+  assert.equal(inventory.transactions.some((row) => row.id === interrupted.transaction), true);
+
+  const resumed = await holt([
+    'recover-discard', interrupted.transaction, '--json', '--cwd', fx.root,
+  ], fx.root);
+  assert.equal(resumed.code, 0, `${resumed.stdout}${resumed.stderr}`);
+  assert.equal(JSON.parse(resumed.stdout).ok, true);
+  assert.equal(await fs.readFile(file, 'utf8'), 'baseline\n');
+});
+
+test('DISCARD CLI: an unverifiable receipt is visible and exits non-zero', async (t) => {
+  const fx = await newRepo('discard-receipt-error-cli');
+  t.after(() => fx.cleanup());
+  const common = (await fx.git([
+    'rev-parse', '--path-format=absolute', '--git-common-dir',
+  ])).trim();
+  const dir = path.join(common, 'holt-discard-transactions');
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(dir, 'broken.json'), '{not-json\n', { mode: 0o600 });
+
+  const r = await holt(['recover-discard', '--plain', '--cwd', fx.root], fx.root);
+  assert.notEqual(r.code, 0, 'unverifiable recovery state must not produce a clean exit');
+  assert.match(r.stdout, /transaction receipt error/);
+  assert.match(r.stdout, /broken/);
+  assert.doesNotMatch(r.stdout, /No incomplete discard transactions/);
+});
+
+test('PARTITION CLI: no task anchors returns a bounded refusal instead of a repository dump', async (t) => {
+  const fx = await newRepo('partition-needs-context');
+  t.after(() => fx.cleanup());
+  const r = await holt(['partition', '--agents', '8', '--json', '--cwd', fx.root], fx.root);
+  assert.equal(r.code, 1, `${r.stdout}${r.stderr}`);
+  assert.ok(Buffer.byteLength(r.stdout) < 8 * 1024, `context refusal must stay small: ${r.stdout.length}`);
+  const payload = JSON.parse(r.stdout);
+  assert.equal(payload.actionable, false);
+  assert.equal(payload.code, 'task-context-required');
+  assert.deepEqual(payload.buckets, []);
+  assert.equal(payload.requestedAgents, 8);
+});
+
+test('PARTITION CLI: task anchor flags require values instead of inventing an undefined scope', async (t) => {
+  const fx = await newRepo('partition-anchor-value');
+  t.after(() => fx.cleanup());
+  for (const flag of ['--path', '--component', '--paths']) {
+    const r = await holt(['partition', flag], fx.root);
+    assert.notEqual(r.code, 0, `${flag} without a value must fail`);
+    assert.match(r.stderr, new RegExp(`${flag} needs a value`));
+  }
+});
+
+test('CLI: every option value crosses one strict missing-value boundary', async (t) => {
+  const fx = await newRepo('strict-option-values');
+  t.after(() => fx.cleanup());
+  const source = await fs.readFile(BIN, 'utf8');
+  assert.doesNotMatch(source, /argv\[\+\+i\]/,
+    'new value-taking flags must use takeValue instead of silently consuming undefined');
+
+  for (const flag of ['--base', '--cwd', '--run', '--repository', '--lock-token']) {
+    const r = await holt(['status', flag], fx.root);
+    assert.notEqual(r.code, 0, `${flag} without a value must fail`);
+    assert.match(`${r.stdout}${r.stderr}`, new RegExp(`${flag} needs a value`));
+  }
+
+  const malformedWindow = await holt(['status', '--family-window', 'abc'], fx.root);
+  assert.notEqual(malformedWindow.code, 0);
+  assert.match(`${malformedWindow.stdout}${malformedWindow.stderr}`,
+    /--family-window must be a non-negative number/);
 });
 
 /**

@@ -466,6 +466,10 @@ function commandMayConvert(argv) {
     if (rest.length === 2 && rest[0] === '--cacheinfo') return false;
     if (rest.length === 3 && rest[0] === '--add' && rest[1] === '--cacheinfo') return false;
     if (rest.length === 1 && rest[0] === '--index-info') return false;
+    // NUL-delimited index-info is still an object-only stdin stream. There are deliberately no
+    // pathname argv operands here; every path is paired with an already-authored object id in the
+    // private scratch index input.
+    if (rest.length === 2 && rest[0] === '-z' && rest[1] === '--index-info') return false;
     return true;
   }
   return false;
@@ -1061,7 +1065,7 @@ export function _resetBatchNulProbe() {
  * silent mis-attribution above. Every other spec shape works unchanged on every git.
  *
  * @param {string[]} specs   git object specs, e.g. `${oid}:${relPath}`, one per requested object
- * @param {{cwd?: string, timeout?: number}} opts
+ * @param {{cwd?: string, timeout?: number, recordConcurrency?: number}} opts
  * @param {(spec: string, content: Buffer|null, index: number) => any} onRecord
  *        called once per spec, in the order `specs` was given. `content` is `null` when the
  *        object is missing at that spec. May return a Promise; every returned promise is
@@ -1069,7 +1073,9 @@ export function _resetBatchNulProbe() {
  *        have settled by the time the caller proceeds.
  * @returns {Promise<void>}
  */
-export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } = {}, onRecord) {
+export async function catFileBatch(specs, {
+  cwd, timeout = DEFAULT_TIMEOUT_MS, recordConcurrency = 8,
+} = {}, onRecord) {
   if (specs.length === 0) return;
 
   // NUL is the one byte no git spec can carry — paths cannot contain it and oids are hex — so a
@@ -1102,6 +1108,8 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
   const childEnv = commandContext.env;
   await requireNoLazyFetch(childEnv);
   const childArgv = withCommandConfig(hardenGitArgv(argv), commandContext.configArgs);
+  const callbackLimit = Math.min(64, Math.max(1,
+    Number.isFinite(Number(recordConcurrency)) ? Math.floor(Number(recordConcurrency)) : 8));
 
   return new Promise((resolve, reject) => {
     const verdict = classify(argv);
@@ -1120,9 +1128,13 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
     let specIdx = 0;
     /** @type {number|null} */
     let awaitingSize = null; // non-null while mid-payload for specs[specIdx]
-    const inFlight = [];
+    const inFlight = new Set();
     let settled = false;
     let stderrText = '';
+    let stdoutEnded = false;
+    let childClosed = false;
+    /** @type {number|null} */
+    let closeCode = null;
 
     const timer = setTimeout(() => {
       if (settled) return;
@@ -1158,14 +1170,62 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
       }
     };
 
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      reject(error);
+    };
+
+    const queueCall = (spec, content, idx) => {
+      const promise = safeCall(spec, content, idx);
+      inFlight.add(promise);
+      promise.finally(() => {
+        inFlight.delete(promise);
+        if (settled) return;
+        drain();
+        if (inFlight.size < callbackLimit && child.stdout.isPaused()) child.stdout.resume();
+        maybeFinish();
+      });
+    };
+
+    const maybeFinish = () => {
+      if (settled || !childClosed || !stdoutEnded) return;
+      drain();
+      if (inFlight.size > 0) return;
+      if (closeCode !== 0) {
+        fail(new GitFailed(`${label} exited ${closeCode}: ${stderrText.trim()}`, {
+          code: closeCode ?? undefined, stderr: stderrText, argv,
+        }));
+        return;
+      }
+      if (specIdx !== specs.length || awaitingSize !== null || pending.length !== 0) {
+        fail(new GitFailed(
+          `${label} ended after ${specIdx}/${specs.length} complete records with ${pending.length} trailing byte(s); `
+          + 'partial or surplus object evidence is not usable',
+          { code: closeCode ?? undefined, stderr: stderrText, argv },
+        ));
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+
     function drain() {
       for (;;) {
+        if (settled) return;
+        if (inFlight.size >= callbackLimit) {
+          child.stdout.pause();
+          return;
+        }
         if (specIdx >= specs.length) return;
         if (awaitingSize === null) {
           const miss = missReply(specs[specIdx]);
           if (pending.length >= miss.length && pending.subarray(0, miss.length).equals(miss)) {
             pending = pending.subarray(miss.length);
-            inFlight.push(safeCall(specs[specIdx], null, specIdx));
+            queueCall(specs[specIdx], null, specIdx);
             specIdx++;
             continue;
           }
@@ -1180,7 +1240,7 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
             // whole record and shifting every record after it by one.
             if (pending.length < miss.length && miss.subarray(0, pending.length).equals(pending)) return;
             pending = pending.subarray(nl + 1);
-            inFlight.push(safeCall(specs[specIdx], null, specIdx));
+            queueCall(specs[specIdx], null, specIdx);
             specIdx++;
             continue;
           }
@@ -1191,7 +1251,7 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
         const content = Buffer.from(pending.subarray(0, awaitingSize)); // copy: don't pin the chunk
         pending = pending.subarray(awaitingSize + 1);
         awaitingSize = null;
-        inFlight.push(safeCall(specs[specIdx], content, specIdx));
+        queueCall(specs[specIdx], content, specIdx);
         specIdx++;
       }
     }
@@ -1200,43 +1260,24 @@ export async function catFileBatch(specs, { cwd, timeout = DEFAULT_TIMEOUT_MS } 
       pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
       drain();
     });
-    child.stderr.on('data', (d) => { stderrText += d; });
+    child.stdout.on('end', () => {
+      stdoutEnded = true;
+      drain();
+      maybeFinish();
+    });
+    child.stderr.on('data', (d) => {
+      if (stderrText.length < 64 * 1024) stderrText += String(d).slice(0, 64 * 1024 - stderrText.length);
+    });
     child.stdin.on('error', (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.kill('SIGKILL');
-      reject(new GitFailed(`${label} input failed: ${err.message}`, { argv, stderr: stderrText }));
+      fail(new GitFailed(`${label} input failed: ${err.message}`, { argv, stderr: stderrText }));
     });
     child.on('error', (err) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(new GitFailed(`${label} failed to spawn: ${err.message}`, { argv }));
+      fail(new GitFailed(`${label} failed to spawn: ${err.message}`, { argv }));
     });
     child.on('close', (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (code !== 0) {
-        reject(new GitFailed(`${label} exited ${code}: ${stderrText.trim()}`, {
-          code: code ?? undefined, stderr: stderrText, argv,
-        }));
-        return;
-      }
-      if (specIdx !== specs.length || awaitingSize !== null || pending.length !== 0) {
-        reject(new GitFailed(
-          `${label} ended after ${specIdx}/${specs.length} complete records with ${pending.length} trailing byte(s); `
-          + 'partial or surplus object evidence is not usable',
-          { code: code ?? undefined, stderr: stderrText, argv },
-        ));
-        return;
-      }
-      // `resolve` is called with NO argument elsewhere in this executor (this function resolves
-      // `Promise<void>`); passing it directly as `.then()`'s fulfilled handler would hand it
-      // `Promise.all`'s array result instead, which is a real type mismatch, not just a checker
-      // complaint — wrapping it keeps the resolved value what the doc comment promises.
-      Promise.all(inFlight).then(() => resolve(), reject);
+      childClosed = true;
+      closeCode = code;
+      maybeFinish();
     });
 
     // NUL-terminated (not NUL-separated) when `-z` is in play: git wants a delimiter after the last

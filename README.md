@@ -31,7 +31,7 @@ enables it. scripts/milestone.mjs is report-only unless a maintainer deliberatel
 </div>
 HOLT:SOCIAL-PROOF:END -->
 
-> **Current status:** The latest published artifact is v0.4.5. Verify the exact GitHub release
+> **Current status:** The latest published artifact is v0.4.6. Verify the exact GitHub release
 > artifact and checksums; this source checkout may contain later, unreleased work.
 > Team and Enterprise are not being sold or activated in this launch.
 
@@ -95,6 +95,24 @@ provably disposable worktrees into locked local quarantine; it does not delete f
 and returns the exact restore path. `holt purge` is a separately named, dry-run-first disk
 reclamation action and requires an explicit apply step after review.
 
+For a repository whose real landing branch is not the remote/default branch Holt detects, bind
+that authority once in private Git-common state (not in a branch-controlled config file):
+
+```bash
+holt base                         # show the selected ref and why
+holt base set origin/production   # persist an explicit, resolvable integration ref
+holt base unset                   # return to conservative detection
+```
+
+`holt discard` is also dry-run capable and now records a durable transaction before moving any
+selected path. If a process interruption or concurrent writer leaves work in physical quarantine,
+list and resume it without re-selecting mutable pathnames:
+
+```bash
+holt recover-discard
+holt recover-discard <transaction-id>
+```
+
 ## What is available today
 
 The current free/core boundary is local, Git-native, and single-repository. It does not require an
@@ -104,7 +122,7 @@ account, hosted code upload, telemetry, or a managed control plane.
 |---|---|---|
 | See the repository-wide state | `status`, `risk`, `context`, TUI, offline relationship graph | A measured view of workstreams, unique content, collisions, duplicates, dependencies, and bounds. |
 | Decide whether work is disposable | `gate`, `clean`, `protect`, `auto` | Exact path/content/reachability evidence can hold or permit an action. Unknown or unmeasured state stays unknown. |
-| Preserve before acting | `rescue`, `discard`, `clean --apply`, `quarantines`, `restore` | Capture or quarantine is verified before release; recovery remains local and explicit. |
+| Preserve before acting | `rescue`, `discard`, `recover-discard`, `clean --apply`, `quarantines`, `restore` | Capture or quarantine is verified before release; interrupted state remains local and resumable. |
 | Coordinate parallel work | `collisions`, `hotspots`, `duplicates`, `impact`, `order`, `partition`, `branches`, `stash`, `plan` | Relationship findings guide review and landing. They are not silently promoted into destructive authority. |
 | Connect agents | Project-scoped MCP, `brief`, `integrate`, and host-specific hooks | Capability is reported per host as advisory, contract-tested, or live-observed; configuration on disk is not proof of a live deny. |
 | Review incidents and provenance | `journal`, `forensics`, `audit` | Local receipts and package/runtime checks can be inspected offline on customer-controlled storage. |
@@ -159,9 +177,9 @@ repairs Holt-owned entries without duplicating them; `holt uninstall` removes on
 unchanged artifacts. Host configuration on disk is not evidence that a host loaded, trusted, or
 enforced it.
 
-- **MCP** — 16 tools in the executable schema. The protocol path is exercised over stdio as
-  `initialize → 16 tools → tools/call`; MCP remains reactive model-pull unless a host supplies a
-  separate lifecycle context hook.
+- **MCP** — 17 tools in the executable schema, including discard preview/recovery. The protocol
+  path is exercised over stdio as `initialize → 17 tools → tools/call`; MCP remains reactive
+  model-pull unless a host supplies a separate lifecycle context hook.
 - **Implemented deterministic pre-tool blocking** — Claude Code, OpenCode, Cursor, Codex local clients, Qwen Code, Copilot CLI, Cline IDE, Goose, Devin CLI and Devin Desktop Cascade cover their documented local surfaces. Their current schemas are contract-tested, but none is currently claimed as a real-host enforcement run.
 - **Hook-capable, not yet wired** — Gemini, Crush, Amp, Factory and Junie still receive MCP + advisory.
 - **Cloud or ephemeral** — Codex cloud, Copilot cloud, Cursor cloud, Google Jules, Replit Agent do not receive local worktree enforcement by default.
