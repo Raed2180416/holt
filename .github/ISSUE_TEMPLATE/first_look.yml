@@ -1,0 +1,47 @@
+name: I tried Holt
+description: Tell the developer whether the first check helped, confused you, or got stuck
+title: "[First look] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for giving Holt a try. I'm Raed, the solo developer behind it at Contrare Research.
+        A short, honest account is useful, including if Holt wasn't helpful.
+        This is public. Please leave out private paths, source code, credentials, and personal data.
+  - type: dropdown
+    id: result
+    attributes:
+      label: How did the first check go?
+      options:
+        - It showed me work I needed to keep
+        - It confirmed what I already knew
+        - The result was confusing or incomplete
+        - I couldn't get it running
+        - I don't think I need it for my workflow
+    validations:
+      required: true
+  - type: textarea
+    id: experience
+    attributes:
+      label: What happened?
+      description: A few sentences are enough. What were you trying to do, and what should be better?
+    validations:
+      required: true
+  - type: input
+    id: setup
+    attributes:
+      label: Your setup (optional)
+      description: OS, agent or editor, rough worktree count, and Holt version if you know it.
+      placeholder: Linux, Codex, about 5 worktrees, Holt 0.4.5
+  - type: input
+    id: source
+    attributes:
+      label: Where did you find Holt? (optional)
+      placeholder: Reddit, LinkedIn, X, search, or a friend
+  - type: checkboxes
+    id: follow_up
+    attributes:
+      label: Optional follow-up
+      options:
+        - label: Raed can follow up once in this issue next week to ask whether I'm still using it.
+          required: false

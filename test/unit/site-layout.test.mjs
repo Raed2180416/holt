@@ -105,18 +105,18 @@ test('site: uses the Holt-only, theme-ready wordmark and mark assets consistentl
   }
 });
 
-test('site: design-partner CTAs resolve to an on-page explanation and a concrete intake', async () => {
+test('site: developer contact and optional team intake resolve to concrete next steps', async () => {
   const [html, intake] = await Promise.all([
     fs.readFile(SITE, 'utf8'),
     fs.readFile(path.resolve(path.dirname(SITE), '..', '.github', 'ISSUE_TEMPLATE', 'design_partner.yml'), 'utf8'),
   ]);
   assert.equal((html.match(/href="#contact"/g) || []).length, 2,
-    'the header and hero design-partner CTAs should visibly navigate to the on-page next step');
+    'the header and footer contact links should navigate to the on-page developer note');
   assert.match(html,
     /href="https:\/\/github\.com\/Raed2180416\/holt\/issues\/new\?template=design_partner\.yml"/,
     'the public workflow option must open the dedicated design-partner intake');
   assert.match(html,
-    /id="start-contact"[^>]*href="mailto:research\.contrare@outlook\.com\?subject=Holt%20design-partner%20conversation"/,
+    /id="start-contact"[^>]*href="mailto:research\.contrare@outlook\.com\?subject=Trying%20Holt"/,
     'the primary contact action must name the real contact address and open an email draft');
   assert.match(html, /id="contact-status"[^>]*aria-live="polite"/,
     'the contact action needs a visible live fallback when the browser has no mail handler');
@@ -143,10 +143,15 @@ test('site: install copy action has a fallback and never fails silently', async 
 
 test('site: leads with Holt strengths instead of defensive or gotcha framing', async () => {
   const html = await fs.readFile(SITE, 'utf8');
-  assert.match(html, /See every workstream\. Surface work found nowhere else\. Keep agents moving\./,
-    'the repository-intelligence section must lead with the operational benefit');
-  assert.match(html, /Explore the system/,
-    'adoption guidance should invite technical depth instead of warning the reader away');
+  assert.match(html, /See what your agents changed\.[\s\S]*Keep the work that matters\./,
+    'the page must explain the operational benefit of seeing and preserving agent work');
+  for (const command of ['collisions', 'duplicates', 'impact', 'order', 'gate', 'rescue', 'restore', 'context']) {
+    assert.ok(html.includes(`<code>${command}</code>`), `the page must explain ${command} within the wider product`);
+  }
+  assert.match(html, /-- holt risk --strict-read-only --no-symbols --include-primary/,
+    'the first action must inspect the repository before optional integrations or protection');
+  assert.match(html, /issues\/new\?template=first_look\.yml/,
+    'someone trying the product needs a concrete feedback route');
   assert.doesNotMatch(html, /The missing layer|Read before adopting|Roadmap \/ not available yet|fail-closed decisions/i,
     'the public narrative must not lead with deficit, refusal, or gotcha language');
 });

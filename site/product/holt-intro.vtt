@@ -1,0 +1,27 @@
+WEBVTT
+
+00:00.000 --> 00:05.600
+The agents were working. The work was getting lost.
+So I built Holt.
+
+00:05.600 --> 00:12.200
+See the whole picture: overlapping edits,
+duplicate work, and dependencies across workspaces.
+
+00:12.200 --> 00:19.800
+Holt v0.4.5 finds three uncommitted-only paths in auth-session.
+The gate reports HOLDS UNIQUE WORK. Nothing was deleted or moved.
+
+00:19.800 --> 00:27.400
+Connect the picture to Claude Code or local Codex
+through MCP, project context, and host-specific hooks.
+Illustrated flow. Setup, trust, and coverage vary by host.
+
+00:27.400 --> 00:35.000
+Find overlap, check what needs keeping,
+and review protection, quarantine, and recovery tools.
+Local recovery is not an off-machine backup.
+
+00:35.000 --> 00:40.000
+I built it for my own mess. I'd like to know if it helps with yours.
+Holt, a product of Contrare Research. Built solo by Raed Siddiqui.
