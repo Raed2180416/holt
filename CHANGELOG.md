@@ -28,9 +28,10 @@ claim zero risk, universal repository coverage, customer adoption, or productivi
 - Universal-ctags parsing streams under byte/tag/line caps, symbol work defaults to two concurrent
   chunks, failed base batches remain explicitly unmeasured, and batched cat-file consumers are
   backpressured. Resource failure lowers confidence instead of becoming an empty-symbol answer.
-- Published dependency locks override `fast-uri` 3.1.7 and `qs` 6.16.0 so the install graph is
-  clear of the host-confusion, SSRF, array-limit, and denial-of-service advisories affecting the
-  previously pinned transitive versions.
+- Published dependency locks override `fast-uri` 3.1.7, `qs` 6.16.0, and `zod` 4.4.3 so the
+  install graph is clear of the host-confusion, SSRF, array-limit, and denial-of-service
+  advisories affecting the previously pinned transitive versions, and test-only dependency
+  installs cannot silently rebuild a different committed GitHub Action bundle.
 - The MCP discard lifecycle is exercised over the real stdio protocol and the complete 17-tool
   schema remains below the repository's bounded context-budget gate.
 

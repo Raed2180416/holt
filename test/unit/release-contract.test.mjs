@@ -410,10 +410,12 @@ test('package contract: complete runtime surfaces are required, exact, locked, a
     'fast-uri': '3.1.7',
     hono: '4.12.34',
     qs: '6.16.0',
+    zod: '4.4.3',
   });
   assert.equal(lock.packages['node_modules/fast-uri'].version, '3.1.7');
   assert.equal(lock.packages['node_modules/hono'].version, '4.12.34');
   assert.equal(lock.packages['node_modules/qs'].version, '6.16.0');
+  assert.equal(lock.packages['node_modules/zod'].version, '4.4.3');
   assert.equal(x.lock, x.shrinkwrap, 'publishable shrinkwrap drifted from the reviewed lock');
 
   x.shrinkwrap = `${x.shrinkwrap}\n`;

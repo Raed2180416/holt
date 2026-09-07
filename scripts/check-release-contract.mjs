@@ -332,8 +332,8 @@ export function releaseContractProblems(input) {
     add('package', 'only the deep token-clone backend may be omitted, at its reviewed exact version');
   }
   if (pkg.overrides?.['fast-uri'] !== '3.1.7' || pkg.overrides?.hono !== '4.12.34'
-      || pkg.overrides?.qs !== '6.16.0') {
-    add('package', 'patched fast-uri, hono, and qs floors are not enforced in the published dependency graph');
+      || pkg.overrides?.qs !== '6.16.0' || pkg.overrides?.zod !== '4.4.3') {
+    add('package', 'patched fast-uri, hono, qs, and zod floors are not enforced in the published dependency graph');
   }
   if (String(input.lock ?? '') !== String(input.shrinkwrap ?? '')) {
     add('package', 'package-lock.json and the publishable npm-shrinkwrap.json describe different trees');
