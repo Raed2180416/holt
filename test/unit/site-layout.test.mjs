@@ -105,28 +105,31 @@ test('site: uses the Holt-only, theme-ready wordmark and mark assets consistentl
   }
 });
 
-test('site: developer contact and optional team intake resolve to concrete next steps', async () => {
+test('site: try and feedback actions work without a local mail handler', async () => {
   const [html, intake] = await Promise.all([
     fs.readFile(SITE, 'utf8'),
-    fs.readFile(path.resolve(path.dirname(SITE), '..', '.github', 'ISSUE_TEMPLATE', 'design_partner.yml'), 'utf8'),
+    fs.readFile(path.resolve(path.dirname(SITE), '..', '.github', 'ISSUE_TEMPLATE', 'first_look.yml'), 'utf8'),
   ]);
   assert.equal((html.match(/href="#contact"/g) || []).length, 2,
     'the header and footer contact links should navigate to the on-page developer note');
   assert.match(html,
-    /href="https:\/\/github\.com\/Raed2180416\/holt\/issues\/new\?template=design_partner\.yml"/,
-    'the public workflow option must open the dedicated design-partner intake');
+    /href="https:\/\/github\.com\/Raed2180416\/holt\/issues\/new\?template=first_look\.yml"/,
+    'the feedback option must open the first-use form');
   assert.match(html,
-    /id="start-contact"[^>]*href="mailto:research\.contrare@outlook\.com\?subject=Trying%20Holt"/,
-    'the primary contact action must name the real contact address and open an email draft');
+    /class="button button-dark" href="#install">Try now/,
+    'the developer note must lead directly to the working try path');
+  assert.match(html, /<button[^>]*id="copy-contact-email"[^>]*type="button"/,
+    'email contact must be an explicit copy action rather than an unobservable mail-app handoff');
   assert.match(html, /id="contact-status"[^>]*aria-live="polite"/,
-    'the contact action needs a visible live fallback when the browser has no mail handler');
+    'the email copy action needs visible feedback');
   assert.match(html, /navigator\.clipboard\.writeText\(email\)\.then\(function \(\) \{ update\(true\); \}, fallback\)/,
-    'the contact action must copy the real address before relying on a configured mail handler');
-  assert.match(html, /status\.textContent = copied[\s\S]*Email copied:[\s\S]*opening your email app/,
-    'the contact action must provide visible feedback even when a mail handler does not open');
-  assert.match(intake, /This issue is public/);
-  assert.match(intake, /one successful workflow and one resilience scenario/i,
-    'design-partner intake must request a resilience control, not only a product wish');
+    'the email action must copy the real address and handle a rejected clipboard write');
+  assert.match(html, /status\.textContent = copied[\s\S]*Email copied:[\s\S]*Copy unavailable/,
+    'copy failure must leave a visible address the visitor can select');
+  assert.doesNotMatch(html, /opening your email app|href="mailto:/,
+    'the page must not claim an email app opened when the browser cannot observe it');
+  assert.match(html, /GitHub feedback requires a GitHub account/);
+  assert.match(intake, /This is public/);
 });
 
 test('site: install copy action has a fallback and never fails silently', async () => {
@@ -168,8 +171,6 @@ test('site: product proof is a real Holt capture, never an invented interface', 
     'the hero must render the checked-in Holt TUI evidence capture');
   assert.match(html, /Real product renderer \/ controlled Git fixture/,
     'the capture must be identified as real product output with its evidence boundary, not decoration');
-  assert.match(html, /holt tui --snapshot/,
-    'the page must name the exact public command that produced the product surface');
   assert.match(html, /docs\/evidence\/tui-graph/,
     'the product capture must link to its reproducible evidence packet');
   assert.doesNotMatch(html, /illustrative surface|representative view|repo-tree|decision-card|tree-row/i,

@@ -246,7 +246,6 @@ The free single-repository core is the current public offer. If you already use 
 worktrees, try the first check and [tell me how it went](https://github.com/Raed2180416/holt/issues/new?template=first_look.yml).
 A short account of what helped, what was confusing, or why you do not need it is useful.
 
-For a larger team workflow, see the optional [design-partner program](docs/launch/DESIGN-PARTNER-PROGRAM.md).
 Team and Enterprise are not being sold or activated in this launch.
 
 Holt is a product of [Contrare Research](https://github.com/Raed2180416). Product and research queries:

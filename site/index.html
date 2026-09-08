@@ -50,7 +50,7 @@
         <a href="#model">Why Holt</a>
         <a href="git-worktree-cleanup.html">Cleanup guide</a>
         <a href="#contact">Meet the developer</a>
-        <a class="header-cta" href="#install">Try Holt</a>
+        <a class="header-cta" href="#install">Try now</a>
       </nav>
     </div>
   </header>
@@ -64,7 +64,7 @@
           <h1>See what your agents changed. <em>Keep the work that matters.</em></h1>
           <p>Holt brings your coding agents' separate workspaces into one local view. Find duplicate work, catch overlapping edits, see what depends on what, and check which changes need preserving before cleanup.</p>
           <div class="button-row">
-            <a class="button button-primary" href="#install">Check your worktrees <span class="button-arrow" aria-hidden="true">↓</span></a>
+            <a class="button button-primary" href="#install">Try now <span class="button-arrow" aria-hidden="true">↓</span></a>
             <a class="button button-secondary" href="#demo">See a real example <span class="button-arrow" aria-hidden="true">↓</span></a>
           </div>
           <div class="hero-note" aria-label="Holt operating principles">
@@ -79,7 +79,6 @@
             <span class="product-shot-label">Real product renderer / controlled Git fixture</span>
             <img class="hero-product-shot" src="product/controlled-tui-120x36.png" width="1120" height="760" alt="Actual Holt terminal interface classifying ten Git worktrees as at risk, holding, or disposable, with unique-work evidence and a recoverable rescue command for the selected worktree.">
           </a>
-          <figcaption class="visual-caption">Actual <code>holt tui --snapshot</code> output from a small test repository. <a href="https://github.com/Raed2180416/holt/tree/main/docs/evidence/tui-graph">See how this example was made ↗</a></figcaption>
         </figure>
       </div>
     </section>
@@ -229,7 +228,7 @@
             <span class="card-index">09 / LOCAL AND FREE</span>
             <h3>Free core</h3>
             <p>Local analysis, no account, no code upload, no usage telemetry. The single-repository core is free under <a href="https://github.com/Raed2180416/holt/blob/main/LICENSE.md">FSL-1.1-MIT</a> for any purpose other than a defined Competing Use. Internal commercial use is permitted within that boundary.</p>
-            <a class="offer-cta" data-cta="install" href="#install">Install now <span aria-hidden="true">↓</span></a>
+            <a class="offer-cta" data-cta="install" href="#install">Try now <span aria-hidden="true">↓</span></a>
           </article>
         </div>
         <div class="boundary">
@@ -254,10 +253,12 @@
             <p>If you try it, please tell me what you think. Useful, confusing, missing something, or just not needed in your workflow: honest opinions and criticism are welcome.</p>
           </div>
           <div class="partner-side">
-            <a class="button button-dark" href="https://github.com/Raed2180416/holt/issues/new?template=first_look.yml">Tell me how it went <span class="button-arrow" aria-hidden="true">↗</span></a>
-            <a class="button button-secondary" id="start-contact" href="mailto:research.contrare@outlook.com?subject=Trying%20Holt">Email me <span class="button-arrow" aria-hidden="true">↗</span></a>
-            <small id="contact-status" aria-live="polite">research.contrare@outlook.com · clicking Email me also copies this address</small>
-            <a class="partner-prep" href="https://github.com/Raed2180416/holt/issues/new?template=design_partner.yml">Have a team workflow to discuss? <span aria-hidden="true">→</span></a>
+            <a class="button button-dark" href="#install">Try now <span class="button-arrow" aria-hidden="true">↑</span></a>
+            <a class="button button-secondary" href="product/holt-demo-graph.html">Explore the demo <span class="button-arrow" aria-hidden="true">↗</span></a>
+            <button class="button button-secondary" id="copy-contact-email" type="button">Copy email address</button>
+            <small id="contact-status" aria-live="polite">research.contrare@outlook.com</small>
+            <a class="partner-prep" href="https://github.com/Raed2180416/holt/issues/new?template=first_look.yml">Share feedback on GitHub <span aria-hidden="true">↗</span></a>
+            <small>GitHub feedback requires a GitHub account. You can also email me.</small>
           </div>
         </div>
 
@@ -320,15 +321,16 @@
   }());
 
   (function () {
-    var link = document.getElementById('start-contact');
+    var button = document.getElementById('copy-contact-email');
     var status = document.getElementById('contact-status');
     var email = 'research.contrare@outlook.com';
-    if (!link || !status) return;
+    if (!button || !status) return;
 
     var update = function (copied) {
       status.textContent = copied
-        ? 'Email copied: ' + email + ' · opening your email app…'
-        : 'Email: ' + email + ' · opening your email app…';
+        ? 'Email copied: ' + email + ' · paste it into your email app.'
+        : 'Copy unavailable. Select this address: ' + email;
+      button.textContent = copied ? 'Email copied' : 'Copy email address';
       status.dataset.state = copied ? 'copied' : 'available';
     };
     var fallback = function () {
@@ -346,8 +348,7 @@
       update(copied);
     };
 
-    link.addEventListener('click', function () {
-      update(false);
+    button.addEventListener('click', function () {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(email).then(function () { update(true); }, fallback);
       } else fallback();
