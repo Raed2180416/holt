@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { partitionPlan } from '../../src/partition.mjs';
+import {
+  partitionPlan, compactPartitionPlan, partitionContextRequired,
+} from '../../src/partition.mjs';
 
 const FILES = [
   'src/a.js', 'src/b.js', 'src/c.js', 'src/d.js',
@@ -80,6 +82,60 @@ test('partition: requested fan-out never creates empty buckets and exposes struc
   assert.equal(plan.mode, 'structural');
 });
 
+test('partition: no task context emits no actionable allocation by default', () => {
+  const refused = partitionContextRequired({ agents: 8 });
+  assert.equal(refused.actionable, false);
+  assert.equal(refused.fanoutFeasible, false);
+  assert.deepEqual(refused.buckets, []);
+  assert.equal(refused.requestedAgents, 8);
+});
+
+test('partition: a giant indivisible conflict component is explicitly not feasible fan-out', () => {
+  const files = [];
+  const collisions = [];
+  for (let i = 0; i < 100; i++) files.push(`giant/f${i}.js`);
+  files.push('small/only.js');
+  for (let i = 0; i < 100; i++) {
+    collisions.push({ a: 'bridge', b: `wt-${i}`, sharedFiles: [`giant/f${i}.js`] });
+  }
+  const plan = partitionPlan({ collisions }, files, { agents: 2, paths: ['**'] });
+  assert.equal(plan.fanoutFeasible, false, JSON.stringify(plan.fanout));
+  assert.equal(plan.actionable, false, 'an infeasible structural split must not be called actionable');
+  assert.ok(plan.fanout.largestIndivisibleUnitWeight >= 100);
+});
+
+test('partition: public summaries bound directories and contested files while retaining totals', () => {
+  const files = Array.from({ length: 300 }, (_, i) => `dir-${i}/file.js`);
+  const collisions = Array.from({ length: 180 }, (_, i) => ({
+    a: `a-${i}`, b: `b-${i}`, sharedFiles: [`dir-${i}/file.js`],
+  }));
+  const full = partitionPlan({ collisions }, files, { agents: 2, paths: ['**'] });
+  const verbose = {
+    ...full,
+    taskContext: {
+      ...full.taskContext,
+      anchors: Array.from({ length: 80 }, (_, i) => `anchor-${i}/**`),
+      unmatched: Array.from({ length: 60 }, (_, i) => `missing-${i}/**`),
+    },
+  };
+  const compact = compactPartitionPlan(verbose, { limit: 25 });
+  assert.ok(compact.buckets.reduce((sum, bucket) => sum + bucket.dirs.length, 0) <= 25);
+  assert.equal(compact.avoid.length, 25);
+  assert.equal(compact.output.totalDirs, full.buckets.flatMap((bucket) => bucket.dirs).length);
+  assert.equal(compact.output.totalContestedFiles, 180);
+  assert.equal(compact.taskContext.anchors.length, 25);
+  assert.equal(compact.taskContext.unmatched.length, 25);
+  assert.equal(compact.output.totalAnchors, 80);
+  assert.equal(compact.output.totalUnmatchedAnchors, 60);
+  assert.equal(compact.output.truncated, true);
+  assert.equal(compact.output.complete, false);
+  assert.equal(compact.actionable, false,
+    'a partial public payload cannot be called an executable ownership allocation');
+  assert.ok(compact.buckets.every((bucket) => bucket.dirs.length > 0),
+    'a global output cap should sample every non-empty agent bucket before repeating one');
+  assert.match(compact.next, /--json --full/);
+});
+
 test('partition: explicit path anchors scope the structural map and report unmatched anchors', () => {
   const scoped = partitionPlan({ collisions: [] }, FILES, {
     agents: 3, paths: ['src/**'],
@@ -91,6 +147,18 @@ test('partition: explicit path anchors scope the structural map and report unmat
   const missing = partitionPlan({ collisions: [] }, FILES, { agents: 2, components: ['does-not-exist'] });
   assert.equal(missing.taskContext.status, 'unresolved');
   assert.deepEqual(missing.taskContext.unmatched, ['does-not-exist']);
+});
+
+test('partition: task anchors exclude unrelated contested paths and conflict bridges', () => {
+  const plan = partitionPlan({
+    collisions: [
+      { a: 'shared', b: 'src-peer', sharedFiles: ['src/a.js'] },
+      { a: 'shared', b: 'docs-peer', sharedFiles: ['docs/x.md'] },
+    ],
+  }, FILES, { agents: 2, paths: ['src/**'] });
+  assert.deepEqual(plan.avoid.map((row) => row.file), ['src/a.js']);
+  assert.ok(plan.buckets.flatMap((bucket) => bucket.dirs)
+    .every((unit) => unit === 'src' || unit.startsWith('src/')));
 });
 
 test('partition: glob anchors stay scoped and mixed task context is explicit', () => {

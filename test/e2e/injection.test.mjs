@@ -183,7 +183,7 @@ test('INJECTION: a hostile worktree name cannot forge a holt line in ANY render 
     // inside `holt graph` — at the same instant `holt collisions` fenced the identical name.
     // A coverage list that names commands is a list somebody has to remember to extend, so
     // test/unit/untrusted.test.mjs also enumerates the module exports; this is the end-to-end half.
-    const PRINTS_IDS = [[], ['risk'], ['collisions'], ['plan'], ['graph'], ['order'], ['partition']];
+    const PRINTS_IDS = [[], ['risk'], ['collisions'], ['plan'], ['graph'], ['order'], ['partition', '--structural']];
     for (const cmd of [...PRINTS_IDS, ['duplicates']]) {
       const r = await holt([...cmd, '--cwd', fx.root], fx.root);
       const label = `holt ${cmd.join(' ') || '(summary)'}`;

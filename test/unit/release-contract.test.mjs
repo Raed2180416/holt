@@ -406,8 +406,16 @@ test('package contract: complete runtime surfaces are required, exact, locked, a
   assert.equal(pkg.engines.git, '>=2.45.0', 'package metadata omits the required Git safety floor');
   assert.deepEqual(lock.packages[''].dependencies, pkg.dependencies);
   assert.deepEqual(lock.packages[''].optionalDependencies, pkg.optionalDependencies);
-  assert.equal(lock.packages['node_modules/fast-uri'].version, '3.1.5');
+  assert.deepEqual(pkg.overrides, {
+    'fast-uri': '3.1.7',
+    hono: '4.12.34',
+    qs: '6.16.0',
+    zod: '4.4.3',
+  });
+  assert.equal(lock.packages['node_modules/fast-uri'].version, '3.1.7');
   assert.equal(lock.packages['node_modules/hono'].version, '4.12.34');
+  assert.equal(lock.packages['node_modules/qs'].version, '6.16.0');
+  assert.equal(lock.packages['node_modules/zod'].version, '4.4.3');
   assert.equal(x.lock, x.shrinkwrap, 'publishable shrinkwrap drifted from the reviewed lock');
 
   x.shrinkwrap = `${x.shrinkwrap}\n`;
@@ -455,7 +463,8 @@ test('SBOM contract: root identity is the package, not the checkout directory ba
   assert.notEqual(spdxRoot?.name, path.basename(fixtureRoot),
     'SPDX root identity leaked the checkout directory name again');
   assert.ok(cdx.components.some((x) => x.name === 'hono' && x.version === '4.12.34'));
-  assert.ok(cdx.components.some((x) => x.name === 'fast-uri' && x.version === '3.1.5'));
+  assert.ok(cdx.components.some((x) => x.name === 'fast-uri' && x.version === '3.1.7'));
+  assert.ok(cdx.components.some((x) => x.name === 'qs' && x.version === '6.16.0'));
   assert.equal(cdx.components.some((x) => /typescript|@types\/node/.test(x.name)), false,
     'development-only packages leaked into the release SBOM');
 

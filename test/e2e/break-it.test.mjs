@@ -520,6 +520,71 @@ test('ATTACK: a symbol extraction that FAILED must not read as "no symbols"', as
   }
 });
 
+test('ATTACK: ctags output beyond the memory budget is unmeasured, never partially trusted', async (t) => {
+  const { ctagsBatch, resolveBackend } = await import('../../src/symbols.mjs');
+  if ((await resolveBackend()).kind !== 'ctags') return t.skip('ctags unavailable');
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-ctags-bound-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(dir, 'many.js'), [
+    'export function FIRST_SYMBOL() {}',
+    'export function SECOND_SYMBOL() {}',
+    'export function THIRD_SYMBOL() {}',
+    '',
+  ].join('\n'));
+
+  const bounded = await ctagsBatch(dir, ['many.js'], { maxOutputBytes: 32 });
+  assert.deepEqual(bounded.failed, ['many.js']);
+  assert.deepEqual(bounded.get('many.js'), [],
+    'a killed, partial stream cannot become evidence that only the early tags exist');
+});
+
+test('ATTACK: the ctags tag budget is global across chunks and stops later parser work', async (t) => {
+  const { ctagsBatch, resolveBackend } = await import('../../src/symbols.mjs');
+  if ((await resolveBackend()).kind !== 'ctags') return t.skip('ctags unavailable');
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-ctags-global-bound-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const files = ['a.py', 'b.py', 'c.py'];
+  for (const [index, file] of files.entries()) {
+    await fs.writeFile(path.join(dir, file), `def bounded_${index}():\n    pass\n`);
+  }
+
+  const bounded = await ctagsBatch(dir, files, { chunk: 1, maxTags: 2 });
+  const retained = files.reduce((sum, file) => sum + bounded.get(file).length, 0);
+  assert.ok(retained <= 2, `retained ${retained} tags past the whole-call budget`);
+  assert.ok(bounded.failed.length >= 1,
+    'once the shared budget is exhausted, remaining files must be named unmeasured');
+});
+
+test('ATTACK: the retained symbol budget also bounds the degraded fallback backend', async (t) => {
+  const { symbolsOnDisk } = await import('../../src/symbols.mjs');
+  const dir = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-symbol-global-bound-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const files = ['a.py', 'b.py', 'c.py'];
+  for (const [index, file] of files.entries()) {
+    await fs.writeFile(path.join(dir, file), `def bounded_fallback_${index}():\n    pass\n`);
+  }
+
+  const bounded = await symbolsOnDisk(dir, files, {
+    kind: 'regex', label: 'regex-fallback', degraded: true, enry: false,
+  }, { maxSymbols: 2 });
+  const retained = files.reduce((sum, file) => sum + bounded.get(file).length, 0);
+  assert.ok(retained <= 2, `fallback retained ${retained} symbols past its budget`);
+  assert.ok(bounded.failed.length >= 1,
+    'fallback files omitted by the budget must be explicitly unmeasured');
+});
+
+test('ATTACK: a failed base-symbol batch is named as unmeasured, never absent', async (t) => {
+  const { symbolsAtBase } = await import('../../src/symbols.mjs');
+  const nonRepo = await fs.mkdtemp(path.join(process.env.HOLT_TMPDIR || os.tmpdir(), 'holt-base-fail-'));
+  t.after(() => fs.rm(nonRepo, { recursive: true, force: true }));
+  const found = await symbolsAtBase(nonRepo, 'a'.repeat(40), ['src/base.js'], {
+    kind: 'regex', label: 'regex-fallback', degraded: true, enry: false,
+  });
+  assert.deepEqual(found.get('src/base.js'), []);
+  assert.deepEqual(found.failed, ['src/base.js'],
+    'a batch process failure is not evidence that the base file has no symbols');
+});
+
 test('ATTACK: a file too large to tag reads as "no symbols" instead of "not measured"', async (t) => {
   // SAME CLASS AS THE TIMEOUT ABOVE, different trigger. `tagWorthy()` (symbols.mjs) refuses to
   // hand a file over MAX_TAG_FILE_BYTES (2 MiB) to ctags — a deliberate policy skip, not a

@@ -35,6 +35,7 @@ import { git, gitPathBatched, catFileBatch, splitNul, pmap, resolveRef, GitRefus
 import { resolveBackend, symbolsOnDisk, symbolsAtBase, diffSymbols, symbolKey } from './symbols.mjs';
 import { pathContentKey } from './content-identity.mjs';
 import { readReceipt, ownershipOf } from './integrate/receipt.mjs';
+import { readIntegrationBase } from './integration-base.mjs';
 
 const BASE_CANDIDATES = ['main', 'master', 'trunk', 'develop', 'default'];
 
@@ -44,6 +45,21 @@ export async function resolveBase(root, explicit) {
     const oid = await resolveRef(root, explicit);
     if (!oid) throw new Error(`holt: base ref '${explicit}' does not resolve in ${root}`);
     return { ref: explicit, oid, how: 'explicit' };
+  }
+
+  const configured = await readIntegrationBase(root);
+  if (configured) {
+    const oid = await resolveRef(root, configured.ref);
+    if (!oid) {
+      throw new Error(`holt: configured integration base '${configured.ref}' no longer resolves in ${root}; `
+        + 'run `holt base set <ref>` or `holt base unset`');
+    }
+    return {
+      ref: configured.ref,
+      oid,
+      how: 'configured-integration',
+      note: `using repository-local integration authority set with 'holt base set'`,
+    };
   }
 
   // origin/HEAD is the correct source for "what is this project's default branch" and is the
@@ -1691,9 +1707,15 @@ export async function scan(disc, opts = {}) {
         // load, "could not look" became a confident "shares nothing with anyone", and a worktree
         // holding unique work looked disposable. Recording WHICH files could not be read lets the
         // verdict say unmeasured instead of nothing; silence must never read as a negative result.
-        w.symbolsUnmeasured = headSyms.failed ?? [];
+        const relevant = new Set(w.symbolFiles ?? w.touched);
+        w.symbolsUnmeasured = [...new Set([
+          ...(headSyms.failed ?? []),
+          ...(baseSyms.failed ?? []).filter((file) => relevant.has(file)),
+        ])];
       },
-      Math.min(opts.concurrency ?? 8, 6),
+      // Each ctags process is itself multi-file and can emit a substantial tag stream. Two
+      // concurrent workstreams keep CPU busy without multiplying bounded buffers sixfold.
+      Math.min(opts.concurrency ?? 8, 2),
     );
   }
 

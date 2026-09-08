@@ -315,6 +315,7 @@ test('ARGUMENTS: the declaration each tool already publishes is now the thing th
   const at = tool('holt_at_risk');
   const check = tool('holt_check_workstream');
   const clean = tool('holt_clean');
+  const discard = tool('holt_discard');
   const part = tool('holt_partition');
 
   // REJECTED — no defensible interpretation exists, and guessing one is how "[object Object]"
@@ -330,6 +331,9 @@ test('ARGUMENTS: the declaration each tool already publishes is now the thing th
     [at, { repo: 'x'.repeat(5000) }, /the maximum is 4096/],
     [check, { id: 'x'.repeat(600) }, /the maximum is 512/],
     [clean, { operation: 'delete' }, /must be one of preview, quarantine, list, restore/],
+    [discard, { operation: 'delete' }, /must be one of preview, discard, list, recover/],
+    [discard, { paths: 'scratch.txt' }, /'paths' must be an array/],
+    [discard, { paths: ['scratch.txt', 7] }, /paths\[1\].*string/],
     [at, { limit: {} }, /'limit' must be a finite number/],
     [at, { limit: 'lots' }, /'limit' must be a finite number/],
     [at, { limit: Infinity }, /'limit' must be a finite number/],
@@ -370,6 +374,7 @@ test('ARGUMENTS: the declaration each tool already publishes is now the thing th
     [check, { id: 'A-memory-core/stage' }],
     [clean, { apply: true }],
     [clean, {}],
+    [discard, { operation: 'preview', paths: ['scratch.txt'] }],
     [part, { paths: ['src/**'], components: ['auth'] }],
     [tool('holt_rescue'), { id: 'release-1.2.3', release: false }],
     [tool('holt_duplicates'), { deep: true, limit: 5 }],

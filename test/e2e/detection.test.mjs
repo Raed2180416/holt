@@ -14,7 +14,7 @@ import fsp from 'node:fs/promises';
 import { standardFixture, emptyFixture, newRepo, backdateWorktreeCreation } from '../fixtures.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
-import { analyze, contextDigest, duplicates } from '../../src/analyze.mjs';
+import { analyze, contextDigest, duplicates, landingPlan } from '../../src/analyze.mjs';
 
 async function inspectFixture(fx, opts = {}) {
   const disc = await discover(fx.root, opts);
@@ -883,6 +883,39 @@ test('P5 COLLAPSE: exact fan-out copies collapse only when every copy is durable
   assert.equal(report.plan.collapse.some((x) => x.id === 'uncommitted-copy' || x.into === 'uncommitted-copy'), false,
     `uncommitted work must stay in the review queue: ${JSON.stringify(report.plan.collapse)}`);
   assert.ok(report.plan.order.some((x) => x.id === 'uncommitted-copy'), 'uncommitted work must remain ordered for review');
+});
+
+test('P5 COLLAPSE: directional redundancy never hides the dirty worktree holding the copy', () => {
+  const common = {
+    family: 'fixture', ok: true, added: [], addedKeys: [], symbolsUnmeasured: [],
+    ignored: { count: 0, files: [], how: 'measured' },
+  };
+  const clean = {
+    ...common,
+    id: 'a-clean', path: '/tmp/a-clean', touched: ['x.js'],
+    contentKeys: { 'x.js': 'same-on-disk-bytes' },
+    committed: {
+      count: 1, files: ['x.js'], identities: { 'x.js': 'same-committed-entry' }, mergedTree: 'tree-a',
+    },
+    uncommitted: { count: 0, files: [], untracked: [], how: 'status' },
+  };
+  const dirty = {
+    ...common,
+    id: 'z-dirty', path: '/tmp/z-dirty', touched: ['x.js', 'dirty.txt'],
+    contentKeys: { 'x.js': 'same-on-disk-bytes', 'dirty.txt': 'dirty-only-bytes' },
+    committed: {
+      count: 1, files: ['x.js'], identities: { 'x.js': 'same-committed-entry' }, mergedTree: 'tree-b',
+    },
+    uncommitted: { count: 1, files: ['dirty.txt'], untracked: [], how: 'status' },
+  };
+
+  const plan = landingPlan({ workstreams: [clean, dirty] }, {
+    collisions: [], duplicates: [], collapse: true,
+  });
+  assert.equal(plan.collapse.some((row) => row.id === 'z-dirty'), false,
+    `directional A-is-held-by-B evidence cannot make unsafe B disappear: ${JSON.stringify(plan.collapse)}`);
+  assert.ok(plan.order.some((row) => row.id === 'z-dirty'),
+    `the dirty holder must remain explicitly reviewable: ${JSON.stringify(plan)}`);
 });
 
 /* ------------------------------------------------------ negative control ---- */

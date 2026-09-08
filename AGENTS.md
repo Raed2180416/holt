@@ -65,12 +65,22 @@ anything already committed is recoverable. If a refusal names a file you truly d
 commit it, `holt rescue` it, or delete it yourself outside the agent — do not look for another
 verb that gets past the guard.
 
+If `holt discard` is interrupted or reports a retained quarantine, do not run another broad
+cleanup over it. Run `holt recover-discard` to list durable transactions, then
+`holt recover-discard <transaction-id>` to reconcile the recorded paths. Holt never overwrites a
+concurrent replacement; an unresolved path remains named and retained.
+
 **Before starting work, check what your siblings are doing:**
 
 ```bash
 holt context <worktree-id>     # who else is editing your files, what already exists
 holt status                    # collisions, duplicates, what is at risk
 ```
+
+Also check `holt base`. If its detected ref is not the repository's real integration destination,
+use an explicit `--base <ref>` for the current read. Persist with `holt base set <ref>` only when
+the repository owner or operating instructions identify that ref; the setting is authority and is
+stored outside branch-controlled files.
 
 If a symbol you are about to write already exists in another workstream, reuse or coordinate —
 do not build it twice. Add `--json` to any command for machine-readable output.

@@ -192,3 +192,22 @@ test('catFileBatch: a synchronous throw during drain does not crash the data eve
   assert.equal(got.get(`${head}:a.txt`), 'AAA\n', 'record before the throw must arrive');
   assert.equal(got.get(`${head}:c.txt`), 'CCC\n', 'record after the throw must arrive');
 });
+
+test('catFileBatch: slow consumers are backpressured to a bounded callback count', async (t) => {
+  const fx = await newRepo('cat-backpressure');
+  t.after(() => fx.cleanup());
+  const head = (await fx.git(['rev-parse', 'HEAD'])).trim();
+  const specs = Array.from({ length: 80 }, () => `${head}:src/base.js`);
+  let active = 0;
+  let maximum = 0;
+  let seen = 0;
+  await catFileBatch(specs, { cwd: fx.root, recordConcurrency: 3 }, async () => {
+    active++;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    seen++;
+    active--;
+  });
+  assert.equal(seen, specs.length);
+  assert.ok(maximum <= 3, `callback buffers escaped the declared bound: ${maximum}`);
+});

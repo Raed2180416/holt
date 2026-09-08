@@ -252,7 +252,7 @@ test('HOSTILE: `repo` cannot point holt at another repository — reading OR rem
   const w = await startServer(mine);
   t.after(async () => { await w.close(); await removeTree(dir); });
 
-  for (const toolName of ['holt_status', 'holt_branches', 'holt_at_risk', 'holt_clean', 'holt_protect']) {
+  for (const toolName of ['holt_status', 'holt_branches', 'holt_at_risk', 'holt_clean', 'holt_protect', 'holt_discard']) {
     const res = await w.call(toolName, { repo: theirs }, 120_000);
     assert.equal(res.result.isError, true, `${toolName} answered about another repository`);
     const p = payloadOf(res);
@@ -410,6 +410,7 @@ test('HOSTILE: no argument crashes, hangs or is silently reinterpreted — and t
     ['a 1 MB path', 'holt_status', { repo: 'x'.repeat(1024 * 1024) }, /the maximum is 4096/],
     ['a string on a destructive flag', 'holt_clean', { repo: root, apply: 'true' }, /must be true or false/],
     ['a string on the purge apply flag', 'holt_purge', { repo: root, id: 'x', apply: 'true' }, /must be true or false/],
+    ['a scalar discard path', 'holt_discard', { repo: root, paths: 'x' }, /must be an array/],
     ['a number on a boolean flag', 'holt_duplicates', { repo: root, deep: 1 }, /must be true or false/],
     ['a non-numeric limit', 'holt_at_risk', { repo: root, limit: 'lots' }, /must be a finite number/],
   ];

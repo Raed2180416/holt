@@ -172,7 +172,7 @@ test('CLI: order / partition / branches / journal are wired, exit 0, and emit va
   const fx = await graveyardFixture();
   t.after(() => fx.cleanup());
 
-  for (const args of [['order'], ['partition', '--agents', '3'], ['hotspots'], ['branches'], ['journal'], ['plan', '--collapse']]) {
+  for (const args of [['order'], ['partition', '--agents', '3', '--structural'], ['hotspots'], ['branches'], ['journal'], ['plan', '--collapse']]) {
     const r = await sh(process.execPath, [BIN, ...args, '--json', '--cwd', fx.root], fx.root);
     assert.equal(r.code, 0, `holt ${args.join(' ')} exited ${r.code}: ${r.stderr}`);
     assert.doesNotThrow(() => JSON.parse(r.stdout), `holt ${args.join(' ')} must emit JSON`);
