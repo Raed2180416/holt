@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#121c18">
+  <meta name="robots" content="index,follow">
+  <meta name="description" content="Check what is left in Git worktrees before cleanup. Understand remove versus prune, inspect untracked and ignored files, and try Holt's read-only overview.">
+  <link rel="canonical" href="https://raed2180416.github.io/holt/git-worktree-cleanup.html">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Before cleaning up Git worktrees, check what is still there">
+  <meta property="og:description" content="A practical guide from the solo developer building Holt at Contrare Research.">
+  <meta property="og:url" content="https://raed2180416.github.io/holt/git-worktree-cleanup.html">
+  <meta property="og:image" content="https://raed2180416.github.io/holt/brand/holt-lockup.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Git worktree cleanup: what to check before removing a worktree | Holt</title>
+  <link rel="icon" type="image/png" href="brand/holt-mark-transparent.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="./" aria-label="Holt home"><img src="brand/holt-mark-transparent.png" alt="" width="20" height="32"><span class="brand-rest" aria-hidden="true">olt</span></a>
+      <nav class="nav" aria-label="Primary navigation"><a href="./#contact">Meet the developer</a><a class="header-cta" href="./#install">Try Holt</a></nav>
+    </div>
+  </header>
+  <main id="main" tabindex="-1" class="container guide">
+    <span class="eyebrow">Git worktrees / practical guide</span>
+    <h1>Before cleaning up worktrees, check what is still there.</h1>
+    <p class="guide-byline">Raed Siddiqui · Contrare Research · September 8, 2026</p>
+    <p>When several coding agents are working at once, the list of worktrees can get hard to follow. A session ends, a branch looks old, and a folder starts to look disposable. The thing worth checking is what that folder still contains.</p>
+    <p>I build <a href="./">Holt</a>, a local tool for this problem. You can do useful checks with Git alone, too. Here is where I would start.</p>
+
+    <h2>Start with the list, then inspect each checkout.</h2>
+    <div class="code-card"><pre>git worktree list --porcelain
+git -C /path/to/worktree status --short --untracked-files=all
+git -C /path/to/worktree ls-files --others --ignored --exclude-standard</pre></div>
+    <p>Replace <code>/path/to/worktree</code> with a path from the first command. Repeat the checks for the worktrees you are reviewing, including your main checkout. The last command lists ignored files separately so they are not silently left out of your review.</p>
+    <p>A clean <code>git status</code> in your main checkout says something about that checkout. Another worktree has its own index and working files. It can still contain an untracked migration or a local edit that has not reached a commit. See <a href="https://git-scm.com/docs/git-status">Git's status documentation</a> and <a href="https://git-scm.com/docs/git-worktree">worktree documentation</a>.</p>
+
+    <h2>Remove and prune do different jobs.</h2>
+    <p><code>git worktree remove</code> removes a checkout. Git refuses an unclean worktree unless you force it. <code>git worktree prune</code> removes stale administrative records for worktrees that are already missing. Prune does not inspect and tidy every existing worktree for you. Those behaviors are documented in <a href="https://git-scm.com/docs/git-worktree">Git's worktree manual</a>.</p>
+    <p>If Git refuses removal, inspect the files it is protecting. Forcing the command should not be the automatic next step. Also check whether local commits are preserved in a branch or other durable reference before making a separate branch-deletion decision.</p>
+
+    <h2>Look at more than the branch name.</h2>
+    <ul role="list">
+      <li><strong>Modified and staged files:</strong> does someone still need to review or save them?</li>
+      <li><strong>Untracked files:</strong> is this a new source file, migration, note, or other work that Git has not committed?</li>
+      <li><strong>Ignored files:</strong> are they replaceable dependencies, or useful local data? The directory name alone does not answer that.</li>
+      <li><strong>Local commits:</strong> is the work preserved in the intended branch, and has it actually been integrated where you expect?</li>
+      <li><strong>Active sessions:</strong> is an agent still writing here? Finish or pause that work before treating the checkout as settled.</li>
+    </ul>
+
+    <h2>Where Holt helps</h2>
+    <p>Holt brings the linked worktrees into one local view and looks for work with no durable copy elsewhere. The first check on the <a href="./#install">Holt homepage</a> runs in strict read-only mode. It changes no repository files, hooks, or locks and does not upload your source.</p>
+    <p>That quick check deliberately skips symbol analysis, and committed comparisons can be marked approximate. It helps you find what needs attention. It is not a deletion verdict or an off-machine backup. Holt's protection, recovery, and quarantine commands are separate workflows described in the <a href="https://github.com/Raed2180416/holt">repository</a>.</p>
+
+    <h2>I'd like to know how this goes in your setup.</h2>
+    <p>I'm a solo developer building Holt as a product of Contrare Research. If you already have several worktrees, try the first check and tell me whether it shows you anything useful. If it is slow, confusing, or unnecessary, I want to hear that too.</p>
+    <div class="button-row"><a class="button button-primary" href="./#install">Try the read-only check</a><a href="https://github.com/Raed2180416/holt/issues/new?template=first_look.yml">Leave honest feedback</a></div>
+    <p>Holt's single-repository core is free and source-available under <a href="https://github.com/Raed2180416/holt/blob/main/LICENSE.md">FSL-1.1-MIT</a> for its defined permitted purposes. It is not currently OSI open source.</p>
+  </main>
+  <footer class="site-footer"><div class="container"><nav class="footer-links" aria-label="Footer navigation"><a href="./">Holt</a><a href="https://github.com/Raed2180416/holt">GitHub</a><a href="mailto:research.contrare@outlook.com">Contact</a></nav><p class="footer-note">Holt is a product of Contrare Research.</p></div></footer>
+</body>
+</html>

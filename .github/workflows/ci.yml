@@ -339,7 +339,24 @@ jobs:
 
       - run: npm ci
       - name: install browser proof dependency (no browser download)
-        run: npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1
+        # Keep the reviewed root dependency graph unchanged for the bundle equality check.
+        shell: bash
+        run: |
+          set -euo pipefail
+          playwright_prefix="$RUNNER_TEMP/holt-playwright"
+          npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1 --prefix "$playwright_prefix"
+          node - "$playwright_prefix" <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const prefix = process.argv[2];
+          for (const name of ['playwright', 'playwright-core']) {
+            fs.symlinkSync(
+              path.join(prefix, 'node_modules', name),
+              path.join(process.cwd(), 'node_modules', name),
+              process.platform === 'win32' ? 'junction' : 'dir',
+            );
+          }
+          NODE
 
       - name: doctor
         run: node bin/holt.mjs doctor
@@ -459,8 +476,24 @@ jobs:
 
       - run: npm ci
       - name: install browser proof dependency (no browser download)
+        # Expose the browser verifier package without re-resolving Holt's locked dependencies.
         shell: bash
-        run: npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1
+        run: |
+          set -euo pipefail
+          playwright_prefix="$RUNNER_TEMP/holt-playwright"
+          npm install --no-save --ignore-scripts --no-package-lock playwright@1.62.1 --prefix "$playwright_prefix"
+          node - "$playwright_prefix" <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const prefix = process.argv[2];
+          for (const name of ['playwright', 'playwright-core']) {
+            fs.symlinkSync(
+              path.join(prefix, 'node_modules', name),
+              path.join(process.cwd(), 'node_modules', name),
+              process.platform === 'win32' ? 'junction' : 'dir',
+            );
+          }
+          NODE
       - name: what this platform actually has
         run: node bin/holt.mjs doctor
       - name: every portable test file (the pinned real-repo corpus has one required 4/4 owner)

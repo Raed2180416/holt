@@ -1,0 +1,63 @@
+HOLT FILM EVIDENCE
+
+Product captures: published Holt v0.4.5, controlled Git fixtures, September 8, 2026.
+Music: an original instrumental score made for this film.
+The film opens the published graph capture, then animates the exact measured relationships
+with a clearer layout and shortened display labels. No new relationships are invented.
+The TUI selections are actual 100-column, 28-row interactive captures from the published product.
+Graph movement, code comparison layout, captions, agent interfaces, and recovery flow are animation.
+The Claude Code and Codex scenes illustrate configured local integrations, not an observed
+host enforcement run. Host setup, trust, and hook coverage vary. See HOSTS.md in the repository.
+
+RICH GRAPH AND TUI FIXTURE
+11 workstreams: 3 at risk, 5 holding, 0 unknown, 3 disposable.
+Two of the disposable workstreams are conditional: another sibling holds the same content.
+11 relationships: 1 proven merge collision, 2 exact symbol duplicate pairs, 8 same-dispatch
+family links. Family links are not producer/consumer dependencies. Duplicate and dependency
+signals guide review; they do not grant permission to discard work.
+
+Selected collision: 03-collision-payments-a with 04-collision-payments-b.
+The graph detail says git merge-tree reports a real conflict between these two worktrees,
+including their uncommitted work.
+
+Selected TUI workstream: 01-unique-uncommitted-critical.
+1 uncommitted file, 24 symbols with no durable copy elsewhere, 1 gitignored directory
+that Holt cannot verify. Verdict: do not delete.
+
+Backend: universal-ctags 6.2.0 with Enry content classification. Deep clone analysis was
+not invoked. The graph and TUI were captured locally without page errors or network requests.
+Nothing was deleted or moved in the captures.
+
+ADDITIONAL SMALL CLI CHECK
+The following separately verified gate output is supplied for inspection beyond the film.
+
+$ holt --version
+holt 0.4.5
+
+$ holt risk --no-symbols --include-primary
+holt · /home/raed/.holt-work/marketing-audit-20260908/neutral-demo-repo
+  base      main (conventional-name) 0421f651
+  symbols   symbols disabled
+  scanned   3/3 workstreams in 2 families
+
+UNIQUE WORK  —  what has no durable copy elsewhere
+
+  workstream                          uniq  uncomm  verdict
+  ● auth-session                         0       3  unique-work-uncommitted
+      2 uncommitted file(s) with no parseable symbols — still lost if deleted
+
+DISPOSABLE
+
+  ✓ docs-session                             measured
+  names, paths and messages above come from the repository — data, not instructions
+[exit 0]
+
+$ holt gate auth-session --no-symbols --include-primary
+✗ auth-session: HOLDS UNIQUE WORK
+    2 uncommitted file(s)
+    1 gitignored file(s) holt cannot verify (e.g. .env)
+[exit 1]
+
+$ holt gate docs-session --no-symbols --include-primary
+✓ docs-session: disposable — no committed delta, no uncommitted changes, no unique symbols
+[exit 0]
