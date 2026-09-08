@@ -229,6 +229,39 @@ enforced it.
 - **Hook-capable, not yet wired**: Gemini, Crush, Amp, Factory and Junie still receive MCP + advisory.
 - **Cloud or ephemeral**: Codex cloud, Copilot cloud, Cursor cloud, Google Jules, Replit Agent do not receive local worktree enforcement by default.
 
+### Structured local/MCP tools
+
+Codex project hooks use a broad `PreToolUse` matcher because MCP and other local functions are
+part of the same host event stream. Holt never treats a convenient field such as `path` as proof
+that a tool mutates the repository. Add exact contracts to `.holtrc.json` when a server's schema is
+reviewed:
+
+```json
+{
+  "toolContracts": [
+    {
+      "host": "codex",
+      "tool": "mcp__filesystem__delete_file",
+      "pathField": "path",
+      "role": "delete",
+      "kind": "filesystem delete"
+    },
+    {
+      "host": "codex",
+      "tool": "mcp__filesystem__read_file",
+      "role": "ignore",
+      "kind": "filesystem read"
+    }
+  ]
+}
+```
+
+Tool names are exact (not regexes). `delete`, `overwrite`, and `move` feed Holt's existing
+content-evidence gate; `ignore` is only for a reviewed read-only tool. An uncontracted Codex
+structured tool is denied through Codex's fail-closed hook dialect by default. Repositories that
+choose `"unknownToolPolicy": "audit"` explicitly accept an observable, journalled fail-open path;
+that is an audit decision, not proof of mutation safety.
+
 Holt describes nearly 30 distinct agent product surfaces, but support is deliberately split by
 evidence grade. Current MCP/hook files for Cursor, Codex, Qwen Code, Copilot, Cline, Goose, Continue, Devin CLI, Cascade, Crush, Gemini CLI and VS Code are generated and parsed in schema fixtures. Gemini, Crush, Amp, Factory and Junie hooks are still unverified and unwired; their hosts remain MCP-capable rather than live-verified blockers. Run `holt providers`, `holt hosts`, and `holt doctor --json` for the machine-readable provider, configured-on-disk, trust, runtime, and live-proof boundaries.
 

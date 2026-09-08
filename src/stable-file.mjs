@@ -23,6 +23,26 @@ const identity = (a, b) => a && b
   && a.ctimeMs === b.ctimeMs;
 
 const ownedByProcess = (stat) => typeof process.getuid !== 'function' || stat.uid === process.getuid();
+const TRANSIENT_RENAME_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
+const RENAME_RETRY_DELAYS_MS = [5, 10, 20, 40, 80, 160, 250, 250, 250, 250];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Windows can reject an otherwise atomic replacement while a concurrent verifier still has the
+ * destination open. Keep the atomic rename intact: retry only transient sharing/contention
+ * failures, never delete the destination as a workaround, and surface a persistent failure.
+ */
+async function renamePrivateFileWithRetry(temp, file) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(temp, file);
+      return;
+    } catch (error) {
+      if (!TRANSIENT_RENAME_CODES.has(error?.code) || attempt >= RENAME_RETRY_DELAYS_MS.length) throw error;
+      await sleep(RENAME_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
 
 /**
  * Read one regular file through a stable descriptor and re-bind the final pathname.
@@ -103,7 +123,7 @@ export async function writePrivateFileAtomic(file, bytes) {
     await handle.sync();
     await handle.close();
     handle = null;
-    await fs.rename(temp, file);
+    await renamePrivateFileWithRetry(temp, file);
     const published = await fs.lstat(file);
     if (!published.isFile() || published.isSymbolicLink() || !ownedByProcess(published)) {
       throw new Error(`published state is not one owned regular file: ${file}`);

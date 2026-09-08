@@ -32,6 +32,12 @@
  *     (an override is exact evidence; a regex match on a generated name is not) — this file only
  *     makes that existing, already-reviewed knob reachable from disk instead of from a caller
  *     nothing could actually be.  It cannot mark anything "safe" that content-identity doesn't.
+ *
+ *   - STRUCTURED TOOL AUTHORITY IS EXPLICIT. `toolContracts` is an exact host/tool registry, not
+ *     a regex over arbitrary JSON. A contract may mark a read-only tool as `ignore`, or name the
+ *     exact dotted path fields for delete/overwrite/move evidence. Codex's broad PreToolUse hook
+ *     asks on an uncontracted structured tool by default; `unknownToolPolicy: "audit"` is an
+ *     explicit, journalled fail-open choice for repositories that have reviewed their tool set.
  */
 
 import fs from 'node:fs/promises';
@@ -65,13 +71,84 @@ export function hasNestedQuantifier(source) {
   return /\((?:\?[:=!]|\?<[=!a-zA-Z])?(?:[^()\\]|\\.)*(?:[+*]|\{\d+,\d*\})\s*\)\s*(?:[+*]|\{\d+,\d*\})/.test(src);
 }
 
-const KNOWN_KEYS = ['familyOverrides', 'guardAllow', 'maintenanceFloor', 'maintenanceRatio'];
+const KNOWN_KEYS = [
+  'familyOverrides', 'guardAllow', 'maintenanceFloor', 'maintenanceRatio',
+  'toolContracts', 'unknownToolPolicy',
+];
 
 // Keys that are silently ignored — they are standard JSON config metadata, not holt settings.
 // `$schema` is the JSON Schema standard self-reference key; any editor that supports JSON
 // schemas will add it automatically, and killing the guard on it would be a self-inflicted
 // wound.
 const IGNORED_KEYS = ['$schema'];
+
+const TOOL_CONTRACT_ROLES = ['ignore', 'delete', 'overwrite', 'move'];
+const TOOL_POLICIES = ['ask', 'audit'];
+
+function contractFieldName(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 120
+    && value.split('.').every((part) => /^[A-Za-z][A-Za-z0-9_]*$/.test(part));
+}
+
+function contractToolName(value) {
+  return typeof value === 'string' && value.length > 0 && value.length <= 200
+    && !/[\s\0\n\r*?()[\]|]/.test(value);
+}
+
+/** Validate the explicit host/tool authority registry without compiling user regexes. */
+function validateToolContracts(raw, filePath) {
+  if (!Array.isArray(raw) || raw.length > 128) {
+    throw new ConfigError(`${filePath}: "toolContracts" must be an array with at most 128 entries`, filePath);
+  }
+  const seen = new Set();
+  return raw.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new ConfigError(`${filePath}: "toolContracts[${index}]" must be an object`, filePath);
+    }
+    const host = entry.host;
+    const tool = entry.tool;
+    const role = entry.role;
+    if (typeof host !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(host) || host.length > 64) {
+      throw new ConfigError(`${filePath}: "toolContracts[${index}].host" must be an exact host id`, filePath);
+    }
+    if (!contractToolName(tool)) {
+      throw new ConfigError(`${filePath}: "toolContracts[${index}].tool" must be one exact runtime tool name (no wildcards)`, filePath);
+    }
+    if ((host === 'codex' && tool === 'apply_patch')
+      || (host === 'claude-code' && (tool === 'Write' || tool === 'Edit'))
+      || (host === 'qwen-code' && (tool === 'write_file' || tool === 'edit'))) {
+      throw new ConfigError(`${filePath}: built-in ${host}/${tool} authority cannot be overridden by toolContracts`, filePath);
+    }
+    const identity = `${host}\u0000${tool}`;
+    if (seen.has(identity)) {
+      throw new ConfigError(`${filePath}: duplicate exact tool contract for ${host}/${tool}`, filePath);
+    }
+    seen.add(identity);
+    if (!TOOL_CONTRACT_ROLES.includes(role)) {
+      throw new ConfigError(`${filePath}: "toolContracts[${index}].role" must be one of ${TOOL_CONTRACT_ROLES.join(', ')}`, filePath);
+    }
+    if (role !== 'ignore' && !contractFieldName(entry.pathField)) {
+      throw new ConfigError(`${filePath}: "toolContracts[${index}].pathField" must be a dotted field name`, filePath);
+    }
+    if (role === 'move' && !contractFieldName(entry.destField)) {
+      throw new ConfigError(`${filePath}: "toolContracts[${index}].destField" must be a dotted field name for move contracts`, filePath);
+    }
+    if (entry.kind !== undefined
+      && (typeof entry.kind !== 'string' || entry.kind.length === 0 || entry.kind.length > 200
+        || /[\0\n\r]/.test(entry.kind))) {
+      throw new ConfigError(`${filePath}: "toolContracts[${index}].kind" must be a short single-line string`, filePath);
+    }
+    if (entry.promptOnRisk !== undefined && typeof entry.promptOnRisk !== 'boolean') {
+      throw new ConfigError(`${filePath}: "toolContracts[${index}].promptOnRisk" must be boolean`, filePath);
+    }
+    const out = { host, tool, role };
+    if (entry.pathField !== undefined) out.pathField = entry.pathField;
+    if (entry.destField !== undefined) out.destField = entry.destField;
+    if (entry.kind !== undefined) out.kind = entry.kind;
+    if (entry.promptOnRisk !== undefined) out.promptOnRisk = entry.promptOnRisk;
+    return out;
+  });
+}
 
 export class ConfigError extends Error {
   constructor(message, filePath) {
@@ -192,6 +269,15 @@ function validate(raw, filePath) {
       throw new ConfigError(`${filePath}: "maintenanceRatio" must be a number between 0 and 1`, filePath);
     }
     out.maintenanceRatio = v;
+  }
+
+  if ('toolContracts' in raw) out.toolContracts = validateToolContracts(raw.toolContracts, filePath);
+
+  if ('unknownToolPolicy' in raw) {
+    if (!TOOL_POLICIES.includes(raw.unknownToolPolicy)) {
+      throw new ConfigError(`${filePath}: "unknownToolPolicy" must be "ask" or "audit"`, filePath);
+    }
+    out.unknownToolPolicy = raw.unknownToolPolicy;
   }
 
   return { config: out, warnings };
