@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.7
+
+**Active sessions can claim a workspace before their edits reach disk.** The ownership lifecycle
+adds claim, heartbeat, handoff, release, and reviewed takeover through CLI and MCP. Gate and clean
+retain claimed worktrees, while plan and order defer them. Context, hook briefings, TUI, and graph
+carry the same evidence. A native mutex serializes claim versus cleanup and releases on process
+death without ending the separate session claim. This is explicit local coordination, not automatic
+detection of every running agent.
+
+**Generated residue is named separately from source work.** A worktree whose only observed
+ignored bytes are manifest-backed generated paths, such as a local dependency install, now gets
+its own reporting category in `holt status`, `holt risk`, and the MCP summary tools. This keeps
+actual source work at risk visible first without treating generated residue as disposable. A local
+patch or data inside such a directory can still matter, so cleanup remains blocked; mixed,
+unexplained, and secret-bearing ignored paths remain in the ordinary at-risk set.
+
 ## 0.4.6
 
 **Resumable discard, trusted integration-base selection, and bounded large-repository analysis.**
