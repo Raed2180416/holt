@@ -9,8 +9,11 @@ import { fileURLToPath } from 'node:url';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 test('free/core launch exposes a clear GitHub entry point and no paid-tier checkout', async () => {
-  const [site, pages] = await Promise.all([
+  const [site, thanks, cleanupGuide, dependencyGuide, pages] = await Promise.all([
     fs.readFile(path.join(ROOT, 'site', 'index.html'), 'utf8'),
+    fs.readFile(path.join(ROOT, 'site', 'thanks.html'), 'utf8'),
+    fs.readFile(path.join(ROOT, 'site', 'git-worktree-cleanup.html'), 'utf8'),
+    fs.readFile(path.join(ROOT, 'site', 'worktree-dependency-bloat.html'), 'utf8'),
     fs.readFile(path.join(ROOT, '.github', 'workflows', 'pages.yml'), 'utf8'),
   ]);
 
@@ -26,6 +29,11 @@ test('free/core launch exposes a clear GitHub entry point and no paid-tier check
   assert.match(site,
     /class="button button-primary button-github" href="https:\/\/github\.com\/Raed2180416\/holt">Open Holt on GitHub\b/,
     'the install section must retain a direct GitHub choice alongside the local command');
+  for (const [page, html] of Object.entries({ thanks, cleanupGuide, dependencyGuide })) {
+    assert.match(html,
+      /class="header-cta" href="https:\/\/github\.com\/Raed2180416\/holt">Try on GitHub/,
+      `${page} must keep the source and release project visibly reachable`);
+  }
 
   assert.match(site, /Team and Enterprise are deliberately not offered in this launch/);
   assert.doesNotMatch(site, /id="cta-team"|data-checkout=|Start a Team plan|__HOLT_API__|\/checkout\b/,
