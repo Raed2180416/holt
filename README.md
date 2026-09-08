@@ -34,6 +34,21 @@ agent success rate, speed, or token use. Those need valid comparisons on real ta
 
 ## Try a read-only check
 
+### See the result before using your own repository
+
+[Run the disposable first-look fixture](https://github.com/Raed2180416/holt-first-look). It makes a
+temporary Git repository with two sibling worktrees, then runs Holt in strict read-only mode. One
+worktree has a reassuring name but holds modified, untracked, and ignored work; the other is empty.
+Nothing in your own repository is changed, removed, or uploaded.
+
+```bash
+git clone https://github.com/Raed2180416/holt-first-look.git
+cd holt-first-look
+./try-holt.sh
+```
+
+### Check your own repository, read only
+
 Open a terminal inside a repository with linked worktrees, then run:
 
 ```bash
@@ -55,6 +70,7 @@ actually helps. If you give it a try, [tell me how it went](https://github.com/R
 Honest opinions and criticism are welcome, including if it feels confusing or unnecessary.
 
 [Website and demo](https://raed2180416.github.io/holt/) ·
+[Disposable first look](https://github.com/Raed2180416/holt-first-look) ·
 [Git worktree cleanup guide](https://raed2180416.github.io/holt/git-worktree-cleanup.html)
 
 <!-- HOLT:SOCIAL-PROOF:BEGIN
