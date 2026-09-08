@@ -100,11 +100,13 @@ test('site: small public text combinations meet WCAG AA contrast', async () => {
 });
 
 test('site: public landing and guide routes are indexed, while prototypes stay excluded', async () => {
-  const [index, thanks, robots, sitemap] = await Promise.all([
+  const [index, thanks, robots, sitemap, cleanupGuide, dependencyGuide] = await Promise.all([
     fs.readFile(path.join(SITE, 'index.html'), 'utf8'),
     fs.readFile(path.join(SITE, 'thanks.html'), 'utf8'),
     fs.readFile(path.join(SITE, 'robots.txt'), 'utf8'),
     fs.readFile(path.join(SITE, 'sitemap.xml'), 'utf8'),
+    fs.readFile(path.join(SITE, 'git-worktree-cleanup.html'), 'utf8'),
+    fs.readFile(path.join(SITE, 'worktree-dependency-bloat.html'), 'utf8'),
   ]);
 
   assert.match(index, /<meta name="robots" content="index,follow">/);
@@ -123,9 +125,15 @@ test('site: public landing and guide routes are indexed, while prototypes stay e
   assert.match(robots, /Sitemap: https:\/\/raed2180416\.github\.io\/holt\/sitemap\.xml/);
   assert.match(sitemap, /<loc>https:\/\/raed2180416\.github\.io\/holt\/<\/loc>/);
   assert.match(sitemap, /<loc>https:\/\/raed2180416\.github\.io\/holt\/git-worktree-cleanup\.html<\/loc>/);
-  const guide = await fs.readFile(path.join(SITE, 'git-worktree-cleanup.html'), 'utf8');
-  assert.match(guide, /<meta name="robots" content="index,follow">/);
-  assert.match(guide, /<link rel="canonical" href="https:\/\/raed2180416\.github\.io\/holt\/git-worktree-cleanup\.html">/);
-  assert.equal((sitemap.match(/<url>/g) || []).length, 2,
+  assert.match(sitemap, /<loc>https:\/\/raed2180416\.github\.io\/holt\/worktree-dependency-bloat\.html<\/loc>/);
+  assert.match(cleanupGuide, /<meta name="robots" content="index,follow">/);
+  assert.match(cleanupGuide, /<link rel="canonical" href="https:\/\/raed2180416\.github\.io\/holt\/git-worktree-cleanup\.html">/);
+  assert.match(dependencyGuide, /<meta name="robots" content="index,follow">/);
+  assert.match(dependencyGuide, /<link rel="canonical" href="https:\/\/raed2180416\.github\.io\/holt\/worktree-dependency-bloat\.html">/);
+  assert.match(dependencyGuide, /Holt does not deduplicate dependencies/,
+    'the guide must keep package-manager disk reclamation separate from Holt\'s worktree evidence');
+  assert.doesNotMatch(dependencyGuide, /rm\s+-rf\s+(?:\.\/)?node_modules/,
+    'a public safety guide must not make raw removal of a worktree dependency directory its default advice');
+  assert.equal((sitemap.match(/<url>/g) || []).length, 3,
     'prototype and thank-you routes must not appear in the public sitemap');
 });

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#121c18">
+  <meta name="robots" content="index,follow">
+  <meta name="description" content="Coding agents can leave dependency installs in many Git worktrees. Separate source safety from package-manager disk reclamation before cleaning up.">
+  <link rel="canonical" href="https://raed2180416.github.io/holt/worktree-dependency-bloat.html">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Worktree dependency bloat: reclaim space without losing source work">
+  <meta property="og:description" content="A practical guide to separating Git worktree safety from package-manager cleanup, by the solo developer behind Holt.">
+  <meta property="og:url" content="https://raed2180416.github.io/holt/worktree-dependency-bloat.html">
+  <meta property="og:image" content="https://raed2180416.github.io/holt/brand/holt-lockup.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Worktree dependency bloat: reclaim space without losing source work | Holt</title>
+  <link rel="icon" type="image/png" href="brand/holt-mark-transparent.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="./" aria-label="Holt home"><img src="brand/holt-mark-transparent.png" alt="" width="20" height="32"><span class="brand-rest" aria-hidden="true">olt</span></a>
+      <nav class="nav" aria-label="Primary navigation"><a href="git-worktree-cleanup.html">Cleanup guide</a><a href="./#contact">Meet the developer</a><a class="header-cta" href="./#install">Try Holt</a></nav>
+    </div>
+  </header>
+  <main id="main" tabindex="-1" class="container guide">
+    <span class="eyebrow">Git worktrees / dependency bloat</span>
+    <h1>Worktree disk bloat is a package-management problem before it is a Git cleanup problem.</h1>
+    <p class="guide-byline">Raed Siddiqui · Contrare Research · September 8, 2026</p>
+    <p>Coding agents often install dependencies to run a test, build a feature, or reproduce a bug. With several worktrees, those installations can make disk use grow quickly. That is real friction, but it does not make the source checkout disposable.</p>
+    <p>I built <a href="./">Holt</a> after losing original work across agent workspaces. This guide separates two decisions that should stay separate: whether a worktree still holds source work, and where recreatable package data should live.</p>
+
+    <h2>Ask the source question first.</h2>
+    <p>Before reclaiming space from a worktree, check whether an agent is still using it and whether it contains local work. A directory called <code>node_modules</code> is a useful clue, not a proof that everything beside it can go.</p>
+    <div class="code-card"><pre>git worktree list --porcelain
+git -C /path/to/worktree status --short --untracked-files=all
+git -C /path/to/worktree ls-files --others --ignored --exclude-standard</pre></div>
+    <p>Use a path from the first command and review the output for every checkout you intend to change. The final command is important because ignored files do not appear in the ordinary short status output. A clean main checkout does not tell you whether another worktree contains a local fix, migration, note, or generated artifact that has never reached a commit.</p>
+    <p>If the source needs preserving, stop there. Capture, commit, or otherwise settle it before making a disk decision. Git's <a href="https://git-scm.com/docs/git-worktree">worktree manual</a> explains why <code>remove</code> and <code>prune</code> are different operations.</p>
+
+    <h2>Then distinguish the local install from the shared package store.</h2>
+    <p>A dependency folder inside a worktree and a package manager's cache or shared store serve different jobs. Removing a worktree-local installation can change what an active agent or test runner sees. Reclaiming unreferenced packages from a shared store can help many worktrees at once.</p>
+    <ul role="list">
+      <li><strong>npm:</strong> <a href="https://docs.npmjs.com/cli/cache/">npm cache documentation</a> describes <code>npm cache verify</code> as an integrity check that also garbage-collects unneeded cache data. It is a cache operation, not a way to decide whether the worktree's source is safe to remove.</li>
+      <li><strong>pnpm:</strong> its <a href="https://pnpm.io/cli/store">store documentation</a> says <code>pnpm store prune</code> removes packages unreferenced by every project using that store. pnpm can download them again if a later install needs them.</li>
+      <li><strong>Yarn:</strong> cache layout depends on the Yarn version and project configuration. The <a href="https://yarnpkg.com/cli">current Yarn CLI reference</a> lists <code>yarn cache clean</code> as a cache operation. Check whether your project deliberately keeps <code>.yarn/cache</code> under version control before changing it.</li>
+    </ul>
+    <p>Use the package manager recorded by the repository's lockfile and configuration. Do not mix package managers just to reclaim space, and do not assume a build cache is interchangeable with a package store.</p>
+
+    <h2>Where Holt helps, and where it stops.</h2>
+    <p>Holt includes ignored paths in destructive analysis and can show when a worktree has content that needs review. Unresolved ignored bytes keep that worktree out of the disposable set. Holt does not deduplicate dependencies or claim semantic understanding of every ignored file.</p>
+    <p>That boundary is intentional. Holt can help you establish that a source checkout is settled. Your package manager is the right tool to reclaim its own caches or unreferenced store entries. The first check on the <a href="./#install">Holt homepage</a> is strict and read-only, so it is a safe way to understand the worktree side before you choose a package-manager action.</p>
+    <p>Want to see that boundary before pointing a new tool at your own repository? The <a href="https://github.com/Raed2180416/holt-first-look">disposable first-look fixture</a> creates one modified file, one untracked note, and one ignored file beside an empty sibling worktree, then runs the same check without moving or deleting anything.</p>
+
+    <h2>A simple order of operations.</h2>
+    <ol role="list">
+      <li>Pause or finish agents using the worktree you are reviewing.</li>
+      <li>Inspect modified, untracked, and ignored source state.</li>
+      <li>Identify the repository's package manager from its lockfile and configuration.</li>
+      <li>Use that package manager's documented cache or store maintenance for rebuildable package data.</li>
+      <li>Only remove a worktree after its source state is settled and Git agrees it is clean.</li>
+    </ol>
+
+    <h2>I'd like the awkward cases.</h2>
+    <p>If repeated agent installs are making your worktree workflow painful, I would like to understand the part that is actually hard: the package manager, generated output, native builds, a lockfile arrangement, or knowing which agent is still using the checkout. I am building Holt solo at Contrare Research, and criticism is useful.</p>
+    <div class="button-row"><a class="button button-primary" href="./#install">Try the read-only check</a><a href="https://github.com/Raed2180416/holt/issues/new?template=first_look.yml">Share what happened</a></div>
+    <p>Holt's single-repository core is free and source-available under <a href="https://github.com/Raed2180416/holt/blob/main/LICENSE.md">FSL-1.1-MIT</a> for its defined permitted purposes. It is not currently OSI open source.</p>
+  </main>
+  <footer class="site-footer"><div class="container"><nav class="footer-links" aria-label="Footer navigation"><a href="./">Holt</a><a href="git-worktree-cleanup.html">Cleanup guide</a><a href="https://github.com/Raed2180416/holt">GitHub</a><a href="mailto:research.contrare@outlook.com">Contact</a></nav><p class="footer-note">Holt is a product of Contrare Research.</p></div></footer>
+</body>
+</html>
