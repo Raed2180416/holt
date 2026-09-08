@@ -524,7 +524,7 @@ export const FEATURES = [
   {
     id: 'pricing-and-public-claims', area: 'commerce',
     interfaces: ['site:pricing', 'readme:claims'],
-    tests: [T('test/unit/pricing-cta.test.mjs', 'free/core launch exposes one honest install path and no paid-tier checkout'), T('test/unit/published-numbers.test.mjs', 'published numbers: test count is synchronized or explicitly withheld everywhere'), T('test/unit/site-layout.test.mjs', 'site: anything legitimately wider than a phone scrolls inside its OWN container')],
+    tests: [T('test/unit/pricing-cta.test.mjs', 'free/core launch exposes a clear GitHub entry point and no paid-tier checkout'), T('test/unit/published-numbers.test.mjs', 'published numbers: test count is synchronized or explicitly withheld everywhere'), T('test/unit/site-layout.test.mjs', 'site: anything legitimately wider than a phone scrolls inside its OWN container')],
     oracle: 'Static surfaces parsed against the free-only CTA, executable entitlements, and measured-number gates.',
     gap: 'Copy/CTA consistency does not prove buyer comprehension or adoption; paid checkout is intentionally outside this launch.',
     evidence: ['complete-test-corpus', 'release-bodies'],

@@ -438,6 +438,8 @@ code { overflow-wrap: anywhere; }
 .install-aside { padding-top: 54px; }
 .install-aside h3 { color: var(--ink); font-family: var(--mono); font-size: 13px; letter-spacing: .08em; text-transform: uppercase; }
 .install-aside p { margin-top: 16px; color: var(--ink-soft); font-size: 14px; line-height: 1.65; }
+.install-aside .button-github { width: 100%; margin-top: 20px; color: var(--white); text-decoration: none; }
+.install-aside .install-results-heading { margin-top: 38px; }
 .install-aside ul { display: grid; gap: 10px; margin-top: 22px; }
 .install-aside li { position: relative; padding-left: 17px; color: var(--ink-soft); font-size: 13px; line-height: 1.5; }
 .install-aside li::before { position: absolute; top: .65em; left: 0; width: 6px; height: 6px; border-radius: 50%; background: var(--leaf-dark); content: ""; }
