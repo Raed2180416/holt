@@ -88,6 +88,31 @@ test('MCP holt_status: returns the decision surface, not an inventory', async (t
   assert.ok(size < 2500, `holt_status payload is ${size} chars — too large for a summary tool`);
 });
 
+test('MCP: manifest-backed dependency residue is named separately from source work at risk', async (t) => {
+  const fx = await newRepo('mcp-generated-residue');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', 'node_modules/\n');
+  await fx.write('package.json', '{"name":"fixture","private":true}\n');
+  await fx.commit('declare JavaScript dependencies');
+
+  const wt = await fx.worktree('dependency-install');
+  await fx.write('node_modules/example/index.js', 'module.exports = 1;\n', wt);
+
+  const status = await call('holt_status', fx);
+  assert.equal(status.sourceWorkAtRisk, 0);
+  assert.equal(status.generatedResidue?.total, 1);
+  assert.equal(status.generatedResidue?.workstreams[0]?.id, 'dependency-install');
+  assert.equal(status.generatedResidue?.workstreams[0]?.sourceSettledGeneratedOnly, true);
+  assert.deepEqual(status.generatedResidue?.workstreams[0]?.generatedIgnoredPaths, ['node_modules/']);
+  assert.equal(status.topRisks.length, 0,
+    'a local dependency install must not crowd out actual source work in the agent summary');
+
+  const risk = await call('holt_at_risk', fx);
+  assert.equal(risk.generatedResidue?.total, 1);
+  assert.equal(risk.generatedResidue?.workstreams[0]?.id, 'dependency-install');
+  assert.match(risk.note, /Git-ignored bytes/);
+});
+
 test('MCP holt_check_workstream: fail-closed verdicts with reasons', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());

@@ -27,6 +27,7 @@ import { git, pmap, worktreeSnapshot, readWorktreeFile } from './git.mjs';
 import { symbolKey } from './symbols.mjs';
 import { isHoltLock } from './discover.mjs';
 import { stashState } from './stash.mjs';
+import { looksGenerated } from './scan.mjs';
 
 /* ------------------------------------------------------------------ helpers ---- */
 
@@ -371,6 +372,24 @@ export function uniqueWork(scanResult) {
       // build output (node_modules, dist, caches — the GENERATED list) before this count ever
       // sees it, so this cannot turn a worktree's dist/ into "unique work".
       const ignoredFileCount = w.ignored?.count ?? 0;
+      const ignoredPaths = w.ignored?.files ?? [];
+      // An ignored directory is not automatically disposable.  A package manifest is evidence
+      // that `node_modules/` can be recreated, but it cannot prove that the copy on disk has no
+      // local patch or data.  This is deliberately a reporting category, never an authority
+      // change: safeToDelete() still sees every ignored byte and refuses a green verdict.
+      const generatedIgnoredPaths = ignoredPaths.filter((file) =>
+        looksGenerated(file, new Set(w.generatedActive ?? [])),
+      );
+      const otherIgnoredPaths = ignoredPaths.filter((file) =>
+        !generatedIgnoredPaths.includes(file),
+      );
+      const sourceSettledGeneratedOnly =
+        w.committed?.count === 0
+        && w.uncommitted?.count === 0
+        && (w.uncommitted?.unmeasured?.length ?? 0) === 0
+        && w.ignored?.how === 'status --ignored'
+        && ignoredPaths.length > 0
+        && otherIgnoredPaths.length === 0;
       const atRiskSymbols = byLayer.uncommitted.length + byLayer.untracked.length;
       const atRisk = Math.max(atRiskSymbols, uncommittedFileCount + ignoredFileCount);
 
@@ -424,6 +443,9 @@ export function uniqueWork(scanResult) {
         uncommittedOnlyCount: atRisk,
         uncommittedFileCount,
         ignoredFileCount,
+        generatedIgnoredPaths,
+        otherIgnoredPaths,
+        sourceSettledGeneratedOnly,
         atRiskSymbolCount: atRiskSymbols,
         committedFiles: w.committed.count,
         // This is an observation, not permission to delete: the current bytes also appear in these

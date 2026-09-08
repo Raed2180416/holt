@@ -184,7 +184,8 @@ export function renderSummary(report) {
   const out = [renderHeader(report, u), ''];
   const k = report.counts;
 
-  const atRisk = report.unique.filter((u) => u.uncommittedOnlyCount > 0);
+  const generatedResidue = report.unique.filter((u) => u.sourceSettledGeneratedOnly);
+  const atRisk = report.unique.filter((u) => u.uncommittedOnlyCount > 0 && !u.sourceSettledGeneratedOnly);
   const uniqueCommitted = report.unique.filter(
     (u) => u.uncommittedOnlyCount === 0 && u.uniqueSymbolCount > 0,
   );
@@ -214,6 +215,10 @@ export function renderSummary(report) {
     `  ${c('green', padStart(k.safeToDelete, 4))}  disposable     ` +
     c('grey', 'provably nothing to lose'),
   );
+  out.push(
+    `  ${c('yellow', padStart(generatedResidue.length, 4))}  generated      ` +
+    c('grey', 'only manifest-backed generated paths found; still not disposable'),
+  );
 
   if (atRisk.length) {
     out.push('', c('bold', 'AT RISK — delete these and the work is gone'));
@@ -230,6 +235,16 @@ export function renderSummary(report) {
       }
     }
     if (atRisk.length > 12) out.push(c('grey', `  … and ${atRisk.length - 12} more`));
+  }
+
+  if (generatedResidue.length) {
+    out.push('', c('bold', 'GENERATED RESIDUE: only manifest-backed generated paths were found'));
+    out.push(c('grey', '  This does not make the worktree disposable: the local bytes may be patched or hold data.'));
+    out.push('');
+    for (const r of generatedResidue.slice(0, 12)) {
+      out.push(`  ${u.cell(r.id, 34, ID)} ${c('grey', r.generatedIgnoredPaths.map((p) => u.take(p, ID)).join('  '))}`);
+    }
+    if (generatedResidue.length > 12) out.push(c('grey', `  … and ${generatedResidue.length - 12} more`));
   }
 
   out.push(...stashSection(report, u));
@@ -371,11 +386,16 @@ export function renderRisk(report) {
   }
   out.push(c('grey', `  ${pad('workstream', 34)} ${padStart('uniq', 5)} ${padStart('uncomm', 7)}  verdict`));
   for (const r of rows.slice(0, 40)) {
-    const flag = r.uncommittedOnlyCount > 0 ? c('red', '●') : r.uniqueSymbolCount > 0 ? c('yellow', '●') : c('grey', '●');
+    const flag = r.sourceSettledGeneratedOnly
+      ? c('yellow', '●')
+      : r.uncommittedOnlyCount > 0 ? c('red', '●') : r.uniqueSymbolCount > 0 ? c('yellow', '●') : c('grey', '●');
     out.push(
       `  ${flag} ${u.cell(r.id, 32, ID)} ${padStart(r.uniqueSymbolCount, 5)} ${padStart(r.uncommittedOnlyCount, 7)}  ${c('grey', u.take(r.verdict))}`
       + (r.uniqueSymbolCount === 0 && r.uncommittedFileCount > 0
         ? c('grey', `\n      ${r.uncommittedFileCount} uncommitted file(s) with no parseable symbols — still lost if deleted`)
+        : '')
+      + (r.sourceSettledGeneratedOnly
+        ? c('yellow', `\n      only manifest-backed generated path(s): ${(r.generatedIgnoredPaths ?? []).slice(0, 3).map((f) => u.take(f, ID)).join(', ')}; this does not make the worktree disposable`)
         : '')
       // THE 'uniq' COLUMN CAN BE A FLOOR, NOT A TOTAL. ctagsBatch names every file it could not
       // read (a NUL byte tripping the content classifier, a file over the size cap, a timeout) in
