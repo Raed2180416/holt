@@ -131,11 +131,11 @@ test('MCP PROTOCOL: tools/list returns the full, well-formed tool set', async (t
   // The ACTING tools must be present too. An agent that can only diagnose freezes holding the
   // right answer — measured: two trials chose `holt clean` correctly and were then blocked by
   // the host's Bash permission classifier, because MCP had no way to act.
-  for (const expected of ['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect', 'holt_discard']) {
+  for (const expected of ['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect', 'holt_discard', 'holt_worktree_ownership']) {
     assert.ok(names.includes(expected), `missing acting tool ${expected}`);
   }
 
-  const MUTATING = new Set(['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect', 'holt_discard']);
+  const MUTATING = new Set(['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect', 'holt_discard', 'holt_worktree_ownership']);
   const DESTRUCTIVE = new Set(['holt_purge', 'holt_discard']);
 
   for (const tool of tools) {

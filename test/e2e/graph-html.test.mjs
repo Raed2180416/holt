@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url';
 import { renderHtml } from '../../src/graph-html.mjs';
 import { inspect } from '../../src/index.mjs';
 import { newRepo, standardFixture, creatableComponent } from '../fixtures.mjs';
+import { operateWorktreeOwnership } from '../../src/ownership.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -678,6 +679,67 @@ test('GRAPH LEGIBILITY: no label is drawn on top of another', async (t) => {
   }
   assert.deepEqual(clashes, [],
     `these labels are drawn on top of each other, which is what made the graph unreadable:\n  ${clashes.join('\n  ')}`);
+});
+
+test('GRAPH OWNERSHIP: an active lease is a first-class visual decision, not a hidden JSON field', async (t) => {
+  const fx = await newRepo('graph-live-ownership');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('mid-edit');
+  const claim = await operateWorktreeOwnership(wt, {
+    operation: 'claim', owner: 'graph-session', ttlSeconds: 60,
+  });
+  assert.equal(claim.ok, true, JSON.stringify(claim));
+
+  const html = renderHtml(await inspect(fx.root, {}));
+  const data = JSON.parse(dataLiteral(html));
+  const node = data.nodes.find((candidate) => candidate.id === 'mid-edit');
+  assert.equal(node.ownership?.state, 'active', JSON.stringify(node));
+  assert.match(html, /Actively owned/);
+  assert.match(html, /data-focus="owned"/);
+
+  const created = [];
+  const makeEl = (name) => {
+    const el = {
+      tagName: name, attrs: {}, children: [], text: '',
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      appendChild(c) { this.children.push(c); return c; },
+      replaceChildren(...c) { this.children = c; },
+      addEventListener() {}, removeEventListener() {}, setPointerCapture() {},
+      getBoundingClientRect() { return { left: 0, top: 0, width: 1000, height: 700 }; },
+      classList: { add() {}, remove() {} },
+      set textContent(v) { this.text = String(v); this.children.length = 0; },
+      get textContent() { return this.text; },
+      get dataset() { return {}; },
+      get clientWidth() { return 1000; },
+      get clientHeight() { return 700; },
+      querySelectorAll() { return []; },
+    };
+    created.push(el);
+    return el;
+  };
+  const stage = makeEl('div');
+  const detail = makeEl('div');
+  const document = {
+    createElementNS: (_ns, name) => makeEl(name),
+    getElementById: (id) => id === 'stage' ? stage : id === 'detail' ? detail : makeEl('div'),
+    querySelectorAll: () => [],
+    get activeElement() { return null; },
+  };
+  let frames = 0;
+  const raf = (fn) => { if (frames++ < 100) fn(); return frames; };
+  const body = scriptBody(html);
+  const src = body.slice(0, body.lastIndexOf('</script>')) + '\nreturn { describe };';
+  const api = new Function('document', 'addEventListener', 'setTimeout', 'clearTimeout',
+    'requestAnimationFrame', 'Math', src)(document, () => {}, () => 0, () => {}, raf, Math);
+
+  const circle = created.find((el) => el.tagName === 'circle'
+    && el.children.some((child) => child.tagName === 'title' && child.text.startsWith('mid-edit')));
+  assert.ok(circle, 'the actively owned worktree must be drawn as a graph node');
+  assert.equal(circle.attrs.fill, 'var(--owned)', JSON.stringify(circle.attrs));
+  assert.equal(circle.attrs['stroke-dasharray'], '1 2', JSON.stringify(circle.attrs));
+  api.describe(data.nodes.findIndex((candidate) => candidate.id === 'mid-edit'));
+  assert.match(detail.text, /ownership\s+active\s+graph-session/);
+  assert.match(detail.text, /until/);
 });
 
 /**

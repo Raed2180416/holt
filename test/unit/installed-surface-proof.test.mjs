@@ -27,11 +27,11 @@ async function temp(t, label) {
   return root;
 }
 
-test('installed proof: exact public denominators remain 42 CLI commands and 16 MCP tools', () => {
-  assert.equal(CLI_COMMANDS.length, 42);
-  assert.equal(new Set(CLI_COMMANDS).size, 42);
-  assert.equal(MCP_TOOLS.length, 16);
-  assert.equal(new Set(MCP_TOOLS).size, 16);
+test('installed proof: exact public denominators remain 45 CLI commands and 18 MCP tools', () => {
+  assert.equal(CLI_COMMANDS.length, 45);
+  assert.equal(new Set(CLI_COMMANDS).size, 45);
+  assert.equal(MCP_TOOLS.length, 18);
+  assert.equal(new Set(MCP_TOOLS).size, 18);
   assert.ok(CLI_COMMANDS.includes('mcp'));
   assert.deepEqual(MCP_TOOLS.filter((name) => /^holt_/.test(name)), MCP_TOOLS);
 });
@@ -177,7 +177,7 @@ function syntheticValidArtifact() {
   const cli = CLI_COMMANDS.map((command) => command === 'mcp'
     ? {
         surface: 'cli:mcp', command, skipped: false, valid: true, failures: [], invocations: [{}],
-        protocolToolCalls: 16, cleanShutdowns: 16,
+        protocolToolCalls: MCP_TOOLS.length, cleanShutdowns: MCP_TOOLS.length,
       }
     : {
         surface: `cli:${command}`, command, skipped: false, valid: true, failures: [], invocations: [{}],

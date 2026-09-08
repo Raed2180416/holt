@@ -111,7 +111,7 @@ Work can be spread across commits, the index, unstaged edits, untracked files, i
 Holt gives humans and agents one local decision surface for that question. It can:
 
 • show unique, redundant, conflicting and dependent work across worktrees;
-• inject timely project context through supported hooks and expose 16 decision-oriented MCP tools;
+• inject timely project context through supported hooks and expose 18 decision-oriented MCP tools;
 • keep exact deletion authority separate from similarity and code-relationship heuristics;
 • preview cleanup, then use locked local quarantine rather than immediate deletion;
 • restore a quarantine with an exact command;

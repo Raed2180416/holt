@@ -36,6 +36,7 @@ import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
 import { readStableRegularFile } from './stable-file.mjs';
+import { isOwnershipGitLock, withUnclaimedWorktreeOwnership } from './ownership.mjs';
 import {
   createDiscardTransaction, updateDiscardTransaction, readDiscardTransaction,
   listDiscardTransactionRecords, removeDiscardTransaction, newDiscardTransactionId,
@@ -294,6 +295,13 @@ export async function unprotect(cwd, { id = null, force = false, dryRun = false,
     if (!ws.path) continue;
     const st = await lockState(ws.path, cwd);
     if (!st.locked) continue;
+    if (isOwnershipGitLock(st.reason)) {
+      actions.push({
+        id: ws.id, action: 'skipped-ownership-lock', reason: st.reason,
+        hint: `run 'holt ownership status ${ws.id}' and use ownership release or a reviewed takeover; unprotect does not end session ownership`,
+      });
+      continue;
+    }
     // Locks placed by something else are left alone: holt must not quietly disarm a protection
     // a human or another tool put there deliberately.
     const foreign = !isHoltLock(st.reason);
@@ -2937,17 +2945,33 @@ export async function clean(cwd, {
 
     if (onAfterVerify) await /** @type {(p: any, verdict: any) => any} */ (onAfterVerify)(p, still);
 
-    // A foreign lock is independent authority and always wins. Holt's ordinary risk lock stays
-    // continuously in place: quarantine moves locked trees with Git's required double force.
-    const lock = await lockState(p.path, cwd);
-    if (lock.locked) {
-      if (!isHoltLock(lock.reason) || isHoltCleanQuarantineLock(lock.reason)) {
-        done.push({ ...p, action: 'skipped', why: `locked by something other than an active Holt risk guard: ${lock.reason}` });
-        continue;
+    // The ownership mutex closes the last claim-vs-clean interval. The earlier fresh report
+    // catches an existing lease; this re-reads it while a concurrent claimant is excluded, then
+    // holds that mutex through Git's atomic move. Holt still does not infer liveness for agents
+    // that never claim, but it never moves a worktree a participating session owns.
+    const ownershipGuard = await withUnclaimedWorktreeOwnership(p.path, async () => {
+      // A foreign lock is independent authority and always wins. Holt's ordinary risk lock stays
+      // continuously in place: quarantine moves locked trees with Git's required double force.
+      const lock = await lockState(p.path, cwd);
+      if (lock.locked && (!isHoltLock(lock.reason) || isHoltCleanQuarantineLock(lock.reason))) {
+        return {
+          ok: true,
+          moved: { ok: false, retained: false, why: `locked by something other than an active Holt risk guard: ${lock.reason}` },
+        };
       }
+      return { ok: true, moved: await quarantineWorktree(cwd, p) };
+    });
+    if (!ownershipGuard.ok) {
+      done.push({
+        ...p,
+        action: 'skipped',
+        why: ownershipGuard.ownership?.state === 'expired'
+          ? `ownership lease expired; explicit takeover or owner release is required before cleanup`
+          : `ownership prevents cleanup: ${ownershipGuard.ownership?.reason ?? ownershipGuard.ownership?.state ?? ownershipGuard.code}`,
+      });
+      continue;
     }
-
-    const moved = await quarantineWorktree(cwd, p);
+    const moved = ownershipGuard.moved;
     if (!moved.ok) {
       done.push({
         ...p,

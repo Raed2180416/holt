@@ -47,7 +47,7 @@ export const CLI_COMMANDS = [
   'status', 'risk', 'collisions', 'hotspots', 'duplicates', 'context', 'plan', 'impact',
   'order', 'partition', 'branches', 'journal', 'forensics', 'fleet', 'license', 'managed-policy', 'ci', 'graph',
   'stash', 'gate', 'tui', 'setup', 'doctor', 'base', 'audit', 'auto', 'protect', 'unprotect', 'rescue',
-  'rescued', 'clean', 'quarantines', 'restore', 'purge', 'discard', 'recover-discard', 'verify', 'hosts', 'providers',
+  'ownership', 'rescued', 'clean', 'quarantines', 'restore', 'purge', 'discard', 'recover-discard', 'verify', 'hosts', 'providers',
   'integrate', 'uninstall', 'brief', 'mcp', 'hook',
 ];
 
@@ -82,6 +82,14 @@ export const FEATURES = [
     oracle: 'Fresh report lookup with exact exit-code assertions and planted sole-copy/redundant/unknown states.',
     gap: '`gate` cannot re-verify a later unrelated rm invocation; recoverable `clean --apply` is the rechecking action path.',
     evidence: ['complete-test-corpus', 'guard-corpus'],
+  },
+  {
+    id: 'live-worktree-ownership', area: 'coordination',
+    interfaces: ['cli:ownership', 'cli:gate', 'cli:clean', 'cli:context', 'cli:plan', 'cli:order', 'cli:unprotect', 'mcp:holt_worktree_ownership', 'mcp:holt_check_workstream', 'ui:tui', 'ui:graph'],
+    tests: [T('test/e2e/ownership.test.mjs', 'OWNERSHIP: a crashed internal operation releases its mutex without abandoning a session claim'), T('test/e2e/ownership.test.mjs', 'OWNERSHIP: claim, heartbeat, handoff and release protect an otherwise-clean linked worktree'), T('test/e2e/ownership.test.mjs', 'OWNERSHIP: a claim arriving after clean re-verification wins the final move race'), T('test/e2e/cli.test.mjs', 'CLI OWNERSHIP: an explicit session lease is a complete lifecycle, not a status-only hint'), T('test/e2e/mcp.test.mjs', 'MCP OWNERSHIP: a participating session can protect a clean worktree through the agent surface'), T('test/e2e/tui.test.mjs', 'TUI OWNERSHIP: an active participating session is visible ahead of ordinary cleanup states'), T('test/e2e/graph-html.test.mjs', 'GRAPH OWNERSHIP: an active lease is a first-class visual decision, not a hidden JSON field')],
+    oracle: 'Real linked worktrees, explicit lifecycle transitions, native Git lock refusal, ordinary disposition before claim and after release, and a claim injected between clean verification and its final move.',
+    gap: 'Only sessions that explicitly participate are represented. Expiry does not prove abandonment, and local leases cannot observe arbitrary external agents or coordinate separate hosts.',
+    evidence: ['complete-test-corpus', 'guard-corpus', 'git-runtime'],
   },
   {
     id: 'collision-analysis', area: 'core-analysis',
@@ -516,7 +524,7 @@ export const FEATURES = [
   {
     id: 'pricing-and-public-claims', area: 'commerce',
     interfaces: ['site:pricing', 'readme:claims'],
-    tests: [T('test/unit/pricing-cta.test.mjs', 'free/core launch exposes one honest install path and no paid-tier checkout'), T('test/unit/published-numbers.test.mjs', 'published numbers: test count is synchronized or explicitly withheld everywhere'), T('test/unit/site-layout.test.mjs', 'site: anything legitimately wider than a phone scrolls inside its OWN container')],
+    tests: [T('test/unit/pricing-cta.test.mjs', 'free/core launch exposes a clear GitHub entry point and no paid-tier checkout'), T('test/unit/published-numbers.test.mjs', 'published numbers: test count is synchronized or explicitly withheld everywhere'), T('test/unit/site-layout.test.mjs', 'site: anything legitimately wider than a phone scrolls inside its OWN container')],
     oracle: 'Static surfaces parsed against the free-only CTA, executable entitlements, and measured-number gates.',
     gap: 'Copy/CTA consistency does not prove buyer comprehension or adoption; paid checkout is intentionally outside this launch.',
     evidence: ['complete-test-corpus', 'release-bodies'],

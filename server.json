@@ -7,12 +7,12 @@
     "url": "https://github.com/Raed2180416/holt",
     "source": "github"
   },
-  "version": "0.4.6",
+  "version": "0.4.7",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "holt",
-      "version": "0.4.6",
+      "version": "0.4.7",
       "transport": {
         "type": "stdio"
       },

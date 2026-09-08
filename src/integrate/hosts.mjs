@@ -12,7 +12,7 @@
  *               adapter EXISTS. `verifiedLive` and each row's note separately say whether a real
  *               host process was driven; schema/source validation is never promoted into a live
  *               enforcement claim.
- *   mcp       — holt runs as an MCP server the agent can call (17 tools). Advisory + actable, but
+ *   mcp       — holt runs as an MCP server the agent can call (18 tools). Advisory + actable, but
  *               the model chooses to call it.
  *   advisory  — the agent only reads a rules file (AGENTS.md/CLAUDE.md/…); holt is context, not
  *               control.

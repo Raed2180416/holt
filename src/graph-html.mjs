@@ -109,7 +109,7 @@ export function renderHtml(report) {
 <style>
   :root {
     --bg:#0f1115; --panel:#171a21; --line:#252a35; --fg:#e6e9ef; --muted:#8b93a7;
-    --risk:#ff5f56; --hold:#ffbd2e; --dup:#c678dd; --safe:#3fb950; --sibling:#2f3846;
+    --risk:#ff5f56; --hold:#ffbd2e; --dup:#c678dd; --safe:#3fb950; --owned:#58d5e3; --sibling:#2f3846;
     --overlap:#58a6ff; --accent:#e2a154;
   }
   @media (prefers-color-scheme: light) {
@@ -182,6 +182,7 @@ export function renderHtml(report) {
     <input id="search" type="search" placeholder="filter workstreams..." autocomplete="off" spellcheck="false">
     <h2>Decisions</h2>
     <div class="row clickable" data-focus="risk" role="button" tabindex="0"><span>At risk (uncommitted only)</span><b style="color:var(--risk)">${esc(report.counts.atRisk)}</b></div>
+    <div class="row clickable" data-focus="owned" role="button" tabindex="0"><span>Actively owned</span><b style="color:var(--owned)">${esc(report.counts.activeOwnership ?? 0)}</b></div>
     <div class="row"><span>Collisions</span><b style="color:var(--risk)">${esc(report.counts.collisions)}</b></div>
     <div class="row"><span>Duplicate pairs</span><b style="color:var(--dup)">${esc(report.counts.duplicatePairs)}</b></div>
     <div class="row clickable" data-focus="safe" role="button" tabindex="0"><span>Disposable</span><b style="color:var(--safe)">${esc(report.counts.safeToDelete)}</b></div>
@@ -197,6 +198,7 @@ export function renderHtml(report) {
     <h2>Legend</h2>
     <div class="legend">
       <span><i style="background:var(--risk)"></i>at risk</span>
+      <span><i style="background:var(--owned)"></i>actively owned</span>
       <span><i style="background:var(--hold)"></i>unique committed</span>
       <span><i style="background:var(--safe)"></i>disposable</span>
       <span><i style="background:var(--safe);border:2px dashed var(--dup)"></i>disposable, redundant — a sibling holds the same content, don't remove both at once</span>
@@ -243,7 +245,8 @@ const hint = document.getElementById('hint');
 const W = () => stage.clientWidth, H = () => stage.clientHeight;
 
 const colorOf = n =>
-  n.uncommittedOnly > 0 ? 'var(--risk)'
+  n.ownership && n.ownership.state === 'active' ? 'var(--owned)'
+  : n.uncommittedOnly > 0 ? 'var(--risk)'
   : n.safeToDelete       ? 'var(--safe)'
   : (n.uniqueSymbols > 0 || n.committedFiles > 0) ? 'var(--hold)'
   : 'var(--muted)';
@@ -466,7 +469,7 @@ document.querySelectorAll('[data-focus]').forEach(row => {
   const activate = () => {
     // Clicking a count filters to the nodes it counted - the number becomes navigable rather
     // than decorative.
-    query = row.dataset.focus === 'risk' ? 'risk' : 'safe';
+    query = row.dataset.focus === 'risk' ? 'risk' : row.dataset.focus === 'owned' ? 'owned' : 'safe';
     search.value = '';
     hovered = -1; pinned = -1; keyboardFocused = -1; pendingFocus = -1;
     draw();
@@ -479,6 +482,7 @@ document.querySelectorAll('[data-focus]').forEach(row => {
 const matches = n => {
   if (!query) return true;
   if (query === 'risk') return n.uncommittedOnly > 0;
+  if (query === 'owned') return n.ownership && n.ownership.state === 'active';
   if (query === 'safe') return n.safeToDelete;
   return n.id.toLowerCase().includes(query);
 };
@@ -528,17 +532,20 @@ function draw() {
   nodes.forEach((n, i) => {
     const on = lit(i);
     const redundant = i !== focus && isRedundant(n);
+    const owned = n.ownership && n.ownership.state === 'active';
     const attrs = {
       class: 'node', cx: n.x.toFixed(1), cy: n.y.toFixed(1), r: n.r.toFixed(1),
-      fill: colorOf(n), stroke: i === focus ? 'var(--fg)' : redundant ? 'var(--dup)' : 'var(--bg)',
-      'stroke-width': i === focus ? 2.5 : redundant ? 2 : 1.5, opacity: on ? 1 : 0.12,
+      fill: colorOf(n), stroke: i === focus ? 'var(--fg)' : redundant ? 'var(--dup)' : owned ? 'var(--fg)' : 'var(--bg)',
+      'stroke-width': i === focus ? 2.5 : redundant || owned ? 2 : 1.5, opacity: on ? 1 : 0.12,
       tabindex: 0, role: 'button', 'data-node-index': i,
       'aria-pressed': pinned === i ? 'true' : 'false',
       'aria-label': 'Workstream ' + String(n.id).replace(/\\s+/g, ' ') +
         '. Verdict ' + String(n.verdict || 'unknown').replace(/\\s+/g, ' ') +
+        '. Ownership ' + String(n.ownership?.state || 'unavailable').replace(/\\s+/g, ' ') +
         '. ' + n.committedFiles + ' committed file(s), ' + n.uncommittedOnly + ' uncommitted-only file(s).',
     };
     if (redundant) attrs['stroke-dasharray'] = '3 2';
+    else if (owned) attrs['stroke-dasharray'] = '1 2';
     const circle = svgEl('circle', attrs);
     circle.addEventListener('focus', () => {
       keyboardFocused = i;
@@ -577,7 +584,9 @@ function draw() {
       draw();
     });
     const tip = svgEl('title', {});
-    tip.textContent = n.id + (isRedundant(n) ? ' (redundant with ' + n.redundantWith.join(', ') + ')' : '');
+    tip.textContent = n.id
+      + (owned ? ' (actively owned by ' + String(n.ownership.owner) + ' until ' + String(n.ownership.expiresAt) + ')' : '')
+      + (isRedundant(n) ? ' (redundant with ' + n.redundantWith.join(', ') + ')' : '');
     circle.appendChild(tip);
     g.appendChild(circle);
   });
@@ -649,6 +658,10 @@ function describe(i) {
     'head        ' + (n.head || '—') + '\\n' +
     'branch      ' + (n.branch || '(detached)') + '\\n' +
     'verdict     ' + n.verdict + '\\n\\n' +
+    'ownership   ' + (n.ownership?.state || 'unavailable')
+      + (n.ownership?.state === 'active'
+        ? '  ' + n.ownership.owner + ' until ' + n.ownership.expiresAt
+        : n.ownership?.reason ? '  ' + n.ownership.reason : '') + '\\n' +
     'committed   ' + n.committedFiles + ' file(s) base lacks\\n' +
     'uncommitted ' + n.uncommittedFiles + ' file(s)\\n' +
     'added       ' + n.addedSymbols + ' symbol(s)\\n' +

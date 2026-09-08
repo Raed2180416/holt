@@ -11,6 +11,7 @@
  */
 
 import { git, repoRoot, repoIdentity, pmap } from './git.mjs';
+import { inspectWorktreeOwnership } from './ownership.mjs';
 import { discoverJjWorkspaces as _discoverJj } from './jj.mjs';
 import { resolveBase } from './scan.mjs';
 import fs from 'node:fs/promises';
@@ -683,6 +684,10 @@ export async function discoverGitWorktrees(cwd) {
     : (commonDir ? Symbol('no-main-worktree') : foldCase(await canonicalPath(root)));
   const workstreams = await Promise.all(records.map(async (w) => {
     const quarantine = await cleanQuarantineRecord(w.path, w.lockReason);
+    // This is a distinct evidence plane from the content scan. A clean tree may still be owned
+    // by an agent whose edits have not reached disk, so every report must carry the explicit
+    // lease state from discovery rather than asking a later action to remember a side lookup.
+    const ownership = await inspectWorktreeOwnership(w.path, { commonDir });
     const quarantineState = quarantine?.state ?? null;
     const marker = quarantine?.marker ?? null;
     return {
@@ -710,6 +715,7 @@ export async function discoverGitWorktrees(cwd) {
       quarantinePreExistingLockReason: marker?.preExistingLockReason ?? null,
       prunable: w.prunable,
       prunableReason: w.prunableReason ?? null,
+      ownership,
       isPrimary: foldCase(await canonicalPath(w.path)) === canonRoot,
     };
   }));

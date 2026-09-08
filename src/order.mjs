@@ -20,6 +20,8 @@
 // symbol. It entangles landing order exactly as a predicted conflict does: the text merges, and
 // the result is a duplicate declaration. Excluding it — as 'proven-clean' is excluded — would
 // sequence the two in parallel and break the landing on the case holt exists to catch.
+import { ownershipLandingReason } from './ownership.mjs';
+
 const CONFLICT_KINDS = new Set(['proven', 'predicted', 'semantic-overlap']);
 
 /**
@@ -33,6 +35,7 @@ export function landingOrder(report) {
   // them in a lane that says “land concurrently.” Test fixtures predating the typed confidence
   // field remain compatible: an absent confidence is treated as the old exact fixture contract.
   const excluded = (report.safe ?? []).filter((s) => s.isPrimary || s.familyRule === 'primary-worktree'
+    || ownershipLandingReason(s.ownership)
     || s.confidence === 'unknown' || s.confidence === 'approximate' || s.confidence === 'unverifiable'
     || s.safe === true);
   const eligible = (report.safe ?? []).filter((s) => !excluded.includes(s));
@@ -117,12 +120,12 @@ export function landingOrder(report) {
       id: s.id,
       reason: s.isPrimary || s.familyRule === 'primary-worktree'
         ? 'primary worktree is not a landing candidate'
-        : s.safe === true
+        : ownershipLandingReason(s.ownership) ?? (s.safe === true
           ? 'disposable workstream is already reproducible from base'
-          : 'landing safety is not exact; review the workstream before ordering it',
+          : 'landing safety is not exact; review the workstream before ordering it'),
     })),
     note: 'parallel = no observed interaction (not a compatibility certificate). Lane order is a '
       + 'min-entanglement heuristic; conflictsWithLater names the merges to watch at each step. '
-      + 'Primary, disposable, and non-exact workstreams are excluded from landing candidates.',
+      + 'Primary, disposable, non-exact, and session-owned workstreams are excluded from landing candidates.',
   };
 }

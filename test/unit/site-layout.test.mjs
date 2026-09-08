@@ -116,8 +116,11 @@ test('site: try and feedback actions work without a local mail handler', async (
     /href="https:\/\/github\.com\/Raed2180416\/holt\/issues\/new\?template=first_look\.yml"/,
     'the feedback option must open the first-use form');
   assert.match(html,
-    /class="button button-dark" href="#install">Try now/,
-    'the developer note must lead directly to the working try path');
+    /class="button button-dark" href="#install">Run a first check/,
+    'the developer note must lead directly to the working read-only check');
+  assert.match(html,
+    /class="header-cta" href="https:\/\/github\.com\/Raed2180416\/holt">Try on GitHub/,
+    'the header call to action must visibly lead to the GitHub project');
   assert.match(html, /<button[^>]*id="copy-contact-email"[^>]*type="button"/,
     'email contact must be an explicit copy action rather than an unobservable mail-app handoff');
   assert.match(html, /id="contact-status"[^>]*aria-live="polite"/,
