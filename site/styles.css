@@ -476,7 +476,8 @@ code { overflow-wrap: anywhere; }
 .measurement-disclosure { margin-top: 6px; font-family: var(--mono); font-size: 10px; }
 
 .film-section { border-bottom: 1px solid var(--line); }
-.film-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .8fr); gap: 72px; align-items: center; }
+.film-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 42px; }
+.film-layout > div { max-width: 900px; }
 .film-layout h2 { margin-top: 20px; font-family: var(--display); font-size: clamp(2.4rem, 4.5vw, 4rem); font-weight: 400; letter-spacing: -.05em; line-height: 1.05; }
 .film-layout p { margin-top: 23px; color: var(--ink-soft); font-size: 17px; line-height: 1.65; }
 .film-layout > div > a { display: inline-block; margin-top: 24px; color: var(--signal); text-decoration: underline; text-underline-offset: 4px; }
@@ -486,7 +487,7 @@ code { overflow-wrap: anywhere; }
 .launch-film figcaption a { text-decoration: underline; text-underline-offset: 3px; }
 @media (max-width: 760px) {
   .film-layout { grid-template-columns: minmax(0, 1fr); gap: 36px; }
-  .launch-film { max-width: 520px; }
+  .launch-film { max-width: 100%; }
 }
 
 /* Thanks page */

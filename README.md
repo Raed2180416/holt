@@ -24,6 +24,14 @@ see what changed, find repeated implementations and overlapping edits, review wh
 what, and check what needs preserving before cleanup. You can use it from a terminal, inspect an
 offline graph, or give your agents the same context through project integrations.
 
+The useful question is what the agent should know **before its next action**. Is another
+worktree already implementing the API it needs? Will a sibling change collide with this one?
+Does a workspace still hold the only copy of a fix? Holt makes that cross-worktree state
+inspectable and queryable, with separate evidence checks for preservation and cleanup.
+
+This is a tool for the agent's workflow. The current release does not claim measured gains in
+agent success rate, speed, or token use. Those need valid comparisons on real tasks.
+
 ## Try a read-only check
 
 Open a terminal inside a repository with linked worktrees, then run:

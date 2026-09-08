@@ -24,7 +24,7 @@ body:
     id: experience
     attributes:
       label: What happened?
-      description: A few sentences are enough. What were you trying to do, and what should be better?
+      description: A few sentences are enough. What were you trying to do? Did Holt reveal something useful, confirm your existing workflow, or add unnecessary work?
     validations:
       required: true
   - type: input

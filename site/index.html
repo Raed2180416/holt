@@ -91,16 +91,16 @@
           <h2>Claude Code duplicated work. Then originals disappeared.</h2>
           <p>I was working on a large project, and keeping track of the agents became its own job. I built Holt because I wanted to understand what was happening and protect the work already there.</p>
           <p>These separate copies of a repository are called <strong>Git worktrees</strong>. They let agents work in parallel, but each can hold changes the others have never seen.</p>
-          <p>The video follows the work from a repository overview to the terminal, agent context, and recovery tools. Its terminal example uses the published release to find local changes that have not reached a commit.</p>
-          <a href="#available">See what else Holt does ↓</a>
+          <p>Watch Holt open a real relationship graph, find a collision and repeated work, and show changes with no durable copy. Then see how the same tools fit into Claude Code and local Codex workflows.</p>
+          <a href="product/holt-demo-graph.html">Explore the actual demo graph ↗</a>
         </div>
         <figure class="launch-film">
-          <video controls playsinline preload="none" poster="product/holt-film-poster.png" width="1080" height="1350" aria-label="Holt founder story and 40-second product animation">
-            <source src="product/holt-intro.mp4" type="video/mp4">
+          <video controls playsinline preload="none" poster="product/holt-film-poster.png" width="1920" height="1080" aria-label="Holt 54-second product film with the actual graph and terminal interface">
+            <source src="product/holt-ride.mp4" type="video/mp4">
             <track kind="captions" src="product/holt-intro.vtt" srclang="en" label="English" default>
-            <a href="product/holt-intro.mp4">Watch the Holt demo</a>
+            <a href="product/holt-ride.mp4">Watch the Holt demo</a>
           </video>
-          <figcaption>Product animation with findings from Holt v0.4.5 on a controlled Git example. Relationship and agent scenes are illustrations. Nothing was deleted or moved in the demo. <a href="product/demo-transcript.txt">Read the output</a>.</figcaption>
+          <figcaption>Actual graph and terminal captures from Holt v0.4.5 on controlled Git examples, with animated emphasis. Agent interfaces and recovery flow are illustrations. Nothing was deleted or moved in these captures. <a href="product/holt-demo-graph.html">Explore the graph</a> · <a href="product/holt-demo-tui.html">Read the terminal view</a> · <a href="product/demo-transcript.txt">Evidence and output</a>.</figcaption>
         </figure>
       </div>
     </section>
@@ -122,6 +122,11 @@
             <summary>Prefer a regular install?</summary>
             <div class="code-card"><pre>npm install -g https://github.com/Raed2180416/holt/releases/latest/download/holt.tgz --allow-remote=root</pre></div>
             <p>Then run <code>holt risk --strict-read-only --no-symbols --include-primary</code> from your repository. The per-command <code>--allow-remote=root</code> flag supports npm 12's explicit URL-package permission.</p>
+          </details>
+          <details class="install-details">
+            <summary>Open the full terminal view or graph</summary>
+            <p>After a regular install, <code>holt doctor</code> shows which analysis backends are available. Run <code>holt tui --include-primary</code> to explore the workstreams, collisions, and unique-work evidence. Press <kbd>q</kbd> to leave.</p>
+            <p><code>holt graph --html holt-graph.html --include-primary</code> exports an interactive local graph. Choose a new output filename, then open it in your browser. <code>holt context &lt;id&gt;</code> gives the sibling context for a workstream listed by <code>holt status</code>.</p>
           </details>
         </div>
         <aside class="install-aside">
@@ -145,6 +150,7 @@
             <span class="eyebrow">The problem</span>
             <h2>More agents shouldn't mean losing the thread.</h2>
             <p>Two agents can rebuild the same thing, change the same function, or leave a fix in a workspace you thought was finished. Holt helps you see those relationships before deciding what to combine, preserve, or clean up.</p>
+            <p>The useful context is often outside the current workspace: an API another agent is still building, a sibling edit that will collide, or a fix that has never reached a commit. Holt makes that state available before the next coding, landing, or cleanup decision.</p>
           </div>
           <ol class="transaction-steps" role="list">
             <li class="transaction-step">
@@ -212,7 +218,7 @@
           <article class="now-card">
             <span class="card-index">07 / AGENT CONTEXT</span>
             <h3>Can my agents see this too?</h3>
-            <p><code>context</code>, <code>brief</code>, and a project-scoped MCP server expose repository findings to agents. Optional host hooks cover specific operations. <a href="https://github.com/Raed2180416/holt/blob/main/HOSTS.md">Check your host's coverage</a> before relying on blocking.</p>
+            <p>A project-scoped MCP server gives agents 16 decision-oriented tools, including context, collisions, and landing order. In the CLI, <code>context</code> and <code>brief</code> supply the sibling context. Optional host hooks cover specific operations. <a href="https://github.com/Raed2180416/holt/blob/main/HOSTS.md">Check your host's coverage</a> before relying on blocking.</p>
           </article>
           <article class="now-card">
             <span class="card-index">08 / HISTORY</span>

@@ -43,7 +43,7 @@ test('public MCP tool-count claims are derived from the executable schema', asyn
   ]);
   const count = mcpTest.TOOLS.length;
   assert.ok(count > 0, 'MCP schema unexpectedly has no tools');
-  assert.ok(readme.includes(`**MCP** — ${count} tools`),
+  assert.ok(readme.includes(`**MCP**: ${count} tools`),
     `README integration claim is stale: executable MCP schema has ${count} tools`);
   assert.ok(readme.includes(`initialize → ${count} tools →`),
     `README protocol evidence is stale: executable MCP schema has ${count} tools`);
