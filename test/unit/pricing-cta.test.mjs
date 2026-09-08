@@ -18,7 +18,7 @@ test('free/core launch exposes one honest install path and no paid-tier checkout
   assert.equal(offers.length, 1, 'today\'s public launch must expose exactly one offer');
   assert.equal(offers[0][1], 'free-core', 'the only current offer must be the free/core product');
   assert.match(offers[0][2], /<h3>Free core<\/h3>/);
-  assert.match(offers[0][2], /data-cta="install"[^>]*href="#install"[^>]*>Install now\b/,
+  assert.match(offers[0][2], /data-cta="install"[^>]*href="#install"[^>]*>Try now\b/,
     'the free/core offer must have a visible CTA to the working install path');
 
   assert.match(site, /Team and Enterprise are deliberately not offered in this launch/);
