@@ -1,6 +1,7 @@
 HOLT FILM EVIDENCE
 
 Product captures: published Holt v0.4.5, controlled Git fixtures, September 8, 2026.
+Music: an original instrumental score made for this film.
 The film opens the published graph capture, then animates the exact measured relationships
 with a clearer layout and shortened display labels. No new relationships are invented.
 The TUI selections are actual 100-column, 28-row interactive captures from the published product.
