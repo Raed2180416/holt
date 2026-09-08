@@ -222,14 +222,19 @@ repairs Holt-owned entries without duplicating them; `holt uninstall` removes on
 unchanged artifacts. Host configuration on disk is not evidence that a host loaded, trusted, or
 enforced it.
 
-- **MCP**: 17 tools in the executable schema, including discard preview/recovery. The protocol
-  path is exercised over stdio as `initialize → 17 tools → tools/call`; MCP remains reactive
+- **MCP**: 18 tools in the executable schema, including live ownership and discard preview/recovery. The protocol
+  path is exercised over stdio as `initialize → 18 tools → tools/call`; MCP remains reactive
   model-pull unless a host supplies a separate lifecycle context hook.
 - **Implemented deterministic pre-tool blocking**: Claude Code, OpenCode, Cursor, Codex local clients, Qwen Code, Copilot CLI, Cline IDE, Goose, Devin CLI and Devin Desktop Cascade cover their documented local surfaces. Their current schemas are contract-tested, but none is currently claimed as a real-host enforcement run.
 - **Hook-capable, not yet wired**: Gemini, Crush, Amp, Factory and Junie still receive MCP + advisory.
 - **Cloud or ephemeral**: Codex cloud, Copilot cloud, Cursor cloud, Google Jules, Replit Agent do not receive local worktree enforcement by default.
 
 ### Structured local/MCP tools
+
+A clean worktree can still belong to an agent that is thinking or preparing its next edit.
+`holt ownership claim <id> --owner <session-id>` keeps that workspace out of cleanup and landing
+plans until the session releases it. Renew with `heartbeat`, transfer with `handoff`, and finish
+with `release`. [The ownership workflow](docs/LIVE-OWNERSHIP.md) explains expiry and recovery.
 
 Codex project hooks use a broad `PreToolUse` matcher because MCP and other local functions are
 part of the same host event stream. Holt never treats a convenient field such as `path` as proof

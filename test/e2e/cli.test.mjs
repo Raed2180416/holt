@@ -93,6 +93,39 @@ test('CLI: the MUTATING commands are reachable too', async (t) => {
   }
 });
 
+test('CLI OWNERSHIP: an explicit session lease is a complete lifecycle, not a status-only hint', async (t) => {
+  const fx = await newRepo('cli-ownership');
+  t.after(() => fx.cleanup());
+  await fx.worktree('mid-edit');
+
+  const initial = await holt(['ownership', 'status', '--cwd', fx.root, '--json'], fx.root);
+  assert.equal(initial.code, 0, initial.stderr);
+  assert.equal(JSON.parse(initial.stdout).worktrees.find((row) => row.id === 'mid-edit').ownership.state, 'unclaimed');
+
+  const claim = await holt([
+    'ownership', 'claim', 'mid-edit', '--owner', 'cli-session-a', '--ttl', '60', '--cwd', fx.root, '--json',
+  ], fx.root);
+  assert.equal(claim.code, 0, `${claim.stdout}\n${claim.stderr}`);
+  assert.equal(JSON.parse(claim.stdout).ownership.owner, 'cli-session-a');
+
+  const heartbeat = await holt([
+    'ownership', 'heartbeat', 'mid-edit', '--owner', 'cli-session-a', '--ttl', '60', '--cwd', fx.root, '--json',
+  ], fx.root);
+  assert.equal(heartbeat.code, 0, `${heartbeat.stdout}\n${heartbeat.stderr}`);
+
+  const handoff = await holt([
+    'ownership', 'handoff', 'mid-edit', '--owner', 'cli-session-a', '--to', 'cli-session-b', '--ttl', '60', '--cwd', fx.root, '--json',
+  ], fx.root);
+  assert.equal(handoff.code, 0, `${handoff.stdout}\n${handoff.stderr}`);
+  assert.equal(JSON.parse(handoff.stdout).ownership.owner, 'cli-session-b');
+
+  const release = await holt([
+    'ownership', 'release', 'mid-edit', '--owner', 'cli-session-b', '--cwd', fx.root, '--json',
+  ], fx.root);
+  assert.equal(release.code, 0, `${release.stdout}\n${release.stderr}`);
+  assert.equal(JSON.parse(release.stdout).ownership.state, 'unclaimed');
+});
+
 test('CLI: --json output is parseable for every command that claims it', async (t) => {
   const fx = await fixture('cli-json');
   t.after(() => fx.cleanup());

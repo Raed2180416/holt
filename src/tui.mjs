@@ -159,6 +159,9 @@ function truncateAnsi(s, width) {
 /* ----------------------------------------------------------------- model ---- */
 
 const BUCKET = {
+  // Ownership is a separate evidence plane from changed bytes. Put it first so a clean-looking
+  // worktree that a participating session is about to edit never disappears among generic holds.
+  owned: { key: 'owned', label: 'OWNED', colour: 'cyan', order: -1, hint: 'a participating session has an active live-worktree lease' },
   atRisk: { key: 'atRisk', label: 'AT RISK', colour: 'red', order: 0, hint: 'uncommitted-only work — git cannot see this' },
   holds: { key: 'holds', label: 'HOLDS', colour: 'yellow', order: 1, hint: 'committed work base lacks' },
   unknown: { key: 'unknown', label: 'UNKNOWN', colour: 'magenta', order: 2, hint: 'could not assess — treat as unsafe' },
@@ -180,6 +183,7 @@ const LABEL_W = Math.max(...Object.values(BUCKET).map((b) => b.label.length));
 const isRedundantSafe = (row) => row.bucket === 'disposable' && (row.verdict?.redundantWith?.length ?? 0) > 0;
 
 function bucketOf(node, verdict, uniq) {
+  if (node.ownership?.state === 'active') return BUCKET.owned;
   if (!verdict || verdict.confidence === 'unknown') return BUCKET.unknown;
   if (verdict.safe) return BUCKET.disposable;
   // `uncommittedOnlyCount` is intentionally lossless and includes ignored files. It is not a
@@ -231,6 +235,7 @@ export async function buildModel(cwd, opts = {}) {
       uncommittedFiles: n.uncommittedFiles,
       addedSymbols: n.addedSymbols,
       uniqueSymbols: n.uniqueSymbols,
+      ownership: n.ownership,
     };
   });
 
@@ -303,6 +308,7 @@ export function renderFrame(model, state, size) {
   const disposableRows = rows.filter((r) => r.bucket === 'disposable');
   const redundantOnly = disposableRows.filter(isRedundantSafe).length;
   const counts = [
+    ...(k.activeOwnership ? [paint('cyan', `${k.activeOwnership} owned`)] : []),
     paint('red', `${rows.filter((r) => r.bucket === 'atRisk').length} at-risk`),
     paint('yellow', `${rows.filter((r) => r.bucket === 'holds').length} holding`),
     paint('magenta', `${rows.filter((r) => r.bucket === 'unknown').length} unknown`),
@@ -380,6 +386,13 @@ function detailLines(row, width, height, u = budget()) {
   if (row.verdict) {
     L.push(paint('grey', 'verdict   ') + (row.verdict.safe ? paint('green', 'safe to delete') : paint('red', 'do not delete')));
     for (const reason of row.verdict.reasons ?? []) L.push(paint('grey', '          ') + u.take(reason, { max: width }));
+  }
+  if (row.ownership?.state === 'active') {
+    L.push(paint('grey', 'ownership ') + paint('cyan', `active: ${u.take(row.ownership.owner, { ident: true })}`)
+      + paint('grey', ` until ${u.take(row.ownership.expiresAt ?? 'unknown')}`));
+    L.push(paint('grey', '          participating sessions must hand off or release before cleanup'));
+  } else if (row.ownership?.state && row.ownership.state !== 'unclaimed') {
+    L.push(paint('grey', 'ownership ') + paint('magenta', `needs review: ${u.take(row.ownership.reason ?? row.ownership.state)}`));
   }
   if (redundant.length) {
     L.push(paint('grey', 'redundant ') + `identical to work also held by ${redundant.join(', ')}`);

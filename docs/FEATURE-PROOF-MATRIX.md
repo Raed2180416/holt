@@ -28,15 +28,15 @@ A valid artifact proves only that every declared check passed without omission o
 
 These lists are machine-compared with executable help/schema/manifest data on every run.
 
-### CLI commands (44)
+### CLI commands (45)
 
-`cli:status` · `cli:risk` · `cli:collisions` · `cli:hotspots` · `cli:duplicates` · `cli:context` · `cli:plan` · `cli:impact` · `cli:order` · `cli:partition` · `cli:branches` · `cli:journal` · `cli:forensics` · `cli:fleet` · `cli:license` · `cli:managed-policy` · `cli:ci` · `cli:graph` · `cli:stash` · `cli:gate` · `cli:tui` · `cli:setup` · `cli:doctor` · `cli:base` · `cli:audit` · `cli:auto` · `cli:protect` · `cli:unprotect` · `cli:rescue` · `cli:rescued` · `cli:clean` · `cli:quarantines` · `cli:restore` · `cli:purge` · `cli:discard` · `cli:recover-discard` · `cli:verify` · `cli:hosts` · `cli:providers` · `cli:integrate` · `cli:uninstall` · `cli:brief` · `cli:mcp` · `cli:hook`
+`cli:status` · `cli:risk` · `cli:collisions` · `cli:hotspots` · `cli:duplicates` · `cli:context` · `cli:plan` · `cli:impact` · `cli:order` · `cli:partition` · `cli:branches` · `cli:journal` · `cli:forensics` · `cli:fleet` · `cli:license` · `cli:managed-policy` · `cli:ci` · `cli:graph` · `cli:stash` · `cli:gate` · `cli:tui` · `cli:setup` · `cli:doctor` · `cli:base` · `cli:audit` · `cli:auto` · `cli:protect` · `cli:unprotect` · `cli:rescue` · `cli:ownership` · `cli:rescued` · `cli:clean` · `cli:quarantines` · `cli:restore` · `cli:purge` · `cli:discard` · `cli:recover-discard` · `cli:verify` · `cli:hosts` · `cli:providers` · `cli:integrate` · `cli:uninstall` · `cli:brief` · `cli:mcp` · `cli:hook`
 
 The implementation also accepts the legacy/default aliases `cli:scan`, `cli:help`, and `cli:version`; the denominator above is the set of documented command sections in the CLI's top-level help output.
 
-### MCP tools (17)
+### MCP tools (18)
 
-`mcp:holt_at_risk` · `mcp:holt_branches` · `mcp:holt_check_workstream` · `mcp:holt_clean` · `mcp:holt_collisions` · `mcp:holt_context` · `mcp:holt_discard` · `mcp:holt_duplicates` · `mcp:holt_hotspots` · `mcp:holt_impact` · `mcp:holt_landing_order` · `mcp:holt_landing_plan` · `mcp:holt_partition` · `mcp:holt_protect` · `mcp:holt_purge` · `mcp:holt_rescue` · `mcp:holt_status`
+`mcp:holt_at_risk` · `mcp:holt_branches` · `mcp:holt_check_workstream` · `mcp:holt_clean` · `mcp:holt_collisions` · `mcp:holt_context` · `mcp:holt_discard` · `mcp:holt_duplicates` · `mcp:holt_hotspots` · `mcp:holt_impact` · `mcp:holt_landing_order` · `mcp:holt_landing_plan` · `mcp:holt_partition` · `mcp:holt_protect` · `mcp:holt_purge` · `mcp:holt_rescue` · `mcp:holt_status` · `mcp:holt_worktree_ownership`
 
 MCP tools are agent-native and can return evidence or act, but MCP itself is model-invoked. Proactive context and pre-action blocking require a separately wired host lifecycle/tool hook.
 
@@ -114,6 +114,14 @@ Each quoted evidence name below is an exact string present in the named test/har
 - Independent oracle: Fresh report lookup with exact exit-code assertions and planted sole-copy/redundant/unknown states.
 - Remaining unproven gap: `gate` cannot re-verify a later unrelated rm invocation; recoverable `clean --apply` is the rechecking action path.
 - Mandatory runner evidence: `complete-test-corpus`, `guard-corpus`
+
+#### `live-worktree-ownership`
+
+- User surfaces: `cli:ownership`, `cli:gate`, `cli:clean`, `cli:context`, `cli:plan`, `cli:order`, `cli:unprotect`, `mcp:holt_worktree_ownership`, `mcp:holt_check_workstream`, `ui:tui`, `ui:graph`
+- Exact executable evidence: `test/e2e/ownership.test.mjs` — “OWNERSHIP: a crashed internal operation releases its mutex without abandoning a session claim”; `test/e2e/ownership.test.mjs` — “OWNERSHIP: claim, heartbeat, handoff and release protect an otherwise-clean linked worktree”; `test/e2e/ownership.test.mjs` — “OWNERSHIP: a claim arriving after clean re-verification wins the final move race”; `test/e2e/cli.test.mjs` — “CLI OWNERSHIP: an explicit session lease is a complete lifecycle, not a status-only hint”; `test/e2e/mcp.test.mjs` — “MCP OWNERSHIP: a participating session can protect a clean worktree through the agent surface”; `test/e2e/tui.test.mjs` — “TUI OWNERSHIP: an active participating session is visible ahead of ordinary cleanup states”; `test/e2e/graph-html.test.mjs` — “GRAPH OWNERSHIP: an active lease is a first-class visual decision, not a hidden JSON field”
+- Independent oracle: Real linked worktrees, explicit lifecycle transitions, native Git lock refusal, ordinary disposition before claim and after release, and a claim injected between clean verification and its final move.
+- Remaining unproven gap: Only sessions that explicitly participate are represented. Expiry does not prove abandonment, and local leases cannot observe arbitrary external agents or coordinate separate hosts.
+- Mandatory runner evidence: `complete-test-corpus`, `guard-corpus`, `git-runtime`
 
 #### `collision-analysis`
 

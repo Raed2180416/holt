@@ -45,6 +45,7 @@ import { loadConfig, ConfigError } from '../config.mjs';
 import { assertUsablePath, samePathAsync } from '../paths.mjs';
 import { resolveActor, setAmbientActor } from '../actor.mjs';
 import { stashRecoveryGuidance } from '../stash.mjs';
+import { operateWorktreeOwnership } from '../ownership.mjs';
 
 /**
  * @modelcontextprotocol/sdk is an OPTIONAL dependency (see package.json optionalDependencies). A
@@ -163,7 +164,7 @@ const MAX_LIMIT = 100;
 const DEFAULT_DUPLICATE_LIMIT = 25;
 
 const REPO_ARG = {
-  repo: { type: 'string', maxLength: 4096, description: 'Path in this repository; defaults to server cwd. Other repositories are refused.' },
+  repo: { type: 'string', maxLength: 4096, description: 'Path in this repo; default cwd.' },
 };
 
 const TOOLS = [
@@ -276,6 +277,27 @@ const TOOLS = [
       required: ['id'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'holt_worktree_ownership',
+    title: 'Worktree ownership',
+    description:
+      'Protect a clean worktree while a session works. Claim, renew, hand off or release ownership. Expiry requires review.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...REPO_ARG,
+        operation: { type: 'string', maxLength: 16, enum: ['status', 'claim', 'heartbeat', 'handoff', 'release'], description: 'Only status may omit id.' },
+        id: { type: 'string', maxLength: 512, description: 'Workstream id.' },
+        owner: { type: 'string', maxLength: 256, description: 'Explicit session identifier.' },
+        to: { type: 'string', maxLength: 256, description: 'New owner for handoff.' },
+        ttlSeconds: { type: 'number', minimum: 60, maximum: 86400, description: 'Lease seconds; default 900.' },
+        takeover: { type: 'boolean', description: 'Replace expired/invalid lease; requires reason.' },
+        reason: { type: 'string', maxLength: 512, description: 'Takeover justification.' },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
     name: 'holt_impact',
@@ -890,6 +912,8 @@ async function dispatch(name, args, cwd, limit) {
         collisions: report.counts.collisions,
         duplicatePairs: report.counts.duplicatePairs,
         disposable: report.counts.safeToDelete,
+        activeOwnership: report.counts.activeOwnership || undefined,
+        ownershipNeedsReview: report.counts.ownershipNeedsReview || undefined,
         // "Disposable" spans two materially different situations, and an agent deciding what to
         // delete must be able to tell them apart: a worktree holding NOTHING, and a worktree
         // whose content a LIVING SIBLING also holds. The second is safe only while the sibling
@@ -989,6 +1013,7 @@ async function dispatch(name, args, cwd, limit) {
         mayQuarantine: authority.mayQuarantine,
         recheckRequired: authority.recheckRequired,
         confidence: v.confidence,
+        ownership: v.ownership,
         reasons: v.reasons,
         redundantWith: v.redundantWith,
         recommendation: authority.decision === 'unknown'
@@ -1075,6 +1100,8 @@ async function dispatch(name, args, cwd, limit) {
         // branch naming), or 'user-override' (an explicit human regex). See assignFamilies in
         // discover.mjs.
         familyRule: d.familyRule,
+        ownership: d.ownership,
+        activeOwners: d.activeOwners,
         siblings: d.siblings,
         advice: d.advice,
         alreadyBuiltElsewhere: (d.duplicatedSymbols ?? []).map((x) => ({
@@ -1085,6 +1112,33 @@ async function dispatch(name, args, cwd, limit) {
           count: x.fileCount, theirsUncommitted: x.hasUncommitted,
         })),
       };
+    }
+
+    case 'holt_worktree_ownership': {
+      // Do not use getReport() here: a lease may expire between an advisory report and this
+      // lifecycle call, and the ownership boundary must observe it freshly.
+      const operation = args.operation ?? 'status';
+      const disc = await discover(cwd, {});
+      if (!disc.root) throw repoAbsenceError(disc, cwd);
+      if (operation === 'status' && !args.id) {
+        const rows = disc.workstreams.map((w) => ({ id: w.id, ownership: w.ownership }));
+        return { total: rows.length, worktrees: rows };
+      }
+      if (!args.id) throw new ToolArgumentError(`holt_worktree_ownership: operation '${operation}' requires argument 'id'`);
+      const worktree = disc.workstreams.find((w) => w.id === args.id);
+      if (!worktree) {
+        return { error: `no workstream '${args.id}'`, known: disc.workstreams.map((w) => w.id).slice(0, 40) };
+      }
+      cache.clear();
+      const result = await operateWorktreeOwnership(worktree.path, {
+        operation,
+        owner: args.owner,
+        toOwner: args.to,
+        ttlSeconds: args.ttlSeconds,
+        takeover: args.takeover === true,
+        reason: args.reason,
+      });
+      return { ...result, id: worktree.id };
     }
 
     case 'holt_impact': {

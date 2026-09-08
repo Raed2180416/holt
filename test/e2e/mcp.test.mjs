@@ -64,6 +64,37 @@ test('MCP: quarantine recovery stays agent-native without adding two schema-heav
   assert.match(clean.description, /restore one without overwriting or weakening prior protection/i);
 });
 
+test('MCP OWNERSHIP: a participating session can protect a clean worktree through the agent surface', async (t) => {
+  const fx = await newRepo('mcp-ownership');
+  t.after(() => fx.cleanup());
+  await fx.worktree('mid-edit');
+
+  const schema = TOOLS.find((tool) => tool.name === 'holt_worktree_ownership');
+  assert.ok(schema, 'the lifecycle must be discoverable by agents, not only through the shell');
+  assert.equal(schema.annotations.readOnlyHint, false);
+  assert.equal(schema.annotations.destructiveHint, false);
+
+  const before = await call('holt_worktree_ownership', fx, { operation: 'status' });
+  assert.equal(before.worktrees.find((row) => row.id === 'mid-edit').ownership.state, 'unclaimed');
+
+  const claim = await call('holt_worktree_ownership', fx, {
+    operation: 'claim', id: 'mid-edit', owner: 'mcp-session', ttlSeconds: 60,
+  });
+  assert.equal(claim.ok, true, JSON.stringify(claim));
+  assert.equal(claim.ownership.owner, 'mcp-session');
+
+  const verdict = await call('holt_check_workstream', fx, { id: 'mid-edit' });
+  assert.equal(verdict.safeToDelete, false, JSON.stringify(verdict));
+  assert.equal(verdict.ownership?.state, 'active');
+  assert.match(verdict.reasons.join('\n'), /actively owned/i);
+
+  const release = await call('holt_worktree_ownership', fx, {
+    operation: 'release', id: 'mid-edit', owner: 'mcp-session', ttlSeconds: 60,
+  });
+  assert.equal(release.ok, true, JSON.stringify(release));
+  assert.equal(release.ownership.state, 'unclaimed');
+});
+
 test('MCP holt_status: returns the decision surface, not an inventory', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());

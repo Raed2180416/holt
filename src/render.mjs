@@ -110,6 +110,12 @@ export function renderHeader(report, u = repoData()) {
     `  scanned   ${k.scanned}/${k.workstreams} workstreams in ${k.families} famil${k.families === 1 ? 'y' : 'ies'}` +
     (k.skipped ? c('yellow', `  ·  ${k.skipped} skipped`) : ''),
   );
+  if ((k.activeOwnership ?? 0) || (k.ownershipNeedsReview ?? 0)) {
+    lines.push(
+      `  ownership ${k.activeOwnership ?? 0} active lease(s)`
+      + ((k.ownershipNeedsReview ?? 0) ? c('yellow', `  ·  ${k.ownershipNeedsReview} need review`) : ''),
+    );
+  }
   return lines.join('\n');
 }
 
@@ -215,6 +221,12 @@ export function renderSummary(report) {
     `  ${c('green', padStart(k.safeToDelete, 4))}  disposable     ` +
     c('grey', 'provably nothing to lose'),
   );
+  if ((k.activeOwnership ?? 0) || (k.ownershipNeedsReview ?? 0)) {
+    out.push(
+      `  ${c('yellow', padStart(k.activeOwnership ?? 0, 4))}  owned          `
+      + c('grey', 'explicit live leases block cleanup; unclaimed does not assert inactivity'),
+    );
+  }
   out.push(
     `  ${c('yellow', padStart(generatedResidue.length, 4))}  generated      ` +
     c('grey', 'only manifest-backed generated paths found; still not disposable'),
@@ -678,7 +690,19 @@ export function renderContext(digest) {
     : digest.familyRule;
   out.push(c('bold', `CONTEXT for ${u.take(digest.workstream, ID)}`) + c('grey', `  (sibling group: ${u.take(ruleHint)})`));
   out.push('');
+  if (digest.ownership?.state === 'active') {
+    out.push(c('yellow', `  your worktree is actively owned by ${u.take(digest.ownership.owner, ID)} until ${u.take(digest.ownership.expiresAt ?? '—')}`), '');
+  } else if (digest.ownership?.state && digest.ownership.state !== 'unclaimed') {
+    out.push(c('yellow', `  ownership needs review: ${u.take(digest.ownership.reason ?? digest.ownership.state)}`), '');
+  }
   if (digest.siblings.length) out.push(c('grey', `  siblings: ${digest.siblings.map((s) => u.take(s, ID)).join(', ')}`), '');
+  if (digest.activeOwners?.length) {
+    out.push(c('bold', '  ACTIVE OWNERS NEXT DOOR'));
+    for (const row of digest.activeOwners) {
+      out.push(c('grey', `    ${u.take(row.workstream, ID)}  ${u.take(row.ownership.owner, ID)} until ${u.take(row.ownership.expiresAt ?? '—')}`));
+    }
+    out.push('');
+  }
   // `advice` is holt's sentence with repository names interpolated INTO it upstream, in
   // src/analyze.mjs — so by the time it arrives here it is one string and the boundary can only
   // treat the whole line as repository data. That is correct but coarse; the residual note in the
@@ -702,6 +726,30 @@ export function renderContext(digest) {
     out.push('');
   }
   out.push(...provenanceLines(u));
+  return out.join('\n');
+}
+
+/** The explicit liveness plane beside content evidence; never a guessed process status. */
+export function renderOwnership(result) {
+  const u = repoData();
+  const rows = Array.isArray(result?.worktrees)
+    ? result.worktrees
+    : (result?.id ? [result] : []);
+  const out = [c('bold', 'holt ownership') + c('grey', '  explicit local leases; unclaimed does not mean no agent is working')];
+  if (!rows.length) {
+    out.push('', c('grey', '  no worktrees were found'));
+    return out.join('\n');
+  }
+  for (const row of rows) {
+    const lease = row.ownership ?? { state: 'unavailable', reason: 'no ownership evidence' };
+    const state = lease.state === 'active' ? c('yellow', 'ACTIVE')
+      : lease.state === 'unclaimed' ? c('grey', 'unclaimed')
+        : c('red', u.take(String(lease.state ?? 'unavailable')).toUpperCase());
+    out.push(`\n  ${u.cell(row.id ?? 'unknown', 30, ID)} ${state}`);
+    if (lease.owner) out.push(c('grey', `    owner ${u.take(lease.owner, ID)}  until ${u.take(lease.expiresAt ?? '—')}`));
+    if (lease.reason) out.push(c('grey', `    ${u.take(lease.reason)}`));
+  }
+  out.push('', c('grey', '  Active, expired, invalid and unavailable leases all refuse cleanup. Release or explicitly take over a lease; Holt never infers liveness from a process, name or mtime.'));
   return out.join('\n');
 }
 

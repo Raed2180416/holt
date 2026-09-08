@@ -14,6 +14,7 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { standardFixture, newRepo } from '../fixtures.mjs';
 import { buildModel, renderFrame } from '../../src/tui.mjs';
+import { operateWorktreeOwnership } from '../../src/ownership.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 const strip = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
@@ -54,6 +55,29 @@ test('TUI: the frame shows the story a human needs', async (t) => {
     { columns: 130, rows: 34 }));
   assert.match(cleanFrame, /would quarantine this \(recoverable; branch retained\)/,
     'the TUI must not tell a user that clean physically deletes or reclaims the worktree');
+});
+
+test('TUI OWNERSHIP: an active participating session is visible ahead of ordinary cleanup states', async (t) => {
+  const fx = await newRepo('tui-live-ownership');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('mid-edit');
+  const claim = await operateWorktreeOwnership(wt, {
+    operation: 'claim', owner: 'tui-session', ttlSeconds: 60,
+  });
+  assert.equal(claim.ok, true, JSON.stringify(claim));
+
+  const model = await buildModel(fx.root);
+  const row = model.rows.find((candidate) => candidate.id === 'mid-edit');
+  assert.equal(row.bucket, 'owned', JSON.stringify(row));
+  assert.equal(model.rows[0].id, 'mid-edit', 'an active ownership lease sorts before ordinary cleanup findings');
+
+  const frame = strip(renderFrame(model, { selected: 0, filter: 'all', message: '' },
+    { columns: 130, rows: 34 }));
+  assert.match(frame, /OWNED/);
+  assert.match(frame, /active: tui-session/);
+  assert.match(frame, /hand off or release before cleanup/);
+  assert.doesNotMatch(frame, /provably nothing to lose/,
+    'a clean-looking but actively owned worktree must never inherit the disposable wording');
 });
 
 test('TUI: ignored-only primary work is named accurately and gets a valid recovery action', async (t) => {

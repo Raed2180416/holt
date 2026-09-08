@@ -559,6 +559,11 @@ const DRIVERS = {
   renderHotspots: () => [R.renderHotspots(poisonedReport()), R.renderHotspots({ hotspots: [] })],
   renderImpact: () => [R.renderImpact(poisonedImpact()), R.renderImpact(poisonedImpact(true))],
   renderContext: () => [R.renderContext(poisonedDigest()), R.renderContext(poisonedDigest(false))],
+  renderOwnership: () => [
+    R.renderOwnership({ worktrees: [{ id: P, ownership: { state: 'active', owner: P, expiresAt: P, reason: P } }] }),
+    R.renderOwnership({ id: P, ownership: { state: P, owner: P, reason: P } }),
+    R.renderOwnership({ worktrees: [] }),
+  ],
   renderOrder: () => [R.renderOrder(poisonedOrder()), R.renderOrder({ parallel: [], lanes: [] })],
   renderPartition: () => [R.renderPartition(poisonedPartition()),
     R.renderPartition({ agents: 1, buckets: [], avoid: [] })],

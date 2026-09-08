@@ -28,6 +28,7 @@ import { symbolKey } from './symbols.mjs';
 import { isHoltLock } from './discover.mjs';
 import { stashState } from './stash.mjs';
 import { looksGenerated } from './scan.mjs';
+import { ownershipLandingReason } from './ownership.mjs';
 
 /* ------------------------------------------------------------------ helpers ---- */
 
@@ -698,6 +699,30 @@ export function safeToDelete(scanResult, unique = null) {
             + 'but it is not a removable worktree (git itself refuses `git worktree remove` here, '
             + 'and .git lives inside it)'
           : 'this is the repository\'s main working tree, and it holds work base lacks'],
+      };
+    }
+
+    // Live ownership is intentionally independent of file content.  A session can have a clean
+    // directory because its next change still lives in an editor buffer; treating that as an
+    // empty worktree would turn "Holt has not seen bytes yet" into permission to move it away.
+    // A participating owner is therefore hard authority for every cleanup path.  Conversely,
+    // an expired, malformed, unavailable or currently-mutating lease is never proof that nobody
+    // owns the worktree, so it fails closed as UNKNOWN until a person explicitly resolves it.
+    // The main-worktree rule remains first: it is structural authority and must not be obscured
+    // by an otherwise useful live-session status.
+    const ownership = w.ownership;
+    if (ownership?.state === 'active') {
+      return {
+        id: w.id, path: w.path, safe: false, confidence: 'measured', ownership,
+        reasons: [`actively owned by ${ownership.owner} until ${ownership.expiresAt}; release or hand off the ownership lease before cleanup`],
+      };
+    }
+    if (ownership && ownership.state !== 'unclaimed') {
+      return {
+        id: w.id, path: w.path, safe: false, confidence: 'unknown', ownership,
+        reasons: [ownership.state === 'expired'
+          ? `ownership lease held by ${ownership.owner} expired at ${ownership.expiresAt}; expiry is not abandonment, so explicit takeover or owner release is required`
+          : `worktree ownership cannot be established (${ownership.reason ?? ownership.state}); refusing cleanup until it is resolved`],
       };
     }
 
@@ -1662,12 +1687,18 @@ export function contextDigest(scanResult, workstreamId, { maxItems = 12 } = {}) 
   // different, complementary question — "did they touch the same thing" — and is reported
   // separately rather than used to second-guess who the dispatch actually contained.
   const siblings = live.filter((w) => w.family === me.family && w.id !== me.id).map((w) => w.id);
+  const activeOwners = live
+    .filter((w) => w.id !== me.id && w.ownership?.state === 'active')
+    .map((w) => ({ workstream: w.id, ownership: w.ownership }))
+    .slice(0, maxItems);
 
   return {
     ok: true,
     workstream: me.id,
     family: me.family,
     familyRule: me.familyRule,
+    ownership: me.ownership ?? { state: 'unavailable', reason: 'no ownership evidence was collected for this workstream' },
+    activeOwners,
     siblings,
     contestedFiles: contested.slice(0, maxItems),
     duplicatedSymbols: alreadyBuilt.slice(0, maxItems),
@@ -1751,7 +1782,8 @@ export function landingPlan(scanResult, {
   // The primary is evidence, not a branch an agent should land or collapse. Keep it in the
   // overall scan but remove it from the candidate map so every downstream operation inherits the
   // same boundary instead of having to remember a renderer-only exclusion.
-  const candidatesLive = live.filter((w) => !isPrimary(w));
+  const reviewableLive = live.filter((w) => !isPrimary(w));
+  const candidatesLive = reviewableLive.filter((w) => !ownershipLandingReason(w.ownership));
   const workstreamById = new Map(candidatesLive.map((w) => [w.id, w]));
   const supersededBy = new Map();
   const collapseEvidence = new Map();
@@ -1879,13 +1911,14 @@ export function landingPlan(scanResult, {
       toReview: toLand.length,
       excluded: live.length - candidatesLive.length,
     },
-    reviewSurface: reviewSurface(candidatesLive, safeIds),
-    excluded: live.filter(isPrimary).map((w) => ({
+    reviewSurface: reviewSurface(reviewableLive, safeIds),
+    excluded: live.filter((w) => isPrimary(w) || ownershipLandingReason(w.ownership)).map((w) => ({
       id: w.id,
-      reason: 'primary worktree is evidence, not a landing candidate',
+      reason: isPrimary(w) ? 'primary worktree is evidence, not a landing candidate'
+        : ownershipLandingReason(w.ownership),
     })),
     note: 'holt produces the ORDER. Executing rebases is git-machete / stack-pr / Graphite territory. '
-      + 'The primary worktree is excluded from landing candidates.',
+      + 'The primary worktree and unresolved session claims are excluded from landing candidates.',
   };
 }
 
@@ -1991,6 +2024,7 @@ export function buildGraph(scanResult, { collisions: cols = [], duplicates: dups
       uncommittedOnly: uniqById.get(w.id)?.uncommittedOnlyCount ?? 0,
       safeToDelete: safe.get(w.id)?.safe ?? false,
       verdict: uniqById.get(w.id)?.verdict ?? 'unknown',
+      ownership: w.ownership ?? { state: 'unavailable', reason: 'no ownership evidence was collected for this workstream' },
       ...(redundantWith?.length ? { redundantWith } : {}),
     };
   });
@@ -2055,6 +2089,7 @@ export async function analyze(scanResult, opts = {}) {
   // full coverage, which is how a tool quietly starts lying about what it looked at.
   const live = scanResult.workstreams.filter((w) => w.ok);
   const { dropped, limit } = discriminativeSymbols(live);
+  const ownership = live.map((w) => w.ownership ?? { state: 'unavailable' });
 
   // ---- THE STASH, WHICH THIS REPORT'S OWN PREMISE MADE INVISIBLE ---------------------------
   //
@@ -2106,6 +2141,8 @@ export async function analyze(scanResult, opts = {}) {
       // make a number that drives worktree decisions move for a reason that has nothing to do
       // with any worktree.
       stashAtRisk: stash.atRisk.length,
+      activeOwnership: ownership.filter((lease) => lease.state === 'active').length,
+      ownershipNeedsReview: ownership.filter((lease) => !['active', 'unclaimed'].includes(lease.state)).length,
     },
     stash,
     unique: uniq,

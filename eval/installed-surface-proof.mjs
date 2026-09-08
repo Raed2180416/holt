@@ -25,17 +25,17 @@ const SCHEMA = 'holt-installed-surface-proof-v1';
 export const CLI_COMMANDS = Object.freeze([
   'status', 'risk', 'collisions', 'hotspots', 'duplicates', 'context', 'plan', 'impact',
   'order', 'partition', 'branches', 'journal', 'forensics', 'fleet', 'license',
-  'managed-policy', 'ci', 'graph', 'stash', 'gate', 'tui', 'setup', 'doctor', 'audit',
-  'auto', 'protect', 'unprotect', 'rescue', 'rescued', 'clean', 'quarantines', 'restore',
-  'purge', 'discard', 'verify', 'hosts', 'providers', 'integrate', 'uninstall', 'brief',
+  'managed-policy', 'ci', 'graph', 'stash', 'gate', 'tui', 'setup', 'doctor', 'base', 'audit',
+  'auto', 'protect', 'unprotect', 'rescue', 'ownership', 'rescued', 'clean', 'quarantines', 'restore',
+  'purge', 'discard', 'recover-discard', 'verify', 'hosts', 'providers', 'integrate', 'uninstall', 'brief',
   'mcp', 'hook',
 ]);
 
 export const MCP_TOOLS = Object.freeze([
   'holt_at_risk', 'holt_branches', 'holt_check_workstream', 'holt_clean',
-  'holt_collisions', 'holt_context', 'holt_duplicates', 'holt_hotspots', 'holt_impact',
+  'holt_collisions', 'holt_context', 'holt_discard', 'holt_duplicates', 'holt_hotspots', 'holt_impact',
   'holt_landing_order', 'holt_landing_plan', 'holt_partition', 'holt_protect',
-  'holt_purge', 'holt_rescue', 'holt_status',
+  'holt_purge', 'holt_rescue', 'holt_status', 'holt_worktree_ownership',
 ]);
 
 const CLI_TIER = Object.freeze({
@@ -932,6 +932,31 @@ export async function runCliProbe(context, command, index) {
       assertExit(probe, safe, 0, 'gate disposable');
       const safeValue = parseJsonOutput(safe, 'gate disposable');
       assertProbe(probe, safeValue.safe === true, 'gate accepts the independently planted empty negative control');
+    } else if (command === 'ownership') {
+      const ownership = async (operation, args = []) => {
+        const run = await invoke(['ownership', operation, fixture.truth.empty, ...args, '--json', '--cwd', fixture.repo]);
+        assertExit(probe, run, 0, `ownership ${operation}`);
+        return parseJsonOutput(run, `ownership ${operation}`);
+      };
+      const initial = await ownership('status');
+      assertProbe(probe, initial.ownership?.state === 'unclaimed', 'ownership starts unclaimed on the disposable control');
+      const claimed = await ownership('claim', ['--owner', 'proof-a', '--ttl', '60']);
+      assertProbe(probe, claimed.ownership?.state === 'active' && claimed.ownership?.owner === 'proof-a',
+        'ownership claim records the explicit session');
+      const held = await invoke(['gate', fixture.truth.empty, '--json', '--cwd', fixture.repo]);
+      assertExit(probe, held, 1, 'gate actively owned worktree');
+      assertProbe(probe, parseJsonOutput(held, 'gate owned').ownership?.state === 'active',
+        'gate refuses an otherwise-disposable worktree because its session is active');
+      const renewed = await ownership('heartbeat', ['--owner', 'proof-a', '--ttl', '60']);
+      assertProbe(probe, renewed.ok === true && renewed.ownership?.state === 'active', 'ownership heartbeat renews the live claim');
+      const handed = await ownership('handoff', ['--owner', 'proof-a', '--to', 'proof-b', '--ttl', '60']);
+      assertProbe(probe, handed.ownership?.owner === 'proof-b', 'ownership handoff transfers to the explicit successor');
+      const released = await ownership('release', ['--owner', 'proof-b']);
+      assertProbe(probe, released.ownership?.state === 'unclaimed', 'ownership release ends the claim');
+      const disposable = await invoke(['gate', fixture.truth.empty, '--json', '--cwd', fixture.repo]);
+      assertExit(probe, disposable, 0, 'gate after ownership release');
+      assertProbe(probe, parseJsonOutput(disposable, 'gate released').safe === true,
+        'ordinary disposition resumes after the session releases ownership');
     } else if (command === 'tui') {
       const run = await invoke(['tui', '--snapshot', '--columns', '120', '--rows', '30', '--cwd', fixture.repo]);
       assertExit(probe, run, 0, 'tui snapshot');
@@ -950,6 +975,12 @@ export async function runCliProbe(context, command, index) {
       assertProbe(probe, value.ok === true && value.git?.noLazyFetch === true
         && Array.isArray(value.safetyContract),
       'doctor proves the selected Git runtime and live argv safety contract');
+    } else if (command === 'base') {
+      const run = await invoke(['base', '--json', '--cwd', fixture.repo]);
+      assertExit(probe, run, 0, 'base status');
+      const value = parseJsonOutput(run, 'base status');
+      assertProbe(probe, value.ok === true && value.resolved?.ref === 'main' && /^[0-9a-f]{40,64}$/.test(value.resolved?.oid ?? ''),
+        'base resolves the planted integration branch and its commit');
     } else if (command === 'audit') {
       const run = await invoke(['audit', '--json', '--cwd', fixture.repo]);
       assertExit(probe, run, 0, 'audit');
@@ -1048,6 +1079,12 @@ export async function runCliProbe(context, command, index) {
       const shown = await git(['show', `${value.ref}:untracked-discard-proof.txt`], fixture.repo, fixture.env);
       assertProbe(probe, shown.stdout.includes('untracked valuable bytes'), 'discard recovery ref contains the planted untracked bytes');
       assertProbe(probe, !(await exists(path.join(fixture.repo, targets[1]))), 'discard removes only the requested untracked path after capture');
+    } else if (command === 'recover-discard') {
+      const run = await invoke(['recover-discard', '--json', '--cwd', fixture.repo]);
+      assertExit(probe, run, 0, 'recover-discard list');
+      const value = parseJsonOutput(run, 'recover-discard list');
+      assertProbe(probe, value.ok === true && Array.isArray(value.transactions),
+        'recover-discard inspects the durable transaction store without inventing interruptions');
     } else if (command === 'verify') {
       const testCommand = `${process.execPath} -e process.exit(0)`;
       const run = await invoke([
@@ -1302,7 +1339,7 @@ export async function runMcpProbe(context, tool, index) {
     const names = schemas.map((row) => row.name);
     try {
       requireExactSet(names, MCP_TOOLS, 'MCP tools/list');
-      assertProbe(probe, true, 'tools/list returns the exact 16-tool denominator');
+      assertProbe(probe, true, `tools/list returns the exact ${MCP_TOOLS.length}-tool denominator`);
     } catch (error) {
       assertProbe(probe, false, error.message);
     }
@@ -1354,6 +1391,19 @@ export async function runMcpProbe(context, tool, index) {
       payload = await call(tool, { ...repoArg, id: fixture.truth.unique });
       assertProbe(probe, payload.workstream === fixture.truth.unique && payload.siblings?.length >= 1,
         'holt_context resolves the exact planted workstream with real siblings');
+    } else if (tool === 'holt_discard') {
+      const target = path.join(fixture.worktrees[fixture.truth.unique], 'mcp-discard-proof.txt');
+      await fs.writeFile(target, 'MCP_DISCARD_RECOVERY_PROOF\n');
+      probe.beforeSubjectManifest = await fixtureManifest(fixture);
+      const args = { repo: fixture.worktrees[fixture.truth.unique], paths: ['mcp-discard-proof.txt'] };
+      await call(tool, { ...args, operation: 'preview' });
+      assertProbe(probe, await exists(target), 'holt_discard preview preserves the planted bytes');
+      payload = await call(tool, { ...args, operation: 'discard' });
+      assertProbe(probe, /^refs\/holt\/discard\//.test(payload.ref) && await refExists(fixture, payload.ref),
+        'holt_discard captures an independently existing recovery ref');
+      const shown = await git(['show', `${payload.ref}:mcp-discard-proof.txt`], fixture.repo, fixture.env);
+      assertProbe(probe, shown.stdout.includes('MCP_DISCARD_RECOVERY_PROOF'), 'holt_discard recovery ref contains the exact planted bytes');
+      assertProbe(probe, !(await exists(target)), 'holt_discard removes the requested path after capture');
     } else if (tool === 'holt_duplicates') {
       payload = await call(tool, repoArg);
       assertProbe(probe, payload.pairs?.some((row) => pairMatches(row, fixture.truth.duplicate)),
@@ -1420,6 +1470,24 @@ export async function runMcpProbe(context, tool, index) {
         'holt_status reports the planted workstream denominator and at-risk positive control');
       assertProbe(probe, payload.topRisks?.some((row) => row.id === fixture.truth.unique),
         'holt_status decision surface names the planted top risk');
+    } else if (tool === 'holt_worktree_ownership') {
+      const args = { ...repoArg, id: fixture.truth.empty };
+      const initial = await call(tool, { ...args, operation: 'status' });
+      assertProbe(probe, initial.ownership?.state === 'unclaimed', 'MCP ownership starts unclaimed on the disposable control');
+      const claimed = await call(tool, { ...args, operation: 'claim', owner: 'proof-a', ttlSeconds: 60 });
+      assertProbe(probe, claimed.ownership?.state === 'active' && claimed.ownership?.owner === 'proof-a',
+        'MCP ownership claims the clean worktree for the explicit session');
+      const held = await call('holt_check_workstream', args);
+      assertProbe(probe, held.safeToDelete === false && held.ownership?.state === 'active',
+        'MCP disposition observes the live claim');
+      const renewed = await call(tool, { ...args, operation: 'heartbeat', owner: 'proof-a', ttlSeconds: 60 });
+      assertProbe(probe, renewed.ok === true && renewed.ownership?.state === 'active', 'MCP heartbeat renews the claim');
+      const handed = await call(tool, { ...args, operation: 'handoff', owner: 'proof-a', to: 'proof-b', ttlSeconds: 60 });
+      assertProbe(probe, handed.ownership?.owner === 'proof-b', 'MCP handoff transfers the claim to its successor');
+      payload = await call(tool, { ...args, operation: 'release', owner: 'proof-b' });
+      assertProbe(probe, payload.ownership?.state === 'unclaimed', 'MCP release ends the claim');
+      const disposable = await call('holt_check_workstream', args);
+      assertProbe(probe, disposable.safeToDelete === true, 'MCP disposition resumes ordinary behavior after release');
     } else {
       throw new Error(`no behavioral MCP probe implemented for ${tool}`);
     }
@@ -1498,7 +1566,7 @@ export function validatePublicationArtifact(evidence) {
   }
   const mcpCli = cli.find((row) => row.command === 'mcp');
   if (mcpCli?.protocolToolCalls !== MCP_TOOLS.length || mcpCli?.cleanShutdowns !== MCP_TOOLS.length) {
-    fail('cli:mcp is not tied to all 16 behavioral calls and clean EOF shutdowns');
+    fail(`cli:mcp is not tied to all ${MCP_TOOLS.length} behavioral calls and clean EOF shutdowns`);
   }
   if (evidence.scratch?.markerVerified !== true) fail('scratch ownership marker was not reverified');
   return { valid: failures.length === 0, failures };

@@ -295,7 +295,7 @@ process.stdin.on('data', (chunk) => {
   assert.equal(preflight.protocol.initializeValid, true);
   assert.equal(preflight.protocol.serverVersionMatches, true);
   assert.equal(preflight.protocol.toolsListValid, true);
-  assert.equal(preflight.protocol.toolCount, 16);
+  assert.equal(preflight.protocol.toolCount, MCP_RELEASE_TOOL_NAMES.length);
   assert.deepEqual(preflight.protocol.missingRequiredTools, []);
   assert.deepEqual(preflight.protocol.unexpectedTools, []);
   assert.deepEqual(preflight.protocol.malformedToolSchemas, []);

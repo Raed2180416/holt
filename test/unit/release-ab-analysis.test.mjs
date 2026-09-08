@@ -485,7 +485,7 @@ async function validRunnerEvidence(base, input, n = 20) {
             valid: true,
             live: {
               protocol: {
-                toolCount: 16,
+                toolCount: MCP_RELEASE_TOOL_NAMES.length,
                 toolsListValid: true,
                 toolNames: [...MCP_RELEASE_TOOL_NAMES],
                 toolSchemaSha256,

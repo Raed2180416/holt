@@ -322,7 +322,10 @@ export async function cachedReport(cwd, opts = {}) {
   const disc = await discover(cwd, opts);
   if (!disc.root) throw repoAbsenceError(disc, cwd);
 
-  const fp = await fingerprint(disc.root);
+  const fp = createHash('sha256').update(await fingerprint(disc.root))
+    .update('\0ownership-v1\0')
+    .update(JSON.stringify(disc.workstreams.map((w) => ({ id: w.id, ownership: w.ownership }))))
+    .digest('hex');
   const dir = cacheDirectory();
   const file = cachePath(disc.root, opts);
   let cacheReady = true;
@@ -6499,6 +6502,21 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
 
   // `w`, not `u` — `u` is the untrusted-content budget in this scope, and a filter parameter
   // shadowing it would silently make `u.take` mean something else inside the callback.
+  const owned = report.graph.nodes.filter((w) => w.ownership?.state === 'active');
+  if (owned.length) {
+    lines.push(`${owned.length} worktree(s) have active session owners: `
+      + owned.slice(0, 5).map((w) => `${u.take(w.id, ID)} (${u.take(w.ownership.owner, ID)})`).join(', ')
+      + (owned.length > 5 ? `; ${owned.length - 5} more` : '')
+      + '. Wait for owner release before landing or cleanup.');
+  }
+  const ownershipReview = report.graph.nodes.filter((w) => w.ownership?.state
+    && !['active', 'unclaimed'].includes(w.ownership.state));
+  if (ownershipReview.length) {
+    lines.push(`${ownershipReview.length} worktree ownership claim(s) need review: `
+      + ownershipReview.slice(0, 5).map((w) => `${u.take(w.id, ID)} (${u.take(w.ownership.state)})`).join(', ')
+      + (ownershipReview.length > 5 ? `; ${ownershipReview.length - 5} more` : '')
+      + '. Use ownership status, owner release, or an explicit reviewed takeover; expiry is not abandonment.');
+  }
   const risky = report.unique.filter((w) => w.uncommittedOnlyCount > 0);
   if (risky.length) {
     const shown = risky.slice(0, 5);

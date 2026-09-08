@@ -30,7 +30,7 @@ import {
 } from '../src/git.mjs';
 import {
   renderSummary, renderRisk, renderCollisions, renderDuplicates,
-  renderPlan, renderCollapse, renderHotspots, renderContext, renderImpact, renderOrder, renderPartition, renderBranches, paint,
+  renderPlan, renderCollapse, renderHotspots, renderContext, renderOwnership, renderImpact, renderOrder, renderPartition, renderBranches, paint,
 } from '../src/render.mjs';
 import { renderHtml } from '../src/graph-html.mjs';
 import { renderClusters } from '../src/ascii-graph.mjs';
@@ -70,6 +70,7 @@ import { fleetScan, fleetAudit } from '../src/team/fleet.mjs';
 import { sinkExport } from '../src/team/audit-sink.mjs';
 import { loadConfig, ConfigError } from '../src/config.mjs';
 import { stashState, describeStash } from '../src/stash.mjs';
+import { operateWorktreeOwnership } from '../src/ownership.mjs';
 
 // Exact current upstream release. Setup prints this byte-for-byte before asking and Go verifies
 // the module through its normal checksum machinery; there is no moving `@latest` executable.
@@ -107,6 +108,7 @@ const CONFIG_NON_FATAL = new Set([
   'verify',         // verifies workstream pairs
   'rescued',        // lists rescues
   'mcp',            // MCP server — agent relies on this for decisions
+  'ownership',      // explicit lifecycle authority is a cleanup boundary
 ]);
 
 const USAGE = `
@@ -172,6 +174,13 @@ ACTING  (these explicitly mutate local Git/repository state)
                       (or --yes to confirm without writing one) — the override is journalled
   rescue <id>         capture unique work to a verifiable ref  [--release] [--dry-run]
                       exits non-zero if the capture cannot be verified
+  ownership <operation> [<id>]
+                      claim before editing a clean tree; active, expired and unreadable leases
+                      block cleanup. Holt never guesses whether an unclaimed agent is alive.
+                      status lists every lease or shows one; claim / heartbeat / release require
+                      --owner <opaque-session-id>; handoff also requires --to <new-owner>
+                      --ttl <seconds> defaults to 900. An expired lease requires claim --takeover
+                      --reason "<why>"; expiry never authorizes cleanup by itself.
   rescued             list every rescue taken in this repo
   clean               re-check, then move disposable worktrees into locked local quarantine
                       [--apply] — no files or branches are deleted; restore argv is returned
@@ -254,6 +263,11 @@ OPTIONS
   --force             unprotect: also release a lock holt did not place
                       (needs --reason or --yes; without one, refused before anything changes)
   --reason <text>     unprotect --force: why the override is happening — journalled verbatim
+                      ownership --takeover: why an expired or invalid lease is being taken over — journalled
+  --owner <id>        ownership: explicit owner/session identifier (never inferred by Holt)
+  --to <id>           ownership handoff: successor owner/session identifier
+  --ttl <seconds>     ownership: lease duration, 60–86400 seconds (default: 900)
+  --takeover          ownership claim: explicitly replace an expired or invalid lease (needs --reason)
   --yes, -y           confirm an action non-interactively (unprotect --force; doctor --install)
   -h, --help          this
   -v, --version       print the version and exit
@@ -352,6 +366,7 @@ function parseArgs(argv) {
     profile: null, authority: null, store: null, bootstrapRoot: null, metadataUrl: null, targetsUrl: null,
     repository: null, repositoryRoot: null, recoveryMode: null, lockToken: null, orphan: null,
     allHosts: false, dryRun: false, apply: false, release: false, force: false, reason: null,
+    owner: null, toOwner: null, ttlSeconds: undefined, takeover: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -395,6 +410,10 @@ function parseArgs(argv) {
       case '--release': opts.release = true; break;
       case '--force': opts.force = true; break;
       case '--reason': opts.reason = takeValue('--reason'); break;
+      case '--owner': opts.owner = takeValue('--owner'); break;
+      case '--to': opts.toOwner = takeValue('--to'); break;
+      case '--ttl': opts.ttlSeconds = numericFlag('--ttl', takeValue('--ttl'), { min: 60, max: 86400 }); break;
+      case '--takeover': opts.takeover = true; break;
       case '--run': opts.run = takeValue('--run'); break;
       case '--agents': {
         const agents = Number(takeValue('--agents'));
@@ -2533,6 +2552,43 @@ async function main() {
   }
   opts.configPath = configPath;
   if (cmd === 'doctor') return cmdDoctor(opts);
+  if (cmd === 'ownership') {
+    const operation = opts._[1] ?? 'status';
+    const id = opts._[2] ?? null;
+    const disc = await discover(opts.cwd, opts);
+    if (!disc.root) {
+      const error = repoAbsenceError(disc, opts.cwd);
+      if (opts.json) emitJson({ ok: false, code: 'not-a-repository', reason: error.message });
+      else process.stderr.write(paint('red', `holt ownership: ${error.message}\n`));
+      process.exit(2);
+    }
+    if (operation === 'status' && !id) {
+      const worktrees = disc.workstreams.map((w) => ({ id: w.id, path: w.path, ownership: w.ownership }));
+      if (opts.json) emitJson({ ok: true, worktrees }); else out(renderOwnership({ worktrees }));
+      return;
+    }
+    if (!id) {
+      const message = `ownership ${operation}: needs a workstream id`;
+      if (opts.json) emitJson({ ok: false, code: 'missing-id', reason: message });
+      else process.stderr.write(paint('red', `holt ${message}\n`));
+      process.exit(2);
+    }
+    const worktree = disc.workstreams.find((w) => w.id === id);
+    if (!worktree) {
+      const message = `no workstream '${id}'`;
+      if (opts.json) emitJson({ ok: false, code: 'unknown-worktree', reason: message, known: disc.workstreams.map((w) => w.id) });
+      else process.stderr.write(paint('red', `holt ownership: ${message}\n`));
+      process.exit(2);
+    }
+    const result = await operateWorktreeOwnership(worktree.path, {
+      operation, owner: opts.owner, toOwner: opts.toOwner, ttlSeconds: opts.ttlSeconds,
+      takeover: opts.takeover, reason: opts.reason,
+    });
+    const payload = { ...result, id: worktree.id, path: worktree.path };
+    if (opts.json) emitJson(payload); else out(renderOwnership(payload));
+    if (!result.ok) process.exit(result.code === 'invalid-operation' || result.code?.startsWith('invalid') || result.code === 'takeover-reason-required' ? 2 : 1);
+    return;
+  }
   if (cmd === 'base') return cmdBase(opts);
   if (cmd === 'audit') return cmdAudit(opts);
   if (cmd === 'hook') return cmdHook(opts);

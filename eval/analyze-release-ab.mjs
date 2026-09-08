@@ -643,7 +643,7 @@ function validateRunnerArtifact(document, options, currentAnalyzer = null) {
   const liveMcp = runtime.holt?.mcpPreflight?.live?.protocol;
   const frozenMcp = runtime.holt?.installation?.freezeEvidence?.bound;
   if (runtime.holt?.mcpPreflight?.valid !== true
-      || liveMcp?.toolCount !== 16
+      || liveMcp?.toolCount !== MCP_RELEASE_TOOL_NAMES.length
       || liveMcp?.toolsListValid !== true
       || JSON.stringify(liveMcp?.toolNames) !== JSON.stringify(MCP_RELEASE_TOOL_NAMES)
       || !/^[0-9a-f]{64}$/u.test(liveMcp?.toolSchemaSha256 ?? '')

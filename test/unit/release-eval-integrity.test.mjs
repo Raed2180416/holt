@@ -228,13 +228,13 @@ test('RELEASE EVAL NAMESPACE: one atomic reservation owns every output/checkpoin
   assert.equal(await fs.readFile(`${occupied}.checkpoint.jsonl`, 'utf8'), 'irreplaceable checkpoint\n');
 });
 
-test('RELEASE EVAL MCP: exact 16 names and object schemas are mandatory', () => {
+test('RELEASE EVAL MCP: exact published names and object schemas are mandatory', () => {
   const schemas = MCP_RELEASE_TOOL_NAMES.map((name) => ({
     name, description: `schema for ${name}`, inputSchema: { type: 'object', properties: {} },
   }));
   const valid = validateMcpToolSchemas(schemas);
   assert.equal(valid.valid, true);
-  assert.equal(valid.toolNames.length, 16);
+  assert.equal(valid.toolNames.length, MCP_RELEASE_TOOL_NAMES.length);
   assert.match(valid.toolSchemaSha256, /^[0-9a-f]{64}$/);
 
   const missing = validateMcpToolSchemas(schemas.slice(1));
@@ -280,7 +280,7 @@ test('RELEASE EVAL FREEZE: semantic/checksum evidence binds tarball, install tre
     preflight: {
       valid: true,
       protocol: {
-        toolsListValid: true, toolCount: 16, toolNames: [...MCP_RELEASE_TOOL_NAMES],
+        toolsListValid: true, toolCount: MCP_RELEASE_TOOL_NAMES.length, toolNames: [...MCP_RELEASE_TOOL_NAMES],
         toolSchemaSha256: '9'.repeat(64),
       },
     },

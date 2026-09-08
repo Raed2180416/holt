@@ -974,7 +974,7 @@ function frozenRuntimeBindingReasons(freezeArtifact, installed) {
       || freezeArtifact?.preflight?.protocol?.toolsListValid !== true
       || JSON.stringify(freezeArtifact?.preflight?.protocol?.toolNames)
         !== JSON.stringify([...MCP_RELEASE_TOOL_NAMES])) {
-    reasons.push('freeze evidence does not bind the exact 16-tool release MCP schema');
+    reasons.push(`freeze evidence does not bind the exact ${MCP_RELEASE_TOOL_NAMES.length}-tool release MCP schema`);
   }
   if (!/^[0-9a-f]{64}$/u.test(freezeArtifact?.preflight?.protocol?.toolSchemaSha256 ?? '')) {
     reasons.push('freeze evidence does not retain the canonical MCP tool-schema SHA-256');
@@ -1553,6 +1553,7 @@ const MCP_RELEASE_TOOL_NAMES = Object.freeze([
   'holt_clean',
   'holt_collisions',
   'holt_context',
+  'holt_discard',
   'holt_duplicates',
   'holt_hotspots',
   'holt_impact',
@@ -1563,6 +1564,7 @@ const MCP_RELEASE_TOOL_NAMES = Object.freeze([
   'holt_purge',
   'holt_rescue',
   'holt_status',
+  'holt_worktree_ownership',
 ]);
 
 function validateMcpToolSchemas(tools) {
