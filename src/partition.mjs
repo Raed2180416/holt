@@ -47,6 +47,101 @@ function makeUnionFind() {
 }
 
 export const MAX_PARTITION_AGENTS = 256;
+export const DEFAULT_PARTITION_OUTPUT_LIMIT = 50;
+
+function requestedAgentCount(agents) {
+  const requested = Number(agents);
+  return Math.min(MAX_PARTITION_AGENTS, Math.max(1,
+    Number.isFinite(requested) ? Math.floor(requested) : 2));
+}
+
+export function partitionContextRequired({ agents = 2 } = {}) {
+  return {
+    ok: false,
+    actionable: false,
+    code: 'task-context-required',
+    agents: 0,
+    requestedAgents: requestedAgentCount(agents),
+    fanoutFeasible: false,
+    buckets: [],
+    avoid: [],
+    taskContext: {
+      status: 'insufficient_task_context',
+      reason: 'No intended task paths or components were supplied; repository layout alone is not an actionable ownership plan.',
+      next: 'Supply --path/--component, or add --structural to explicitly request a bounded repository-shape view.',
+    },
+    mode: 'task-context-required',
+  };
+}
+
+/** Bound every public list while retaining exact totals and an explicit opt-in route. */
+export function compactPartitionPlan(plan, { limit = DEFAULT_PARTITION_OUTPUT_LIMIT } = {}) {
+  const cap = Math.min(100, Math.max(1, Number.isFinite(Number(limit)) ? Math.floor(Number(limit)) : DEFAULT_PARTITION_OUTPUT_LIMIT));
+  const sourceBuckets = plan.buckets ?? [];
+  const visibleDirs = sourceBuckets.map(() => []);
+  let returnedDirs = 0;
+  // Round-robin keeps a large first bucket from consuming the whole public budget and making
+  // later agents appear empty. The output is still globally bounded, but every bucket gets a
+  // representative path before any bucket gets a second one when the cap permits it.
+  for (let offset = 0; returnedDirs < cap; offset++) {
+    let progressed = false;
+    for (let index = 0; index < sourceBuckets.length && returnedDirs < cap; index++) {
+      const value = sourceBuckets[index].dirs[offset];
+      if (value === undefined) continue;
+      visibleDirs[index].push(value);
+      returnedDirs++;
+      progressed = true;
+    }
+    if (!progressed) break;
+  }
+  const buckets = sourceBuckets.map((bucket, index) => {
+    const dirs = visibleDirs[index];
+    return {
+      agent: bucket.agent,
+      weight: bucket.weight,
+      totalDirs: bucket.dirs.length,
+      returnedDirs: dirs.length,
+      truncated: dirs.length < bucket.dirs.length,
+      dirs,
+    };
+  });
+  const totalDirs = sourceBuckets.reduce((sum, bucket) => sum + bucket.dirs.length, 0);
+  const avoid = (plan.avoid ?? []).slice(0, cap);
+  const taskContext = plan.taskContext ? { ...plan.taskContext } : null;
+  const totalAnchors = taskContext?.anchors?.length ?? 0;
+  const totalUnmatched = taskContext?.unmatched?.length ?? 0;
+  if (Array.isArray(taskContext?.anchors)) taskContext.anchors = taskContext.anchors.slice(0, cap);
+  if (Array.isArray(taskContext?.unmatched)) taskContext.unmatched = taskContext.unmatched.slice(0, cap);
+  if (taskContext) {
+    taskContext.totalAnchors = totalAnchors;
+    taskContext.totalUnmatched = totalUnmatched;
+  }
+  const truncated = totalDirs > cap || (plan.avoid?.length ?? 0) > cap
+    || totalAnchors > cap || totalUnmatched > cap;
+  return {
+    ...plan,
+    actionable: plan.actionable === true && !truncated,
+    buckets,
+    avoid,
+    taskContext,
+    output: {
+      limit: cap,
+      totalDirs,
+      returnedDirs,
+      totalContestedFiles: plan.avoid?.length ?? 0,
+      returnedContestedFiles: avoid.length,
+      totalAnchors,
+      returnedAnchors: taskContext?.anchors?.length ?? 0,
+      totalUnmatchedAnchors: totalUnmatched,
+      returnedUnmatchedAnchors: taskContext?.unmatched?.length ?? 0,
+      truncated,
+      complete: !truncated,
+    },
+    next: truncated
+      ? 'Narrow with --path/--component. For a deliberate complete export, use --json --full.'
+      : undefined,
+  };
+}
 
 const unitOf = (file, depth) => {
   const parts = String(file).split('/');
@@ -61,11 +156,9 @@ const unitOf = (file, depth) => {
  * @param {{agents?: number, paths?: string[], components?: string[]}} opts
  */
 export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], components = [] } = {}) {
-  const requested = Number(agents);
   // One requested agent is a valid, useful answer. The old minimum of two contradicted the CLI
   // and MCP schemas and forced a meaningless empty second packet on a single-task repository.
-  const requestedAgents = Math.min(MAX_PARTITION_AGENTS, Math.max(1,
-    Number.isFinite(requested) ? Math.floor(requested) : 2));
+  const requestedAgents = requestedAgentCount(agents);
   const files = [...new Set((trackedFiles ?? []).map(String))];
   const anchors = [...new Set([...paths, ...components].map(String).map((s) => s.trim()).filter(Boolean))];
   const compileAnchor = (selector) => {
@@ -92,13 +185,19 @@ export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], co
   };
   const selectors = anchors.map((anchor) => [anchor, compileAnchor(anchor)]);
   const matches = (file, selector) => selector?.test(file) === true;
+  const matchedSelectors = selectors.map(() => false);
   const scopedFiles = anchors.length
-    ? files.filter((file) => selectors.some(([, selector]) => matches(file, selector)))
+    ? files.filter((file) => {
+      let selected = false;
+      for (let index = 0; index < selectors.length; index++) {
+        if (!matches(file, selectors[index][1])) continue;
+        matchedSelectors[index] = true;
+        selected = true;
+      }
+      return selected;
+    })
     : files;
-  const unmatchedAnchors = anchors.filter((anchor, index) => {
-    const selector = selectors[index]?.[1];
-    return !files.some((file) => matches(file, selector));
-  });
+  const unmatchedAnchors = anchors.filter((_anchor, index) => !matchedSelectors[index]);
   const taskStatus = !anchors.length
     ? 'insufficient_task_context'
     : scopedFiles.length
@@ -109,6 +208,7 @@ export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], co
   const scopedEvidence = anchors.length
     ? evidenceFiles.filter((file) => selectors.some(([, selector]) => matches(file, selector)))
     : evidenceFiles;
+  const scopedEvidenceSet = new Set(scopedEvidence);
   const allPaths = [...new Set([...scopedFiles, ...scopedEvidence])];
   const targetUnits = Math.min(requestedAgents, Math.max(1, allPaths.length));
   const maxDepth = Math.max(1, ...allPaths.map((f) => {
@@ -140,6 +240,7 @@ export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], co
   const hotspots = new Map(); // file -> Set(workstream ids)
   for (const c of report.collisionsAll ?? report.collisions ?? []) {
     for (const key of c.sharedFiles ?? []) {
+      if (!scopedEvidenceSet.has(String(key))) continue;
       if (!hotspots.has(key)) hotspots.set(key, new Set());
       hotspots.get(key).add(c.a);
       hotspots.get(key).add(c.b);
@@ -162,10 +263,12 @@ export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], co
   // component even though no single collision names them both — which is the whole point.
   const uf = makeUnionFind();
   for (const c of report.collisionsAll ?? report.collisions ?? []) {
+    const relevantFiles = (c.sharedFiles ?? []).filter((file) => scopedEvidenceSet.has(String(file)));
+    if (!relevantFiles.length) continue;
     const wtA = `wt:${c.a}`;
     const wtB = `wt:${c.b}`;
     uf.union(wtA, wtB);
-    for (const f of c.sharedFiles ?? []) {
+    for (const f of relevantFiles) {
       const dTok = `dir:${unitOf(f, depth)}`;
       uf.union(wtA, dTok);
       uf.union(wtB, dTok);
@@ -206,6 +309,18 @@ export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], co
   }
   for (const b of buckets) b.dirs.sort();
 
+  const totalWeight = buckets.reduce((sum, bucket) => sum + bucket.weight, 0);
+  const idealWeight = n > 0 ? totalWeight / n : 0;
+  const maxBucketWeight = Math.max(0, ...buckets.map((bucket) => bucket.weight));
+  const largestUnitWeight = Math.max(0, ...byWeight.map((unit) => unit.weight));
+  // "Feasible" has a declared, reproducible meaning: the requested number of non-empty packets
+  // exists and no indivisible conflict component forces one packet above 150% of ideal load.
+  // This makes a 3,749-file conflict tangle beside 35 free files visibly non-fanoutable instead
+  // of presenting two wildly unequal buckets as an actionable two-agent plan.
+  const fanoutFeasible = allPaths.length > 0
+    && n === requestedAgents
+    && (n === 1 || maxBucketWeight <= idealWeight * 1.5);
+
   const dirOwner = new Map();
   for (const b of buckets) for (const d of b.dirs) dirOwner.set(d, b.agent);
 
@@ -220,8 +335,20 @@ export function partitionPlan(report, trackedFiles, { agents = 2, paths = [], co
   });
 
   return {
+    ok: true,
+    actionable: anchors.length > 0 && taskStatus === 'provided' && fanoutFeasible,
     agents: n,
     requestedAgents,
+    fanoutFeasible,
+    fanout: {
+      requested: requestedAgents,
+      produced: n,
+      totalWeight,
+      idealWeight,
+      maxBucketWeight,
+      largestIndivisibleUnitWeight: largestUnitWeight,
+      criterion: 'requested non-empty packets exist and no packet exceeds 150% of ideal tracked-file weight',
+    },
     taskContext: taskStatus === 'insufficient_task_context'
       ? {
         status: taskStatus,

@@ -1733,6 +1733,13 @@ export function landingPlan(scanResult, {
   const workstreamById = new Map(candidatesLive.map((w) => [w.id, w]));
   const supersededBy = new Map();
   const collapseEvidence = new Map();
+  const collapseEvidenceByMember = new Map();
+  const rememberCollapseEvidence = (d) => {
+    for (const id of [d.a, d.b]) {
+      if (!collapseEvidenceByMember.has(id)) collapseEvidenceByMember.set(id, []);
+      collapseEvidenceByMember.get(id).push(d);
+    }
+  };
   const parent = new Map();
   const find = (id) => {
     if (!parent.has(id)) parent.set(id, id);
@@ -1748,7 +1755,11 @@ export function landingPlan(scanResult, {
   };
   const durableDuplicate = (a, b) => {
     const ua = uniqById.get(a.id), ub = uniqById.get(b.id);
-    if (!ua || !ub || ua.uncommittedOnlyCount > 0 || ub.uncommittedOnlyCount > 0) return false;
+    if (!ua || !ub || !safeIds.has(a.id) || !safeIds.has(b.id)
+      || ua.uncommittedOnlyCount > 0 || ub.uncommittedOnlyCount > 0
+      || (a.uncommitted?.count ?? 0) > 0 || (b.uncommitted?.count ?? 0) > 0
+      || (a.ignored?.count ?? 0) > 0 || (b.ignored?.count ?? 0) > 0
+      || (a.symbolsUnmeasured?.length ?? 0) > 0 || (b.symbolsUnmeasured?.length ?? 0) > 0) return false;
     const aTree = a.committed?.mergedTree;
     const bTree = b.committed?.mergedTree;
     return Boolean(aTree && bTree && aTree === bTree);
@@ -1765,13 +1776,18 @@ export function landingPlan(scanResult, {
       if (!durableDuplicate(a, b)) continue;
       union(d.a, d.b);
       collapseEvidence.set(`${d.a}\0${d.b}`, d);
+      rememberCollapseEvidence(d);
     }
     // Content identity is a stronger duplicate instrument than symbol identity. Safe redundant
     // rows therefore participate in the same review cluster even when no symbol was extractable.
     for (const s of safe) {
-      if (!s.safe || !s.redundantWith?.length) continue;
+      if (!safeIds.has(s.id) || !s.redundantWith?.length) continue;
       for (const other of s.redundantWith) {
-        if (workstreamById.has(other)) union(s.id, other);
+        const a = workstreamById.get(s.id), b = workstreamById.get(other);
+        // `redundantWith` is directional: A may be removable because B holds A, while B can also
+        // contain dirty work of its own. Union-find is symmetric, so only admit the pair after the
+        // complete exact-safe predicate proves BOTH sides are clean, measured tree twins.
+        if (a && b && durableDuplicate(a, b)) union(s.id, other);
       }
     }
 
@@ -1789,9 +1805,10 @@ export function landingPlan(scanResult, {
       for (const id of members) {
         if (id === representative) continue;
         supersededBy.set(id, representative);
-        const evidence = [...collapseEvidence.values()].find((d) =>
-          (d.a === id && d.b === representative) || (d.a === representative && d.b === id)
-          || (d.a === id && members.includes(d.b)) || (d.b === id && members.includes(d.a)));
+        // Every recorded evidence pair also performed a union, so a member's first evidence
+        // entry is necessarily inside its final union-find component. Avoid rescanning the
+        // member's evidence list for a partner that the component already proves.
+        const evidence = collapseEvidenceByMember.get(id)?.[0];
         if (evidence) collapseEvidence.set(id, evidence);
       }
     }

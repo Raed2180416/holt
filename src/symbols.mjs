@@ -28,7 +28,8 @@
  *   difference is immune to line shifts and answers the actual question.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -458,10 +459,19 @@ function optionFlags() {
  * Run ctags over a set of files in one invocation.
  * @returns {Promise<Map<string, Array<{name,kind,line,scope}>> & {failed: string[]}>} keyed by the given rel path
  */
-export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400, languageForce = null } = {}) {
+export async function ctagsBatch(cwd, relPaths, {
+  timeout = 60_000,
+  chunk = 400,
+  languageForce = null,
+  maxOutputBytes = 16 * 1024 * 1024,
+  maxTags = 100_000,
+  maxLineBytes = 1024 * 1024,
+} = {}) {
   /** @type {any} */
   const result = new Map();
   if (relPaths.length === 0) { result.failed = []; return result; }
+  const tagBudget = Math.max(1, Number.isFinite(Number(maxTags)) ? Math.floor(Number(maxTags)) : 100_000);
+  let retainedTags = 0;
 
   if (!_inProbe) await ensureCompat(); // close this toolchain's gaps before extracting anything
   // Files whose extraction ERRORED. Carried on the result so every caller can distinguish
@@ -479,61 +489,129 @@ export async function ctagsBatch(cwd, relPaths, { timeout = 60_000, chunk = 400,
   const chunks = [];
   for (let i = 0; i < usable.length; i += chunk) chunks.push(usable.slice(i, i + chunk));
 
-  for (const group of chunks) {
-    const stdout = await new Promise((resolve) => {
-      execFile(
-        'ctags',
-        [
-          ...optionFlags(),
-          '--output-format=json',
-          '--fields=+nKzS',
-          // NO `--extras=`. It was here to suppress qualified-name duplicates, and it silently
-          // suppressed the fileScope extra too — which is how ctags reports `static` functions
-          // and file-local classes. Measured: `class CppClass` came back with "file": true on a
-          // default run and VANISHED entirely with `--extras=`. That was a systematic false
-          // negative across every language, not just C++: exactly the kind of silence this tool
-          // exists to catch, sitting inside the tool. Duplicates are handled by dedup below.
-          '--quiet',
-          ...(languageForce ? [`--language-force=${languageForce}`] : []),
-          ...CTAGS_EXCLUDES,
-          '-f', '-',
-          ...group.map(argSafePath),
-        ],
-        {
-          cwd,
-          timeout,
-          maxBuffer: 128 * 1024 * 1024,
-          // ctags writes its own `tags.XXXXXX` working file into TMPDIR. Without this it
-          // lands in the system temp filesystem, which on many Linux boxes is RAM-backed.
-          env: { ...process.env, TMPDIR: scratchDir() },
-        },
-        // A FAILURE MUST NOT LOOK LIKE AN EMPTY ANSWER. Measured: a file containing a real symbol
-        // returns [] under a 1ms timeout — byte-identical to a file that genuinely has none. That
-        // silence then reads as "these two workstreams share nothing", so a timed-out extraction
-        // under CI load became a confident "no duplicates" and a worktree that looked disposable.
-        // The error is carried out of here so callers can say UNMEASURED instead of "nothing".
-        (err, out) => resolve({ text: err && !out ? '' : String(out ?? ''), err: err ?? null }),
-      );
-    });
-    if (stdout.err) for (const f of group) failed.add(f);
-
-    for (const line of stdout.text.split('\n')) {
-      if (!line.startsWith('{')) continue;
-      let tag;
-      try { tag = JSON.parse(line); } catch { continue; }
-      if (tag._type !== 'tag' || isNoise(tag)) continue;
-      // ctags echoes back the path exactly as it was given, so the `./` that argSafePath adds to
-      // stop a filename being read as an option comes back too. Every caller keys on the ORIGINAL
-      // relative path, so it is stripped here — at the one boundary where ctags' output becomes
-      // holt's data — rather than at each of the call sites that would have to remember.
-      const file = tag.path.startsWith('./') ? tag.path.slice(2) : tag.path;
-      if (!result.has(file)) result.set(file, []);
-      result.get(file).push({
-        name: tag.name,
-        kind: tag.kind ?? 'unknown',
-        line: tag.line ?? null,
-        scope: tag.scope ?? null,
+  for (let groupIndex = 0; groupIndex < chunks.length; groupIndex++) {
+    const group = chunks[groupIndex];
+    if (retainedTags >= tagBudget) {
+      for (const remaining of chunks.slice(groupIndex).flat()) failed.add(remaining);
+      break;
+    }
+    const remainingTagBudget = tagBudget - retainedTags;
+    const extracted = await new Promise((resolve) => {
+      const argv = [
+        ...optionFlags(),
+        '--output-format=json',
+        '--fields=+nKzS',
+        // NO `--extras=`. It was here to suppress qualified-name duplicates, and it silently
+        // suppressed the fileScope extra too — which is how ctags reports `static` functions
+        // and file-local classes. Duplicates are handled by dedup below.
+        '--quiet',
+        ...(languageForce ? [`--language-force=${languageForce}`] : []),
+        ...CTAGS_EXCLUDES,
+        '-f', '-',
+        ...group.map(argSafePath),
+      ];
+      const child = spawn('ctags', argv, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // ctags writes its own `tags.XXXXXX` working file into TMPDIR. Without this it lands in
+        // the system temp filesystem, which on many Linux boxes is RAM-backed.
+        env: { ...process.env, TMPDIR: scratchDir() },
       });
+      const decoder = new StringDecoder('utf8');
+      const groupSet = new Set(group);
+      const tags = new Map();
+      let carry = '';
+      let outputBytes = 0;
+      let tagCount = 0;
+      let stderr = '';
+      let failure = null;
+      let tagBudgetHit = false;
+      let done = false;
+
+      const stop = (reason) => {
+        if (failure) return;
+        failure = reason;
+        child.kill('SIGKILL');
+      };
+      const acceptLine = (line) => {
+        if (!line.startsWith('{')) return;
+        if (Buffer.byteLength(line) > maxLineBytes) {
+          stop(`ctags emitted a line larger than ${maxLineBytes} bytes`);
+          return;
+        }
+        let tag;
+        try { tag = JSON.parse(line); } catch { return; }
+        if (tag._type !== 'tag' || isNoise(tag)) return;
+        const reported = String(tag.path ?? '');
+        const file = reported.startsWith('./') ? reported.slice(2) : reported;
+        if (!groupSet.has(file)) return;
+        tagCount++;
+        if (tagCount > remainingTagBudget) {
+          tagBudgetHit = true;
+          stop(`ctags emitted more than ${tagBudget} tags for one bounded extraction`);
+          return;
+        }
+        if (!tags.has(file)) tags.set(file, []);
+        tags.get(file).push({
+          name: tag.name,
+          kind: tag.kind ?? 'unknown',
+          line: tag.line ?? null,
+          scope: tag.scope ?? null,
+        });
+      };
+      const consume = (text, final = false) => {
+        carry += text;
+        let newline;
+        while (!failure && (newline = carry.indexOf('\n')) !== -1) {
+          const line = carry.slice(0, newline);
+          carry = carry.slice(newline + 1);
+          acceptLine(line);
+        }
+        if (!failure && Buffer.byteLength(carry) > maxLineBytes) {
+          stop(`ctags emitted a line larger than ${maxLineBytes} bytes`);
+        }
+        if (final && !failure && carry) {
+          acceptLine(carry);
+          carry = '';
+        }
+      };
+      /**
+       * @param {number|null} code
+       * @param {string|null} [reason]
+       */
+      const finish = (code, reason = null) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        if (!failure) consume(decoder.end(), true);
+        const error = failure ?? reason ?? (code === 0 ? null : `ctags exited ${code}: ${stderr.trim()}`);
+        resolve({ ok: !error && code === 0, tags, error, tagCount, tagBudgetHit });
+      };
+      const timer = setTimeout(() => stop(`ctags timed out after ${timeout}ms`), timeout);
+      child.stdout.on('data', (bytes) => {
+        if (failure) return;
+        outputBytes += bytes.length;
+        if (outputBytes > maxOutputBytes) {
+          stop(`ctags output exceeded ${maxOutputBytes} bytes for one chunk`);
+          return;
+        }
+        consume(decoder.write(bytes));
+      });
+      child.stderr.on('data', (bytes) => {
+        if (stderr.length < 64 * 1024) stderr += String(bytes).slice(0, 64 * 1024 - stderr.length);
+      });
+      child.on('error', (error) => finish(null, `ctags failed to spawn: ${error.message}`));
+      child.on('close', (code) => finish(code));
+    });
+    if (!extracted.ok) {
+      for (const f of group) failed.add(f);
+      if (extracted.tagBudgetHit) {
+        for (const remaining of chunks.slice(groupIndex + 1).flat()) failed.add(remaining);
+        break;
+      }
+    } else {
+      for (const [file, tags] of extracted.tags) result.set(file, tags);
+      retainedTags += extracted.tagCount;
     }
     // Files ctags parsed but found nothing in must still exist as empty, so callers can
     // distinguish "no symbols" from "never scanned". Silence must never mean absence.
@@ -973,12 +1051,36 @@ export function symbolKey(sym) {
 }
 
 /** Symbols for files as they exist on disk in `dir`. */
-export async function symbolsOnDisk(dir, relPaths, backend) {
+export async function symbolsOnDisk(dir, relPaths, backend, { maxSymbols = 100_000 } = {}) {
   /** @type {any} */
   const result = new Map();
   // Aggregated from every ctagsBatch below. An extraction that ERRORED is not an empty answer,
   // and callers must be able to tell the difference — see the note in ctagsBatch.
   const failed = new Set();
+  const symbolBudget = Math.min(1_000_000, Math.max(1,
+    Number.isFinite(Number(maxSymbols)) ? Math.floor(Number(maxSymbols)) : 100_000));
+  let retainedSymbols = 0;
+  const retain = (file, symbols) => {
+    if (retainedSymbols + symbols.length > symbolBudget) {
+      failed.add(file);
+      result.set(file, []);
+      return;
+    }
+    result.set(file, symbols);
+    retainedSymbols += symbols.length;
+  };
+  const extractCtags = async (files, options = {}) => {
+    if (!files.length) return;
+    if (retainedSymbols >= symbolBudget) {
+      for (const file of files) failed.add(file);
+      return;
+    }
+    const m = await ctagsBatch(dir, files, {
+      ...options, maxTags: symbolBudget - retainedSymbols,
+    });
+    for (const file of m.failed ?? []) failed.add(file);
+    for (const [file, symbols] of m) retain(file, symbols);
+  };
   if (relPaths.length === 0) return result;
   // Resolve the toolchain's gaps BEFORE anything reads _extraFlags. forcedName() below decides
   // whether an ambiguous file is forced to `FSharp` or to holt's private `HoltFSharp`, and that
@@ -1008,28 +1110,26 @@ export async function symbolsOnDisk(dir, relPaths, backend) {
       byLang.get(lang).push(p);
     }
     for (const [lang, files] of byLang) {
-      const m = await ctagsBatch(dir, files, { languageForce: forcedName(lang) });
-      for (const f of m.failed ?? []) failed.add(f);
-      for (const [f, syms] of m) result.set(f, syms);
+      await extractCtags(files, { languageForce: forcedName(lang) });
     }
   } else {
     ctagsFiles.push(...ambiguous);
   }
 
   if (backend.kind === 'ctags' && ctagsFiles.length) {
-    const m = await ctagsBatch(dir, ctagsFiles);
-    for (const f of m.failed ?? []) failed.add(f);
-    for (const [f, syms] of m) result.set(f, syms);
+    await extractCtags(ctagsFiles);
   } else if (ctagsFiles.length) {
     await pmap(ctagsFiles, async (p) => {
+      if (retainedSymbols >= symbolBudget) { failed.add(p); return; }
       const c = await readTextIfSmall(path.join(dir, p));
-      result.set(p, c === null ? [] : fallbackExtract(p, c));
+      retain(p, c === null ? [] : fallbackExtract(p, c));
     }, 16);
   }
 
   await pmap(keyFiles, async (p) => {
+    if (retainedSymbols >= symbolBudget) { failed.add(p); return; }
     const c = await readTextIfSmall(path.join(dir, p));
-    result.set(p, c === null ? [] : extractKeys(p, c));
+    retain(p, c === null ? [] : extractKeys(p, c));
   }, 16);
 
   for (const p of relPaths) if (!result.has(p)) result.set(p, []);
@@ -1121,8 +1221,10 @@ const CAT_FILE_BATCH_CHUNK = 5000;
  * process per chunk instead of one process per file. See BENCHMARKS.md for the before/after.
  */
 export async function symbolsAtBase(repoRoot, baseOid, relPaths, backend) {
+  /** @type {any} */
   const result = new Map();
-  if (relPaths.length === 0) return result;
+  const failed = new Set();
+  if (relPaths.length === 0) { result.failed = []; return result; }
 
   const tmp = await fs.mkdtemp(path.join(scratchDir(), 'holt-base-'));
   try {
@@ -1164,19 +1266,25 @@ export async function symbolsAtBase(repoRoot, baseOid, relPaths, backend) {
             // one file: it is treated as absent-at-base (no symbols), and the rest of the chunk
             // proceeds normally.
             result.set(rel, []);
+            failed.add(rel);
           }
         });
       } catch {
         // The whole CHUNK's batch process failed to run (spawn error, timeout). Same fallback
         // the old per-file call made on an individual failure: treat as absent-at-base rather
         // than crashing the scan. A read that could not happen is not evidence of anything.
-        for (const rel of group) if (!result.has(rel)) result.set(rel, []);
+        for (const rel of group) {
+          if (!result.has(rel)) result.set(rel, []);
+          failed.add(rel);
+        }
       }
     }
 
     const found = await symbolsOnDisk(tmp, materialised, backend);
+    for (const file of found.failed ?? []) failed.add(file);
     for (const [f, syms] of found) result.set(f, syms);
     for (const p of relPaths) if (!result.has(p)) result.set(p, []);
+    result.failed = [...failed];
     return result;
   } finally {
     await fs.rm(tmp, { recursive: true, force: true }).catch(() => {});

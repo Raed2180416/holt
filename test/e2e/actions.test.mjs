@@ -22,7 +22,7 @@ import { execFile } from 'node:child_process';
 import { newRepo } from '../fixtures.mjs';
 import {
   protect, unprotect, rescue, rescues, clean, discard, auto, quarantines, restoreQuarantine,
-  purgeQuarantine, verifyHeadLeaf,
+  purgeQuarantine, verifyHeadLeaf, discardTransactions, recoverDiscard,
 } from '../../src/actions.mjs';
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
@@ -1828,6 +1828,256 @@ test('DISCARD RACE: tracked restoration refuses rather than overwrite a post-cap
   assert.equal((await fx.git(['show', `${r.commit}:src/base.js`])).trim(), 'captured edited generation');
 });
 
+test('DISCARD TRANSACTION: one capture-identical recreation does not strand every sibling quarantine', async (t) => {
+  const fx = await newRepo('discard-bulk-recreation');
+  t.after(() => fx.cleanup());
+  await fx.write('first.txt', 'first baseline\n');
+  await fx.write('second.txt', 'second baseline\n');
+  await fx.commit('bulk discard baseline');
+  const wt = await fx.worktree('bulk-edits');
+  const first = path.join(wt, 'first.txt');
+  const second = path.join(wt, 'second.txt');
+  await fs.writeFile(first, 'first captured edit\n');
+  await fs.writeFile(second, 'second captured edit\n');
+
+  const r = await discard(fx.root, [first, second], {
+    // This is the exact incident shape: a generator recreates the selected path with the same
+    // dirty bytes that Holt captured, not with HEAD. It is still concurrent work and must stay.
+    onAfterCapture: async () => fs.writeFile(first, 'first captured edit\n', { flag: 'wx' }),
+  });
+
+  assert.equal(r.ok, false, JSON.stringify(r));
+  assert.equal(await fs.readFile(first, 'utf8'), 'first captured edit\n',
+    'capture-identical concurrent recreation belongs to the writer and is never overwritten');
+  assert.equal(await fs.readFile(second, 'utf8'), 'second baseline\n',
+    'a conflict on one path must not prevent unrelated tracked paths from reaching HEAD');
+  assert.ok(r.reverted.includes(second), JSON.stringify(r));
+  assert.deepEqual(r.conflicts?.map((row) => row.path), ['first.txt']);
+  assert.equal((await fx.git(['show', `${r.commit}:first.txt`])).trim(), 'first captured edit');
+  assert.equal((await fx.git(['show', `${r.commit}:second.txt`])).trim(), 'second captured edit');
+
+  const leftovers = (await fs.readdir(wt)).filter((name) => name.startsWith('.holt-discard-'));
+  assert.deepEqual(leftovers, [],
+    `a durable capture plus one path conflict must not leave a quarantine forest: ${leftovers}`);
+  assert.equal((await discardTransactions(fx.root)).transactions.length, 0,
+    'a fully reconciled conflict has no physical transaction left to resume');
+});
+
+test('DISCARD TRANSACTION: an already-present exact HEAD leaf is adopted idempotently', async (t) => {
+  const fx = await newRepo('discard-head-adoption');
+  t.after(() => fx.cleanup());
+  await fx.write('tracked.txt', 'baseline\n');
+  await fx.commit('head adoption baseline');
+  const wt = await fx.worktree('head-adoption');
+  const file = path.join(wt, 'tracked.txt');
+  await fs.writeFile(file, 'captured edit\n');
+
+  const r = await discard(fx.root, [file], {
+    onAfterCapture: async () => fs.writeFile(file, 'baseline\n', { flag: 'wx' }),
+  });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(await fs.readFile(file, 'utf8'), 'baseline\n');
+  assert.deepEqual(r.adopted, [file], 'the verified HEAD recreation should be reported, not rejected');
+  assert.deepEqual((await fs.readdir(wt)).filter((name) => name.startsWith('.holt-discard-')), []);
+});
+
+test('DISCARD TRANSACTION: a durable interrupted capture is first-class and resumable', async (t) => {
+  const fx = await newRepo('discard-resume');
+  t.after(() => fx.cleanup());
+  await fx.write('tracked.txt', 'baseline\n');
+  await fx.commit('resume baseline');
+  const wt = await fx.worktree('resume-me');
+  const file = path.join(wt, 'tracked.txt');
+  await fs.writeFile(file, 'captured edit\n');
+
+  const interrupted = await discard(fx.root, [file], {
+    onAfterCapture: async () => { throw new Error('simulated process interruption'); },
+  });
+  assert.equal(interrupted.ok, false, JSON.stringify(interrupted));
+  assert.ok(interrupted.transaction, 'the failure must name the durable transaction');
+  assert.deepEqual(interrupted.recoverArgv, ['holt', 'recover-discard', interrupted.transaction]);
+  const pending = await discardTransactions(fx.root);
+  assert.equal(pending.transactions.length, 1, JSON.stringify(pending));
+  assert.equal(pending.transactions[0].id, interrupted.transaction);
+
+  const recovered = await recoverDiscard(fx.root, interrupted.transaction);
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  assert.equal(await fs.readFile(file, 'utf8'), 'baseline\n');
+  assert.equal((await fx.git(['show', `${recovered.commit}:tracked.txt`])).trim(), 'captured edit');
+  assert.equal((await discardTransactions(fx.root)).transactions.length, 0,
+    'a completed recovery must retire its transaction receipt');
+  assert.deepEqual((await fs.readdir(wt)).filter((name) => name.startsWith('.holt-discard-')), []);
+});
+
+test('DISCARD TRANSACTION: a vanished pre-capture quarantine is never reported as rolled back', async (t) => {
+  const fx = await newRepo('discard-vanished-quarantine');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('vanished-quarantine');
+  const file = path.join(wt, 'sole-copy.txt');
+  await fs.writeFile(file, 'must not become a false rollback success\n');
+
+  const failed = await discard(fx.root, [file], {
+    onAfterQuarantine: async ({ quarantines }) => {
+      await fs.rm(quarantines[0], { recursive: true });
+      throw new Error('simulated external quarantine removal before capture');
+    },
+  });
+  assert.equal(failed.ok, false, JSON.stringify(failed));
+  assert.equal(failed.rollbackFailures.length, 1, JSON.stringify(failed));
+  assert.match(failed.rollbackFailures[0].error, /quarantine is missing/);
+  assert.ok(failed.transaction, 'unreconciled state must retain a durable transaction receipt');
+  assert.equal((await discardTransactions(fx.root)).transactions.length, 1);
+  await assert.rejects(() => fs.lstat(file), { code: 'ENOENT' });
+});
+
+test('DISCARD TRANSACTION: a crash between exclusive link and unlink self-heals', async (t) => {
+  const fx = await newRepo('discard-publication-crash');
+  t.after(() => fx.cleanup());
+  await fx.write('tracked.txt', 'baseline\n');
+  await fx.commit('publication crash baseline');
+  const wt = await fx.worktree('publication-crash');
+  const file = path.join(wt, 'tracked.txt');
+  await fs.writeFile(file, 'captured edit\n');
+
+  const interrupted = await discard(fx.root, [file], {
+    onAfterCapture: async () => { throw new Error('retain transaction'); },
+  });
+  assert.ok(interrupted.transaction, JSON.stringify(interrupted));
+  const common = (await sh('git', [
+    'rev-parse', '--path-format=absolute', '--git-common-dir',
+  ], fx.root)).stdout.trim();
+  const receipt = path.join(common, 'holt-discard-transactions', `${interrupted.transaction}.json`);
+  const strandedTemp = path.join(path.dirname(receipt),
+    `.${path.basename(receipt)}.${process.pid}.simulated-crash.tmp`);
+  await fs.link(receipt, strandedTemp);
+  assert.equal((await fs.lstat(receipt)).nlink, 2);
+
+  const listed = await discardTransactions(fx.root);
+  assert.equal(listed.errors.length, 0, JSON.stringify(listed));
+  assert.equal(listed.transactions[0].id, interrupted.transaction);
+  assert.equal((await fs.lstat(receipt)).nlink, 1,
+    'only the controlled same-inode publication temp link may be retired');
+  await assert.rejects(() => fs.lstat(strandedTemp), { code: 'ENOENT' });
+
+  const uncontrolledLink = path.join(path.dirname(receipt), 'uncontrolled-receipt-link');
+  await fs.link(receipt, uncontrolledLink);
+  const refused = await discardTransactions(fx.root);
+  assert.equal(refused.transactions.length, 0, JSON.stringify(refused));
+  assert.equal(refused.errors.length, 1,
+    'an unrelated hard link must remain a fail-closed receipt error');
+  assert.equal((await fs.lstat(receipt)).nlink, 2);
+  await fs.unlink(uncontrolledLink);
+
+  const relisted = await discardTransactions(fx.root);
+  assert.equal(relisted.errors.length, 0, JSON.stringify(relisted));
+  assert.equal(relisted.transactions[0].id, interrupted.transaction);
+
+  const recovered = await recoverDiscard(fx.root, interrupted.transaction);
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  assert.equal(await fs.readFile(file, 'utf8'), 'baseline\n');
+});
+
+test('DISCARD TRANSACTION: recovery re-anchors a deleted capture ref to the exact recorded commit', async (t) => {
+  const fx = await newRepo('discard-ref-reanchor');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('ref-reanchor');
+  const file = path.join(wt, 'sole-copy.txt');
+  await fs.writeFile(file, 'capture survives a missing ref\n');
+
+  const interrupted = await discard(fx.root, [file], {
+    onAfterCapture: async () => { throw new Error('retain transaction before finalization'); },
+  });
+  assert.equal(interrupted.ok, false, JSON.stringify(interrupted));
+  assert.ok(interrupted.ref);
+  assert.ok(interrupted.commit);
+  await fx.git(['update-ref', '-d', interrupted.ref]);
+
+  const recovered = await recoverDiscard(fx.root, interrupted.transaction);
+  assert.equal(recovered.ok, true, JSON.stringify(recovered));
+  assert.equal(recovered.reanchoredCaptureRef, true);
+  assert.equal((await fx.git(['rev-parse', recovered.ref])).trim(), interrupted.commit);
+  assert.equal((await fx.git(['show', `${interrupted.commit}:sole-copy.txt`])).trim(),
+    'capture survives a missing ref');
+  await assert.rejects(() => fs.lstat(file), { code: 'ENOENT' });
+  assert.equal((await discardTransactions(fx.root)).transactions.length, 0);
+});
+
+test('DISCARD TRANSACTION: recovery never overwrites a capture ref recreated with other content', async (t) => {
+  const fx = await newRepo('discard-ref-race');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('ref-race');
+  const file = path.join(wt, 'sole-copy.txt');
+  await fs.writeFile(file, 'retained behind the raced ref\n');
+
+  const interrupted = await discard(fx.root, [file], {
+    onAfterCapture: async () => { throw new Error('retain transaction before raced recovery'); },
+  });
+  const unrelated = (await fx.git(['rev-parse', 'HEAD'])).trim();
+  assert.notEqual(unrelated, interrupted.commit);
+  await fx.git(['update-ref', '-d', interrupted.ref]);
+  await fx.git(['update-ref', interrupted.ref, unrelated]);
+
+  const refused = await recoverDiscard(fx.root, interrupted.transaction);
+  assert.equal(refused.ok, false, JSON.stringify(refused));
+  assert.match(refused.error, /no longer names the recorded commit|recreated concurrently/);
+  assert.equal((await fx.git(['rev-parse', interrupted.ref])).trim(), unrelated,
+    'recovery must not overwrite the concurrently recreated ref');
+  assert.equal((await discardTransactions(fx.root)).transactions.length, 1,
+    'the unresolved transaction must remain durable');
+  await assert.rejects(() => fs.lstat(file), { code: 'ENOENT' });
+});
+
+test('DISCARD TRANSACTION: a tampered receipt cannot redirect recovery outside its worktree parent', async (t) => {
+  const fx = await newRepo('discard-receipt-redirection');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('receipt-redirection');
+  const file = path.join(wt, 'sole-copy.txt');
+  await fs.writeFile(file, 'captured before receipt tampering\n');
+  const outsideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-discard-outside-'));
+  t.after(() => fs.rm(outsideRoot, { recursive: true, force: true }));
+  const outsideDir = path.join(outsideRoot, '.holt-discard-0-deadbeefdeadbeef');
+  const outsidePayload = path.join(outsideDir, 'payload');
+  await fs.mkdir(outsideDir);
+  await fs.writeFile(outsidePayload, 'outside must remain untouched\n');
+
+  const interrupted = await discard(fx.root, [file], {
+    onAfterCapture: async () => { throw new Error('retain transaction for tamper control'); },
+  });
+  const common = (await sh('git', [
+    'rev-parse', '--path-format=absolute', '--git-common-dir',
+  ], fx.root)).stdout.trim();
+  const receipt = path.join(common, 'holt-discard-transactions', `${interrupted.transaction}.json`);
+  const record = JSON.parse(await fs.readFile(receipt, 'utf8'));
+  record.selections[0].quarantineDir = outsideDir;
+  record.selections[0].payload = outsidePayload;
+  await fs.writeFile(receipt, `${JSON.stringify(record)}\n`);
+
+  const refused = await recoverDiscard(fx.root, interrupted.transaction);
+  assert.equal(refused.ok, false, JSON.stringify(refused));
+  assert.match(refused.error, /outside its controlled parent/);
+  assert.equal(await fs.readFile(outsidePayload, 'utf8'), 'outside must remain untouched\n');
+});
+
+test('DISCARD SYMLINK: a leaf pointing outside is captured as a link without touching its target', async (t) => {
+  if (process.platform === 'win32') return t.skip('symlink creation is privilege-dependent on Windows');
+  const fx = await newRepo('discard-outward-symlink');
+  t.after(() => fx.cleanup());
+  const wt = await fx.worktree('outward-link');
+  const outside = path.join(path.dirname(wt), 'outside-target.txt');
+  t.after(() => fs.rm(outside, { force: true }));
+  await fs.writeFile(outside, 'outside stays\n');
+  const link = path.join(wt, 'outward-link');
+  const target = path.relative(wt, outside);
+  await fs.symlink(target, link);
+
+  const r = await discard(fx.root, [link]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  await assert.rejects(() => fs.lstat(link), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(outside, 'utf8'), 'outside stays\n');
+  assert.equal((await fx.git(['show', `${r.commit}:outward-link`])).trim(), target,
+    'the recovery ref stores the link target bytes, never the target file bytes');
+});
+
 test('DISCARD RACE: replacing a parent with a symlink never redirects restoration', async (t) => {
   if (process.platform === 'win32') return t.skip('symlink creation is privilege-dependent on Windows');
   const fx = await newRepo('discard-parent-swap');
@@ -3133,9 +3383,15 @@ test('RESURRECTION: a second discard must NEVER overwrite an earlier capture ref
   const firstCommit = (await sh('git', ['rev-parse', r1.ref], fx.root)).stdout.trim();
   assert.ok(firstCommit, 'the first capture must have a resolvable ref');
 
-  // A SECOND discard, same worktree id, same stamp => the same baseRef is requested.
+  // A SECOND discard deliberately reuses the first baseRef through the deterministic test seam.
+  // The transaction UUID normally makes this collision practically impossible; forcing it here
+  // proves the compare-and-swap is still the authority if an external writer or future naming
+  // change creates one.
   await fx.write('second.txt', 'the only copy of the SECOND thing\n', wt);
-  const r2 = await discard(fx.root, [path.join(wt, 'second.txt')], { stamp: STAMP });
+  const r2 = await discard(fx.root, [path.join(wt, 'second.txt')], {
+    stamp: STAMP,
+    baseRef: r1.ref,
+  });
   assert.equal(r2.ok, true, `second discard must succeed: ${JSON.stringify(r2)}`);
 
   // THE INVARIANT: the first capture is still there, unchanged, and still holds its content.

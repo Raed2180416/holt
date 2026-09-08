@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { standardFixture } from '../fixtures.mjs';
 import { __test } from '../../src/mcp/server.mjs';
 import { samePathAsync } from '../../src/paths.mjs';
+import { discard } from '../../src/actions.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 const PACKAGE_VERSION = JSON.parse(await fs.readFile(path.join(path.dirname(BIN), '..', 'package.json'), 'utf8')).version;
@@ -130,12 +131,12 @@ test('MCP PROTOCOL: tools/list returns the full, well-formed tool set', async (t
   // The ACTING tools must be present too. An agent that can only diagnose freezes holding the
   // right answer — measured: two trials chose `holt clean` correctly and were then blocked by
   // the host's Bash permission classifier, because MCP had no way to act.
-  for (const expected of ['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect']) {
+  for (const expected of ['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect', 'holt_discard']) {
     assert.ok(names.includes(expected), `missing acting tool ${expected}`);
   }
 
-  const MUTATING = new Set(['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect']);
-  const DESTRUCTIVE = new Set(['holt_purge']);
+  const MUTATING = new Set(['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect', 'holt_discard']);
+  const DESTRUCTIVE = new Set(['holt_purge', 'holt_discard']);
 
   for (const tool of tools) {
     assert.ok(tool.description?.length > 40, `${tool.name}: description too thin`);
@@ -235,6 +236,48 @@ test('MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over 
   const { fx } = await standardFixture();
   const { client } = await startServer(fx.root);
   t.after(() => { client.close(); return fx.cleanup(); });
+
+  // 0. discard is dry-run first, captures before removal, and exposes interrupted recovery over
+  // the same agent-native surface rather than requiring a shell command that the host may block.
+  const discardPath = path.join(fx.wt('uniqueUncommitted'), 'mcp-discard.txt');
+  await fs.writeFile(discardPath, 'recoverable discard bytes\n');
+  const discardDry = await client.send('tools/call', {
+    name: 'holt_discard', arguments: { repo: fx.root, paths: [discardPath] },
+  });
+  const discardDryPayload = JSON.parse(discardDry.result.content[0].text);
+  assert.equal(discardDryPayload.dryRun, true);
+  assert.equal(await fs.readFile(discardPath, 'utf8'), 'recoverable discard bytes\n');
+  const discarded = await client.send('tools/call', {
+    name: 'holt_discard', arguments: { repo: fx.root, operation: 'discard', paths: [discardPath] },
+  });
+  const discardedPayload = JSON.parse(discarded.result.content[0].text);
+  assert.equal(discardedPayload.ok, true, discarded.result.content[0].text);
+  assert.equal(discardedPayload.verified, true);
+  assert.match(discardedPayload.ref, /^refs\/holt\/discard\//);
+  await assert.rejects(() => fs.lstat(discardPath), { code: 'ENOENT' });
+
+  const interruptedPath = path.join(fx.wt('uniqueUncommitted'), 'mcp-interrupted.txt');
+  await fs.writeFile(interruptedPath, 'interrupted bytes\n');
+  const interrupted = await discard(fx.root, [interruptedPath], {
+    onAfterCapture: async () => { throw new Error('simulated interruption before MCP recovery'); },
+  });
+  assert.equal(interrupted.ok, false, JSON.stringify(interrupted));
+  const pending = await client.send('tools/call', {
+    name: 'holt_discard', arguments: { repo: fx.root, operation: 'list' },
+  });
+  assert.equal(JSON.parse(pending.result.content[0].text).count, 1, pending.result.content[0].text);
+  const resumed = await client.send('tools/call', {
+    name: 'holt_discard', arguments: {
+      repo: fx.root, operation: 'recover', id: interrupted.transaction,
+    },
+  });
+  const resumedPayload = JSON.parse(resumed.result.content[0].text);
+  assert.equal(resumedPayload.ok, true, resumed.result.content[0].text);
+  const afterResume = await client.send('tools/call', {
+    name: 'holt_discard', arguments: { repo: fx.root, operation: 'list' },
+  });
+  assert.equal(JSON.parse(afterResume.result.content[0].text).count, 0,
+    'successful MCP recovery must retire the durable transaction');
 
   // 1. protect: locks the workstreams holding unique work.
   const prot = await client.send('tools/call', { name: 'holt_protect', arguments: { repo: fx.root } });

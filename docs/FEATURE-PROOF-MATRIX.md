@@ -28,15 +28,15 @@ A valid artifact proves only that every declared check passed without omission o
 
 These lists are machine-compared with executable help/schema/manifest data on every run.
 
-### CLI commands (42)
+### CLI commands (44)
 
-`cli:status` · `cli:risk` · `cli:collisions` · `cli:hotspots` · `cli:duplicates` · `cli:context` · `cli:plan` · `cli:impact` · `cli:order` · `cli:partition` · `cli:branches` · `cli:journal` · `cli:forensics` · `cli:fleet` · `cli:license` · `cli:managed-policy` · `cli:ci` · `cli:graph` · `cli:stash` · `cli:gate` · `cli:tui` · `cli:setup` · `cli:doctor` · `cli:audit` · `cli:auto` · `cli:protect` · `cli:unprotect` · `cli:rescue` · `cli:rescued` · `cli:clean` · `cli:quarantines` · `cli:restore` · `cli:purge` · `cli:discard` · `cli:verify` · `cli:hosts` · `cli:providers` · `cli:integrate` · `cli:uninstall` · `cli:brief` · `cli:mcp` · `cli:hook`
+`cli:status` · `cli:risk` · `cli:collisions` · `cli:hotspots` · `cli:duplicates` · `cli:context` · `cli:plan` · `cli:impact` · `cli:order` · `cli:partition` · `cli:branches` · `cli:journal` · `cli:forensics` · `cli:fleet` · `cli:license` · `cli:managed-policy` · `cli:ci` · `cli:graph` · `cli:stash` · `cli:gate` · `cli:tui` · `cli:setup` · `cli:doctor` · `cli:base` · `cli:audit` · `cli:auto` · `cli:protect` · `cli:unprotect` · `cli:rescue` · `cli:rescued` · `cli:clean` · `cli:quarantines` · `cli:restore` · `cli:purge` · `cli:discard` · `cli:recover-discard` · `cli:verify` · `cli:hosts` · `cli:providers` · `cli:integrate` · `cli:uninstall` · `cli:brief` · `cli:mcp` · `cli:hook`
 
 The implementation also accepts the legacy/default aliases `cli:scan`, `cli:help`, and `cli:version`; the denominator above is the set of documented command sections in the CLI's top-level help output.
 
-### MCP tools (16)
+### MCP tools (17)
 
-`mcp:holt_at_risk` · `mcp:holt_branches` · `mcp:holt_check_workstream` · `mcp:holt_clean` · `mcp:holt_collisions` · `mcp:holt_context` · `mcp:holt_duplicates` · `mcp:holt_hotspots` · `mcp:holt_impact` · `mcp:holt_landing_order` · `mcp:holt_landing_plan` · `mcp:holt_partition` · `mcp:holt_protect` · `mcp:holt_purge` · `mcp:holt_rescue` · `mcp:holt_status`
+`mcp:holt_at_risk` · `mcp:holt_branches` · `mcp:holt_check_workstream` · `mcp:holt_clean` · `mcp:holt_collisions` · `mcp:holt_context` · `mcp:holt_discard` · `mcp:holt_duplicates` · `mcp:holt_hotspots` · `mcp:holt_impact` · `mcp:holt_landing_order` · `mcp:holt_landing_plan` · `mcp:holt_partition` · `mcp:holt_protect` · `mcp:holt_purge` · `mcp:holt_rescue` · `mcp:holt_status`
 
 MCP tools are agent-native and can return evidence or act, but MCP itself is model-invoked. Proactive context and pre-action blocking require a separately wired host lifecycle/tool hook.
 
@@ -166,7 +166,7 @@ Each quoted evidence name below is an exact string present in the named test/har
 #### `bounded-analysis-and-honest-degradation`
 
 - User surfaces: `contract:analysis-bounds`, `option:--limit`, `option:--no-symbols`
-- Exact executable evidence: `test/e2e/no-symbols.test.mjs` — “--no-symbols: safety decisions and Git-proven conflicts equal a full scan while symbol findings are explicitly absent”; `test/e2e/no-symbols.test.mjs` — “--no-symbols: a fresh CLI scan bypasses the planted symbol backend; the positive control reaches it”; `test/e2e/break-it.test.mjs` — “ATTACK: a file too large to tag reads as "no symbols" instead of "not measured"”; `test/e2e/stash-evidence.test.mjs` — “STASH: more than MAX_ENTRIES entries → truncated flag is set and describeStash warns”; `test/e2e/mcp.test.mjs` — “MCP: every list-returning tool SAYS when it capped the list”
+- Exact executable evidence: `test/e2e/no-symbols.test.mjs` — “--no-symbols: safety decisions and Git-proven conflicts equal a full scan while symbol findings are explicitly absent”; `test/e2e/no-symbols.test.mjs` — “--no-symbols: a fresh CLI scan bypasses the planted symbol backend; the positive control reaches it”; `test/e2e/break-it.test.mjs` — “ATTACK: a file too large to tag reads as "no symbols" instead of "not measured"”; `test/e2e/break-it.test.mjs` — “ATTACK: ctags output beyond the memory budget is unmeasured, never partially trusted”; `test/e2e/break-it.test.mjs` — “ATTACK: the ctags tag budget is global across chunks and stops later parser work”; `test/e2e/break-it.test.mjs` — “ATTACK: the retained symbol budget also bounds the degraded fallback backend”; `test/e2e/break-it.test.mjs` — “ATTACK: a failed base-symbol batch is named as unmeasured, never absent”; `test/unit/cat-file-batch.test.mjs` — “catFileBatch: slow consumers are backpressured to a bounded callback count”; `test/e2e/stash-evidence.test.mjs` — “STASH: more than MAX_ENTRIES entries → truncated flag is set and describeStash warns”; `test/e2e/mcp.test.mjs` — “MCP: every list-returning tool SAYS when it capped the list”
 - Independent oracle: Paired full/file-only scans over planted disposable, at-risk, duplicate, and conflicting work, plus a fresh-process symbol-backend boundary trap and fixtures that cross every named bound.
 - Remaining unproven gap: `--no-symbols` deliberately omits unique-symbol, semantic-overlap, duplicate, and impact evidence; the backend-bypass control proves avoided extraction work, not a universal wall-clock or token saving.
 - Mandatory runner evidence: `no-symbols-contract`, `complete-test-corpus`
@@ -216,7 +216,7 @@ Each quoted evidence name below is an exact string present in the named test/har
 #### `review-plan`
 
 - User surfaces: `cli:plan`, `mcp:holt_landing_plan`
-- Exact executable evidence: `test/e2e/detection.test.mjs` — “P5: the plan drops disposables, collapses duplicates, and orders the rest”; `test/e2e/detection.test.mjs` — “P5 COLLAPSE: exact fan-out copies collapse only when every copy is durable”
+- Exact executable evidence: `test/e2e/detection.test.mjs` — “P5: the plan drops disposables, collapses duplicates, and orders the rest”; `test/e2e/detection.test.mjs` — “P5 COLLAPSE: exact fan-out copies collapse only when every copy is durable”; `test/e2e/detection.test.mjs` — “P5 COLLAPSE: directional redundancy never hides the dirty worktree holding the copy”
 - Independent oracle: Known disposable, exact durable duplicate, unique, and entangled workstreams in one fixture.
 - Remaining unproven gap: The plan is advisory and cannot know product priority or reviewer intent.
 - Mandatory runner evidence: `complete-test-corpus`
@@ -232,9 +232,9 @@ Each quoted evidence name below is an exact string present in the named test/har
 #### `agent-partition`
 
 - User surfaces: `cli:partition`, `mcp:holt_partition`
-- Exact executable evidence: `test/unit/partition.test.mjs` — “partition: buckets are disjoint and cover every top-level segment”; `test/unit/partition.test.mjs` — “partition: PROPERTY — no two conflicting workstreams land in different buckets”
+- Exact executable evidence: `test/unit/partition.test.mjs` — “partition: buckets are disjoint and cover every top-level segment”; `test/unit/partition.test.mjs` — “partition: no task context emits no actionable allocation by default”; `test/unit/partition.test.mjs` — “partition: a giant indivisible conflict component is explicitly not feasible fan-out”; `test/unit/partition.test.mjs` — “partition: public summaries bound directories and contested files while retaining totals”; `test/unit/partition.test.mjs` — “partition: PROPERTY — no two conflicting workstreams land in different buckets”
 - Independent oracle: Seeded random graphs checked for disjoint coverage, ownership, and conflict co-location.
-- Remaining boundary: Without explicit task paths/components, Holt returns `insufficient_task_context` and labels the output as an advanced structural view; even an anchored map does not infer a complete task decomposition or developer expertise.
+- Remaining unproven gap: Without explicit task paths/components, Holt returns `task-context-required` with no actionable allocation; even an anchored map cannot infer complete task decomposition or expertise.
 - Mandatory runner evidence: `complete-test-corpus`
 
 #### `branch-graveyard`
@@ -299,9 +299,9 @@ Each quoted evidence name below is an exact string present in the named test/har
 
 #### `guarded-discard`
 
-- User surfaces: `cli:discard`
-- Exact executable evidence: `test/e2e/actions.test.mjs` — “DISCARD: nested empty directories do not dead-end recoverable cleanup”; `test/e2e/actions.test.mjs` — “DISCARD: a many-leaf generated tree is captured without exhausting object writers”; `test/e2e/actions.test.mjs` — “DISCARD: binary content is captured byte-for-byte before removal”; `test/e2e/actions.test.mjs` — “DISCARD RACE: a same-name replacement created after capture is never erased”; `test/e2e/actions.test.mjs` — “DISCARD: restoring a tracked executable proves content, type, and executable mode”
-- Independent oracle: Pre-removal ref capture independently compared by bytes/type/mode/path across empty-directory shape, 384 sole-copy leaves, binary data, and post-capture replacement races.
+- User surfaces: `cli:discard`, `cli:recover-discard`, `mcp:holt_discard`
+- Exact executable evidence: `test/e2e/actions.test.mjs` — “DISCARD: nested empty directories do not dead-end recoverable cleanup”; `test/e2e/actions.test.mjs` — “DISCARD: a many-leaf generated tree is captured without exhausting object writers”; `test/e2e/actions.test.mjs` — “DISCARD: binary content is captured byte-for-byte before removal”; `test/e2e/actions.test.mjs` — “DISCARD RACE: a same-name replacement created after capture is never erased”; `test/e2e/actions.test.mjs` — “DISCARD TRANSACTION: one capture-identical recreation does not strand every sibling quarantine”; `test/e2e/actions.test.mjs` — “DISCARD TRANSACTION: a durable interrupted capture is first-class and resumable”; `test/e2e/actions.test.mjs` — “DISCARD TRANSACTION: a vanished pre-capture quarantine is never reported as rolled back”; `test/e2e/actions.test.mjs` — “DISCARD TRANSACTION: recovery re-anchors a deleted capture ref to the exact recorded commit”; `test/e2e/actions.test.mjs` — “DISCARD TRANSACTION: a tampered receipt cannot redirect recovery outside its worktree parent”; `test/e2e/actions.test.mjs` — “DISCARD: restoring a tracked executable proves content, type, and executable mode”; `test/e2e/mcp-protocol.test.mjs` — “MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over the wire”
+- Independent oracle: Pre-removal Git read-back plus durable transaction inventory, interruption resume, per-path conflicts, byte/type/mode/path checks, and protocol-level action inspection.
 - Remaining unproven gap: Platform-specific ACLs and extended attributes are not represented by the Git object model.
 - Mandatory runner evidence: `complete-test-corpus`, `guard-corpus`, `mutation-fingerprint`
 
@@ -381,7 +381,7 @@ Each quoted evidence name below is an exact string present in the named test/har
 
 #### `mcp-action-tools`
 
-- User surfaces: `mcp:holt_clean`, `mcp:holt_rescue`, `mcp:holt_protect`
+- User surfaces: `mcp:holt_clean`, `mcp:holt_discard`, `mcp:holt_rescue`, `mcp:holt_protect`
 - Exact executable evidence: `test/e2e/mcp.test.mjs` — “MCP: holt_clean declares the reversible quarantine contract”; `test/e2e/mcp-protocol.test.mjs` — “MCP PROTOCOL: the acting tools ACT — the full loop an agent needs, over the wire”
 - Independent oracle: Protocol calls followed by independent Git refs, locks, quarantine paths, and restore-state inspection.
 - Remaining unproven gap: The host approval policy still decides whether non-read-only MCP calls may execute.
@@ -575,9 +575,17 @@ Each quoted evidence name below is an exact string present in the named test/har
 - Remaining unproven gap: Backend installation needs explicit consent and network; supported host setup still needs host trust/load verification.
 - Mandatory runner evidence: `complete-test-corpus`, `git-runtime`, `host-manifest-sync`
 
+#### `integration-base-authority`
+
+- User surfaces: `cli:base`, `option:--base`
+- Exact executable evidence: `test/e2e/integration-base.test.mjs` — “integration base: explicit repository-local authority beats a stale conventional branch”; `test/e2e/integration-base.test.mjs` — “integration base CLI: set/status/unset is reachable and rejects an unresolved ref”
+- Independent oracle: A real repository with a deliberately stale main branch and a separate named landing branch, checked through CLI and resolver outputs.
+- Remaining unproven gap: Holt cannot infer organizational intent; persisting the wrong but resolvable ref remains an explicit local authority mistake.
+- Mandatory runner evidence: `complete-test-corpus`
+
 #### `machine-output-and-analysis-scope`
 
-- User surfaces: `option:--json`, `option:--include-primary`, `option:--all`, `option:--base`, `option:--family-window`
+- User surfaces: `option:--json`, `option:--include-primary`, `option:--all`, `option:--family-window`
 - Exact executable evidence: `test/e2e/cli.test.mjs` — “CLI: --json output is parseable for every command that claims it”; `test/e2e/cli.test.mjs` — “FIRST RUN: the solo-repo caveat — a dirty, unscanned primary is NAMED beside every all-clear”; `test/e2e/cli.test.mjs` — “CLI: a numeric flag is parsed and never silently coerced”
 - Independent oracle: Subprocess JSON parsing, planted dirty-primary scope controls, and malformed/boundary numeric option cases.
 - Remaining unproven gap: Parseable JSON is not a versioned schema guarantee for every nested field; consumers must pin a Holt version.

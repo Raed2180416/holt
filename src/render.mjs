@@ -730,8 +730,22 @@ export function renderOrder(plan) {
 
 export function renderPartition(plan) {
   const u = repoData();
+  if (plan.mode === 'task-context-required') {
+    return [
+      c('bold', 'holt partition — task context required'),
+      c('yellow', '\n  NO ACTIONABLE ALLOCATION WAS EMITTED'),
+      c('grey', `  ${plan.taskContext.reason}`),
+      c('grey', `  ${plan.taskContext.next}`),
+      ...provenanceLines(u),
+      '',
+    ].join('\n');
+  }
   const out = [c('bold', `holt partition — ${plan.agents} agents`)
     + c('grey', `  (${plan.granularity ?? 'top-level-directory'} · structural advisory, not a task plan)`)];
+  if (plan.fanoutFeasible === false) {
+    out.push(c('yellow', '\n  REQUESTED FAN-OUT IS NOT FEASIBLE')
+      + c('grey', ` — ${plan.fanout?.largestIndivisibleUnitWeight ?? '?'} tracked file(s) are glued into the largest indivisible unit.`));
+  }
   if (plan.taskContext?.status === 'insufficient_task_context') {
     out.push(c('yellow', '\n  INSUFFICIENT TASK CONTEXT')
       + c('grey', ' — no task paths/components were supplied; these buckets describe repository shape only.'));
@@ -749,6 +763,7 @@ export function renderPartition(plan) {
     out.push(`\n  AGENT ${b.agent}  ${c('grey', `${b.weight} tracked file(s)`)}`);
     // A directory name is repository-controlled in exactly the way a worktree basename is.
     out.push(`    ${b.dirs.map((d) => u.take(d, ID)).join('  ')}`);
+    if (b.truncated) out.push(c('grey', `    … ${b.totalDirs - b.returnedDirs} more path unit(s) omitted`));
   }
   if (plan.avoid.length) {
     out.push(`\n  ${c('yellow', 'ALREADY CONTESTED')}  ${c('grey', 'one owner each — currently touched by multiple live workstreams')}`);
@@ -757,10 +772,12 @@ export function renderPartition(plan) {
       out.push(`    ${u.take(a.file, ID)}  ${c('grey', `held by ${held}`)}  → agent ${a.assignTo ?? '?'}`);
     }
     // A partitioning plan read as complete is a plan that assigns contested files to nobody.
-    if (plan.avoid.length > 15) {
-      out.push(c('grey', `    … and ${plan.avoid.length - 15} more contested file(s) — 'holt partition --json' lists every one`));
+    const totalAvoid = plan.output?.totalContestedFiles ?? plan.avoid.length;
+    if (totalAvoid > 15) {
+      out.push(c('grey', `    … and ${totalAvoid - 15} more contested file(s) — narrow with --path/--component`));
     }
   }
+  if (plan.output?.truncated && plan.next) out.push(c('grey', `\n  ${plan.next}`));
   out.push(...provenanceLines(u));
   out.push('');
   return out.join('\n');

@@ -17,7 +17,10 @@ import { readStableRegularFile } from '../src/stable-file.mjs';
 // fileURLToPath, never URL.pathname: on Windows the latter yields "/C:/x", which is not a path.
 // The CI matrix exists because that exact bug shipped once.
 import { fileURLToPath } from 'node:url';
-import { scan } from '../src/scan.mjs';
+import { scan, resolveBase } from '../src/scan.mjs';
+import {
+  readIntegrationBase, setIntegrationBase, clearIntegrationBase,
+} from '../src/integration-base.mjs';
 import { analyze, contextDigest, directDeleteDecision } from '../src/analyze.mjs';
 import { deepDuplicates, detectJscpd } from '../src/deep.mjs';
 import { detectCtags, detectEnry, languageCoverage } from '../src/symbols.mjs';
@@ -47,13 +50,15 @@ import {
 import { providersReport } from '../src/integrate/provider-profiles.mjs';
 import {
   protect, unprotect, rescue, rescues, clean, discard, auto, quarantines, restoreQuarantine,
-  purgeQuarantine,
+  purgeQuarantine, discardTransactions, recoverDiscard,
 } from '../src/actions.mjs';
 import { verifyPair } from '../src/verify.mjs';
 import { runTui } from '../src/tui.mjs';
 import { landingOrder } from '../src/order.mjs';
 import { branchAudit } from '../src/branches.mjs';
-import { partitionPlan, MAX_PARTITION_AGENTS } from '../src/partition.mjs';
+import {
+  partitionPlan, compactPartitionPlan, partitionContextRequired, MAX_PARTITION_AGENTS,
+} from '../src/partition.mjs';
 import { readJournal, appendEvent, verifyJournal, proveEntry } from '../src/journal.mjs';
 import { exportJournal, SIEM_FORMATS } from '../src/siem.mjs';
 import { summarizeJournal } from '../src/roi.mjs';
@@ -97,6 +102,8 @@ const CONFIG_NON_FATAL = new Set([
   'restore',        // restores one clean quarantine without overwriting its original path
   'purge',          // reclaims a verified clean quarantine behind a dry-run/apply boundary
   'discard',        // discards paths
+  'recover-discard', // resumes or inspects a durable discard transaction
+  'base',           // reads or changes explicit repository-local integration authority
   'verify',         // verifies workstream pairs
   'rescued',        // lists rescues
   'mcp',            // MCP server — agent relies on this for decisions
@@ -146,6 +153,9 @@ COMMANDS
   tui                 interactive risk-sorted dashboard  [--snapshot]
   setup               first run: inspect/install backends, wire supported hosts, show risk
   doctor              environment and backend check  [--install [--yes]]
+  base                show the ref Holt treats as the integration destination
+                      set <ref>: trust a repository-local landing ref for every worktree
+                      unset: remove that setting and return to conservative auto-detection
   audit               supply-chain evidence for THIS installation: integrity against the shipped
                       manifest, and every capability it holds — what it reads, writes, executes
                       and sends. Offline, no repository needed, free on every tier.
@@ -174,6 +184,9 @@ ACTING  (these explicitly mutate local Git/repository state)
   discard <path>...   discard guarded content after a verified capture  [--dry-run]
                       content goes to refs/holt/discard/* first; tracked edits restore to HEAD,
                       while untracked content is removed only after capture verification
+  recover-discard [<transaction>]
+                      list incomplete discard transactions, or safely reconcile one after an
+                      interruption; concurrent destination content is never overwritten
   verify <a> <b>      run YOUR test suite on A alone, B alone, and A+B merged; report
                       only what the COMBINATION breaks  [--run "<cmd>"]  (executes code)
 
@@ -216,6 +229,7 @@ OPTIONS
   --path <glob>       partition task anchor (repeatable; keeps the map scoped to intended paths)
   --component <name>  partition component anchor (repeatable; structural provider hint)
   --structural        explicitly request the advanced file-layout view without task anchors
+  --full              partition --json only: deliberately emit every directory and contested file
   --max-depth <n>     fleet: directory depth to search for repositories (default 3)
   --since <iso>       forensics: ignore events before this date
   --agent <id>        forensics: only this agent's events
@@ -333,7 +347,17 @@ function parseArgs(argv) {
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    const takeValue = (name) => {
+      const value = argv[i + 1];
+      if (value === undefined || value === '') throw new Error(`${name} needs a value`);
+      i++;
+      return value;
+    };
     switch (a) {
+      case '--':
+        opts._.push(...argv.slice(i + 1));
+        i = argv.length;
+        break;
       case '--json': opts.json = true; break;
       case '--no-symbols': opts.symbols = false; break;
       case '--strict-read-only': opts.strictReadOnly = true; break;
@@ -342,18 +366,30 @@ function parseArgs(argv) {
       case '--all-hosts': opts.allHosts = true; break;
       case '--deep': opts.deep = true; break;
       case '--structural': opts.structural = true; break;
-      case '--path': (opts.taskPaths ??= []).push(argv[++i]); break;
-      case '--component': (opts.taskComponents ??= []).push(argv[++i]); break;
-      case '--paths': opts.taskPaths = String(argv[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean); break;
+      case '--full': opts.full = true; break;
+      case '--path': {
+        (opts.taskPaths ??= []).push(takeValue('--path'));
+        break;
+      }
+      case '--component': {
+        (opts.taskComponents ??= []).push(takeValue('--component'));
+        break;
+      }
+      case '--paths': {
+        const value = takeValue('--paths');
+        opts.taskPaths = String(value).split(',').map((s) => s.trim()).filter(Boolean);
+        if (!opts.taskPaths.length) throw new Error('--paths needs at least one non-empty value');
+        break;
+      }
       case '--collapse': opts.collapse = true; break;
       case '--dry-run': opts.dryRun = true; break;
       case '--apply': opts.apply = true; break;
       case '--release': opts.release = true; break;
       case '--force': opts.force = true; break;
-      case '--reason': opts.reason = argv[++i]; break;
-      case '--run': opts.run = argv[++i]; break;
+      case '--reason': opts.reason = takeValue('--reason'); break;
+      case '--run': opts.run = takeValue('--run'); break;
       case '--agents': {
-        const agents = Number(argv[++i]);
+        const agents = Number(takeValue('--agents'));
         if (!Number.isInteger(agents) || agents < 1 || agents > MAX_PARTITION_AGENTS) {
           throw new Error(`--agents must be an integer from 1 to ${MAX_PARTITION_AGENTS}`);
         }
@@ -361,67 +397,69 @@ function parseArgs(argv) {
         break;
       }
       case '--autoprotect': opts.autoprotect = true; break;
-      case '--export': opts.exportFmt = argv[++i]; break;
+      case '--export': opts.exportFmt = takeValue('--export'); break;
       case '--summary': opts.summary = true; break;
       case '--verify': opts.verify = true; break;
-      case '--prove': opts.prove = argv[++i]; break;
-      case '--sink': opts.sink = argv[++i]; break;
-      case '--fleet': (opts.fleetRoots ??= []).push(argv[++i]); opts.fleet = true; break;
-      case '--since': opts.since = argv[++i]; break;
-      case '--force': opts.force = true; break;
+      case '--prove': opts.prove = takeValue('--prove'); break;
+      case '--sink': opts.sink = takeValue('--sink'); break;
+      case '--fleet': (opts.fleetRoots ??= []).push(takeValue('--fleet')); opts.fleet = true; break;
+      case '--since': opts.since = takeValue('--since'); break;
       case '--all': opts.includeCoLocated = true; break;
       case '--limit': {
-        const limit = Number(argv[++i]);
+        const limit = Number(takeValue('--limit'));
         if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('--limit must be an integer from 1 to 100');
         opts.limit = limit;
         break;
       }
       case '--install': opts.install = true; break;
       case '--yes': case '-y': opts.yes = true; break;
-      case '--max-depth': opts.maxDepth = numericFlag('--max-depth', argv[++i], { min: 1, max: 64 }); break;
+      case '--max-depth': opts.maxDepth = numericFlag('--max-depth', takeValue('--max-depth'), { min: 1, max: 64 }); break;
       case '--fail-on-unlanded': opts.failOnUnlanded = true; break;
-      case '--max-age-days': opts.maxAgeDays = numericFlag('--max-age-days', argv[++i], { min: 0, max: 36500 }); break;
-      case '--ignore': (opts.ignore ??= []).push(argv[++i]); break;
+      case '--max-age-days': opts.maxAgeDays = numericFlag('--max-age-days', takeValue('--max-age-days'), { min: 0, max: 36500 }); break;
+      case '--ignore': (opts.ignore ??= []).push(takeValue('--ignore')); break;
       case '--snapshot': opts.snapshot = true; break;
-      case '--columns': opts.columns = numericFlag('--columns', argv[++i], { min: 20, max: 1000 }); break;
-      case '--rows': opts.rowsOpt = numericFlag('--rows', argv[++i], { min: 5, max: 500 }); break;
+      case '--columns': opts.columns = numericFlag('--columns', takeValue('--columns'), { min: 20, max: 1000 }); break;
+      case '--rows': opts.rowsOpt = numericFlag('--rows', takeValue('--rows'), { min: 5, max: 500 }); break;
       case '-h': case '--help': opts.help = true; break;
       case '-v': case '-V': case '--version': opts.version = true; break;
-      case '--base': opts.base = argv[++i]; break;
+      case '--base': opts.base = takeValue('--base'); break;
       case '--family-window': {
-        const s = Number(argv[++i]);
+        const raw = takeValue('--family-window');
+        const s = Number(raw);
         // `|| 300` swallowed 0 (a valid "no window" value) and NaN. A NaN or negative is a user
         // error; 0 is a deliberate "every workstream is its own family". Help text says SECONDS.
-        opts.familyWindowMs = (Number.isFinite(s) && s >= 0 ? s : 3600) * 1000;
+        if (!Number.isFinite(s) || s < 0) {
+          throw new Error(`--family-window must be a non-negative number, got ${JSON.stringify(raw)}`);
+        }
+        opts.familyWindowMs = s * 1000;
         break;
       }
-      case '--cwd': opts.cwd = argv[++i]; break;
-      case '--html': opts.html = argv[++i]; break;
-      case '--host': opts.host = argv[++i]; break;
-      case '--command': opts.command = argv[++i]; break;
-      case '--session': opts.session = argv[++i]; break;
-      case '--invocation': opts.invocation = argv[++i]; break;
-      case '--agent': opts.agent = argv[++i]; break;
-      case '--since': opts.since = argv[++i]; break;
-      case '--bin': opts.bin = argv[++i]; break;
+      case '--cwd': opts.cwd = takeValue('--cwd'); break;
+      case '--html': opts.html = takeValue('--html'); break;
+      case '--host': opts.host = takeValue('--host'); break;
+      case '--command': opts.command = takeValue('--command'); break;
+      case '--session': opts.session = takeValue('--session'); break;
+      case '--invocation': opts.invocation = takeValue('--invocation'); break;
+      case '--agent': opts.agent = takeValue('--agent'); break;
+      case '--bin': opts.bin = takeValue('--bin'); break;
       case '--print-config': opts.printConfig = true; break;
       case '--remove': opts.remove = true; break;
-      case '--concurrency': opts.concurrency = numericFlag('--concurrency', argv[++i], { min: 1, max: 64 }); break;
+      case '--concurrency': opts.concurrency = numericFlag('--concurrency', takeValue('--concurrency'), { min: 1, max: 64 }); break;
       case '--verbose': opts.verbose = true; break;
       case '--debug': opts.debug = true; break;
       case '--quiet': opts.quiet = true; break;
       case '--plain': opts.plain = true; break;
-      case '--profile': opts.profile = argv[++i]; break;
-      case '--authority': opts.authority = argv[++i]; break;
-      case '--store': opts.store = argv[++i]; break;
-      case '--bootstrap-root': opts.bootstrapRoot = argv[++i]; break;
-      case '--metadata-url': opts.metadataUrl = argv[++i]; break;
-      case '--targets-url': opts.targetsUrl = argv[++i]; break;
-      case '--repository': opts.repository = argv[++i]; break;
-      case '--repository-root': opts.repositoryRoot = argv[++i]; break;
-      case '--recovery-mode': opts.recoveryMode = argv[++i]; break;
-      case '--lock-token': opts.lockToken = argv[++i]; break;
-      case '--orphan': opts.orphan = argv[++i]; break;
+      case '--profile': opts.profile = takeValue('--profile'); break;
+      case '--authority': opts.authority = takeValue('--authority'); break;
+      case '--store': opts.store = takeValue('--store'); break;
+      case '--bootstrap-root': opts.bootstrapRoot = takeValue('--bootstrap-root'); break;
+      case '--metadata-url': opts.metadataUrl = takeValue('--metadata-url'); break;
+      case '--targets-url': opts.targetsUrl = takeValue('--targets-url'); break;
+      case '--repository': opts.repository = takeValue('--repository'); break;
+      case '--repository-root': opts.repositoryRoot = takeValue('--repository-root'); break;
+      case '--recovery-mode': opts.recoveryMode = takeValue('--recovery-mode'); break;
+      case '--lock-token': opts.lockToken = takeValue('--lock-token'); break;
+      case '--orphan': opts.orphan = takeValue('--orphan'); break;
       case '--require-signature': opts.requireSignature = true; break;
       default:
         if (a.startsWith('--')) throw new Error(`unknown option: ${a}\n  Run 'holt --help' for valid options.`);
@@ -440,6 +478,53 @@ for (const stream of [process.stdout, process.stderr]) {
 
 function out(s) { process.stdout.write(s.endsWith('\n') ? s : `${s}\n`); }
 function emitJson(v) { out(JSON.stringify(v, null, 2)); }
+
+async function cmdBase(opts) {
+  const disc = await discover(opts.cwd, opts);
+  if (!disc.root) {
+    const { message } = repoAbsenceError(disc, opts.cwd);
+    process.stderr.write(paint('red', `holt base: ${message}\n`));
+    process.exit(2);
+  }
+  const action = opts._[1] ?? 'status';
+  /** @type {null|{ref?: string|null, oid?: string, file?: string, removed?: boolean}} */
+  let changed = null;
+  try {
+    if (action === 'set') {
+      const ref = opts._[2];
+      if (!ref) throw new Error('usage: holt base set <ref>');
+      changed = await setIntegrationBase(disc.root, ref);
+    } else if (action === 'unset') {
+      changed = await clearIntegrationBase(disc.root);
+    } else if (action !== 'status') {
+      throw new Error(`unknown base action '${action}' (use status, set, or unset)`);
+    }
+    const configured = await readIntegrationBase(disc.root);
+    const resolved = await resolveBase(disc.root, null);
+    const result = {
+      ok: true,
+      action,
+      configured: configured ? { ref: configured.ref, updatedAt: configured.updatedAt } : null,
+      resolved: { ref: resolved.ref, oid: resolved.oid, how: resolved.how, note: resolved.note ?? null },
+      changed: changed ? { ref: changed.ref ?? null, removed: changed.removed ?? undefined } : null,
+      note: configured
+        ? 'This explicit repository-local authority overrides base auto-detection; --base still overrides one invocation.'
+        : 'No explicit integration authority is set; Holt is using conservative base auto-detection.',
+    };
+    if (opts.json || (!process.stdout.isTTY && !opts.plain)) return emitJson(result);
+    out(paint('bold', 'holt base'));
+    out(`  resolved    ${resolved.ref}@${resolved.oid.slice(0, 12)}  ${paint('grey', `(${resolved.how})`)}`);
+    out(`  configured  ${configured ? configured.ref : paint('grey', 'none')}`);
+    out(paint('grey', `  ${result.note}`));
+  } catch (error) {
+    if (opts.json || (!process.stdout.isTTY && !opts.plain)) {
+      emitJson({ ok: false, action, error: error?.message ?? String(error) });
+    } else {
+      process.stderr.write(paint('red', `holt base: ${error?.message ?? error}\n`));
+    }
+    process.exit(1);
+  }
+}
 
 /** The shipped version, read once. Stamped into every SIEM record so a log names its producer. */
 /** @type {string | null} */
@@ -580,9 +665,18 @@ function cmdAction(result, opts = {}) {
   if (wantJson) { emitJson(result); return result; }
   // Human-readable summary for action commands
   const lines = [];
-  if (result.dryRun) lines.push(paint('yellow', 'DRY RUN — nothing was changed. Re-run with --apply to execute.\n'));
+  const isDiscardPreview = result?.dryRun
+    && (Object.hasOwn(result, 'wouldRevert') || Object.hasOwn(result, 'wouldRemove'));
+  if (result.dryRun) {
+    lines.push(paint('yellow', isDiscardPreview
+      ? 'DRY RUN — nothing was changed. Re-run without --dry-run to execute.\n'
+      : 'DRY RUN — nothing was changed. Re-run with --apply to execute.\n'));
+  }
   const did = result.did || {};
-  const actions = result.actions || result.wouldQuarantine || result.wouldRemove || [];
+  const discardPreviewActions = isDiscardPreview
+    ? [...(result.wouldRevert ?? []), ...(result.wouldRemove ?? [])]
+    : null;
+  const actions = result.actions || result.wouldQuarantine || discardPreviewActions || result.wouldRemove || [];
   if (actions.length) {
     const isProtect = actions.some((a) => a.action?.includes('lock') || a.action?.includes('protect'));
     const isQuarantine = actions.some((a) => a.action === 'quarantined')
@@ -591,22 +685,26 @@ function cmdAction(result, opts = {}) {
       || actions.some((a) => a.action === 'purged')
       || (result.dryRun && Array.isArray(result.wouldRemove));
     const label = result.dryRun
-      ? (isProtect ? 'would protect' : isQuarantine ? 'would quarantine' : isRemove ? 'would remove' : 'would act on')
+      ? (isProtect ? 'would protect' : isQuarantine ? 'would quarantine' : isDiscardPreview ? 'would discard' : isRemove ? 'would remove' : 'would act on')
       : (isQuarantine ? 'worktree(s) quarantined' : isRemove ? 'worktree(s) purged' : 'action(s)');
     lines.push(paint('bold', `${actions.length} ${label}:`));
     for (const a of actions) {
       const action = a.action || (result.dryRun && isQuarantine ? 'quarantine' : result.dryRun ? 'remove' : 'done');
-      const icon = action === 'removed' || action === 'remove' || action === 'purged' ? '✗'
+      const icon = action === 'restore-from-HEAD' ? '↩'
+        : action === 'removed' || action === 'remove' || action === 'purged' || action === 'remove-after-verified-capture' ? '✗'
         : action === 'quarantined' || action === 'quarantine' ? '↪'
         : action.includes('lock') || action.includes('protect') ? '🔒'
         : action === 'skipped' || action === 'already-locked' ? '○'
         : '•';
-      const color = action === 'removed' || action === 'remove' || action === 'purged' ? 'red'
+      const color = action === 'restore-from-HEAD' ? 'yellow'
+        : action === 'removed' || action === 'remove' || action === 'purged' || action === 'remove-after-verified-capture' ? 'red'
         : action === 'quarantined' || action === 'quarantine' ? 'green'
         : action.includes('lock') || action.includes('protect') ? 'yellow'
         : action === 'skipped' || action === 'already-locked' ? 'grey'
         : 'green';
-      const reason = a.why || a.reason;
+      const reason = a.why || a.reason
+        || (action === 'restore-from-HEAD' ? 'restore from HEAD after verified capture' : null)
+        || (action === 'remove-after-verified-capture' ? 'remove after verified capture' : null);
       lines.push(`  ${paint(color, icon)} ${a.id || a.path || '?'}${reason ? paint('grey', ` — ${reason.slice(0, 120)}`) : ''}`);
       if (typeof a.restore === 'string' && a.restore) {
         lines.push(`      ${paint('grey', 'restore with:')} ${a.restore}`);
@@ -639,6 +737,23 @@ function cmdAction(result, opts = {}) {
     const v = result?.[key];
     if (Array.isArray(v) && v.length) {
       lines.push(paint('grey', `  ${label} (${v.length}): ${v.slice(0, 5).join(', ')}${v.length > 5 ? ` … +${v.length - 5}` : ''}`));
+    }
+  }
+  if (Array.isArray(result?.transactions) && result.transactions.length) {
+    lines.push(paint('bold', `${result.transactions.length} incomplete discard transaction(s):`));
+    for (const transaction of result.transactions) {
+      lines.push(`  ${transaction.id}  ${paint('grey', `${transaction.phase} · ${transaction.paths} path(s) · ${transaction.retained} retained`)}`);
+      if (transaction.recover) lines.push(`      ${paint('grey', 'recover with:')} ${transaction.recover}`);
+    }
+  }
+  if (Array.isArray(result?.errors) && result.errors.length) {
+    lines.push(paint('red', `${result.errors.length} transaction receipt error(s):`));
+    for (const error of result.errors.slice(0, 10)) {
+      lines.push(`  ${JSON.stringify(String(error.id ?? '?').slice(0, 200))} — `
+        + JSON.stringify(String(error.error ?? 'unverifiable').slice(0, 240)));
+    }
+    if (result.errors.length > 10) {
+      lines.push(paint('grey', `  … and ${result.errors.length - 10} more receipt error(s)`));
     }
   }
   // `auto()` does the reversible half itself and deliberately hands the irreversible half back to
@@ -2364,6 +2479,7 @@ async function main() {
   }
   opts.configPath = configPath;
   if (cmd === 'doctor') return cmdDoctor(opts);
+  if (cmd === 'base') return cmdBase(opts);
   if (cmd === 'audit') return cmdAudit(opts);
   if (cmd === 'hook') return cmdHook(opts);
   if (cmd === 'managed-policy') return cmdManagedPolicy(opts);
@@ -2389,14 +2505,24 @@ async function main() {
     return;
   }
   if (cmd === 'partition') {
+    const hasTaskAnchors = (opts.taskPaths?.length ?? 0) + (opts.taskComponents?.length ?? 0) > 0;
+    if (!hasTaskAnchors && !opts.structural) {
+      const plan = partitionContextRequired({ agents: opts.agents ?? 2 });
+      if (opts.json) emitJson(plan);
+      else out(renderPartition(plan));
+      process.exitCode = 1;
+      return;
+    }
     const { report, scanned } = await buildReport(opts);
     const plan = partitionPlan(report, await listTrackedFiles(scanned.root), {
       agents: opts.agents ?? 2,
       paths: opts.taskPaths,
       components: opts.taskComponents,
     });
-    if (opts.json) return emitJson(plan);
-    out(renderPartition(plan));
+    if (opts.json && opts.full) return emitJson(plan);
+    const bounded = compactPartitionPlan(plan, { limit: opts.limit });
+    if (opts.json) return emitJson(bounded);
+    out(renderPartition(bounded));
     return;
   }
   if (cmd === 'hotspots') {
@@ -2989,6 +3115,19 @@ async function main() {
       process.exit(2);
     }
     const r = await discard(opts.cwd, targets, opts);
+    cmdAction(r, opts);
+    if (!r.ok) process.exit(1);
+    return;
+  }
+  if (cmd === 'recover-discard') {
+    const target = opts._[1];
+    if (!target) {
+      const r = await discardTransactions(opts.cwd);
+      cmdAction(r, opts);
+      if (!r.ok) process.exit(1);
+      return;
+    }
+    const r = await recoverDiscard(opts.cwd, target, opts);
     cmdAction(r, opts);
     if (!r.ok) process.exit(1);
     return;

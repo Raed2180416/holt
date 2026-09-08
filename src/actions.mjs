@@ -36,6 +36,10 @@ import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
 import { readStableRegularFile } from './stable-file.mjs';
+import {
+  createDiscardTransaction, updateDiscardTransaction, readDiscardTransaction,
+  listDiscardTransactionRecords, removeDiscardTransaction, newDiscardTransactionId,
+} from './discard-transactions.mjs';
 
 const LOCK_PREFIX = 'holt:';
 
@@ -863,6 +867,19 @@ export async function auto(cwd, opts = {}) {
 const isSelectedPath = (candidate, selected) => candidate === selected
   || candidate.startsWith(`${selected}/`);
 
+function selectedPathMatcher(selectedPaths) {
+  const selected = new Set(selectedPaths);
+  return (candidate) => {
+    let current = candidate;
+    for (;;) {
+      if (selected.has(current)) return true;
+      const slash = current.lastIndexOf('/');
+      if (slash < 0) return false;
+      current = current.slice(0, slash);
+    }
+  };
+}
+
 function parseTreeRecords(raw, source) {
   const out = [];
   for (const record of raw.split('\0').filter(Boolean)) {
@@ -876,40 +893,42 @@ function parseTreeRecords(raw, source) {
 
 async function treeEntriesFor(cwd, treeish, selectedPaths) {
   const byPath = new Map();
-  for (const selected of selectedPaths) {
-    const r = await git(
-      ['ls-tree', '-r', '-z', '--full-tree', treeish, '--', `:(literal)${selected}`],
-      { cwd },
-    );
-    if (r.code !== 0) throw new Error(r.stderr.trim() || `git ls-tree ${treeish} failed`);
-    for (const entry of parseTreeRecords(r.stdout, treeish)) {
-      if (!isSelectedPath(entry.path, selected)) {
-        throw new Error(`tree lookup for '${selected}' returned unrelated path '${entry.path}'`);
-      }
-      byPath.set(entry.path, entry);
+  const selected = [...new Set(selectedPaths)].sort();
+  const belongsToSelection = selectedPathMatcher(selected);
+  const r = await gitPathBatched(
+    ['ls-tree', '-r', '-z', '--full-tree', treeish, '--'],
+    selected.map((value) => `:(literal)${value}`),
+    { cwd },
+  );
+  if (r.code !== 0) throw new Error(r.stderr.trim() || `git ls-tree ${treeish} failed`);
+  for (const entry of parseTreeRecords(r.stdout, treeish)) {
+    if (!belongsToSelection(entry.path)) {
+      throw new Error(`tree lookup returned unrelated path '${entry.path}'`);
     }
+    byPath.set(entry.path, entry);
   }
   return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
 
 async function indexEntriesFor(cwd, selectedPaths, env) {
   const byPath = new Map();
-  for (const selected of selectedPaths) {
-    const r = await git(
-      ['ls-files', '--stage', '-z', '--', `:(literal)${selected}`],
-      { cwd, env },
-    );
-    if (r.code !== 0) throw new Error(r.stderr.trim() || 'git ls-files --stage failed');
-    for (const record of r.stdout.split('\0').filter(Boolean)) {
-      const m = /^(\d+) ([0-9a-f]+) ([0-3])\t([\s\S]*)$/.exec(record);
-      if (!m) throw new Error(`could not parse scratch-index entry for '${selected}'`);
-      const entry = { mode: m[1], oid: m[2], stage: Number(m[3]), path: m[4] };
-      if (!isSelectedPath(entry.path, selected)) {
-        throw new Error(`index lookup for '${selected}' returned unrelated path '${entry.path}'`);
-      }
-      if (entry.stage !== 0) throw new Error(`'${entry.path}' has an unmerged index entry`);
-      byPath.set(entry.path, entry);
+  const selected = [...new Set(selectedPaths)].sort();
+  const belongsToSelection = selectedPathMatcher(selected);
+  const r = await gitPathBatched(
+    ['ls-files', '--stage', '-z', '--'],
+    selected.map((value) => `:(literal)${value}`),
+    { cwd, env },
+  );
+  if (r.code !== 0) throw new Error(r.stderr.trim() || 'git ls-files --stage failed');
+  for (const record of r.stdout.split('\0').filter(Boolean)) {
+    const m = /^(\d+) ([0-9a-f]+) ([0-3])\t([\s\S]*)$/.exec(record);
+    if (!m) throw new Error('could not parse scratch-index entry');
+    const entry = { mode: m[1], oid: m[2], stage: Number(m[3]), path: m[4] };
+    if (!belongsToSelection(entry.path)) {
+      throw new Error(`index lookup returned unrelated path '${entry.path}'`);
     }
+    if (entry.stage !== 0) throw new Error(`'${entry.path}' has an unmerged index entry`);
+    byPath.set(entry.path, entry);
   }
   return [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path));
 }
@@ -1153,6 +1172,43 @@ async function hashRawManifestLeaf(cwd, stageRoot, leaf) {
   return { ...leaf, oid };
 }
 
+async function hashRawManifestLeaves(cwd, stageRoot, leaves) {
+  const regular = leaves.filter((leaf) => leaf.type === 'file');
+  const links = leaves.filter((leaf) => leaf.type === 'symlink');
+  const byPath = new Map();
+
+  // Verify every mirrored regular file through a stable descriptor first, then let one bounded set
+  // of Git processes hash the already-verified paths. `--no-filters` makes this the same raw-byte
+  // operation as the former per-leaf `--stdin` call without paying one process per file.
+  await pmap(regular, async (leaf) => {
+    const source = path.join(stageRoot, ...leaf.path.split('/'));
+    const stable = await readStableRegularFile(source);
+    if (!stable.ok) throw new Error(`'${leaf.path}' raw capture is ${stable.reason}`);
+    if (createHash('sha256').update(stable.bytes).digest('hex') !== leaf.sha256) {
+      throw new Error(`'${leaf.path}' bytes changed after the manifest was captured`);
+    }
+  }, 8);
+  if (regular.length) {
+    const absolute = regular.map((leaf) => path.join(stageRoot, ...leaf.path.split('/')));
+    const r = await gitPathBatched(
+      ['hash-object', '-w', '--no-filters', '--'], absolute,
+      { cwd, allowMutation: true },
+    );
+    if (r.code !== 0) throw new Error(r.stderr.trim() || 'git hash-object batch failed');
+    const oids = r.stdout.split('\n').filter(Boolean);
+    if (oids.length !== regular.length || oids.some((oid) => !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(oid))) {
+      throw new Error(`git hash-object returned ${oids.length} valid object id(s) for ${regular.length} file(s)`);
+    }
+    regular.forEach((leaf, index) => byPath.set(leaf.path, { ...leaf, oid: oids[index] }));
+  }
+
+  // Git follows a symlink pathname, so link target BYTES retain the descriptor-free stdin path.
+  // Links are ordinarily sparse and this bounded lane cannot recreate the large-tree process storm.
+  const hashedLinks = await pmap(links, (leaf) => hashRawManifestLeaf(cwd, stageRoot, leaf), 4);
+  for (const leaf of hashedLinks) byPath.set(leaf.path, leaf);
+  return leaves.map((leaf) => byPath.get(leaf.path));
+}
+
 async function hydrateBlobEntries(cwd, entries) {
   const blobs = entries.filter((entry) => entry.type === 'blob');
   const content = new Map();
@@ -1238,12 +1294,38 @@ async function restoreHeadSelection(abs, relPath, entries) {
   const exact = entries.find((entry) => entry.path === relPath);
   if (exact) {
     if (entries.length !== 1) throw new Error(`HEAD contains both '${relPath}' and descendants`);
-    await materialiseHeadLeaf(abs, relPath, exact);
-    await verifyHeadLeaf(abs, relPath, exact);
-    return;
+    try {
+      await materialiseHeadLeaf(abs, relPath, exact);
+      await verifyHeadLeaf(abs, relPath, exact);
+      return 'created';
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      // A process may have independently recreated the exact desired HEAD leaf. Verify the current
+      // inode, bytes, type and mode before adopting it. Capture-identical dirty bytes do not pass
+      // this check and remain a conflict; existence alone is never authority.
+      await verifyHeadLeaf(abs, relPath, exact);
+      return 'adopted';
+    }
   }
 
-  await fs.mkdir(abs); // exclusive: a concurrent replacement makes this fail, never get erased.
+  try {
+    await fs.mkdir(abs); // exclusive: a concurrent replacement makes this fail, never get erased.
+  } catch (error) {
+    if (error?.code !== 'EEXIST') throw error;
+    // A complete directory restored by an earlier interrupted attempt can also be adopted, but a
+    // partial directory or one extra concurrent leaf fails the exact manifest check below.
+    for (const entry of entries) {
+      const child = entry.path.slice(relPath.length + 1).split('/');
+      await verifyHeadLeaf(path.join(abs, ...child), entry.path, entry);
+    }
+    const existing = await filesystemManifest(abs, relPath);
+    const expectedPaths = entries.map((entry) => entry.path).sort();
+    const actualPaths = existing.map((entry) => entry.path).sort();
+    if (JSON.stringify(expectedPaths) !== JSON.stringify(actualPaths)) {
+      throw new Error(`existing '${relPath}' differs from the complete HEAD directory`);
+    }
+    return 'adopted';
+  }
   for (const entry of entries) {
     if (!entry.path.startsWith(`${relPath}/`)) throw new Error(`unrelated HEAD entry '${entry.path}'`);
     const child = entry.path.slice(relPath.length + 1).split('/');
@@ -1261,12 +1343,47 @@ async function restoreHeadSelection(abs, relPath, entries) {
   if (JSON.stringify(expectedPaths) !== JSON.stringify(actualPaths)) {
     throw new Error(`restored '${relPath}' contains concurrent or missing paths`);
   }
+  return 'created';
 }
 
 async function rollbackQuarantines(quarantines) {
   const failures = [];
   for (const q of [...quarantines].reverse()) {
     if (!q.payload) continue;
+    try { await fs.lstat(q.payload); } catch (error) {
+      if (error?.code === 'ENOENT') {
+        // A missing quarantine is ambiguous: this selection may not have reached rename, an
+        // earlier recovery may already have restored it, or another process may have removed the
+        // only physical copy. Call it rolled back only when the original path still matches the
+        // manifest durably recorded before any rename. Existence alone is not byte evidence.
+        if (!(await sameDirectoryIdentity(q.parentIdentity))) {
+          failures.push({ path: q.abs, quarantine: q.payload, error: 'parent directory identity changed' });
+          continue;
+        }
+        const emptyDirectories = [];
+        try {
+          const current = await filesystemManifest(
+            q.anchoredAbs ?? q.abs, q.relPath, [], emptyDirectories,
+          );
+          if (sameManifest(q.manifest, current)
+            && JSON.stringify(q.emptyDirectories ?? []) === JSON.stringify(emptyDirectories)) continue;
+          failures.push({
+            path: q.abs,
+            quarantine: q.payload,
+            error: 'quarantine is missing and the original path does not match the recorded pre-rename content',
+          });
+        } catch (inspectError) {
+          failures.push({
+            path: q.abs,
+            quarantine: q.payload,
+            error: `quarantine is missing and the original path could not be verified: ${inspectError?.message ?? inspectError}`,
+          });
+        }
+        continue;
+      }
+      failures.push({ path: q.abs, quarantine: q.payload, error: error?.message ?? String(error) });
+      continue;
+    }
     if (!(await sameDirectoryIdentity(q.parentIdentity))) {
       failures.push({ path: q.abs, quarantine: q.payload, error: 'parent directory identity changed' });
       continue;
@@ -1293,15 +1410,31 @@ async function rollbackQuarantines(quarantines) {
 
 async function activeLinuxHandlesUnder(paths) {
   if (process.platform !== 'linux' || typeof process.getuid !== 'function') return [];
-  const roots = [];
-  for (const p of paths) {
-    try { roots.push(await fs.realpath(p)); } catch { roots.push(p); }
+  const exact = new Map();
+  const directories = new Map();
+  for (let index = 0; index < paths.length; index++) {
+    const p = paths[index];
+    let root;
+    try { root = await fs.realpath(p); } catch { root = p; }
+    try {
+      if ((await fs.lstat(root)).isDirectory()) directories.set(path.normalize(root), index);
+      else exact.set(root, index);
+    } catch { exact.set(root, index); }
   }
-  const underRoot = async (target) => {
-    for (const root of roots) {
-      if (await underOrEqualAsync(target, root)) return true;
+  const rootFor = (target) => {
+    if (exact.has(target)) return exact.get(target);
+    // Walk the target's ancestors against an indexed root set. The former implementation scanned
+    // every selected directory for every process descriptor (O(handles × selections)); a bulk
+    // directory discard could therefore replace the old process storm with a CPU comparison
+    // storm. Linux descriptor paths are absolute, so ancestor lookup is exact and depth-bounded.
+    let current = path.normalize(target);
+    for (let depth = 0; depth < 256; depth++) {
+      if (directories.has(current)) return directories.get(current);
+      const parent = path.dirname(current);
+      if (samePathSync(parent, current)) break;
+      current = parent;
     }
-    return false;
+    return null;
   };
   const active = [];
   let procEntries;
@@ -1317,7 +1450,8 @@ async function activeLinuxHandlesUnder(paths) {
     for (const kind of ['cwd']) {
       try {
         const target = (await fs.readlink(path.join(proc, kind))).replace(/ \(deleted\)$/, '');
-        if (await underRoot(target)) active.push({ pid: Number(name), kind, path: target });
+        const rootIndex = rootFor(target);
+        if (rootIndex !== null) active.push({ pid: Number(name), kind, path: target, rootIndex });
       } catch { /* process exited or has no readable cwd */ }
     }
     let fds;
@@ -1325,11 +1459,433 @@ async function activeLinuxHandlesUnder(paths) {
     for (const fd of fds) {
       try {
         const target = (await fs.readlink(path.join(proc, 'fd', fd))).replace(/ \(deleted\)$/, '');
-          if (await underRoot(target)) active.push({ pid: Number(name), kind: `fd:${fd}`, path: target });
+        const rootIndex = rootFor(target);
+        if (rootIndex !== null) active.push({ pid: Number(name), kind: `fd:${fd}`, path: target, rootIndex });
       } catch { /* descriptor/process disappeared between listing and readlink */ }
     }
   }
   return active;
+}
+
+const transactionRecovery = (id) => ({
+  transaction: id,
+  recoverArgv: ['holt', 'recover-discard', id],
+  recover: ['holt', 'recover-discard', id].map(shellQuote).join(' '),
+});
+
+function publicTransactionSelection(q) {
+  return {
+    input: q.input,
+    path: q.abs,
+    relative: q.relPath,
+    existed: q.exists,
+    parentIdentity: q.parentIdentity,
+    quarantineDir: q.visibleDir ?? q.dir ?? null,
+    payload: q.visiblePayload ?? q.payload ?? null,
+    manifest: q.manifest ?? [],
+    emptyDirectories: q.emptyDirectories ?? [],
+    state: q.state ?? 'planned',
+    issue: q.issue ?? null,
+  };
+}
+
+async function validateRecordedDiscardSelection(ws, q) {
+  const observedRelative = await relativeLinkAwareAsync(ws.path, q.abs);
+  if (observedRelative !== q.relPath) {
+    throw new Error(`recorded path '${q.abs}' no longer belongs to '${ws.id}' as '${q.relPath}'`);
+  }
+  if (!samePathSync(path.dirname(q.abs), q.parentIdentity.path)) {
+    throw new Error(`recorded parent for '${q.relPath}' does not match its path`);
+  }
+  if ((q.visibleDir === null) !== (q.visiblePayload === null)) {
+    throw new Error(`recorded quarantine for '${q.relPath}' is incomplete`);
+  }
+  if (q.visibleDir !== null) {
+    const expectedPayload = path.join(q.visibleDir, 'payload');
+    const parent = path.dirname(q.visibleDir);
+    if (!/^\.holt-discard-\d+-[0-9a-f]{16}$/.test(path.basename(q.visibleDir))
+      || !samePathSync(q.visiblePayload, expectedPayload)
+      || (!samePathSync(parent, q.parentIdentity.path)
+        && !samePathSync(parent, q.parentIdentity.canonical))) {
+      throw new Error(`recorded quarantine for '${q.relPath}' is outside its controlled parent`);
+    }
+  }
+}
+
+function entriesBySelection(entries, quarantines) {
+  const byRel = new Map(quarantines.map((q) => [q.relPath, []]));
+  for (const entry of entries) {
+    let candidate = entry.path;
+    while (candidate) {
+      if (byRel.has(candidate)) { byRel.get(candidate).push(entry); break; }
+      const slash = candidate.lastIndexOf('/');
+      if (slash < 0) break;
+      candidate = candidate.slice(0, slash);
+    }
+  }
+  return byRel;
+}
+
+async function headStillAt(cwd, expected) {
+  const r = await git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}'], { cwd });
+  if (expected === null) return r.code !== 0;
+  return r.code === 0 && r.stdout.trim() === expected;
+}
+
+async function refStillAt(cwd, ref, commit) {
+  const r = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd });
+  return r.code === 0 && r.stdout.trim() === commit;
+}
+
+/**
+ * Reconcile every selected path independently after the capture ref is durable.
+ *
+ * A conflict at one destination is not authority to abandon the other N-1 paths, and it is not a
+ * reason to retain their already-durable physical copies. Only a changed/open/unaddressable
+ * quarantine remains on disk. A concurrent destination is never overwritten.
+ */
+async function finalizeCapturedDiscard(cwd, {
+  ws, head, headEntries, quarantines, ref, commit, transaction,
+}) {
+  const removed = [];
+  const reverted = [];
+  const adopted = [];
+  const conflicts = [];
+  const retained = new Map();
+  const activeHandles = [];
+  const selectedEntries = entriesBySelection(headEntries, quarantines);
+
+  if (!(await refStillAt(ws.path, ref, commit))) {
+    for (const q of quarantines) if (q.payload) retained.set(q, 'capture ref changed or is unavailable');
+    conflicts.push({ path: null, input: null, reason: 'capture ref changed before finalization' });
+  }
+  if (!(await headStillAt(ws.path, head))) {
+    for (const q of quarantines) if (q.payload) retained.set(q, 'worktree HEAD changed after capture');
+    conflicts.push({ path: null, input: null, reason: 'worktree HEAD changed after capture; refusing to restore an older tree' });
+  }
+
+  if (!conflicts.length) {
+    for (const q of quarantines) {
+      if (!(await sameDirectoryIdentity(q.parentIdentity))) {
+        q.issue = 'parent directory identity changed after capture';
+        q.state = 'pending';
+        if (q.payload) retained.set(q, q.issue);
+        conflicts.push({ path: q.relPath, input: q.input, reason: q.issue });
+        continue;
+      }
+      const entries = selectedEntries.get(q.relPath) ?? [];
+      if (entries.length) {
+        try {
+          const restored = await restoreHeadSelection(q.anchoredAbs, q.relPath, entries);
+          reverted.push(q.input);
+          if (restored === 'adopted') adopted.push(q.input);
+          q.state = restored === 'adopted' ? 'head-adopted' : 'head-restored';
+        } catch (error) {
+          q.issue = error?.message ?? String(error);
+          q.state = 'destination-conflict';
+          conflicts.push({ path: q.relPath, input: q.input, reason: q.issue });
+        }
+      } else {
+        if (q.exists) removed.push(q.input);
+        q.state = 'removed';
+      }
+    }
+  }
+
+  // A later descriptor write changes only its own quarantine. Verify each one and retain that one,
+  // not every unrelated path in the transaction.
+  for (const q of quarantines) {
+    if (!q.payload || retained.has(q)) continue;
+    try {
+      const now = await filesystemManifest(q.payload, q.relPath);
+      if (!sameManifest(q.manifest, now)) retained.set(q, 'content changed in quarantine before cleanup');
+    } catch (error) {
+      if (error?.code === 'ENOENT') q.state = 'cleaned';
+      else retained.set(q, `quarantine could not be re-read: ${error?.message ?? error}`);
+    }
+  }
+
+  const handleCandidates = [];
+  for (const q of quarantines) {
+    if (!q.payload || retained.has(q) || q.state === 'cleaned') continue;
+    try {
+      const st = await fs.lstat(q.payload);
+      // An open descriptor cannot target the link entry itself; scanning its target would inspect
+      // unrelated outside content and turn an outward symlink into permanent false retention.
+      if (!st.isSymbolicLink()) handleCandidates.push(q);
+    } catch { /* the manifest pass above already classified disappearance/errors */ }
+  }
+  const handles = await activeLinuxHandlesUnder(handleCandidates.map((q) => q.payload));
+  activeHandles.push(...handles);
+  if (handles.some((entry) => entry.kind === 'unverifiable')) {
+    for (const q of handleCandidates) retained.set(q, 'active-handle scan was unverifiable');
+  } else {
+    for (let index = 0; index < handleCandidates.length; index++) {
+      if (handles.some((entry) => entry.rootIndex === index)) {
+        retained.set(handleCandidates[index], 'physical quarantine is still held by an active process');
+      }
+    }
+  }
+
+  // Bind deletion authority immediately before physical cleanup. A unique ref name makes drift
+  // unlikely; this exact check makes it an observed fact rather than an assumption.
+  if (!(await refStillAt(ws.path, ref, commit))) {
+    for (const q of quarantines) if (q.payload && q.state !== 'cleaned') retained.set(q, 'capture ref changed before cleanup');
+  }
+  for (const q of quarantines) {
+    if (!q.payload || retained.has(q) || q.state === 'cleaned') continue;
+    try {
+      await fs.rm(q.payload, { recursive: true, force: false });
+      await fs.rmdir(q.dir);
+      q.state = 'cleaned';
+      q.payload = null;
+      q.dir = null;
+    } catch (error) {
+      retained.set(q, `physical quarantine cleanup failed: ${error?.message ?? error}`);
+    }
+  }
+
+  for (const [q, reason] of retained) {
+    q.issue = reason;
+    q.state = 'pending';
+    q.visiblePayload = await fs.realpath(q.payload).catch(() => q.visiblePayload ?? q.payload);
+  }
+
+  /** @type {any} */
+  let activeTransaction = transaction;
+  let transactionError = null;
+  if (retained.size) {
+    try {
+      activeTransaction = await updateDiscardTransaction(cwd, transaction, {
+        phase: 'pending', ref, commit, selections: quarantines.map(publicTransactionSelection),
+      });
+    } catch (error) { transactionError = error?.message ?? String(error); }
+  } else {
+    try { await removeDiscardTransaction(cwd, transaction); }
+    catch (error) { transactionError = error?.message ?? String(error); }
+  }
+
+  const retainedDetails = [...retained].map(([q, reason]) => ({
+    path: q.visiblePayload ?? q.payload,
+    relative: q.relPath,
+    reason,
+  }));
+  const retainedQuarantines = retainedDetails.map((row) => row.path);
+  // Preserve the original single-directory recovery surface: callers historically joined a
+  // late-created leaf directly onto `quarantine`. File/open-handle recovery remains an array.
+  const oneEmptyDirectory = retained.size === 1
+    ? [...retained.keys()][0]
+    : null;
+  const quarantine = oneEmptyDirectory
+    && oneEmptyDirectory.manifest.length === 0
+    && oneEmptyDirectory.emptyDirectories.includes(oneEmptyDirectory.relPath)
+    ? retainedQuarantines[0]
+    : retainedQuarantines;
+  const ok = conflicts.length === 0 && retainedQuarantines.length === 0 && !transactionError;
+  return {
+    ok,
+    discarded: removed,
+    reverted,
+    adopted,
+    conflicts,
+    activeHandles,
+    retainedDetails,
+    retainedQuarantines,
+    quarantine,
+    transactionError,
+    ...(retainedQuarantines.length || transactionError ? transactionRecovery(activeTransaction.id) : {}),
+  };
+}
+
+/** List only incomplete discard transactions; completed operations retire their receipt. */
+export async function discardTransactions(cwd) {
+  const listed = await listDiscardTransactionRecords(cwd);
+  return {
+    ok: listed.errors.length === 0,
+    count: listed.transactions.length,
+    transactions: listed.transactions.map((record) => ({
+      id: record.id,
+      phase: record.phase,
+      worktree: record.worktree,
+      ref: record.ref ?? record.baseRef ?? null,
+      commit: record.commit ?? null,
+      paths: record.selections.length,
+      retained: record.selections.filter((row) => row.payload && row.state !== 'cleaned').length,
+      updatedAt: record.updatedAt,
+      ...transactionRecovery(record.id),
+    })),
+    errors: listed.errors,
+    note: listed.errors.length
+      ? `${listed.errors.length} discard transaction receipt(s) could not be verified; no clean-state conclusion is available.`
+      : listed.transactions.length
+      ? `Recover one with: holt recover-discard <transaction>`
+      : 'No incomplete discard transactions.',
+  };
+}
+
+function manifestFromCaptured(entries) {
+  return entries.map((entry) => ({
+    path: entry.path,
+    type: entry.mode === '120000' ? 'symlink' : 'file',
+    mode: entry.mode,
+    size: Buffer.isBuffer(entry.content) ? entry.content.length : -1,
+    sha256: Buffer.isBuffer(entry.content)
+      ? createHash('sha256').update(entry.content).digest('hex') : null,
+  }));
+}
+
+/** Resume a durable discard receipt after interruption without re-selecting mutable pathnames. */
+export async function recoverDiscard(cwd, id, opts = {}) {
+  const transaction = await readDiscardTransaction(cwd, id);
+  const disc = await discover(cwd, opts);
+  if (!disc.root) throw repoAbsenceError(disc, cwd);
+  /** @type {any} */
+  let ws = null;
+  for (const row of disc.workstreams) {
+    if (row.path && await samePathAsync(row.path, transaction.worktree.path)) { ws = row; break; }
+  }
+  if (!ws || ws.id !== transaction.worktree.id) {
+    return { ok: false, error: 'recorded worktree identity is no longer registered', ...transactionRecovery(id) };
+  }
+
+  /** @type {any[]} */
+  const quarantines = transaction.selections.map((row) => ({
+    input: row.input,
+    abs: row.path,
+    relPath: row.relative,
+    exists: row.existed,
+    parentIdentity: row.parentIdentity,
+    dir: row.quarantineDir,
+    payload: row.payload,
+    visibleDir: row.quarantineDir,
+    visiblePayload: row.payload,
+    manifest: row.manifest ?? [],
+    emptyDirectories: row.emptyDirectories ?? [],
+    state: row.state,
+    issue: row.issue,
+  }));
+  try {
+    for (const q of quarantines) {
+      await validateRecordedDiscardSelection(ws, q);
+      q.parentAnchor = await openDirectoryAnchor(q.parentIdentity);
+      q.anchoredAbs = path.join(q.parentAnchor.path, path.basename(q.abs));
+      if (q.dir) q.dir = path.join(q.parentAnchor.path, path.basename(q.visibleDir));
+      if (q.payload) q.payload = path.join(q.dir, 'payload');
+    }
+
+    const ref = transaction.ref ?? transaction.baseRef;
+    let refProbe = ref
+      ? await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: ws.path })
+      : { code: 1, stdout: '' };
+    let reanchoredCaptureRef = false;
+    if ((refProbe.code !== 0 || !refProbe.stdout.trim()) && transaction.commit && ref) {
+      // A completed capture can outlive an accidentally deleted ref as an unreachable object, but
+      // only until Git prunes it. Re-anchor exactly the recorded full commit with a must-not-exist
+      // compare-and-swap after verifying its parent. Never replace a concurrently recreated ref.
+      const recordedProbe = await git(
+        ['rev-parse', '--verify', '--quiet', `${transaction.commit}^{commit}`], { cwd: ws.path },
+      );
+      const recordedCommit = recordedProbe.code === 0 ? recordedProbe.stdout.trim() : '';
+      if (!recordedCommit || recordedCommit !== transaction.commit) {
+        return {
+          ok: false,
+          error: 'capture ref is missing and the recorded capture commit is no longer available',
+          ...transactionRecovery(id),
+        };
+      }
+      const recordedAncestry = await git(
+        ['rev-list', '--parents', '-n', '1', recordedCommit], { cwd: ws.path },
+      );
+      const recordedParents = recordedAncestry.code === 0
+        ? recordedAncestry.stdout.trim().split(/\s+/) : [];
+      if (recordedParents[0] !== recordedCommit || (transaction.head
+        ? recordedParents.length !== 2 || recordedParents[1] !== transaction.head
+        : recordedParents.length !== 1)) {
+        return {
+          ok: false,
+          error: 'recorded capture commit is not bound to the recorded HEAD',
+          ...transactionRecovery(id),
+        };
+      }
+      const restoredRef = await git(
+        ['update-ref', '--create-reflog', ref, recordedCommit, ''],
+        { cwd: ws.path, allowMutation: true },
+      );
+      refProbe = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: ws.path });
+      if (refProbe.code !== 0 || refProbe.stdout.trim() !== recordedCommit) {
+        return {
+          ok: false,
+          error: restoredRef.code === 0
+            ? 'capture ref could not be verified after restoration'
+            : 'capture ref was recreated concurrently with different content; refusing to replace it',
+          ...transactionRecovery(id),
+        };
+      }
+      reanchoredCaptureRef = restoredRef.code === 0;
+    }
+    if (refProbe.code !== 0 || !refProbe.stdout.trim()) {
+      const rollbackFailures = await rollbackQuarantines(quarantines);
+      if (!rollbackFailures.length) await removeDiscardTransaction(cwd, transaction);
+      else await updateDiscardTransaction(cwd, transaction, {
+        phase: 'rollback-pending', selections: quarantines.map(publicTransactionSelection),
+      });
+      return {
+        ok: rollbackFailures.length === 0,
+        rolledBack: rollbackFailures.length === 0,
+        rollbackFailures,
+        error: rollbackFailures.length ? 'capture was not durable and rollback remains incomplete' : null,
+        ...(rollbackFailures.length ? transactionRecovery(id) : {}),
+      };
+    }
+    const commit = refProbe.stdout.trim();
+    if (transaction.commit && transaction.commit !== commit) {
+      return { ok: false, error: 'capture ref no longer names the recorded commit', ...transactionRecovery(id) };
+    }
+    const ancestry = await git(['rev-list', '--parents', '-n', '1', commit], { cwd: ws.path });
+    const parents = ancestry.code === 0 ? ancestry.stdout.trim().split(/\s+/) : [];
+    if (parents[0] !== commit || (transaction.head
+      ? parents.length !== 2 || parents[1] !== transaction.head
+      : parents.length !== 1)) {
+      return { ok: false, error: 'capture commit is not bound to the recorded HEAD', ...transactionRecovery(id) };
+    }
+
+    let captured = await treeEntriesFor(ws.path, commit, quarantines.map((q) => q.relPath));
+    captured = await hydrateBlobEntries(ws.path, captured);
+    const capturedBySelection = entriesBySelection(captured, quarantines);
+    for (const q of quarantines) {
+      if (!q.payload) continue;
+      const expected = manifestFromCaptured(capturedBySelection.get(q.relPath) ?? []);
+      if (q.manifest.length && !sameManifest(q.manifest, expected)) {
+        return { ok: false, error: `capture ref does not match recorded quarantine '${q.relPath}'`, ...transactionRecovery(id) };
+      }
+      q.manifest = expected;
+    }
+    let headEntries = transaction.head
+      ? await treeEntriesFor(ws.path, transaction.head, quarantines.map((q) => q.relPath)) : [];
+    headEntries = await hydrateBlobEntries(ws.path, headEntries);
+    const finalized = await finalizeCapturedDiscard(cwd, {
+      ws, head: transaction.head, headEntries, quarantines, ref, commit, transaction,
+    });
+    return {
+      ...finalized,
+      ref,
+      commit,
+      reanchoredCaptureRef,
+      verified: finalized.retainedQuarantines.length === 0,
+      note: finalized.ok
+        ? `Interrupted discard was reconciled; the capture remains recoverable and no physical quarantine remains.${reanchoredCaptureRef ? ' Its missing capture ref was safely re-anchored.' : ''}`
+        : 'Recovery preserved every conflict and retained only physical quarantines that could not be proved safe to remove.',
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `discard recovery could not safely reconcile the recorded state: ${error?.message ?? error}`,
+      ...transactionRecovery(id),
+      note: 'The durable transaction and every unreconciled physical quarantine were retained.',
+    };
+  } finally {
+    for (const q of quarantines) await q.parentAnchor?.handle?.close().catch(() => {});
+  }
 }
 
 /**
@@ -1361,7 +1917,12 @@ async function activeLinuxHandlesUnder(paths) {
 export async function discard(cwd, paths, {
   dryRun = false,
   stamp: stampOverride = null,
+  // Internal deterministic-test seam. Production callers let the transaction UUID derive a fresh
+  // namespace; tests can deliberately reuse one base ref to prove capture allocation never
+  // overwrites an existing capture.
+  baseRef: baseRefOverride = null,
   onBeforeQuarantine = null,
+  onAfterQuarantine = null,
   onAfterCapture = null,
   // Internal deterministic-test seam. The normal action path keeps the default Git runner; tests
   // can fail one identity probe without mutating PATH for concurrent work.
@@ -1543,14 +2104,40 @@ export async function discard(cwd, paths, {
   }
 
   if (dryRun) {
+    const tracked = resolved.filter((r) => headEntries.some((entry) => isSelectedPath(entry.path, r.relPath)));
+    const untracked = resolved.filter((r) => !tracked.includes(r));
     return {
       ok: true,
       dryRun: true,
       worktree: ws.id,
       paths: rel,
-      tracked: resolved.filter((r) => headEntries.some((entry) => isSelectedPath(entry.path, r.relPath)))
-        .map((r) => r.input),
+      tracked: tracked.map((r) => r.input),
+      wouldRevert: tracked.map((r) => ({ path: r.input, relative: r.relPath, action: 'restore-from-HEAD' })),
+      wouldRemove: untracked.filter((r) => r.exists)
+        .map((r) => ({ path: r.input, relative: r.relPath, action: 'remove-after-verified-capture' })),
       note: 'nothing was captured or removed',
+    };
+  }
+
+  const pending = await listDiscardTransactionRecords(ws.path);
+  if (pending.errors.length) {
+    return {
+      ok: false,
+      error: 'existing discard transaction state could not be verified',
+      transactionErrors: pending.errors,
+      note: 'NOTHING WAS CAPTURED OR REMOVED. Inspect `holt recover-discard` before starting another discard.',
+    };
+  }
+  const sameWorktreePending = pending.transactions.find((record) =>
+    samePathSync(record.worktree.path, ws.path)
+    && record.selections.some((selection) => rel.some((candidate) =>
+      isSelectedPath(candidate, selection.relative) || isSelectedPath(selection.relative, candidate))));
+  if (sameWorktreePending) {
+    return {
+      ok: false,
+      error: `worktree '${ws.id}' already has an incomplete discard transaction`,
+      ...transactionRecovery(sameWorktreePending.id),
+      note: 'NOTHING WAS CAPTURED OR REMOVED. Resume the existing transaction first.',
     };
   }
 
@@ -1558,21 +2145,69 @@ export async function discard(cwd, paths, {
   // be made to collide on purpose, which is precisely why this path went untested; the same
   // seam evictCacheFiles() already uses for `now`.
   const stamp = stampOverride ?? new Date().toISOString().replace(/[:.]/g, '-');
-  const baseRef = `refs/holt/discard/${refSafeId(ws.id)}-${stamp}`;
+  const transactionId = newDiscardTransactionId(ws.id, stamp);
+  // The transaction UUID makes this ref name pre-declarable in the receipt and collision-free in
+  // practice. captureRef still enforces must-not-exist: probability is never used as authority.
+  const baseRef = baseRefOverride
+    ?? `refs/holt/discard/${refSafeId(ws.id)}-${stamp}-${transactionId.slice(-36)}`;
   const tmpIndex = scratchIndexPath(ws.path, 'discard');
   /** @type {string|null} */
   let stageRoot = null;
   /** @type {Awaited<ReturnType<typeof captureRef>>|null} */
   let allocated = null;
   /** @type {any[]} */
-  const quarantines = [];
+  const quarantines = resolved.map((r, index) => {
+    const suffix = createHash('sha256').update(`${transactionId}\0${r.abs}\0${index}`).digest('hex').slice(0, 16);
+    const visibleDir = r.exists
+      ? path.join(path.dirname(r.abs), `.holt-discard-${index}-${suffix}`) : null;
+    return {
+      ...r,
+      anchoredAbs: null,
+      dir: visibleDir,
+      visibleDir,
+      payload: visibleDir ? path.join(visibleDir, 'payload') : null,
+      visiblePayload: visibleDir ? path.join(visibleDir, 'payload') : null,
+      manifest: [],
+      emptyDirectories: [],
+      state: 'planned',
+      issue: null,
+    };
+  });
   /** @type {string|null} */
   let tree = null;
   /** @type {string|null} */
   let commit = null;
+  /** @type {any|null} */
+  let transaction = null;
 
   try {
-    for (const r of resolved) r.parentAnchor = await openDirectoryAnchor(r.parentIdentity);
+    for (const q of quarantines) {
+      q.parentAnchor = await openDirectoryAnchor(q.parentIdentity);
+      q.anchoredAbs = path.join(q.parentAnchor.path, path.basename(q.abs));
+      if (q.visibleDir) {
+        q.dir = path.join(q.parentAnchor.path, path.basename(q.visibleDir));
+        q.payload = path.join(q.dir, 'payload');
+      }
+    }
+    // Persist a stable pre-rename snapshot in the planned receipt. If the process dies between
+    // any two renames, recovery can distinguish "never moved/already restored" from "the only
+    // quarantine vanished" without guessing from pathname existence.
+    for (const q of quarantines) {
+      if (!q.exists) continue;
+      const emptyDirectories = [];
+      q.manifest = await filesystemManifest(q.anchoredAbs, q.relPath, [], emptyDirectories);
+      q.emptyDirectories = emptyDirectories;
+    }
+    transaction = await createDiscardTransaction(ws.path, {
+      id: transactionId,
+      phase: 'planned',
+      worktree: { id: ws.id, path: ws.path },
+      head,
+      baseRef,
+      ref: null,
+      commit: null,
+      selections: quarantines.map(publicTransactionSelection),
+    });
     if (onBeforeQuarantine) {
       await /** @type {(detail:any)=>any} */ (onBeforeQuarantine)({
         worktree: ws.id,
@@ -1583,28 +2218,42 @@ export async function discard(cwd, paths, {
     // Rename is the destructive action's linearisation point. The old bytes leave the user path
     // atomically and stay in a same-parent quarantine. A concurrent process recreating the
     // original path writes a NEW entry which Holt never removes or overwrites.
-    for (const r of resolved) {
-      const anchoredAbs = path.join(r.parentAnchor.path, path.basename(r.abs));
-      const q = { ...r, anchoredAbs, dir: null, payload: null, manifest: [], emptyDirectories: [] };
-      quarantines.push(q);
-      if (!r.exists) continue;
-      if (!(await sameDirectoryIdentity(r.parentIdentity))) {
-        throw new Error(`parent '${path.dirname(r.abs)}' changed immediately before quarantine`);
+    for (const q of quarantines) {
+      if (!q.exists) continue;
+      if (!(await sameDirectoryIdentity(q.parentIdentity))) {
+        throw new Error(`parent '${path.dirname(q.abs)}' changed immediately before quarantine`);
       }
-      q.dir = await fs.mkdtemp(path.join(r.parentAnchor.path, `.holt-discard-${path.basename(r.abs)}-`));
-      q.payload = path.join(q.dir, 'payload');
+      await fs.mkdir(q.dir, { mode: 0o700 });
       try {
         // Descriptor-anchored on Linux: neither operand can be redirected through a replacement
         // parent symlink between the identity check and this syscall.
-        await fs.rename(anchoredAbs, q.payload);
+        await fs.rename(q.anchoredAbs, q.payload);
         q.visiblePayload = await fs.realpath(q.payload).catch(() => q.payload);
+        q.visibleDir = path.dirname(q.visiblePayload);
+        q.state = 'quarantined';
       } catch (error) {
         await fs.rmdir(q.dir).catch(() => {});
         q.dir = null;
         q.payload = null;
-        throw new Error(`could not quarantine '${r.input}': ${error?.message ?? error}`);
+        throw new Error(`could not quarantine '${q.input}': ${error?.message ?? error}`);
       }
-      q.manifest = await filesystemManifest(q.payload, q.relPath, [], q.emptyDirectories);
+      const movedEmptyDirectories = [];
+      const movedManifest = await filesystemManifest(q.payload, q.relPath, [], movedEmptyDirectories);
+      if (!sameManifest(q.manifest, movedManifest)
+        || JSON.stringify(q.emptyDirectories) !== JSON.stringify(movedEmptyDirectories)) {
+        throw new Error(`'${q.input}' changed between the planned snapshot and quarantine`);
+      }
+      q.manifest = movedManifest;
+      q.emptyDirectories = movedEmptyDirectories;
+    }
+    transaction = await updateDiscardTransaction(ws.path, transaction, {
+      phase: 'quarantined', selections: quarantines.map(publicTransactionSelection),
+    });
+    if (onAfterQuarantine) {
+      await /** @type {(detail:any)=>any} */ (onAfterQuarantine)({
+        worktree: ws.id,
+        quarantines: quarantines.filter((q) => q.payload).map((q) => q.visiblePayload ?? q.payload),
+      });
     }
 
     // Capture from a private mirror, never by putting the quarantined bytes back at their old
@@ -1642,30 +2291,30 @@ export async function discard(cwd, paths, {
     if (head) await gitOk(['read-tree', head], { cwd: ws.path, env, allowMutation: true });
     else await gitOk(['read-tree', '--empty'], { cwd: ws.path, env, allowMutation: true });
 
-    // Remove every selected HEAD leaf one exact argv at a time. `update-index` file operands are
-    // literal after `--`; there is no shell and therefore no glob/pathspec expansion to turn a
-    // filename like `[x]` into its neighbours.
+    // Remove selected HEAD leaves in argv-byte-bounded batches. `--` keeps every operand literal;
+    // chunking changes process count, never selection semantics.
     const seeded = await indexEntriesFor(ws.path, rel, env);
-    for (const entry of seeded) {
-      await gitOk(['update-index', '--force-remove', '--', entry.path],
-        { cwd: ws.path, env, allowMutation: true });
+    if (seeded.length) {
+      const removedFromIndex = await gitPathBatched(
+        ['update-index', '--force-remove', '--'], seeded.map((entry) => entry.path),
+        { cwd: ws.path, env, allowMutation: true },
+      );
+      if (removedFromIndex.code !== 0) {
+        throw new Error(removedFromIndex.stderr.trim() || 'could not remove selected scratch-index entries');
+      }
     }
 
     let sourceLeaves = quarantines.flatMap((q) => q.manifest);
-    // A package tree can contain tens of thousands of leaves. Promise.all here launched one Git
-    // process per file at once; measured on a 200 MB npm install, a child eventually exited 0 with
-    // no oid and the whole documented recovery path rolled back after more than a minute. This is
-    // the same bounded fan-out rule used by the scanner: eight object writers keep throughput while
-    // preventing file-descriptor/process exhaustion and object-store lock storms.
-    sourceLeaves = await pmap(
-      sourceLeaves,
-      (leaf) => hashRawManifestLeaf(ws.path, activeStageRoot, leaf),
-      8,
-    );
+    sourceLeaves = await hashRawManifestLeaves(ws.path, activeStageRoot, sourceLeaves);
     sourceLeaves.sort((a, b) => a.path.localeCompare(b.path));
-    for (const leaf of sourceLeaves) {
-      await gitOk(['update-index', '--add', '--cacheinfo', `${leaf.mode},${leaf.oid},${leaf.path}`],
-        { cwd: ws.path, env, allowMutation: true });
+    if (sourceLeaves.length) {
+      // NUL framing preserves newlines and every other legal pathname byte. One update-index stream
+      // replaces one process per leaf while writing only the private scratch index.
+      const records = Buffer.from(sourceLeaves
+        .map((leaf) => `${leaf.mode} ${leaf.oid} 0\t${leaf.path}\0`).join(''), 'utf8');
+      await gitOk(['update-index', '-z', '--index-info'], {
+        cwd: ws.path, env, allowMutation: true, stdin: records,
+      });
     }
 
     const indexed = await indexEntriesFor(ws.path, rel, env);
@@ -1691,8 +2340,9 @@ export async function discard(cwd, paths, {
       throw new Error('capture commit does not contain the exact selected index tuples');
     }
     captured = await hydrateBlobEntries(ws.path, captured);
+    const sourceLeafByPath = new Map(sourceLeaves.map((leaf) => [leaf.path, leaf]));
     for (const entry of captured) {
-      const expected = sourceLeaves.find((leaf) => leaf.path === entry.path);
+      const expected = sourceLeafByPath.get(entry.path);
       const digest = Buffer.isBuffer(entry.content)
         ? createHash('sha256').update(entry.content).digest('hex') : null;
       if (!expected || digest !== expected.sha256) {
@@ -1722,22 +2372,10 @@ export async function discard(cwd, paths, {
     if (!allocated.ok) throw new Error(`capture ref could not be allocated (${allocated.reason}): ${allocated.gitError ?? ''}`.trim());
     const ref = allocated.ref;
     const capturedCommit = allocated.commit ?? captureCommit;
-
-    // Re-read the quarantined bytes after Git has finished. An already-open writer follows the
-    // inode through rename; if it changed A to B during capture, B remains in quarantine and this
-    // call refuses rather than deleting a version the ref does not hold.
-    for (const q of quarantines) {
-      if (!q.payload) continue;
-      const now = await filesystemManifest(q.payload, q.relPath);
-      if (!sameManifest(q.manifest, now)) {
-        return {
-          ok: false, ref, commit: capturedCommit,
-          error: `'${q.input}' changed through an open handle after capture`,
-          quarantine: q.visiblePayload ?? q.payload,
-          note: 'The ref holds the captured version and the later bytes remain in quarantine. Nothing was erased.',
-        };
-      }
-    }
+    transaction = await updateDiscardTransaction(ws.path, transaction, {
+      phase: 'captured', ref, commit: capturedCommit,
+      selections: quarantines.map(publicTransactionSelection),
+    });
 
     if (onAfterCapture) {
       try {
@@ -1750,103 +2388,15 @@ export async function discard(cwd, paths, {
           ok: false, ref, commit: capturedCommit,
           error: `post-capture hook failed: ${error?.message ?? error}`,
           quarantine: quarantines.filter((q) => q.payload).map((q) => q.visiblePayload ?? q.payload),
-          note: 'The capture and quarantine were retained; no replacement path was touched.',
+          ...transactionRecovery(transaction.id),
+          note: 'The capture and quarantine were retained as a resumable transaction; no replacement path was touched.',
         };
       }
     }
 
-    for (const q of quarantines) {
-      if (!(await sameDirectoryIdentity(q.parentIdentity))) {
-        q.visiblePayload = await fs.realpath(q.payload).catch(() => q.visiblePayload ?? q.payload);
-        return {
-          ok: false, ref, commit: capturedCommit,
-          error: `parent directory identity changed for '${q.input}' after capture`,
-          quarantine: q.visiblePayload ?? q.payload,
-          note: 'Holt will not follow a replaced parent or symlink. The capture/quarantine were retained.',
-        };
-      }
-    }
-
-    const removed = [];
-    const reverted = [];
-    for (const q of quarantines) {
-      const entries = headEntries.filter((entry) => isSelectedPath(entry.path, q.relPath));
-      if (entries.length) {
-        try {
-          await restoreHeadSelection(q.anchoredAbs, q.relPath, entries);
-        } catch (error) {
-          return {
-            ok: false, ref, commit: capturedCommit,
-            error: `captured, but could not restore '${q.relPath}' without overwriting concurrent work: ${error?.message ?? error}`,
-            discarded: removed,
-            reverted,
-            quarantine: quarantines.filter((held) => held.payload)
-              .map((held) => held.visiblePayload ?? held.payload),
-            note: 'The discarded version is safe in the ref/quarantine. No concurrent replacement was erased.',
-          };
-        }
-        reverted.push(q.input);
-      } else {
-        // The original untracked entry already left this path at the atomic rename. If another
-        // process recreated the name, that is new work and is deliberately left alone.
-        if (q.exists) removed.push(q.input);
-      }
-    }
-
-    // A final exact re-read catches open-handle writes that landed while HEAD was being restored.
-    // On mismatch the physical quarantine is retained even though the earlier version is in Git.
-    for (const q of quarantines) {
-      if (!q.payload) continue;
-      const now = await filesystemManifest(q.payload, q.relPath);
-      if (!sameManifest(q.manifest, now)) {
-        return {
-          ok: false, ref, commit: capturedCommit,
-          error: `'${q.input}' changed in quarantine before cleanup`,
-          quarantine: q.visiblePayload ?? q.payload,
-          note: 'The later bytes remain on disk; Holt refused physical cleanup.',
-        };
-      }
-    }
-
-    const activeHandles = await activeLinuxHandlesUnder(
-      quarantines.filter((q) => q.payload).map((q) => q.payload),
-    );
-    if (activeHandles.length) {
-      return {
-        ok: false, ref, commit: capturedCommit,
-        error: 'physical quarantine is still held by an active process',
-        activeHandles,
-        quarantine: quarantines.filter((q) => q.payload).map((q) => q.visiblePayload ?? q.payload),
-        note: 'The capture is durable, but Holt retained the quarantine so a writer with an open '
-          + 'descriptor cannot add bytes after the last manifest check and lose them during cleanup.',
-      };
-    }
-
-    const refCheck = await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], { cwd: ws.path });
-    if (refCheck.code !== 0 || refCheck.stdout.trim() !== capturedCommit) {
-      return {
-        ok: false, ref, commit: capturedCommit,
-        error: 'capture ref changed before quarantined bytes could be removed',
-        quarantine: quarantines.filter((q) => q.payload).map((q) => q.visiblePayload ?? q.payload),
-        note: 'Physical quarantine was retained.',
-      };
-    }
-
-    for (const q of quarantines) {
-      if (!q.payload) continue;
-      try {
-        await fs.rm(q.payload, { recursive: true, force: false });
-        await fs.rmdir(q.dir);
-      } catch (error) {
-        return {
-          ok: false, ref, commit: capturedCommit,
-          error: `capture is durable, but physical quarantine cleanup failed: ${error?.message ?? error}`,
-          quarantine: q.dir,
-          discarded: removed,
-          reverted,
-        };
-      }
-    }
+    const finalized = await finalizeCapturedDiscard(cwd, {
+      ws, head, headEntries, quarantines, ref, commit: capturedCommit, transaction,
+    });
 
     const journalFailures = [];
     await journal(cwd, {
@@ -1860,13 +2410,11 @@ export async function discard(cwd, paths, {
 
     const emptyDirectoriesOmitted = quarantines.flatMap((q) => q.emptyDirectories ?? []);
     return withJournalWarning({
-      ok: true,
+      ...finalized,
       worktree: ws.id,
       ref,
       commit: capturedCommit,
-      discarded: removed,
-      reverted,
-      verified: true,
+      verified: finalized.retainedQuarantines.length === 0,
       restore: restoreArgv.map(shellQuote).join(' '),
       restoreArgv,
       reapplyDelta: diffArgv
@@ -1874,15 +2422,38 @@ export async function discard(cwd, paths, {
       reapplyDeltaArgv: diffArgv ? { diff: diffArgv, apply: ['git', 'apply'] } : null,
       inspect: `git show ${capturedCommit} --stat`,
       emptyDirectoriesOmitted,
-      note: emptyDirectoriesOmitted.length
+      error: finalized.ok ? null
+        : finalized.conflicts.length
+          ? `captured, but ${finalized.conflicts.length} path conflict(s) were preserved without overwriting concurrent work: ${finalized.conflicts[0].reason}`
+          : `captured, but ${finalized.retainedQuarantines.length} physical quarantine(s) require recovery: ${finalized.retainedDetails[0]?.reason ?? finalized.transactionError ?? 'reconciliation incomplete'}`,
+      note: finalized.retainedQuarantines.length
+        ? 'The capture is durable. Only changed, active, or unverifiable physical quarantines were retained; resume with recoverArgv.'
+        : finalized.conflicts.length
+          ? 'The capture is durable and all physical quarantines were reconciled. Concurrent destination work was preserved untouched.'
+          : emptyDirectoriesOmitted.length
         ? `file content was captured and verified before removal; ${emptyDirectoriesOmitted.length} empty director${emptyDirectoriesOmitted.length === 1 ? 'y was' : 'ies were'} removed but cannot be represented or recreated by a Git ref.`
-        : reverted.length
+        : finalized.reverted.length
         ? 'tracked path(s) were RESTORED from HEAD rather than deleted — the edits you threw away '
           + 'are captured in the ref above and recoverable. Untracked path(s), if any, were removed.'
         : 'content captured and verified before removal; it is recoverable from the ref above.',
     }, journalFailures);
   } catch (error) {
-    const rollbackFailures = allocated ? [] : await rollbackQuarantines(quarantines);
+    const rollbackFailures = allocated || !transaction ? [] : await rollbackQuarantines(quarantines);
+    let transactionError = null;
+    if (transaction) {
+      try {
+        if (allocated || rollbackFailures.length) {
+          transaction = await updateDiscardTransaction(ws.path, transaction, {
+            phase: allocated ? 'pending' : 'rollback-pending',
+            ref: allocated?.ok ? allocated.ref : transaction.ref,
+            commit: allocated?.ok ? (allocated.commit ?? commit) : transaction.commit,
+            selections: quarantines.map(publicTransactionSelection),
+          });
+        } else {
+          await removeDiscardTransaction(ws.path, transaction);
+        }
+      } catch (receiptError) { transactionError = receiptError?.message ?? String(receiptError); }
+    }
     return {
       ok: false,
       ref: allocated?.ok ? allocated.ref : null,
@@ -1890,8 +2461,10 @@ export async function discard(cwd, paths, {
       error: error?.message ?? String(error),
       rollbackFailures,
       quarantine: rollbackFailures.map((failure) => failure.quarantine),
+      transactionError,
+      ...(allocated || rollbackFailures.length || transactionError ? transactionRecovery(transaction?.id ?? transactionId) : {}),
       note: allocated
-        ? 'The capture ref and physical quarantine were retained; no concurrent replacement was erased.'
+        ? 'The capture ref and physical quarantine were retained as a resumable transaction; no concurrent replacement was erased.'
         : (rollbackFailures.length
           ? 'Capture failed and some paths could not be rolled back safely; their quarantine paths are reported.'
           : 'Capture failed before a durable ref was allocated; every quarantined path was restored.'),
@@ -1899,7 +2472,7 @@ export async function discard(cwd, paths, {
   } finally {
     await fs.rm(tmpIndex, { force: true }).catch(() => {});
     if (stageRoot) await fs.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
-    for (const r of resolved) await r.parentAnchor?.handle?.close().catch(() => {});
+    for (const q of quarantines) await q.parentAnchor?.handle?.close().catch(() => {});
   }
 }
 
@@ -1909,7 +2482,14 @@ async function findOwningWorktree(abs, disc) {
   let best = null;
   for (const w of disc.workstreams) {
     if (!w.path) continue;
-    if (!(await underOrEqualAsync(abs, w.path))) continue;
+    // Ownership is determined by the canonical PARENT plus the verbatim leaf. Canonicalising the
+    // full path follows a symlink leaf, so `worktree/link -> /outside` was misclassified as outside
+    // before discard ever reached its link-aware capture path. Parent symlinks still resolve and
+    // escape here, while the leaf itself remains an entry Holt can quarantine without touching its
+    // target.
+    let relative;
+    try { relative = await relativeLinkAwareAsync(w.path, abs); } catch { continue; }
+    if (relative === '..' || relative.startsWith('../') || path.posix.isAbsolute(relative)) continue;
     if (!best || w.path.length > best.path.length) best = w;
   }
   return best;
