@@ -927,7 +927,7 @@ async function dispatch(name, args, cwd, limit) {
         total: rows.length,
         returned: shownRows.length,
         truncated: rows.length > shownRows.length,
-        note: 'uncommittedOnly includes Git-ignored bytes. generatedResidue identifies a source-settled worktree whose only observed bytes are manifest-backed generated paths; it is still not disposable.',
+        note: 'Uncommitted source work exists ONLY as uncommitted changes. uncommittedOnly also counts Git-ignored bytes; generatedResidue identifies a source-settled worktree whose only observed bytes are manifest-backed generated paths, and it is still not disposable.',
         workstreams: shownRows.map(compactUnique),
         generatedResidue: generatedResidue.length ? {
           total: generatedResidue.length,
