@@ -560,7 +560,7 @@ Each quoted evidence name below is an exact string present in the named test/har
 #### `pricing-and-public-claims`
 
 - User surfaces: `site:pricing`, `readme:claims`
-- Exact executable evidence: `test/unit/pricing-cta.test.mjs` — “free/core launch exposes one honest install path and no paid-tier checkout”; `test/unit/published-numbers.test.mjs` — “published numbers: test count is synchronized or explicitly withheld everywhere”; `test/unit/site-layout.test.mjs` — “site: anything legitimately wider than a phone scrolls inside its OWN container”
+- Exact executable evidence: `test/unit/pricing-cta.test.mjs` — “free/core launch exposes a clear GitHub entry point and no paid-tier checkout”; `test/unit/published-numbers.test.mjs` — “published numbers: test count is synchronized or explicitly withheld everywhere”; `test/unit/site-layout.test.mjs` — “site: anything legitimately wider than a phone scrolls inside its OWN container”
 - Independent oracle: Static surfaces parsed against the free-only CTA, executable entitlements, and measured-number gates.
 - Remaining unproven gap: Copy/CTA consistency does not prove buyer comprehension or adoption; paid checkout is intentionally outside this launch.
 - Mandatory runner evidence: `complete-test-corpus`, `release-bodies`
