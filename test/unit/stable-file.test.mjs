@@ -48,6 +48,32 @@ test('stable file: hard-linked state and non-private directories are tightened o
   assert.equal(result.reason, 'multiple-hardlinks');
 });
 
+test('stable file: transient replacement contention is retried without deleting existing state', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-stable-file-retry-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const privateDir = path.join(root, 'state');
+  const leaf = path.join(privateDir, 'cache.json');
+  await writePrivateFileAtomic(leaf, 'old-state');
+
+  const actualRename = fs.rename;
+  let attempts = 0;
+  t.mock.method(fs, 'rename', async (...args) => {
+    attempts += 1;
+    if (attempts < 3) {
+      const error = new Error('simulated Windows sharing violation');
+      error.code = attempts === 1 ? 'EPERM' : 'EACCES';
+      throw error;
+    }
+    return actualRename(...args);
+  });
+
+  await writePrivateFileAtomic(leaf, 'new-state');
+  assert.equal(attempts, 3, 'transient replacement errors must be retried before publication fails');
+  assert.equal(await fs.readFile(leaf, 'utf8'), 'new-state');
+  assert.deepEqual(await fs.readdir(privateDir), ['cache.json'],
+    'failed replacement attempts must not leave a private temporary file behind');
+});
+
 test('stable file: a hostile FIFO is classified without waiting for a writer', async (t) => {
   if (process.platform === 'win32') return t.skip('Windows has no mkfifo-compatible filesystem node');
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'holt-stable-fifo-'));
