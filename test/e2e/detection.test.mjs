@@ -15,6 +15,7 @@ import { standardFixture, emptyFixture, newRepo, backdateWorktreeCreation } from
 import { discover } from '../../src/discover.mjs';
 import { scan } from '../../src/scan.mjs';
 import { analyze, contextDigest, duplicates, landingPlan } from '../../src/analyze.mjs';
+import { renderSummary } from '../../src/render.mjs';
 
 async function inspectFixture(fx, opts = {}) {
   const disc = await discover(fx.root, opts);
@@ -74,6 +75,57 @@ test('P0 PRESENCE: committed unique work is detected and NOT confused with at-ri
   assert.equal(row.uncommittedOnlyCount, 0, 'committed work must not be reported as uncommitted-only');
   assert.ok(row.uniqueSymbols.includes(truth.committedOnlySymbol),
     `expected ${truth.committedOnlySymbol}, got: ${row.uniqueSymbols.join(', ')}`);
+});
+
+test('P0 CLARITY: a settled source tree with a local dependency install is separate from source work at risk', async (t) => {
+  const fx = await newRepo('generated-residue');
+  t.after(() => fx.cleanup());
+  await fx.write('.gitignore', 'node_modules/\n.env.local\n');
+  await fx.write('package.json', '{"name":"fixture","private":true}\n');
+  await fx.commit('declare the JavaScript project and its ignored local state');
+
+  const installOnly = await fx.worktree('install-only');
+  await fx.write('node_modules/example/index.js', 'module.exports = 1;\n', installOnly);
+
+  const mixed = await fx.worktree('mixed-ignored');
+  await fx.write('node_modules/example/index.js', 'module.exports = 1;\n', mixed);
+  await fx.write('.env.local', 'TOKEN=the-only-copy\n', mixed);
+
+  const { report } = await inspectFixture(fx);
+  const installRow = byId(report.unique, 'install-only');
+  const mixedRow = byId(report.unique, 'mixed-ignored');
+
+  assert.equal(installRow.sourceSettledGeneratedOnly, true,
+    `an otherwise-settled checkout with a manifest-backed install needs its own category: ${JSON.stringify(installRow)}`);
+  assert.deepEqual(installRow.generatedIgnoredPaths, ['node_modules/']);
+  assert.deepEqual(installRow.otherIgnoredPaths, []);
+  assert.equal(report.safe.find((row) => row.id === 'install-only')?.safe, false,
+    'a generated directory name plus a manifest is never deletion authority');
+
+  assert.equal(mixedRow.sourceSettledGeneratedOnly, false,
+    'a local secret beside the install must stay in the ordinary at-risk set');
+  assert.deepEqual(mixedRow.otherIgnoredPaths, ['.env.local']);
+
+  const rendered = renderSummary(report);
+  assert.match(rendered, /GENERATED RESIDUE/,
+    'the default view must name the user-facing category instead of calling an install source work');
+  assert.match(rendered, /install-only[\s\S]*node_modules\//);
+  assert.match(rendered, /does not make the worktree disposable/i);
+  assert.match(rendered, /mixed-ignored/,
+    'the worktree with a secret must remain visible in the ordinary at-risk section');
+
+  const noManifest = await newRepo('generated-residue-no-manifest');
+  t.after(() => noManifest.cleanup());
+  await noManifest.write('.gitignore', 'node_modules/\n');
+  await noManifest.commit('ignore a directory without declaring how to recreate it');
+  const unexplained = await noManifest.worktree('unexplained-node-modules');
+  await noManifest.write('node_modules/example/index.js', 'module.exports = 1;\n', unexplained);
+
+  const { report: noManifestReport } = await inspectFixture(noManifest);
+  const unexplainedRow = byId(noManifestReport.unique, 'unexplained-node-modules');
+  assert.equal(unexplainedRow.sourceSettledGeneratedOnly, false,
+    'a folder name without its recreating manifest must remain ordinary ignored content');
+  assert.deepEqual(unexplainedRow.otherIgnoredPaths, ['node_modules/']);
 });
 
 test('P0 AUTHORITY: same-named symbols at different paths remain distinct work instances', async (t) => {

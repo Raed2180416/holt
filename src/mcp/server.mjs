@@ -792,6 +792,9 @@ function compactUnique(u) {
     verdict: u.verdict,
     uniqueSymbols: u.uniqueSymbolCount,
     uncommittedOnly: u.uncommittedOnlyCount,
+    sourceSettledGeneratedOnly: u.sourceSettledGeneratedOnly || undefined,
+    generatedIgnoredPaths: u.generatedIgnoredPaths?.length ? u.generatedIgnoredPaths : undefined,
+    otherIgnoredPaths: u.otherIgnoredPaths?.length ? u.otherIgnoredPaths : undefined,
     redundantWith: u.redundantWith,
     redundantWithDurable: u.redundantWithDurable,
     examples: [...u.byLayer.uncommitted, ...u.byLayer.untracked, ...u.byLayer.committed]
@@ -867,6 +870,10 @@ async function dispatch(name, args, cwd, limit) {
     case 'holt_status': {
       const { report, _ageMs } = await getReport(cwd);
       const r = report.plan.reviewReduction;
+      const generatedResidue = report.unique.filter((u) => u.sourceSettledGeneratedOnly);
+      const sourceWorkAtRisk = report.unique.filter((u) =>
+        u.uncommittedOnlyCount > 0 && !u.sourceSettledGeneratedOnly,
+      );
       return {
         repo: report.root,
         base: `${report.base.ref}@${report.base.oid.slice(0, 8)} (${report.base.how})`,
@@ -874,6 +881,12 @@ async function dispatch(name, args, cwd, limit) {
         workstreams: report.counts.scanned,
         families: report.counts.families,
         atRisk: report.counts.atRisk,
+        sourceWorkAtRisk: sourceWorkAtRisk.length,
+        generatedResidue: generatedResidue.length ? {
+          total: generatedResidue.length,
+          note: 'only manifest-backed generated paths were found; this is not proof the worktree is disposable',
+          workstreams: generatedResidue.slice(0, 3).map(compactUnique),
+        } : undefined,
         collisions: report.counts.collisions,
         duplicatePairs: report.counts.duplicatePairs,
         disposable: report.counts.safeToDelete,
@@ -891,7 +904,7 @@ async function dispatch(name, args, cwd, limit) {
         // stash commit holding the only copy of real content. Repository-level and separately
         // named, so it can never be mistaken for a workstream the agent could delete or land.
         stashAtRisk: report.stash?.atRisk.length || undefined,
-        topRisks: report.unique.filter((u) => u.uncommittedOnlyCount > 0).slice(0, 3).map(compactUnique),
+        topRisks: sourceWorkAtRisk.slice(0, 3).map(compactUnique),
         skipped: report.skipped.length
           ? { count: report.skipped.length, note: 'NOT counted as safe or clean', sample: report.skipped.slice(0, 3) }
           : undefined,
@@ -902,6 +915,7 @@ async function dispatch(name, args, cwd, limit) {
     case 'holt_at_risk': {
       const { report } = await getReport(cwd);
       const rows = report.unique.filter((u) => u.uniqueSymbolCount > 0 || u.uncommittedOnlyCount > 0);
+      const generatedResidue = rows.filter((u) => u.sourceSettledGeneratedOnly);
       // A STASH IS NOT A WORKSTREAM, so it is returned beside `workstreams` and never inside it.
       // An agent handed a synthetic row would try to `holt_check_workstream` it, land it, or
       // delete it — none of which exist for a stash entry. The action that makes it safe is
@@ -913,8 +927,15 @@ async function dispatch(name, args, cwd, limit) {
         total: rows.length,
         returned: shownRows.length,
         truncated: rows.length > shownRows.length,
-        note: 'uncommittedOnly > 0 means the work exists ONLY as uncommitted changes — no git command can relate it',
+        note: 'Uncommitted source work exists ONLY as uncommitted changes. uncommittedOnly also counts Git-ignored bytes; generatedResidue identifies a source-settled worktree whose only observed bytes are manifest-backed generated paths, and it is still not disposable.',
         workstreams: shownRows.map(compactUnique),
+        generatedResidue: generatedResidue.length ? {
+          total: generatedResidue.length,
+          returned: Math.min(generatedResidue.length, limit),
+          truncated: generatedResidue.length > limit,
+          note: 'these paths look regenerable only because this worktree contains the corresponding manifest; local patches or data remain possible',
+          workstreams: generatedResidue.slice(0, limit).map(compactUnique),
+        } : undefined,
         stash: stash.length ? {
           total: stash.length,
           note: 'these entries hold content NO ref holds. No worktree shows this work, so deleting '
