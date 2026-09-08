@@ -52,6 +52,7 @@ git -C /path/to/worktree ls-files --others --ignored --exclude-standard</pre></d
     <h2>Where Holt helps, and where it stops.</h2>
     <p>Holt includes ignored paths in destructive analysis and can show when a worktree has content that needs review. Unresolved ignored bytes keep that worktree out of the disposable set. Holt does not deduplicate dependencies or claim semantic understanding of every ignored file.</p>
     <p>That boundary is intentional. Holt can help you establish that a source checkout is settled. Your package manager is the right tool to reclaim its own caches or unreferenced store entries. The first check on the <a href="./#install">Holt homepage</a> is strict and read-only, so it is a safe way to understand the worktree side before you choose a package-manager action.</p>
+    <p>Want to see that boundary before pointing a new tool at your own repository? The <a href="https://github.com/Raed2180416/holt-first-look">disposable first-look fixture</a> creates one modified file, one untracked note, and one ignored file beside an empty sibling worktree, then runs the same check without moving or deleting anything.</p>
 
     <h2>A simple order of operations.</h2>
     <ol role="list">
