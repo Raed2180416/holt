@@ -1,0 +1,21 @@
+{
+  "name": "holt-workspace",
+  "displayName": "Holt Workspace Recovery",
+  "description": "Keep private recoverable editor versions and protect workspaces while they are open.",
+  "publisher": "contrare",
+  "version": "0.4.7",
+  "engines": { "vscode": "^1.100.0" },
+  "categories": ["Other"],
+  "activationEvents": ["*"],
+  "main": "./extension.cjs",
+  "extensionKind": ["workspace"],
+  "capabilities": {
+    "virtualWorkspaces": { "supported": false },
+    "untrustedWorkspaces": { "supported": false }
+  },
+  "contributes": { "commands": [
+    { "command": "holt.sessions.showStatus", "title": "Holt: Show Workspace Recovery Status" }
+  ] },
+  "license": "SEE LICENSE IN LICENSE-NOTICE.md",
+  "repository": { "type": "git", "url": "https://github.com/Raed2180416/holt.git" }
+}

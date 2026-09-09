@@ -24,9 +24,9 @@ roadmap item, draft contract or unverified release process into a current assura
 
 | # | Question | Answer |
 |---|---|---|
-| 1 | Does the product transmit customer data anywhere? | **Repository analysis, actions, journalling and licence verification do not.** The package has two in-process network paths: a confirmed pinned `universal-ctags` download, and an explicit Enterprise `managed-policy sync` to administrator-supplied credential-free TUF bases. Neither adds repository content or identity. Setup also has two confirmed child-process paths: a package manager and exact-versioned `go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6`. All four are declared in `holt audit --json`; see `SUPPLY-CHAIN.md` for request shapes and boundaries. |
+| 1 | Does the product transmit customer data anywhere? | **Ordinary repository analysis, journalling and licence verification send no repository data.** The package has two in-process network paths: a confirmed pinned `universal-ctags` download and explicit Enterprise `managed-policy sync`; neither adds repository content or identity. Setup has two confirmed child-process paths: a package manager and exact-versioned `go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6`. Explicit `holt run -- <command>` and `holt verify --run <command>` execute the requested program, whose network behaviour is outside Holt's control. All are disclosed in `holt audit --json`. |
 | 2 | Does it phone home for licensing? | **No.** An issued entitlement is checked offline with Ed25519 against a compiled-in public key. Normal runtime verification works without egress. Customer-controlled offline issuance/renewal and a signed removable-media managed-policy update workflow are not shipped yet; expiry substitutes for live revocation. |
-| 3 | Does it require credentials or cloud access? | **No.** No account, no OAuth, no API key. The only secret it can hold is a licence token, stored at `$XDG_CONFIG_HOME/holt/license`, mode `0600`, opened `O_NOFOLLOW`. |
+| 3 | Does it require credentials or cloud access? | **No cloud account, OAuth or API key is required.** A licence token, when used, is stored privately at `$XDG_CONFIG_HOME/holt/license`. Automatic sessions also use private local release capabilities. Editor recovery may contain sensitive unsaved text; it remains in private Git administration storage and is never added to branches, MCP responses or telemetry automatically. |
 | 4 | Can it modify or destroy source code? | **Only through explicit acting commands/options and installed host hooks.** Core analysis cannot reach destructive Git verbs; scan plumbing may create an unreferenced merge-tree object unless `--strict-read-only` is used. `clean --apply` is mutating but non-destructive: it atomically moves a complete registered worktree into locked local quarantine, retains the branch and returns restore argv. `rescue`, `discard`, `branches --apply`, integration and setup state their different writes. The mutation suite deliberately weakens the boundary and requires the relevant tests to fail. |
 | 5 | What is the blast radius if the vendor is compromised? | The distributed package and any future commercial contact/licence systems. There is no hosted analysis service or self-update channel. `holt audit --require-signature` checks the signed installed package after installation. For v0.3.1, GitHub immutable-release verification is available, but no discoverable SLSA provenance exists. |
 
@@ -138,6 +138,10 @@ Reviewers find these anyway. Finding them here first is cheaper for everyone.
    `go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6`. Both print and require confirmation,
    and both appear in `statement.indirectNetwork`. No analysis, scan, hook, MCP or Git action path
    requests privilege elevation.
+   Explicit `holt run -- <command>` and `holt verify --run <command>` also appear in that inventory:
+   their requested programs can use the network. The optional `python3` / `python` supervisor
+   holds native OS authority through `ctypes`; it observes process lifetime and does not sandbox
+   the launched command. The editor extension uses a private local pipe, with no network listener.
 9. **Configured release controls are live state, not an artifact property.** The 2026-08-13 API
    snapshot reports immutable releases enabled, a `release` environment restricted to `v*` tags,
    administrator bypass disabled, no required-reviewer rule, no repository-scoped signing-key

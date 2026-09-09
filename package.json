@@ -9,7 +9,8 @@
   },
   "exports": {
     ".": "./src/index.mjs",
-    "./mcp": "./src/mcp/server.mjs"
+    "./mcp": "./src/mcp/server.mjs",
+    "./sessions": "./src/session-host.mjs"
   },
   "files": [
     "bin",

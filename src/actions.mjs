@@ -36,7 +36,7 @@ import { appendEvent } from './journal.mjs';
 import { scan } from './scan.mjs';
 import { analyze, uniqueWork, safeToDelete, contentAtRisk } from './analyze.mjs';
 import { readStableRegularFile } from './stable-file.mjs';
-import { isOwnershipGitLock, withUnclaimedWorktreeOwnership } from './ownership.mjs';
+import { isOwnershipGitLock, withUnclaimedWorktreeOwnership, inspectWorktreeOwnership } from './ownership.mjs';
 import {
   createDiscardTransaction, updateDiscardTransaction, readDiscardTransaction,
   listDiscardTransactionRecords, removeDiscardTransaction, newDiscardTransactionId,
@@ -3225,6 +3225,7 @@ export async function restoreQuarantine(cwd, target, opts = {}) {
     return { ok: false, failedCount: 1, id: row.id, error: `restore destination could not be verified: ${error?.message ?? error}`, note: 'nothing was moved or unlocked' };
   }
 
+  const ownershipGuard = await withUnclaimedWorktreeOwnership(actualPath, async () => {
   const moveArgv = ['git', 'worktree', 'move', '-f', '-f', actualPath, originalPath];
   const moved = await git(moveArgv.slice(1), { cwd, allowMutation: true })
     .catch((error) => ({ code: 1, stderr: String(error?.message ?? error) }));
@@ -3321,6 +3322,13 @@ export async function restoreQuarantine(cwd, target, opts = {}) {
       ? `The worktree is restored. WARNING: ${markerWarning}`
       : 'The worktree is restored; no files or branches were deleted.',
   }, journalFailures);
+  });
+  if (!ownershipGuard.ok && ownershipGuard.ownership) return {
+    ...ownershipGuard, blocked: true, failedCount: 1, id: row.id,
+    error: 'A session still uses this quarantined workspace; finish or recover that session before moving it.',
+    note: 'Nothing was moved or unlocked.',
+  };
+  return ownershipGuard;
 }
 
 /* ========================================================== QUARANTINE PURGE ==== */
@@ -3488,6 +3496,12 @@ export async function purgeQuarantine(cwd, target, {
   }
 
   const plannedRef = `refs/holt/purge/${createHash('sha256').update(String(row.id)).digest('hex').slice(0, 16)}-${head.slice(0, 16)}`;
+  const ownership = await inspectWorktreeOwnership(actualPath);
+  if (ownership.state !== 'unclaimed') return {
+    ok: false, dryRun: !apply, blocked: true, failedCount: 1, id: row.id, ownership,
+    error: 'A session still uses this quarantined workspace; finish or recover it before purging.',
+    note: 'Nothing was unlocked or removed.',
+  };
   if (!apply) {
     return {
       ok: true,
@@ -3509,6 +3523,7 @@ export async function purgeQuarantine(cwd, target, {
     };
   }
 
+  const ownershipGuard = await withUnclaimedWorktreeOwnership(actualPath, async () => {
   // Rebind immediately before the irreversible half; a path swapped since the checks above is
   // not the object the user authorised.
   let finalBinding;
@@ -3599,4 +3614,11 @@ export async function purgeQuarantine(cwd, target, {
     actions: [{ id: row.id, path: actualPath, action: 'purged', reason: 'clean quarantine removed without force after exact HEAD anchoring' }],
     note: `The clean quarantined checkout was removed and its exact HEAD remains reachable at ${anchored.ref}; no branch was deleted.`,
   }, journalFailures);
+  });
+  if (!ownershipGuard.ok && ownershipGuard.ownership) return {
+    ...ownershipGuard, blocked: true, failedCount: 1, id: row.id,
+    error: 'Session ownership changed before purge; the quarantine is retained.',
+    note: 'Nothing was unlocked or removed.',
+  };
+  return ownershipGuard;
 }

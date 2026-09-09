@@ -254,6 +254,8 @@ test('DOC SMOKE: every `holt ...` command shown in the docs is a real command wi
           continue;
         }
         for (const tok of rest) {
+          // parseArgs forwards the command tail verbatim after the standard separator.
+          if (tok === '--' && sub === 'run') break;
           if (tok.startsWith('--') && !flags.has(tok)) {
             failures.push(`${rel}:${line}: \`${invocation}\` — flag '${tok}' is not recognised by parseArgs`);
           } else if (/^-[a-zA-Z]$/.test(tok) && !flags.has(tok)) {

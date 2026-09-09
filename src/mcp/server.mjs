@@ -164,28 +164,25 @@ const MAX_LIMIT = 100;
 const DEFAULT_DUPLICATE_LIMIT = 25;
 
 const REPO_ARG = {
-  repo: { type: 'string', maxLength: 4096, description: 'Path in this repo; default cwd.' },
+  repo: { type: 'string', maxLength: 4096, description: 'Repo or cwd.' },
 };
 
 const TOOLS = [
   {
     name: 'holt_landing_order',
-    title: 'What order to land workstreams in',
     description:
-      'Orders independent workstreams in parallel and entangled ones sequentially, naming later merges to watch. Heuristic, not a safety certificate.',
+      "Heuristic landing order with parallel groups and later merges to watch; not a safety certificate.",
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
     name: 'holt_branches',
-    title: 'The branch graveyard, classified by content',
     description:
-      'Classifies unchecked-out branches as landed, content-landed after rewritten history, unlanded, or unknown. Never auto-deletes.',
+      "Classify unchecked-out branches by content; never auto-delete.",
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
     name: 'holt_partition',
-    title: 'Pre-flight split for N agents',
-    description: 'Structural map; supply task paths/components. Without anchors this is not a task plan.',
+    description: "Structural map. Task paths/components are required for a task-specific split.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -201,16 +198,14 @@ const TOOLS = [
   },
   {
     name: 'holt_status',
-    title: 'Parallel work status',
     description:
-      'Start here: summarizes workstreams, unique work, collisions, disposable copies, and the reduced review queue.',
+      "Start here: workstreams, unique work, collisions, disposable copies and review queue.",
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
   {
     name: 'holt_at_risk',
-    title: 'Work that exists nowhere else',
     description:
-      'Ranks worktrees and stashes holding content no durable ref holds. Uncommitted-only work ranks highest because deletion loses it silently.',
+      "Rank worktrees/stashes holding content no durable ref holds; uncommitted work first.",
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max rows (default 10, at most 100).' } },
@@ -219,9 +214,8 @@ const TOOLS = [
   },
   {
     name: 'holt_check_workstream',
-    title: 'Is this workstream safe to delete?',
     description:
-      'Fresh pre-removal verdict: safe, holds-work, or unknown with reasons. Failed scans are unknown, never safe.',
+      "Fresh deletion verdict: safe, holds-work or unknown. Failed scans are never safe.",
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, id: { type: 'string', maxLength: 512, description: 'Workstream id (directory basename).' } },
@@ -231,9 +225,8 @@ const TOOLS = [
   },
   {
     name: 'holt_collisions',
-    title: 'Workstreams that will fight',
     description:
-      'Pairs contesting content before landing. Proven means merge-tree conflicted; predicted covers uncommitted evidence Git cannot merge-test.',
+      "Contested pairs. Proven = merge-tree conflict; predicted = uncommitted overlap.",
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max pairs (default 10, at most 100).' } },
@@ -242,9 +235,8 @@ const TOOLS = [
   },
   {
     name: 'holt_hotspots',
-    title: 'Shared-file hotspots before partitioning',
     description:
-      'Shared-file overlap across workstreams before spawning or partitioning. Advisory, not a merge-conflict certificate.',
+      "Shared-file overlap before partitioning; advisory, not proof of conflict.",
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max hotspots (default 12, at most 100).' } },
@@ -253,9 +245,8 @@ const TOOLS = [
   },
   {
     name: 'holt_duplicates',
-    title: 'Workstreams that built the same thing',
     description:
-      'Finds overlapping work before assignment or landing. Distinguishes cross-dispatch waste from expected same-family fan-out; deep adds clones.',
+      "Overlap across dispatches, separated from expected same-family work; deep adds clones.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -268,9 +259,8 @@ const TOOLS = [
   },
   {
     name: 'holt_context',
-    title: 'What my siblings are doing',
     description:
-      'Shows a workstream which siblings contest its files and which symbols already exist next door.',
+      "Sibling file contention and symbols already implemented elsewhere.",
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, id: { type: 'string', maxLength: 512, description: 'The workstream you are working in.' } },
@@ -279,10 +269,43 @@ const TOOLS = [
     },
   },
   {
+    name: 'holt_checkpoint',
+    description: "Capture commits; prepare/test exact candidates with explicit argv; land in the selected integration checkout. Recover uses a landing id.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...REPO_ARG,
+        operation: { type: 'string', maxLength: 16, enum: ['list', 'capture', 'show', 'prepare', 'validate', 'validation', 'land', 'recover'] },
+        id: { type: 'string', maxLength: 64, description: 'Checkpoint or validation id.' },
+        workstream: { type: 'string', maxLength: 512, description: 'Workstream to capture; default is the current worktree.' },
+        ref: { type: 'string', maxLength: 1024, description: 'Committed ref to capture; default HEAD.' },
+        base: { type: 'string', maxLength: 1024, description: 'Integration base; default uses repository authority.' },
+        argv: { type: 'array', maxItems: 256, items: { type: 'string', maxLength: 16384 }, description: 'Exact command and arguments; required for validate.' },
+      },
+      additionalProperties: false,
+    },
+    // Explicit validation runs user code, which can write files and access the network.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+  },
+  {
+    name: 'holt_session_buffers',
+    description: "List verified private editor captures or export one to a NEW absolute JSON file. Never overwrites files or closes sessions.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...REPO_ARG,
+        operation: { type: 'string', maxLength: 16, enum: ['list', 'recover'] },
+        id: { type: 'string', maxLength: 64, description: 'Captured buffer id from list.' },
+        destination: { type: 'string', maxLength: 4096, description: 'New absolute file path for recovery.' },
+      },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  {
     name: 'holt_worktree_ownership',
-    title: 'Worktree ownership',
     description:
-      'Protect a clean worktree while a session works. Claim, renew, hand off or release ownership. Expiry requires review.',
+      "Claim, renew, hand off or release explicit ownership. Expiry requires review.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -301,9 +324,8 @@ const TOOLS = [
   },
   {
     name: 'holt_impact',
-    title: 'Who depends on what another workstream changed',
     description:
-      'Finds cross-workstream symbol producers and consumers that file collisions miss. A dependency is not proof of breakage or conflict.',
+      "Cross-workstream symbol dependencies; not proof of breakage.",
     inputSchema: {
       type: 'object',
       properties: { ...REPO_ARG, limit: { type: 'number', minimum: 1, maximum: MAX_LIMIT, description: 'Max pairs (default 10, at most 100).' } },
@@ -323,9 +345,8 @@ const TOOLS = [
    */
   {
     name: 'holt_discard',
-    title: 'Discard selected paths with verified, resumable recovery',
     description:
-      'Preview, capture then revert/remove paths, list interruptions, or recover one. Capture verifies first; concurrent replacements are never overwritten.',
+      "Preview/discard paths with verified recovery. List or recover interruptions. Preserves concurrent replacements.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -340,9 +361,8 @@ const TOOLS = [
   },
   {
     name: 'holt_clean',
-    title: 'Safely manage disposable worktrees and their recovery copies',
     description:
-      'Preview or move disposable worktrees into recoverable local quarantine; list copies with restore argv, or restore one without overwriting or weakening prior protection. Never deletes files or branches.',
+      "Move disposable worktrees into recoverable local quarantine; list copies or restore one without overwriting or weakening prior protection. Never deletes files or branches.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -357,9 +377,8 @@ const TOOLS = [
   },
   {
     name: 'holt_purge',
-    title: 'Purge one clean quarantine',
     description:
-      'Dry-run by default. Apply re-verifies and anchors HEAD, then uses non-forced Git removal. Refuses dirt and keeps the branch.',
+      "Dry-run by default. Apply freshly verifies, anchors HEAD and uses non-forced Git removal of a clean quarantine; retains branch.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -374,9 +393,8 @@ const TOOLS = [
   },
   {
     name: 'holt_rescue',
-    title: 'Preserve a workstream\'s unique work to a verifiable ref',
     description:
-      'Captures tracked and untracked state to a verified rescue ref, then optionally releases Holt\'s lock. Use before removing a valuable worktree.',
+      "Capture tracked/untracked work to a verified ref; optionally release the Holt lock.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -392,9 +410,8 @@ const TOOLS = [
   },
   {
     name: 'holt_protect',
-    title: 'Lock every workstream holding unique work',
     description:
-      'Git-locks worktrees holding unique work and records why. Stops worktree remove --force, but cannot stop direct filesystem deletion.',
+      "Git-lock unique work. Stops worktree remove --force; cannot stop raw filesystem deletion.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -407,9 +424,8 @@ const TOOLS = [
   },
   {
     name: 'holt_landing_plan',
-    title: 'What to land, in what order',
     description:
-      'Drops proven disposables, collapses only exact durable copies, and orders remaining work least-entangled-first. Partial or dirty overlap never collapses.',
+      "Collapse only exact durable copies; order remaining work by entanglement. Dirty or partial overlaps never collapse.",
     inputSchema: { type: 'object', properties: { ...REPO_ARG }, additionalProperties: false },
   },
 ];
@@ -1112,6 +1128,47 @@ async function dispatch(name, args, cwd, limit) {
           count: x.fileCount, theirsUncommitted: x.hasUncommitted,
         })),
       };
+    }
+
+    case 'holt_checkpoint': {
+      const { createCheckpoint, listCheckpoints, verifyCheckpoint, prepareCheckpoint } = await import('../checkpoints.mjs');
+      const operation = args.operation ?? 'list';
+      if (operation === 'list') return listCheckpoints(cwd);
+      if (operation === 'capture') {
+        let source = cwd;
+        if (args.workstream) {
+          const disc = await discover(cwd, {});
+          const worktree = disc.workstreams.find((item) => item.id === args.workstream);
+          if (!worktree) return { ok: false, code: 'unknown-worktree', id: args.workstream };
+          source = worktree.path;
+        }
+        cache.clear();
+        return createCheckpoint(source, { ref: args.ref ?? 'HEAD', base: args.base ?? null });
+      }
+      if (!args.id) throw new ToolArgumentError(`holt_checkpoint: '${operation}' requires argument 'id'`);
+      if (operation === 'show') return verifyCheckpoint(cwd, args.id);
+      if (operation === 'validate') {
+        const { validateCheckpoint } = await import('../checkpoint-validation.mjs');
+        cache.clear();
+        return validateCheckpoint(cwd, args.id, { base: args.base ?? null, argv: args.argv ?? [] });
+      }
+      if (operation === 'validation') {
+        const { verifyCheckpointValidation } = await import('../checkpoint-validation.mjs');
+        return verifyCheckpointValidation(cwd, args.id);
+      }
+      if (operation === 'land' || operation === 'recover') {
+        const { landCheckpoint, recoverCheckpointLanding } = await import('../checkpoint-landing.mjs');
+        cache.clear();
+        return operation === 'land' ? landCheckpoint(cwd, args.id) : recoverCheckpointLanding(cwd, args.id);
+      }
+      return prepareCheckpoint(cwd, args.id, { base: args.base ?? null });
+    }
+
+    case 'holt_session_buffers': {
+      const { listSessionBuffers, recoverSessionBuffer } = await import('../session-recovery.mjs');
+      if ((args.operation ?? 'list') === 'list') return listSessionBuffers(cwd);
+      if (!args.id || !args.destination) throw new ToolArgumentError('holt_session_buffers: recover requires id and destination.');
+      return recoverSessionBuffer(cwd, args.id, args.destination);
     }
 
     case 'holt_worktree_ownership': {

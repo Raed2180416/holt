@@ -37,7 +37,7 @@ const SAFE = new Set([
   // input (`--batch -z`, git >= 2.38) before it can frame a spec containing a newline safely.
   'version',
   'rev-parse', 'rev-list', 'log', 'show', 'cat-file', 'ls-files', 'ls-tree',
-  'check-attr',
+  'check-attr', 'check-ref-format',
   // `hash-object` WITHOUT `-w` computes an object id and writes nothing — the object database is
   // not opened for writing at all. It is the correct way to ask whether working-tree bytes equal
   // an index blob under Git's BUILTIN eol/ident/encoding conversion: measured on `text eol=crlf`,
@@ -868,6 +868,83 @@ export async function git(argv, {
       child.stdin.end(stdin);
     }
   });
+}
+
+/**
+ * Hold the checked-out local branch and HEAD in one native Git reference transaction while
+ * a narrowly scoped landing callback updates its index/worktree. EOF aborts an uncommitted
+ * transaction. Git also locks HEAD when updating its checked-out referent. Verify that
+ * symbolic binding after prepare, without requesting a duplicate HEAD update.
+ * @template T
+ * @param {string} cwd
+ * @param {{ref:string,expected:string,candidate:string}} update
+ * @param {(isPrepared:()=>boolean)=>Promise<T & {ok:boolean}>} fn
+ */
+export async function withGitLandingRefTransaction(cwd, { ref, expected, candidate }, fn) {
+  const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+  if (!ref.startsWith('refs/heads/') || /[\s\0]/.test(ref) || !oid.test(expected) || !oid.test(candidate)) {
+    return { ok: false, code: 'invalid-landing-reference' };
+  }
+  const valid = await git(['check-ref-format', ref], { cwd });
+  if (valid.code !== 0) return { ok: false, code: 'invalid-landing-reference' };
+  const argv = ['update-ref', '--no-deref', '--stdin', '-m', 'holt: land validated checkpoint'];
+  const verdict = classify(argv, { allowMutation: true });
+  if (!verdict.allowed) throw new GitRefused(`holt refused its landing transaction: ${verdict.reason}`);
+  const context = await buildGitCommandContext(argv, cwd, undefined, 180000);
+  await requireNoLazyFetch(context.env);
+  const child = spawn('git', withCommandConfig(hardenGitArgv(argv), context.configArgs), {
+    cwd, env: context.env, stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let output = '';
+  let stderr = '';
+  let closed = false;
+  let prepared = false;
+  let timedOut = false;
+  const waiters = new Set();
+  const signal = () => { for (const notify of waiters) notify(); };
+  const completion = new Promise((resolve) => {
+    child.on('error', (error) => { stderr += error.message; closed = true; signal(); resolve(-1); });
+    child.on('close', (code) => { closed = true; prepared = false; signal(); resolve(code); });
+  });
+  child.stdin.on('error', () => {});
+  child.stdout.on('data', (chunk) => { output = (output + chunk.toString('utf8')).slice(-16384); signal(); });
+  child.stderr.on('data', (chunk) => { stderr = (stderr + chunk.toString('utf8')).slice(-65536); });
+  const timeout = setTimeout(() => { timedOut = true; prepared = false; child.kill('SIGTERM'); }, 180000);
+  const acknowledged = async (line) => {
+    while (!closed && !output.split('\n').includes(line)) {
+      await new Promise((resolve) => {
+        const notify = () => { waiters.delete(notify); resolve(undefined); };
+        waiters.add(notify);
+      });
+    }
+    return !closed && output.split('\n').includes(line);
+  };
+  try {
+    child.stdin.write(`start\nupdate ${ref} ${candidate} ${expected}\nprepare\n`);
+    if (!await acknowledged('prepare: ok')) {
+      return { ok: false, code: 'landing-reference-unavailable', reason: stderr.trim() };
+    }
+    prepared = true;
+    const head = await git(['symbolic-ref', '-q', 'HEAD'], { cwd });
+    if (head.code !== 0 || head.stdout.trim() !== ref) return { ok: false, code: 'landing-checkout-changed' };
+    const value = await fn(() => prepared && !closed && !timedOut);
+    if (!value.ok || !prepared || closed || timedOut) {
+      if (!closed) child.stdin.end('abort\n');
+      await completion;
+      return { ok: false, code: value.ok ? 'landing-reference-interrupted' : 'landing-not-applied', value };
+    }
+    child.stdin.write('commit\n');
+    const committed = await acknowledged('commit: ok');
+    child.stdin.end();
+    const code = await completion;
+    return committed && code === 0 ? { ok: true, committed: true, value }
+      : { ok: false, code: 'landing-commit-unconfirmed', value, reason: stderr.trim() };
+  } finally {
+    prepared = false;
+    if (!closed) child.stdin.end();
+    await completion;
+    clearTimeout(timeout);
+  }
 }
 
 /* ==========================================================================================

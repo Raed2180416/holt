@@ -28,15 +28,15 @@ A valid artifact proves only that every declared check passed without omission o
 
 These lists are machine-compared with executable help/schema/manifest data on every run.
 
-### CLI commands (45)
+### CLI commands (49)
 
-`cli:status` · `cli:risk` · `cli:collisions` · `cli:hotspots` · `cli:duplicates` · `cli:context` · `cli:plan` · `cli:impact` · `cli:order` · `cli:partition` · `cli:branches` · `cli:journal` · `cli:forensics` · `cli:fleet` · `cli:license` · `cli:managed-policy` · `cli:ci` · `cli:graph` · `cli:stash` · `cli:gate` · `cli:tui` · `cli:setup` · `cli:doctor` · `cli:base` · `cli:audit` · `cli:auto` · `cli:protect` · `cli:unprotect` · `cli:rescue` · `cli:ownership` · `cli:rescued` · `cli:clean` · `cli:quarantines` · `cli:restore` · `cli:purge` · `cli:discard` · `cli:recover-discard` · `cli:verify` · `cli:hosts` · `cli:providers` · `cli:integrate` · `cli:uninstall` · `cli:brief` · `cli:mcp` · `cli:hook`
+`cli:status` · `cli:risk` · `cli:collisions` · `cli:hotspots` · `cli:duplicates` · `cli:context` · `cli:plan` · `cli:impact` · `cli:order` · `cli:partition` · `cli:branches` · `cli:journal` · `cli:forensics` · `cli:fleet` · `cli:license` · `cli:managed-policy` · `cli:ci` · `cli:graph` · `cli:stash` · `cli:gate` · `cli:tui` · `cli:setup` · `cli:doctor` · `cli:base` · `cli:audit` · `cli:run` · `cli:checkpoint` · `cli:session` · `cli:editor` · `cli:auto` · `cli:protect` · `cli:unprotect` · `cli:rescue` · `cli:ownership` · `cli:rescued` · `cli:clean` · `cli:quarantines` · `cli:restore` · `cli:purge` · `cli:discard` · `cli:recover-discard` · `cli:verify` · `cli:hosts` · `cli:providers` · `cli:integrate` · `cli:uninstall` · `cli:brief` · `cli:mcp` · `cli:hook`
 
 The implementation also accepts the legacy/default aliases `cli:scan`, `cli:help`, and `cli:version`; the denominator above is the set of documented command sections in the CLI's top-level help output.
 
-### MCP tools (18)
+### MCP tools (20)
 
-`mcp:holt_at_risk` · `mcp:holt_branches` · `mcp:holt_check_workstream` · `mcp:holt_clean` · `mcp:holt_collisions` · `mcp:holt_context` · `mcp:holt_discard` · `mcp:holt_duplicates` · `mcp:holt_hotspots` · `mcp:holt_impact` · `mcp:holt_landing_order` · `mcp:holt_landing_plan` · `mcp:holt_partition` · `mcp:holt_protect` · `mcp:holt_purge` · `mcp:holt_rescue` · `mcp:holt_status` · `mcp:holt_worktree_ownership`
+`mcp:holt_at_risk` · `mcp:holt_branches` · `mcp:holt_check_workstream` · `mcp:holt_checkpoint` · `mcp:holt_clean` · `mcp:holt_collisions` · `mcp:holt_context` · `mcp:holt_discard` · `mcp:holt_duplicates` · `mcp:holt_hotspots` · `mcp:holt_impact` · `mcp:holt_landing_order` · `mcp:holt_landing_plan` · `mcp:holt_partition` · `mcp:holt_protect` · `mcp:holt_purge` · `mcp:holt_rescue` · `mcp:holt_session_buffers` · `mcp:holt_status` · `mcp:holt_worktree_ownership`
 
 MCP tools are agent-native and can return evidence or act, but MCP itself is model-invoked. Proactive context and pre-action blocking require a separately wired host lifecycle/tool hook.
 
@@ -342,7 +342,7 @@ Each quoted evidence name below is an exact string present in the named test/har
 #### `proactive-lifecycle-context`
 
 - User surfaces: `hook:session-start`, `hook:user-prompt-submit`, `hook:session-end`, `hook:stop`
-- Exact executable evidence: `test/e2e/brief-cadence.test.mjs` — “CODEX BRIEF: UserPromptSubmit uses additionalContext once, then emits no unchanged prompt noise”; `test/e2e/brief-cadence.test.mjs` — “BRIEF: SessionStart is never suppressed”; `test/e2e/brief-cadence.test.mjs` — “CURSOR STOP: followup_message is completed-only, one-loop-bounded”; `test/e2e/autoprotect.test.mjs` — “AUTOPROTECT: session-start with --autoprotect locks at-risk worktrees before the agent moves”
+- Exact executable evidence: `test/e2e/brief-cadence.test.mjs` — “CODEX BRIEF: UserPromptSubmit uses additionalContext once, then emits no unchanged prompt noise”; `test/e2e/brief-cadence.test.mjs` — “BRIEF: session identity separates readers while repeated starts and session end remain quiet”; `test/e2e/brief-cadence.test.mjs` — “CURSOR STOP: even changed at-risk state never restarts the user conversation”; `test/e2e/brief-cadence.test.mjs` — “BRIEF: unchanged prompts stay silent and an actual compaction refreshes context”; `test/e2e/autoprotect.test.mjs` — “AUTOPROTECT: session-start with --autoprotect locks at-risk worktrees before the agent moves”
 - Independent oracle: Repeated lifecycle envelopes against unchanged and changed repository fingerprints.
 - Remaining unproven gap: Proactivity exists only on hosts with a documented wired lifecycle event; MCP alone remains model-invoked.
 - Mandatory runner evidence: `complete-test-corpus`, `host-manifest-sync`
@@ -598,6 +598,14 @@ Each quoted evidence name below is an exact string present in the named test/har
 - Independent oracle: Subprocess JSON parsing, planted dirty-primary scope controls, and malformed/boundary numeric option cases.
 - Remaining unproven gap: Parseable JSON is not a versioned schema guarantee for every nested field; consumers must pin a Holt version.
 - Mandatory runner evidence: `complete-test-corpus`
+
+#### `automatic-sessions-and-checkpoints`
+
+- User surfaces: `cli:run`, `cli:session`, `cli:editor`, `cli:checkpoint`, `mcp:holt_checkpoint`, `mcp:holt_session_buffers`, `ui:tui`, `ui:graph`
+- Exact executable evidence: `test/e2e/checkpoints.test.mjs` — “CHECKPOINT LANDING: tested version lands while producer continues and unrelated staged and unstaged work survives”; `test/e2e/checkpoints.test.mjs` — “CHECKPOINT VALIDATION: failing tests, failing detached work and concealed input changes never earn a passing certificate”
+- Independent oracle: Real supervised processes and independent Git/index/file reads establish exact candidate testing and preservation of concurrent producer work.
+- Remaining unproven gap: Linux supervision and file-editor captures are implemented; full cross-platform supervision, partial-checkout recovery and managed uncommitted checkpoints remain unfinished.
+- Mandatory runner evidence: `complete-test-corpus`, `git-runtime`
 
 ## Cross-cutting release decision
 

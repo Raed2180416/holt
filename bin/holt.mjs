@@ -104,6 +104,7 @@ const CONFIG_NON_FATAL = new Set([
   'purge',          // reclaims a verified clean quarantine behind a dry-run/apply boundary
   'discard',        // discards paths
   'recover-discard', // resumes or inspects a durable discard transaction
+  'run',            // the automatic session boundary does not depend on heuristic config
   'base',           // reads or changes explicit repository-local integration authority
   'verify',         // verifies workstream pairs
   'rescued',        // lists rescues
@@ -164,6 +165,17 @@ COMMANDS
                       [--json] [--require-signature]   require a detached signature when requested
 
 ACTING  (these explicitly mutate local Git/repository state)
+  run -- <command>   attach a session, run a command and wait for its descendants, then detach
+                      --json sends command output to stderr and returns the lifecycle result
+  checkpoint          list saved versions; capture [workstream] pins its current commit
+                      show <id> verifies a version; prepare <id> builds its integration candidate
+                      validate <id> -- <command>; land <validation-id> in the integration checkout
+                      recover <landing-id> resumes an interrupted recorded integration
+  session             buffers: list recoverable editor versions across this repository
+                      recover-buffer <id> <new-absolute-file>: export exact captured text as JSON
+                      bridge: private editor stdio connection (host integration)
+  editor              show editor extension installations; install or uninstall the private bridge
+                      [--extensions-dir <absolute-directory>] for remote editors or other profiles
   auto                do everything that cannot lose data, and report what needs you
                       locks what is at risk, releases locks no longer justified, and hands
                       the destructive half over WITH the evidence — it never deletes
@@ -450,6 +462,8 @@ function parseArgs(argv) {
       case '-h': case '--help': opts.help = true; break;
       case '-v': case '-V': case '--version': opts.version = true; break;
       case '--base': opts.base = takeValue('--base'); break;
+      case '--ref': opts.ref = takeValue('--ref'); break;
+      case '--extensions-dir': opts.extensionsDir = takeValue('--extensions-dir'); break;
       case '--family-window': {
         const raw = takeValue('--family-window');
         const s = Number(raw);
@@ -1756,13 +1770,15 @@ async function cmdHook(opts) {
     // UserPromptSubmit fires on EVERY message. Re-injecting a byte-identical paragraph on every
     // turn is not a reminder — it is the thing that teaches an agent to skip holt's output, and
     // it burns context on every prompt of a long session. So the per-prompt brief speaks only
-    // when what it would say has CHANGED (with a periodic refresh so a compacted session is not
-    // left permanently unaware). SessionStart always speaks: a new session has seen nothing.
+    // when what it would say has CHANGED. An actual compaction event refreshes context; a prompt
+    // counter is not evidence of compaction and must not manufacture periodic interruptions.
     let brief;
     try {
       brief = await buildBrief(cwd, {
-        onlyIfChanged: event === 'user-prompt-submit'
-          || (event === 'pre-invocation' && !firstAntigravityInvocation),
+        onlyIfChanged: payload.source !== 'compact' && (event === 'user-prompt-submit'
+          || (event === 'pre-invocation' && !firstAntigravityInvocation)
+          || (event === 'session-start' && !!actor.session)),
+        scope: `${opts.host}:${actor.session ?? ''}`, lifecycle: true,
         familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
       });
     } catch {
@@ -1789,34 +1805,10 @@ async function cmdHook(opts) {
     return;
   }
 
-  // CURSOR STOP: `followup_message` is a NEW PROMPT, not passive post-response context. It is
-  // therefore useful only with hard bounds. Emit at most once for the original completed loop,
-  // and only when the actionable sibling brief changed. Cursor's follow-up increments loop_count;
-  // refusing loop_count >= 1 makes a Holt warning incapable of perpetuating itself. Aborted/error
-  // turns, malformed payloads and unchanged state return the documented empty response.
-  //
-  // Claude deliberately does not wire Stop. Its current Stop hook accepts additionalContext, but
-  // the documented behavior continues the conversation so Claude can act on it, under the same
-  // loop protections as decision:"block". A manual/stale invocation stays silent rather than
-  // relabeling a forced continuation as passive context.
+  // Stop must not start a new agent loop. Retain this neutral handler for older installations.
+  // Necessary refusals stay at the concrete destructive operation, with fresh evidence.
   if (event === 'stop') {
-    if (opts.host !== 'cursor') return;
-
-    let response = {};
-    if (payload.status === 'completed'
-      && Number.isInteger(payload.loop_count)
-      && payload.loop_count === 0) {
-      try {
-        const brief = await buildBrief(cwd, {
-          onlyIfChanged: true,
-          familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
-        });
-        if (brief) response = formatContext(brief, { host: 'cursor', eventName: 'Stop' });
-      } catch {
-        // Best-effort — a scan failure must not continue or disrupt the agent loop.
-      }
-    }
-    out(JSON.stringify(response));
+    if (opts.host === 'cursor') out('{}');
     return;
   }
 
@@ -1829,6 +1821,7 @@ async function cmdHook(opts) {
   if (event === 'session-end') {
     try {
       const brief = await buildBrief(cwd, {
+        onlyIfChanged: true, scope: `${opts.host}:${actor.session ?? ''}`, lifecycle: true,
         familyOverrides: opts.familyOverrides, maintenanceFloor: opts.maintenanceFloor, maintenanceRatio: opts.maintenanceRatio,
       });
       if (brief) {
@@ -2552,6 +2545,85 @@ async function main() {
   }
   opts.configPath = configPath;
   if (cmd === 'doctor') return cmdDoctor(opts);
+  if (cmd === 'editor') {
+    const { editorInstallations, installEditorExtension, uninstallEditorExtensions } = await import('../src/integrate/editor-install.mjs');
+    const operation = opts._[1] ?? 'status';
+    const options = opts.extensionsDir ? { directory: opts.extensionsDir } : {};
+    const result = operation === 'status' ? await editorInstallations(options)
+      : operation === 'install' ? await installEditorExtension(options)
+        : operation === 'uninstall' ? await uninstallEditorExtensions(options)
+          : { ok: false, code: 'invalid-editor-operation' };
+    if (opts.json) emitJson(result);
+    else { out(result.ok ? `Editor integration: ${operation} complete.` : `Editor integration: ${'code' in result ? result.code : 'some paths were retained'}`); if ('next' in result) out(result.next); }
+    if (!result.ok) process.exitCode = 2;
+    return;
+  }
+  if (cmd === 'session') {
+    const operation = opts._[1] ?? 'buffers';
+    if (operation === 'bridge') {
+      const { runSessionBridge } = await import('../src/session-bridge.mjs');
+      const result = await runSessionBridge(opts.cwd);
+      if (!result.ok) process.exitCode = 2;
+      return;
+    }
+    const { listSessionBuffers, recoverSessionBuffer, recoverCompletedRunners } = await import('../src/session-recovery.mjs');
+    const result = operation === 'buffers' ? await listSessionBuffers(opts.cwd)
+      : operation === 'recover' ? await recoverCompletedRunners(opts.cwd)
+      : operation === 'recover-buffer' && opts._[2] && opts._[3] ? await recoverSessionBuffer(opts.cwd, opts._[2], opts._[3])
+        : { ok: false, code: 'invalid-session-operation', reason: 'Use session buffers, recover, recover-buffer <id> <new-absolute-file>, or bridge.' };
+    if (opts.json) emitJson(result);
+    else if (operation === 'buffers' && result.ok && 'buffers' in result) {
+      for (const item of result.buffers) out(`${item.id}  ${item.path}  version ${item.version} (${item.state})`);
+      if (!result.buffers.length) out('No captured editor buffers.');
+      if (result.issues.length || result.omitted) out('Some recovery records could not be listed; use --json for details.');
+    } else if (result.ok && 'recovered' in result) out(`Recovered ${result.recovered.length} completed command session(s); ${result.retained.length} still need completion evidence.`);
+    else if (result.ok && 'destination' in result) out(`Recovered editor text to ${result.destination}`);
+    else out(`Session: ${result.code}`);
+    if (!result.ok) process.exitCode = 2;
+    return;
+  }
+  if (cmd === 'checkpoint') {
+    const { createCheckpoint, listCheckpoints, verifyCheckpoint, prepareCheckpoint } = await import('../src/checkpoints.mjs');
+    const operation = opts._[1] ?? 'list';
+    const id = opts._[2] ?? null;
+    let result;
+    if (operation === 'list') result = await listCheckpoints(opts.cwd);
+    else if (operation === 'capture') {
+      let cwd = opts.cwd;
+      if (id) {
+        const disc = await discover(opts.cwd, opts);
+        const worktree = disc.workstreams.find((item) => item.id === id);
+        if (!worktree) { emitJson({ ok: false, code: 'unknown-worktree', id }); process.exitCode = 2; return; }
+        cwd = worktree.path;
+      }
+      result = await createCheckpoint(cwd, { ref: opts.ref ?? 'HEAD', base: opts.base });
+    } else if (operation === 'show' && id) result = await verifyCheckpoint(opts.cwd, id);
+    else if (operation === 'prepare' && id) result = await prepareCheckpoint(opts.cwd, id, { base: opts.base });
+    else if (operation === 'validate' && id) {
+      const { validateCheckpoint } = await import('../src/checkpoint-validation.mjs');
+      result = await validateCheckpoint(opts.cwd, id, { base: opts.base, argv: opts._.slice(3) });
+    } else if (operation === 'validation' && id) {
+      const { verifyCheckpointValidation } = await import('../src/checkpoint-validation.mjs');
+      result = await verifyCheckpointValidation(opts.cwd, id);
+    } else if (operation === 'land' && id) {
+      const { landCheckpoint } = await import('../src/checkpoint-landing.mjs');
+      result = await landCheckpoint(opts.cwd, id);
+    } else if (operation === 'recover' && id) {
+      const { recoverCheckpointLanding } = await import('../src/checkpoint-landing.mjs');
+      result = await recoverCheckpointLanding(opts.cwd, id);
+    } else result = { ok: false, code: 'invalid-checkpoint-operation', reason: 'Use checkpoint list, capture [workstream], show/prepare <id>, validate <id> -- <command>, validation/land <validation-id>, or recover <landing-id>.' };
+    emitJson(result);
+    if (!result.ok) process.exitCode = 2;
+    return;
+  }
+  if (cmd === 'run') {
+    const { runWorkspaceCommand } = await import('../src/session-runner.mjs');
+    const result = await runWorkspaceCommand(opts.cwd, opts._.slice(1), { stdio: opts.json ? 'json' : 'inherit' });
+    if (opts.json) emitJson(result);
+    else if (!result.ok) process.stderr.write(`holt run: ${result.reason ?? result.code}\n`);
+    process.exitCode = result.exitCode;
+    return;
+  }
   if (cmd === 'ownership') {
     const operation = opts._[1] ?? 'status';
     const id = opts._[2] ?? null;

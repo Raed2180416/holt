@@ -238,8 +238,8 @@ repairs Holt-owned entries without duplicating them; `holt uninstall` removes on
 unchanged artifacts. Host configuration on disk is not evidence that a host loaded, trusted, or
 enforced it.
 
-- **MCP**: 18 tools in the executable schema, including live ownership and discard preview/recovery. The protocol
-  path is exercised over stdio as `initialize → 18 tools → tools/call`; MCP remains reactive
+- **MCP**: 20 tools in the executable schema, including live ownership and discard preview/recovery. The protocol
+  path is exercised over stdio as `initialize → 20 tools → tools/call`; MCP remains reactive
   model-pull unless a host supplies a separate lifecycle context hook.
 - **Implemented deterministic pre-tool blocking**: Claude Code, OpenCode, Cursor, Codex local clients, Qwen Code, Copilot CLI, Cline IDE, Goose, Devin CLI and Devin Desktop Cascade cover their documented local surfaces. Their current schemas are contract-tested, but none is currently claimed as a real-host enforcement run.
 - **Hook-capable, not yet wired**: Gemini, Crush, Amp, Factory and Junie still receive MCP + advisory.

@@ -46,7 +46,7 @@ const EVIDENCE_ENV_OVERRIDES = Object.freeze({
 export const CLI_COMMANDS = [
   'status', 'risk', 'collisions', 'hotspots', 'duplicates', 'context', 'plan', 'impact',
   'order', 'partition', 'branches', 'journal', 'forensics', 'fleet', 'license', 'managed-policy', 'ci', 'graph',
-  'stash', 'gate', 'tui', 'setup', 'doctor', 'base', 'audit', 'auto', 'protect', 'unprotect', 'rescue',
+  'stash', 'gate', 'tui', 'setup', 'doctor', 'base', 'audit', 'run', 'checkpoint', 'session', 'editor', 'auto', 'protect', 'unprotect', 'rescue',
   'ownership', 'rescued', 'clean', 'quarantines', 'restore', 'purge', 'discard', 'recover-discard', 'verify', 'hosts', 'providers',
   'integrate', 'uninstall', 'brief', 'mcp', 'hook',
 ];
@@ -59,6 +59,14 @@ const T = (pathName, title) => ({ path: pathName, title });
  * not evidence that no gap exists.
  */
 export const FEATURES = [
+  {
+    id: 'automatic-sessions-and-checkpoints', area: 'coordination',
+    interfaces: ['cli:run', 'cli:session', 'cli:editor', 'cli:checkpoint', 'mcp:holt_checkpoint', 'mcp:holt_session_buffers', 'ui:tui', 'ui:graph'],
+    tests: [T('test/e2e/checkpoints.test.mjs', 'CHECKPOINT LANDING: tested version lands while producer continues and unrelated staged and unstaged work survives'), T('test/e2e/checkpoints.test.mjs', 'CHECKPOINT VALIDATION: failing tests, failing detached work and concealed input changes never earn a passing certificate')],
+    oracle: 'Real supervised processes and independent Git/index/file reads establish exact candidate testing and preservation of concurrent producer work.',
+    gap: 'Linux supervision and file-editor captures are implemented; full cross-platform supervision, partial-checkout recovery and managed uncommitted checkpoints remain unfinished.',
+    evidence: ['complete-test-corpus', 'git-runtime'],
+  },
   {
     id: 'discovery-and-source-layers', area: 'core-analysis',
     interfaces: ['cli:status', 'cli:scan'],
@@ -294,7 +302,7 @@ export const FEATURES = [
   {
     id: 'proactive-lifecycle-context', area: 'agent-integration',
     interfaces: ['hook:session-start', 'hook:user-prompt-submit', 'hook:session-end', 'hook:stop'],
-    tests: [T('test/e2e/brief-cadence.test.mjs', 'CODEX BRIEF: UserPromptSubmit uses additionalContext once, then emits no unchanged prompt noise'), T('test/e2e/brief-cadence.test.mjs', 'BRIEF: SessionStart is never suppressed'), T('test/e2e/brief-cadence.test.mjs', 'CURSOR STOP: followup_message is completed-only, one-loop-bounded'), T('test/e2e/autoprotect.test.mjs', 'AUTOPROTECT: session-start with --autoprotect locks at-risk worktrees before the agent moves')],
+    tests: [T('test/e2e/brief-cadence.test.mjs', 'CODEX BRIEF: UserPromptSubmit uses additionalContext once, then emits no unchanged prompt noise'), T('test/e2e/brief-cadence.test.mjs', 'BRIEF: session identity separates readers while repeated starts and session end remain quiet'), T('test/e2e/brief-cadence.test.mjs', 'CURSOR STOP: even changed at-risk state never restarts the user conversation'), T('test/e2e/brief-cadence.test.mjs', 'BRIEF: unchanged prompts stay silent and an actual compaction refreshes context'), T('test/e2e/autoprotect.test.mjs', 'AUTOPROTECT: session-start with --autoprotect locks at-risk worktrees before the agent moves')],
     oracle: 'Repeated lifecycle envelopes against unchanged and changed repository fingerprints.',
     gap: 'Proactivity exists only on hosts with a documented wired lifecycle event; MCP alone remains model-invoked.',
     evidence: ['complete-test-corpus', 'host-manifest-sync'],

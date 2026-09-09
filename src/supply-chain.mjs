@@ -41,6 +41,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, createPublicKey, verify as edVerify } from 'node:crypto';
 import { classify } from './git.mjs';
+import { pythonInventory } from './python-audit.mjs';
 
 /* ═══════════════════════════════════════════════════════ THE DECLARATION ══════════ */
 
@@ -75,7 +76,7 @@ export const CAPABILITY_MODULES = {
 };
 
 /** Ordered so a report reads worst-first. */
-export const CAPABILITY_CLASSES = ['network', 'process', 'eval', 'filesystem'];
+export const CAPABILITY_CLASSES = ['native', 'network', 'process', 'eval', 'filesystem'];
 
 /**
  * WHAT HOLT READS, WRITES AND SENDS — the statement a security review asks for, in the one
@@ -147,6 +148,18 @@ export const CAPABILITIES = {
      * and it appeared here first.
      */
     indirect: [
+      {
+        via: 'holt verify --run <your test command>', file: 'src/verify.mjs',
+        trigger: 'Only explicit pair verification using the operator-supplied --run command or holtTest setting.',
+        effect: 'The project test command executes with the caller\'s permissions in a scratch checkout. That command can access network services or credentials; Holt does not sandbox the test suite.',
+        avoidable: 'yes — status, context, gate and other analysis never execute the project test suite.',
+      },
+      {
+        via: 'holt run -- <your command and arguments>', file: 'src/session-runner.mjs',
+        trigger: 'Only explicit argv supplied to holt run or checkpoint validate (CLI/MCP); never a scan, hook, or automatically chosen project command. Checkpoint landing also supervises a fixed bundled Git worker.',
+        effect: 'Runs the command with the caller\'s permissions and environment. Its descendants may access files, network services, or credentials just as a directly launched command could. The supervisor observes lifetime; it does not sandbox the command.',
+        avoidable: 'yes — ordinary Holt analysis and explicit ownership need no process supervisor or Python runtime.',
+      },
       {
         via: 'sh -c "<your package manager> install …"',
         file: 'bin/holt.mjs',
@@ -269,6 +282,22 @@ export const CAPABILITIES = {
    */
   dynamicCallSites: [
     {
+      file: 'src/integrate/editor/extension.cjs', identifier: 'launcher', canRun: ['node'],
+      why: 'The editor extension runs the exact Node and Holt paths stored by holt editor install in its private owned launcher. It exposes only the local private editor protocol, not a network listener.',
+    },
+    {
+      file: 'src/session-runner.mjs', identifier: 'python', canRun: ['python3', 'python'],
+      why: 'Optional bounded probe of the shipped process supervisor using isolated Python startup (-I -B); runs no user command.',
+    },
+    {
+      file: 'src/session-runner.mjs', identifier: 'capability', canRun: ['python3', 'python'],
+      why: 'The probed Python runtime executes only the shipped supervisor, which launches the exact operator-supplied argv.',
+    },
+    {
+      file: 'bin/holt-supervisor.py', identifier: 'sys', canRun: ['<the exact argv passed to holt run>'],
+      why: 'subprocess.Popen(sys.argv[2:], close_fds=True) launches the explicit command, without a shell or inherited private completion descriptor. ctypes grants native OS authority for process lifetime tracking; it is not a sandbox.',
+    },
+    {
       file: 'bin/install-ctags.mjs', identifier: 'cmd', canRun: ['tar', 'powershell'],
       why: 'a local run() wrapper; callers pass `tar` to extract the ctags archive on Linux/macOS, or `powershell` to Expand-Archive the zip on Windows, AFTER its SHA-256 was verified',
     },
@@ -313,7 +342,9 @@ export const CAPABILITIES = {
       { scope: '$TMPDIR (or HOLT_TMPDIR)', by: 'scan/hook caches, changed-brief state, symbol sanitation, deep duplicate analysis, temporary Git indexes and holt verify', mode: 'bounded cache files plus command-owned scratch paths; best-effort cleanup where applicable' },
       { scope: 'the repository Git object database', by: 'merge-tree --write-tree analysis; rescue/discard capture plumbing', mode: 'analysis may leave an unreferenced tree unless --strict-read-only; acting capture writes verified blobs, trees and commits before a ref' },
       { scope: '$GIT_COMMON_DIR/holt/* and private worktree admin state', by: 'journal/checkpoint, integration receipts, audit-sink cursors, protect/unprotect/auto, clean/restore/purge transition records', mode: 'journal is append-only; other records/locks are scoped state required for recovery and ownership' },
-      { scope: '$GIT_COMMON_DIR/holt-ownership-v1/*', by: 'ownership claim/heartbeat/handoff/release and clean final recheck', mode: 'private atomic lease records and persistent SQLite mutex files; native locks release on process exit without releasing session ownership' },
+      { scope: '$GIT_COMMON_DIR/holt-ownership-v1/*', by: 'ownership lifecycle, automatic runners, private editor bridge, session recovery and clean final recheck', mode: 'private atomic session records, credentials, bounded operation ledgers, exact buffer objects and recovery/closure receipts; persistent SQLite mutex files release their native lock on process exit without releasing session ownership' },
+      { scope: '$GIT_COMMON_DIR/holt-checkpoints-v1/* and refs/holt/checkpoint/* and refs/holt/candidate/*', by: 'checkpoint capture and candidate preparation', mode: 'verified committed snapshots and base-bound candidate refs; never moves the producer HEAD or index' },
+      { scope: 'a new absolute file explicitly selected for buffer recovery', by: 'session recover-buffer and holt_session_buffers recover', mode: 'exclusive 0600 JSON export; existing files and symlinks are never overwritten' },
       { scope: 'refs/holt/rescue/* and refs/holt/discard/*', by: 'holt rescue and holt discard', mode: 'allocated without overwrite and verified before any release/removal' },
       { scope: 'local branches/refs selected by the operator', by: 'holt branches --apply and quarantine/purge recovery anchoring', mode: 'landed branch deletion uses git branch -d, never -D; recovery refs/branches are retained as documented' },
       { scope: 'registered worktree paths and Git worktree metadata', by: 'holt clean --apply, restore and purge --apply', mode: 'clean performs a same-filesystem move into locked quarantine; restore moves it back; purge uses non-forced Git removal after re-verification' },
@@ -323,6 +354,7 @@ export const CAPABILITIES = {
       { scope: 'the sink path you pass, its checkpoint, and $GIT_COMMON_DIR/holt/sink/*.cursor', by: 'Team journal --sink', mode: 'explicit local destination; stable IDs and cursor/checkpoint state support crash recovery and downstream deduplication' },
       { scope: 'project agent/rule/MCP/hook files and Holt\'s Git pre-commit hook block', by: 'holt integrate/uninstall', mode: 'structural Holt-owned merge/removal with an ownership receipt; foreign content is retained' },
       { scope: 'supported existing user host-config files', by: 'holt integrate --global / uninstall --global', mode: 'explicit opt-in; existing-only structural MCP merge/removal; Holt does not create a new user config merely because --global was passed' },
+      { scope: 'the VS Code extensions directory, or the explicit --extensions-dir, and sibling holt-editor-recovery directory', by: 'holt editor install/uninstall', mode: 'new versioned extension files with exact ownership hashes and a private local launcher; changed/unowned files are retained; verified owned installations move whole into recoverable storage on uninstall' },
       { scope: '/etc/holt/managed-policy (system) or $XDG_CONFIG_HOME/holt/managed-policy (explicit user authority)', by: 'holt managed-policy enroll/sync/recover', mode: 'root-owned fixed system authority or explicitly non-system user store; immutable authenticated generations, exclusive lock, fsync/atomic pointer, exact crash receipt and explicit recovery' },
     ],
     never: 'A display/read-only analysis command does not intentionally modify tracked working-tree files, the index, refs, config, stash, reflog, branches, or worktree registration. Its one repository-side exception is a possible unreferenced object from `merge-tree --write-tree`; `--strict-read-only` disables that path. Acting commands write only the explicit target classes above. Holt never force-deletes a branch, rewrites history, changes remotes, or runs a network Git verb.',
@@ -371,7 +403,7 @@ export function shippedFiles(root) {
   return [...out].sort();
 }
 
-const isSource = (rel) => rel.endsWith('.mjs') || rel.endsWith('.js') || rel.endsWith('.cjs');
+const isSource = (rel) => rel.endsWith('.mjs') || rel.endsWith('.js') || rel.endsWith('.cjs') || rel.endsWith('.py');
 
 /* ═══════════════════════════════════════════════════════════ DETECTORS ════════════ */
 
@@ -611,7 +643,9 @@ export function spawnTargets(source) {
   // A method call such as `/pattern/.exec(key)` is not the process-execution global `exec`.
   // `\bexec` conflated both and forced phantom dynamic-binary declarations for every new regex
   // call. Only an unqualified identifier can name the imported child_process functions here.
-  const re = /(?<![.\w$])(?:execFile|execFileSync|spawn|spawnSync|exec|execSync|fork)\s*\(\s*(['"`]([^'"`\n]*)['"`]|[A-Za-z_$][\w$]*)/g;
+  const aliases = [...code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*=\s*promisify\s*\(\s*(?:execFile|exec|spawn)\s*\)/g)].map((match) => match[1]);
+  const names = ['execFile', 'execFileSync', 'spawn', 'spawnSync', 'exec', 'execSync', 'fork', ...aliases].join('|');
+  const re = new RegExp('(?<![.\\w$])(?:' + names + ')\\s*\\(\\s*([\'"`]([^\'"`\\n]*)[\'"`]|[A-Za-z_$][\\w$]*)', 'g');
   for (const m of code.matchAll(re)) {
     if (m[2] !== undefined) out.add(m[2]);
     else out.add(`<dynamic:${m[1]}>`);
@@ -884,7 +918,8 @@ export function auditCapabilities({ root = '.', capabilities = CAPABILITIES, mod
   const unsafeStrip = [];
   for (const rel of files) {
     const raw = fs.readFileSync(path.join(root, rel), 'utf8');
-    const chk = strippedIsSafe(raw, stripComments(raw));
+    const chk = rel.endsWith('.py') ? { safe: pythonInventory(raw).safe, lost: ['Python lexical boundary'] }
+      : strippedIsSafe(raw, stripComments(raw));
     if (!chk.safe) unsafeStrip.push({ file: rel, lostImports: chk.lost });
   }
   checks.push({
@@ -905,7 +940,7 @@ export function auditCapabilities({ root = '.', capabilities = CAPABILITIES, mod
   const byClass = Object.fromEntries(CAPABILITY_CLASSES.map((c) => [c, []]));
   for (const rel of files) {
     const src = fs.readFileSync(path.join(root, rel), 'utf8');
-    const actual = fileCapabilities(src);
+    const actual = rel.endsWith('.py') ? pythonInventory(src).caps : fileCapabilities(src);
     const want = new Set(declared.get(rel) ?? []);
     seen.add(rel);
     for (const c of actual) {
@@ -922,7 +957,7 @@ export function auditCapabilities({ root = '.', capabilities = CAPABILITIES, mod
     ok: capViolations.length === 0 && staleDeclarations.length === 0,
     detail: {
       filesScanned: files.length,
-      network: byClass.network, process: byClass.process, eval: byClass.eval,
+      native: byClass.native, network: byClass.network, process: byClass.process, eval: byClass.eval,
       filesystem: byClass.filesystem.length,
       undeclared: capViolations, stale: staleDeclarations,
     },
@@ -930,7 +965,8 @@ export function auditCapabilities({ root = '.', capabilities = CAPABILITIES, mod
       ? `${capViolations.length} undeclared capability/ies: ${capViolations.map((v) => `${v.file} -> ${v.capability}`).join(', ')}`
       : staleDeclarations.length
         ? `${staleDeclarations.length} declaration(s) with nothing behind them: ${staleDeclarations.map((v) => `${v.file} -> ${v.capability}`).join(', ')}`
-        : `${files.length} files scanned; network capability confined to ${byClass.network.join(', ') || 'no file at all'}`,
+        : `${files.length} files scanned; direct network APIs in ${byClass.network.join(', ') || 'no file at all'}`
+          + (byClass.native.length ? `; native OS authority in ${byClass.native.join(', ')} is not restricted by this static inventory` : ''),
   });
 
   /* ---- 2. network egress ------------------------------------------------------- */
@@ -947,8 +983,8 @@ export function auditCapabilities({ root = '.', capabilities = CAPABILITIES, mod
       ? `UNDECLARED network capability in ${undeclaredEgress.join(', ')}`
       : phantomEgress.length
         ? `declared egress with no network code behind it: ${phantomEgress.join(', ')}`
-        : `${capabilities.network.egress.length} declared egress point(s), all explicit and authenticated as declared; nothing else in the package can open a socket`
-          + ` (plus ${capabilities.network.indirect.length} declared INDIRECT child-process paths that Holt prints and you confirm)`,
+        : `${capabilities.network.egress.length} declared direct egress point(s); ${byClass.native.length} declared native OS module(s) carry broader authority`
+          + ` (plus ${capabilities.network.indirect.length} declared INDIRECT child-process paths reached by explicit operator commands)`,
   });
 
   /* ---- 3. git can never reach the network -------------------------------------- */
@@ -982,7 +1018,8 @@ export function auditCapabilities({ root = '.', capabilities = CAPABILITIES, mod
   const literalBins = new Set();
   const foundSites = new Set();
   for (const rel of files) {
-    for (const t of spawnTargets(fs.readFileSync(path.join(root, rel), 'utf8'))) {
+    const source = fs.readFileSync(path.join(root, rel), 'utf8');
+    for (const t of rel.endsWith('.py') ? pythonInventory(source).targets : spawnTargets(source)) {
       if (t.startsWith('<dynamic:')) foundSites.add(`${rel}:${t.slice(9, -1)}`);
       else literalBins.add(t);
     }
@@ -1020,6 +1057,10 @@ export function auditCapabilities({ root = '.', capabilities = CAPABILITIES, mod
   const actualDynamicEnv = new Set();
   for (const rel of files) {
     const source = fs.readFileSync(path.join(root, rel), 'utf8');
+    if (rel.endsWith('.py')) {
+      for (const identifier of pythonInventory(source).environment) actualDynamicEnv.add(`${rel}:${identifier}`);
+      continue;
+    }
     for (const n of envReads(source)) actualEnv.add(n);
     for (const identifier of computedEnvReadIdentifiers(source)) {
       actualDynamicEnv.add(`${rel}:${identifier}`);
@@ -1113,6 +1154,19 @@ export function audit({ root = '.', requireSignature = false, publicKeysB64 = RE
  * dangerous is on it.
  */
 export const MODULE_LEDGER = {
+  'bin/holt-supervisor.py': ['filesystem', 'native', 'process'],
+  'src/session-runner.mjs': ['filesystem', 'process'],
+  'src/checkpoints.mjs': ['filesystem'],
+  'src/checkpoint-validation.mjs': ['filesystem'],
+  'src/checkpoint-landing.mjs': ['filesystem'],
+  'src/session-buffers.mjs': ['filesystem'],
+  'src/session-recovery.mjs': ['filesystem'],
+  'src/session-host.mjs': [],
+  'src/session-bridge.mjs': [],
+  'src/sessions.mjs': [],
+  'src/python-audit.mjs': [],
+  'src/integrate/editor-install.mjs': ['filesystem'],
+  'src/integrate/editor/extension.cjs': ['filesystem', 'process'],
   // NETWORK — only explicit setup or explicit managed-policy sync.
   'bin/install-ctags.mjs': ['filesystem', 'network', 'process'],
   'src/team/managed-policy-tuf.mjs': ['filesystem', 'network'],

@@ -112,6 +112,20 @@ export async function ensurePrivateDirectory(dir) {
   return dir;
 }
 
+/** Sync publication/removal of directory entries where the OS exposes directory fsync. */
+export async function syncPrivateDirectory(dir) {
+  let handle;
+  try {
+    handle = await fs.open(dir, FSC.O_RDONLY | (FSC.O_DIRECTORY ?? 0) | NOFOLLOW);
+    await handle.sync();
+    return true;
+  } catch (error) {
+    // Node/Windows does not expose a portable directory FlushFileBuffers handle.
+    if (process.platform === 'win32' && ['EISDIR', 'EPERM', 'EACCES', 'EINVAL'].includes(error?.code)) return false;
+    throw error;
+  } finally { await handle?.close().catch(() => {}); }
+}
+
 /** Publish one private file through a unique 0600 sibling and an atomic rename. */
 export async function writePrivateFileAtomic(file, bytes) {
   const dir = await ensurePrivateDirectory(path.dirname(file));
@@ -129,6 +143,7 @@ export async function writePrivateFileAtomic(file, bytes) {
       throw new Error(`published state is not one owned regular file: ${file}`);
     }
     if (process.platform !== 'win32' && (published.mode & 0o077) !== 0) await fs.chmod(file, 0o600);
+    await syncPrivateDirectory(dir);
   } finally {
     if (handle) await handle.close().catch(() => {});
     await fs.rm(temp, { force: true }).catch(() => {});

@@ -56,9 +56,9 @@ export const HOSTS = [
     blockScope: 'shell commands', failureMode: 'hook crash, timeout, or invalid output fails open',
     note: 'IMPLEMENTED, NOT DRIVEN LIVE: .cursor/hooks.json uses beforeShellExecution and Cursor\'s '
       + 'current snake_case {permission,user_message,agent_message} output. Shell commands only; '
-      + 'failClosed is explicitly false, so hook failure or timeout allows the command. Cursor Stop '
-      + 'uses the documented followup_message only for completed loop_count=0 and changed state; '
-      + 'that starts one bounded follow-up rather than passively injecting context.' },
+      + 'failClosed is explicitly false, so hook failure or timeout allows the command. Stop is '
+      + 'not installed and stale Stop hooks are neutral; Holt never starts a follow-up loop. '
+      + 'Session end reports only previously unseen actionable state.' },
   { id: 'cursor-cloud', name: 'Cursor Cloud Agent', env: 'cloud', strength: 'advisory',
     detect: { project: [], user: [] }, rulesFile: 'AGENTS.md · .cursor/rules/*.mdc', mcp: false,
     note: 'The repository hook can be present in a cloud checkout, but holt is not guaranteed to be '

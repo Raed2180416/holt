@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { generateKeyPairSync, sign as edSign } from 'node:crypto';
 import { underOrEqualAsync } from '../../src/paths.mjs';
+import { pythonInventory } from '../../src/python-audit.mjs';
 import {
   audit, auditCapabilities, verifyIntegrity, buildManifest, treeDigest, shippedFiles,
   fileCapabilities, importedBuiltins, spawnTargets, envReads, computedEnvReadIdentifiers,
@@ -126,6 +127,33 @@ test('POSITIVE CONTROL: the detectors find what is known to be present', () => {
   const sinkSite = CAPABILITIES.dynamicCallSites.find((site) => site.file === 'src/team/audit-sink.mjs');
   assert.deepEqual(sinkSite?.canRun, ['node'],
     'the dynamic sink call site must resolve only to the current Node executable');
+});
+
+test('PYTHON AUDIT: native authority and imported aliases are visible while comment/docstring prose is inert', () => {
+  const source = fs.readFileSync(path.join(ROOT, 'bin/holt-supervisor.py'), 'utf8');
+  const actual = pythonInventory(source);
+  assert.equal(actual.safe, true);
+  assert.deepEqual([...actual.caps].sort(), ['filesystem', 'native', 'process']);
+  assert.ok(actual.targets.has('<dynamic:sys>'));
+  assert.equal(pythonInventory('"""import socket\nexec(unsafe)"""\n# import socket\nimport json\n').caps.size, 0);
+  assert.ok(pythonInventory('import socket as network\n').caps.has('network'));
+  assert.ok(pythonInventory('import importlib\n').caps.has('eval'));
+  assert.equal(pythonInventory('"""broken string\nimport socket\n').safe, false);
+  assert.ok(spawnTargets("import {execFile} from 'node:child_process'; const launch = promisify(execFile); launch(program, []);").has('<dynamic:program>'));
+});
+
+test('PYTHON AUDIT: a planted socket, binary and ambient read fail named checks in the shipped optional supervisor', async (t) => {
+  const dir = await sandbox();
+  t.after(() => cleanup(dir));
+  assert.equal(audit({ root: dir }).ok, true);
+  fs.appendFileSync(path.join(dir, 'bin/holt-supervisor.py'), '\nimport socket\nsubprocess.Popen("curl")\nos.getenv("PRIVATE_VALUE")\n');
+  reseal(dir);
+  const report = audit({ root: dir });
+  assert.equal(check(report, 'capabilities').ok, false);
+  assert.equal(check(report, 'network').ok, false);
+  assert.equal(check(report, 'binaries').ok, false);
+  assert.equal(check(report, 'environment').ok, false);
+  assert.ok(check(report, 'binaries').detail.undeclared.includes('curl'));
 });
 
 test('the comment stripper does not eat regex literals containing slashes', () => {
@@ -720,15 +748,15 @@ test('SUPPLY-CHAIN.md names every fixed or administrator-supplied network destin
   assert.match(QUESTIONNAIRE, /two in-process network paths/i);
 });
 
-test('both INDIRECT network paths are exact and disclosed in both documents, not only in the code', () => {
+test('INDIRECT setup and explicit command paths are disclosed in both documents, not only in the code', () => {
   // The gap this whole exercise found in its own first draft: `sh -c "sudo apt-get install …"`
   // reaches the network through a child process, so no in-process detector sees it, and a
   // capability ledger that only watches sockets would have reported a clean "one destination"
   // while the tool could run a privileged installer. Both documents must say so, and the
   // machine-readable output must carry it beside `sends` rather than somewhere a reader has to
   // go looking.
-  assert.equal(CAPABILITIES.network.indirect.length, 2,
-    'package-manager and exact-versioned Go install must remain separately declared');
+  assert.equal(CAPABILITIES.network.indirect.length, 4,
+    'both setup paths and both explicit user-command paths must remain separately declared');
   const enry = CAPABILITIES.network.indirect.find((entry) => /go install/u.test(entry.via));
   assert.ok(enry, 'the Go installer must not disappear behind the package-manager declaration');
   assert.equal(enry.via, 'go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6');
@@ -739,6 +767,8 @@ test('both INDIRECT network paths are exact and disclosed in both documents, not
     assert.match(doc, /package manager/i, 'the package-manager install path must be disclosed');
     assert.match(doc, /sudo/, 'the privilege escalation must be named, not implied');
     assert.ok(doc.includes(enry.via), 'the exact Enry package and version must be disclosed');
+    assert.match(doc, /holt run --/);
+    assert.match(doc, /holt verify --run/);
   }
   assert.ok(CAPABILITIES.privilege.escalates.length === 1,
     'exactly one privilege path exists; if that changes, both documents must change with it');
@@ -749,7 +779,7 @@ test('holt audit --json surfaces the indirect path beside what it sends', async 
   const rep = JSON.parse(r.stdout);
   assert.ok(Array.isArray(rep.statement.indirectNetwork),
     'a reviewer parsing the JSON must see subprocess-mediated network paths without reading prose');
-  assert.equal(rep.statement.indirectNetwork.length, 2);
+  assert.equal(rep.statement.indirectNetwork.length, 4);
   assert.ok(rep.statement.indirectNetwork.some((entry) => /sudo/u.test(entry.effect)));
   const enry = rep.statement.indirectNetwork.find((entry) => /go install/u.test(entry.via));
   assert.equal(enry?.via, 'go install github.com/go-enry/go-enry/v2/cmd/enry@v2.9.6');

@@ -236,6 +236,7 @@ export async function buildModel(cwd, opts = {}) {
       addedSymbols: n.addedSymbols,
       uniqueSymbols: n.uniqueSymbols,
       ownership: n.ownership,
+      checkpoints: n.checkpoints ?? [],
     };
   });
 
@@ -390,9 +391,22 @@ function detailLines(row, width, height, u = budget()) {
   if (row.ownership?.state === 'active') {
     L.push(paint('grey', 'ownership ') + paint('cyan', `active: ${u.take(row.ownership.owner, { ident: true })}`)
       + paint('grey', ` until ${u.take(row.ownership.expiresAt ?? 'unknown')}`));
-    L.push(paint('grey', '          participating sessions must hand off or release before cleanup'));
+    L.push(paint('grey', row.ownership.sessions?.length
+      ? '          hosts detach their sessions after outstanding work drains'
+      : '          participating sessions must hand off or release before cleanup'));
   } else if (row.ownership?.state && row.ownership.state !== 'unclaimed') {
     L.push(paint('grey', 'ownership ') + paint('magenta', `needs review: ${u.take(row.ownership.reason ?? row.ownership.state)}`));
+  }
+  for (const session of (row.ownership?.sessions ?? []).slice(0, 8)) {
+    L.push(paint('grey', 'session   ') + `${u.take(session.label, { ident: true })} · ${u.take(session.state)}`
+      + paint('grey', ` · ${session.pending.length} operation(s) · ${session.buffers.length} buffer(s)`));
+    for (const buffer of session.buffers.filter((item) => item.dirty).slice(0, 3)) {
+      L.push(paint('grey', 'unsaved   ') + `${u.take(buffer.path)} · version ${buffer.version}`);
+    }
+  }
+  for (const checkpoint of (row.checkpoints ?? []).slice(0, 3)) {
+    L.push(paint('grey', 'saved     ') + `${u.take(checkpoint.commit.slice(0, 12))} · committed version available for review`);
+    L.push(paint('grey', '          ') + `holt checkpoint prepare ${u.take(checkpoint.id)}`);
   }
   if (redundant.length) {
     L.push(paint('grey', 'redundant ') + `identical to work also held by ${redundant.join(', ')}`);

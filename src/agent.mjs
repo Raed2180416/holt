@@ -6372,20 +6372,9 @@ async function assessWorktreeMatch(
  * What does an agent working here need to know about its siblings?
  * @returns {Promise<string|null>} plain text, or null when there is nothing worth saying
  */
-/**
- * How many consecutive suppressions before an unchanged brief is repeated anyway.
- *
- * Pure change-triggering has one failure mode, and it is not hypothetical: a long agent session
- * gets its context compacted, the brief scrolls out, and because the repository state never
- * changed, holt stays silent forever about work it is actively protecting. The agent then
- * believes there is nothing to know. A periodic refresh costs one short paragraph and removes
- * that hole; the state has to be genuinely static for twenty prompts to earn one repeat.
- */
-export const BRIEF_REFRESH_AFTER = 20;
-
 /** Sibling of the report cache: what was last SAID, as opposed to what was last computed. */
-function briefStatePath(root) {
-  const key = createHash('sha256').update(path.resolve(root)).digest('hex').slice(0, 16);
+function briefStatePath(root, scope = '') {
+  const key = createHash('sha256').update(path.resolve(root)).update('\0').update(scope).digest('hex').slice(0, 32);
   return path.join(privateStateRoot(), `brief-${key}.json`);
 }
 
@@ -6393,7 +6382,7 @@ function briefStatePath(root) {
  * Build the agent-facing brief.
  *
  * @param {string} cwd
- * @param {{ onlyIfChanged?: boolean, familyOverrides?: string[],
+ * @param {{ onlyIfChanged?: boolean, scope?: string, lifecycle?:boolean, familyOverrides?: string[],
  *           maintenanceFloor?: number, maintenanceRatio?: number }} [opts]
  *   onlyIfChanged — return null when this exact brief was already emitted for this exact
  *   repository state. Wired to UserPromptSubmit, which fires on EVERY message: without it holt
@@ -6502,7 +6491,9 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
 
   // `w`, not `u` — `u` is the untrusted-content budget in this scope, and a filter parameter
   // shadowing it would silently make `u.take` mean something else inside the callback.
-  const owned = report.graph.nodes.filter((w) => w.ownership?.state === 'active');
+  // Normal live participation is status, not a reason to interrupt an ordinary prompt. The
+  // actual cleanup boundary still checks it freshly, and explicit `brief` retains the overview.
+  const owned = opts.lifecycle ? [] : report.graph.nodes.filter((w) => w.ownership?.state === 'active');
   if (owned.length) {
     lines.push(`${owned.length} worktree(s) have active session owners: `
       + owned.slice(0, 5).map((w) => `${u.take(w.id, ID)} (${u.take(w.ownership.owner, ID)})`).join(', ')
@@ -6515,9 +6506,10 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
     lines.push(`${ownershipReview.length} worktree ownership claim(s) need review: `
       + ownershipReview.slice(0, 5).map((w) => `${u.take(w.id, ID)} (${u.take(w.ownership.state)})`).join(', ')
       + (ownershipReview.length > 5 ? `; ${ownershipReview.length - 5} more` : '')
-      + '. Use ownership status, owner release, or an explicit reviewed takeover; expiry is not abandonment.');
+      + '. Use ownership status to inspect and recover the affected session; expiry is not abandonment.');
   }
-  const risky = report.unique.filter((w) => w.uncommittedOnlyCount > 0);
+  const risky = report.unique.filter((w) => w.uncommittedOnlyCount > 0
+    && !(opts.lifecycle && here?.id === w.id));
   if (risky.length) {
     const shown = risky.slice(0, 5);
     lines.push(
@@ -6598,7 +6590,12 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
     );
   }
 
-  if (lines.length === 0) return null;
+  if (lines.length === 0) {
+    // Remember resolution so the same problem recurring later is new, actionable information.
+    if (root) await writePrivateFileAtomic(briefStatePath(root, opts.scope), JSON.stringify({ version: 2, digest: null }))
+      .catch(() => {});
+    return null;
+  }
 
   // SAY WHAT CAME FROM THE REPOSITORY. The fence makes repository text unable to forge a line;
   // this tells the reader which text that was. `provenanceLines` returns nothing when no value was
@@ -6628,7 +6625,7 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
   // fix's clothes.
   const digest = createHash('sha256').update(text).digest('hex').slice(0, 32);
   if (!root) return text;
-  const statePath = briefStatePath(root);
+  const statePath = briefStatePath(root, opts.scope);
   let stateReady = true;
   try { await ensurePrivateDirectory(privateStateRoot()); } catch { stateReady = false; }
   // SessionStart and Antigravity invocation 0 deliberately speak even if another process emitted
@@ -6642,18 +6639,17 @@ export async function buildBrief(cwd = process.cwd(), opts = {}) {
     })).catch(() => { /* an unwritable state file must never break a hook */ });
     return text;
   }
-  /** @type {{digest?:string, suppressed?:number}|null} */
+  /** @type {{digest?:string}|null} */
   let prev = null;
   if (stateReady) try {
     const stored = await readStableRegularFile(statePath, { requireSingleLink: true, requireOwner: true });
     if (stored.ok) prev = JSON.parse(stored.bytes.toString('utf8'));
   } catch { /* first time */ }
 
-  const repeats = prev?.digest === digest ? (prev.suppressed ?? 0) + 1 : 0;
-  const suppress = repeats > 0 && repeats < BRIEF_REFRESH_AFTER;
+  const suppress = prev?.digest === digest;
 
-  if (stateReady) await writePrivateFileAtomic(statePath, JSON.stringify({
-    version: 1, digest, suppressed: suppress ? repeats : 0,
+  if (stateReady && !suppress) await writePrivateFileAtomic(statePath, JSON.stringify({
+    version: 2, digest,
   })).catch(() => { /* an unwritable state file must never break a hook */ });
 
   return suppress ? null : text;

@@ -135,8 +135,8 @@ test('MCP PROTOCOL: tools/list returns the full, well-formed tool set', async (t
     assert.ok(names.includes(expected), `missing acting tool ${expected}`);
   }
 
-  const MUTATING = new Set(['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect', 'holt_discard', 'holt_worktree_ownership']);
-  const DESTRUCTIVE = new Set(['holt_purge', 'holt_discard']);
+  const MUTATING = new Set(['holt_clean', 'holt_purge', 'holt_rescue', 'holt_protect', 'holt_discard', 'holt_worktree_ownership', 'holt_checkpoint', 'holt_session_buffers']);
+  const DESTRUCTIVE = new Set(['holt_purge', 'holt_discard', 'holt_checkpoint']);
 
   for (const tool of tools) {
     assert.ok(tool.description?.length > 40, `${tool.name}: description too thin`);

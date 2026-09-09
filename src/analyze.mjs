@@ -29,6 +29,7 @@ import { isHoltLock } from './discover.mjs';
 import { stashState } from './stash.mjs';
 import { looksGenerated } from './scan.mjs';
 import { ownershipLandingReason } from './ownership.mjs';
+import { listCheckpoints } from './checkpoints.mjs';
 
 /* ------------------------------------------------------------------ helpers ---- */
 
@@ -714,13 +715,17 @@ export function safeToDelete(scanResult, unique = null) {
     if (ownership?.state === 'active') {
       return {
         id: w.id, path: w.path, safe: false, confidence: 'measured', ownership,
-        reasons: [`actively owned by ${ownership.owner} until ${ownership.expiresAt}; release or hand off the ownership lease before cleanup`],
+        reasons: [ownership.sessions?.length
+          ? `${ownership.sessions.length} attached session(s) still use this workspace; their hosts must finish outstanding work and detach before cleanup`
+          : `actively owned by ${ownership.owner} until ${ownership.expiresAt}; release or hand off the ownership lease before cleanup`],
       };
     }
     if (ownership && ownership.state !== 'unclaimed') {
       return {
         id: w.id, path: w.path, safe: false, confidence: 'unknown', ownership,
-        reasons: [ownership.state === 'expired'
+        reasons: [ownership.sessions?.length
+          ? `contact was lost with attached sessions; their pending work remains recorded for recovery before cleanup`
+          : ownership.state === 'expired'
           ? `ownership lease held by ${ownership.owner} expired at ${ownership.expiresAt}; expiry is not abandonment, so explicit takeover or owner release is required`
           : `worktree ownership cannot be established (${ownership.reason ?? ownership.state}); refusing cleanup until it is resolved`],
       };
@@ -2121,6 +2126,16 @@ export async function analyze(scanResult, opts = {}) {
   // single rev walk that fails immediately and returns `total: 0`. Per-entry reachability work
   // happens only when entries exist.
   const stash = await stashState(scanResult.root);
+  const checkpoints = await listCheckpoints(scanResult.root).catch(() => ({
+    ok: false, items: [], issues: [{ code: 'checkpoint-inventory-unavailable' }], omitted: 0,
+  }));
+  // Saved versions are not synthetic worktrees. They neither inflate deletion candidates nor
+  // inherit the producer's writable lifetime; each candidate is verified again before use.
+  graph.checkpoints = checkpoints.items;
+  for (const node of graph.nodes) {
+    const versions = checkpoints.items.filter((checkpoint) => checkpoint.sourceWorktreeKey === node.ownership?.worktreeKey);
+    if (versions.length) node.checkpoints = versions;
+  }
 
   return {
     base: scanResult.base,
@@ -2143,8 +2158,10 @@ export async function analyze(scanResult, opts = {}) {
       stashAtRisk: stash.atRisk.length,
       activeOwnership: ownership.filter((lease) => lease.state === 'active').length,
       ownershipNeedsReview: ownership.filter((lease) => !['active', 'unclaimed'].includes(lease.state)).length,
+      checkpointVersions: checkpoints.items.length,
     },
     stash,
+    checkpoints,
     unique: uniq,
     safe,
     collisions: cols,

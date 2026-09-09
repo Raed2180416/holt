@@ -1099,14 +1099,7 @@ export function cursorHooks(bin = 'holt') {
         // guard, not an availability boundary, and the manifest says so in the same words.
         { command: `${bin} hook pre-tool-use --host cursor`, timeout: 120, failClosed: false },
       ],
-      // Cursor's documented Stop response is `followup_message`: it starts another agent loop,
-      // rather than passively adding context after the response. The CLI therefore emits it only
-      // for a completed loop_count=0 event and only when the actionable brief changed. The
-      // follow-up's own Stop (loop_count >= 1) is always a no-op, which bounds continuation and
-      // prevents a warning from becoming an agent loop. sessionEnd remains a user-facing warning.
-      stop: [
-        { command: `${bin} hook stop --host cursor`, timeout: 60 },
-      ],
+      // Stop would start a new agent loop. Session end reports only previously unseen changes.
       sessionEnd: [
         { command: `${bin} hook session-end --host cursor`, timeout: 60 },
       ],
@@ -3704,10 +3697,8 @@ export function formatContext(text, { host = 'generic', eventName = 'SessionStar
   if (!text) return host === 'claude-code' || host === 'codex' || host === 'cursor'
     || host === 'qwen-code' || host === 'antigravity'
     ? {} : { context: null };
-  // Cursor Stop does not have an additional-context channel. `followup_message` is consumed as a
-  // new prompt and deliberately continues the loop, so cmdHook applies status, loop-count and
-  // changed-state guards before this formatter is reached.
-  if (host === 'cursor' && eventName === 'Stop') return { followup_message: text };
+  // Never turn passive state into a new agent prompt, including stale installed Stop hooks.
+  if (host === 'cursor' && eventName === 'Stop') return {};
   // Claude Stop context continues the conversation. Keep this guard even though Holt no longer
   // wires the event, so a stale/manual invocation cannot resurrect it as a supposedly passive
   // advisory channel.

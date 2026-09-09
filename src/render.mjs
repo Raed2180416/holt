@@ -112,10 +112,11 @@ export function renderHeader(report, u = repoData()) {
   );
   if ((k.activeOwnership ?? 0) || (k.ownershipNeedsReview ?? 0)) {
     lines.push(
-      `  ownership ${k.activeOwnership ?? 0} active lease(s)`
+      `  ownership ${k.activeOwnership ?? 0} active workspace(s)`
       + ((k.ownershipNeedsReview ?? 0) ? c('yellow', `  ·  ${k.ownershipNeedsReview} need review`) : ''),
     );
   }
+  if (k.checkpointVersions) lines.push(`  saved     ${k.checkpointVersions} committed version(s) available for review while producers continue`);
   return lines.join('\n');
 }
 
@@ -735,7 +736,7 @@ export function renderOwnership(result) {
   const rows = Array.isArray(result?.worktrees)
     ? result.worktrees
     : (result?.id ? [result] : []);
-  const out = [c('bold', 'holt ownership') + c('grey', '  explicit local leases; unclaimed does not mean no agent is working')];
+  const out = [c('bold', 'holt ownership') + c('grey', '  local leases and automatic session attachments')];
   if (!rows.length) {
     out.push('', c('grey', '  no worktrees were found'));
     return out.join('\n');
@@ -747,9 +748,20 @@ export function renderOwnership(result) {
         : c('red', u.take(String(lease.state ?? 'unavailable')).toUpperCase());
     out.push(`\n  ${u.cell(row.id ?? 'unknown', 30, ID)} ${state}`);
     if (lease.owner) out.push(c('grey', `    owner ${u.take(lease.owner, ID)}  until ${u.take(lease.expiresAt ?? '—')}`));
+    for (const session of (lease.sessions ?? []).slice(0, 12)) {
+      out.push(`    ${u.take(session.kind)} ${u.take(session.label, ID)} · ${u.take(session.state)}`
+        + ` · ${session.pending.length} pending operation(s) · ${session.buffers.length} open buffer(s)`);
+      for (const operation of session.pending.slice(0, 3)) {
+        out.push(c('grey', `      ${u.take(operation.kind)} ${u.take(operation.paths.length ? operation.paths.join(', ') : 'workspace scope')}`));
+      }
+      for (const buffer of session.buffers.filter((item) => item.dirty).slice(0, 3)) {
+        out.push(c('grey', `      unsaved ${u.take(buffer.path)} · version ${buffer.version}${buffer.recoverable ? ' · recovery copy available' : ''}`));
+      }
+    }
+    if ((lease.sessions?.length ?? 0) > 12) out.push(c('grey', `    ${lease.sessions.length - 12} further sessions; --json includes all`));
     if (lease.reason) out.push(c('grey', `    ${u.take(lease.reason)}`));
   }
-  out.push('', c('grey', '  Active, expired, invalid and unavailable leases all refuse cleanup. Release or explicitly take over a lease; Holt never infers liveness from a process, name or mtime.'));
+  out.push('', c('grey', '  Hosts detach automatic sessions after work drains. Manual lease release does not end attached sessions. Unclaimed describes recorded participation; expiry does not authorize cleanup.'));
   return out.join('\n');
 }
 

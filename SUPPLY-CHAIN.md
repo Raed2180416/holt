@@ -182,8 +182,9 @@ sanitised response summary and its digest are retained in
 
 The installed audit checks in-process primitives, declared external binaries and selected
 documentation assertions against the package bytes. It cannot infer what a child executable does
-after launch, so its machine-readable statement separately declares both confirmed child-process
-install paths and what they can do.
+after launch, so its machine-readable statement separately declares setup installers and explicit
+user-command paths. The optional Python supervisor uses `ctypes` for native OS calls; the audit
+reports that broader authority explicitly and does not claim that static inspection sandboxes it.
 
 ### Sends — two explicit in-process paths, and only when you ask
 
@@ -212,7 +213,11 @@ privilege. Analysis, scan, hook, MCP and Git action paths do not request elevati
 The indirect paths are disclosed here because a true sentence can still mislead: `sh` was
 described as "backend probes and `holt verify --run`" and stopped there — every word true, and the
 reader would still have finished the paragraph with a wrong picture. `holt audit --json` reports
-both under `statement.indirectNetwork`.
+the setup paths under `statement.indirectNetwork`, alongside `holt run -- <command>` and
+`holt verify --run <command>`. These command features run exactly the requested program with the
+caller's permissions and environment. Its descendants may use the network or credentials; Holt
+does not sandbox them. The editor bridge sends text only over a private local pipe to Holt and
+stores recovery copies under private Git administration storage.
 
 No telemetry. No analytics. No crash reporting. No update check. **No licence call-home** —
 entitlement is an offline Ed25519 signature check (`src/license.mjs`). Normal analysis and policy
@@ -236,11 +241,16 @@ Two independent things make that checkable rather than promised:
 ### Executes
 
 `git`, and — only if present and only for the feature that needs them — `jj`, `ctags`, `enry`,
-`rg`, `jscpd`, `tar`, `sh`, `holt`, `go`, `mount`, `where`, `node`. Every one is listed in `holt audit --json`
+`rg`, `jscpd`, `tar`, `sh`, `holt`, `go`, `mount`, `where`, `node`, `python3`, `python`. Every one is listed in `holt audit --json`
 under `checks[].detail`, including the call sites where the executable is a **variable** rather than a
 literal, which is the half a string scan cannot see.
 
-Four of those are worth stating plainly rather than burying:
+The command and setup boundaries are explicit:
+
+- **`holt run -- <command>`** uses the optional Python 3 supervisor to wait for the command and
+  its descendants. Native process supervision observes lifetime; it is not a sandbox. Ordinary
+  Holt analysis and explicit ownership do not require Python. The editor extension runs the exact
+  Node and Holt paths recorded by `holt editor install`, through a private local pipe.
 
 - **`holt verify --run "<cmd>"` executes the command you give it.** That is the feature: it runs
   *your* test suite against a speculative merge. It runs nothing you did not type.

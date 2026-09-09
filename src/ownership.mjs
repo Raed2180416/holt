@@ -22,9 +22,14 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { git, repoIdentity } from './git.mjs';
-import { ensurePrivateDirectory, readStableRegularFile, writePrivateFileAtomic } from './stable-file.mjs';
+import { ensurePrivateDirectory, readStableRegularFile, writePrivateFileAtomic, syncPrivateDirectory } from './stable-file.mjs';
 import { appendEvent } from './journal.mjs';
 import { canonicalPath, relativeWithinAsync } from './paths.mjs';
+import {
+  SESSION_RECORD_VERSION, SESSION_LIMIT, SESSION_MAX_BYTES, validSession, createSession,
+  authenticSession, publicSession, applySessionEvent, rotateSession, sessionEventHash,
+} from './sessions.mjs';
+import { readBufferSnapshot } from './session-buffers.mjs';
 
 export const OWNERSHIP_VERSION = 1;
 export const DEFAULT_LEASE_SECONDS = 15 * 60;
@@ -44,6 +49,7 @@ const NATIVE_LOCK_PREFIX = 'holt: live ownership lease ';
  * @property {string} heartbeatAt
  * @property {string} expiresAt
  * @property {string|null} nativeLockToken
+ * @property {{manual:boolean,sessions:import('./sessions.mjs').SessionRecord[]}} [managed]
  *
  * @typedef {object} OwnershipEvidence
  * @property {string} state
@@ -52,6 +58,9 @@ const NATIVE_LOCK_PREFIX = 'holt: live ownership lease ';
  * @property {string} [heartbeatAt]
  * @property {string} [expiresAt]
  * @property {string} [reason]
+ * @property {ReturnType<typeof publicSession>[]} [sessions]
+ * @property {boolean} [manual]
+ * @property {string} [worktreeKey]
  * @property {LeaseRecord} [_record]
  */
 
@@ -63,6 +72,7 @@ export function isOwnershipGitLock(reason) {
 /** Ownership is a reason to defer landing, never evidence that work is ready to merge. */
 export function ownershipLandingReason(ownership) {
   if (!ownership?.state || ownership.state === 'unclaimed') return null;
+  if (ownership.sessions?.length) return `${ownership.sessions.length} session attachment(s) still use this writable worktree; finish them before landing the workspace`;
   return ownership.state === 'active'
     ? `session ${ownership.owner} still owns this worktree; wait for its owner to release it before landing`
     : `ownership is ${ownership.state}; resolve the session claim before landing`;
@@ -99,14 +109,21 @@ function validInstant(value) {
 }
 
 /** @param {string} state @param {LeaseRecord|null} [record] @param {string|null} [reason] @returns {OwnershipEvidence} */
-function publicLease(state, record = null, reason = null) {
+function publicLease(state, record = null, reason = null, now = Date.now()) {
   if (!record) return reason ? { state, reason } : { state };
+  const sessions = record.managed?.sessions ?? [];
+  const automatic = record.managed && !record.managed.manual && sessions.length;
   return {
     state,
-    owner: record.owner,
-    claimedAt: record.claimedAt,
-    heartbeatAt: record.heartbeatAt,
-    expiresAt: record.expiresAt,
+    worktreeKey: record.worktreeKey,
+    owner: automatic ? sessions.slice(0, 3).map((session) => session.label).join(', ') + (sessions.length > 3 ? ` and ${sessions.length - 3} more` : '') : record.owner,
+    claimedAt: automatic ? sessions.map((session) => session.startedAt).sort()[0] : record.claimedAt,
+    heartbeatAt: automatic ? sessions.map((session) => session.heartbeatAt).sort().at(-1) : record.heartbeatAt,
+    expiresAt: automatic ? sessions.map((session) => session.expiresAt).sort().at(-1) : record.expiresAt,
+    ...(record.managed ? {
+      manual: record.managed.manual,
+      sessions: record.managed.sessions.map((session) => publicSession(session, now)),
+    } : {}),
     ...(reason ? { reason } : {}),
   };
 }
@@ -114,8 +131,8 @@ function publicLease(state, record = null, reason = null) {
 // Lifecycle mutations need the native Git-lock token, while report/MCP/CLI output must never
 // leak it.  Keep it non-enumerable so ordinary spreads and JSON serialisation remain public.
 /** @param {string} state @param {LeaseRecord} record @param {string|null} [reason] */
-function leaseWithRecord(state, record, reason = null) {
-  const lease = publicLease(state, record, reason);
+function leaseWithRecord(state, record, reason = null, now = Date.now()) {
+  const lease = publicLease(state, record, reason, now);
   Object.defineProperty(lease, '_record', { value: record, enumerable: false });
   return lease;
 }
@@ -126,10 +143,12 @@ function parseRecord(raw, target, now) {
   }
   const keys = Object.keys(raw).sort();
   const expected = ['claimedAt', 'expiresAt', 'heartbeatAt', 'nativeLockToken', 'owner', 'version', 'worktreeKey'];
+  if (raw.version === SESSION_RECORD_VERSION) expected.push('managed');
+  expected.sort();
   if (keys.length !== expected.length || keys.some((key, i) => key !== expected[i])) {
     return publicLease('invalid', null, 'ownership record has an unsupported shape');
   }
-  if (raw.version !== OWNERSHIP_VERSION || raw.worktreeKey !== target.key || !validOwner(raw.owner)
+  if (![OWNERSHIP_VERSION, SESSION_RECORD_VERSION].includes(raw.version) || raw.worktreeKey !== target.key || !validOwner(raw.owner)
     || !validInstant(raw.claimedAt) || !validInstant(raw.heartbeatAt) || !validInstant(raw.expiresAt)) {
     return publicLease('invalid', null, 'ownership record failed validation');
   }
@@ -143,6 +162,17 @@ function parseRecord(raw, target, now) {
     || expiresAt - heartbeatAt > MAX_LEASE_SECONDS * 1000) {
     return publicLease('invalid', null, 'ownership record has invalid lease times');
   }
+  if (raw.version === SESSION_RECORD_VERSION) {
+    const managed = raw.managed;
+    if (!managed || typeof managed !== 'object' || Array.isArray(managed)
+      || Object.keys(managed).sort().join(',') !== 'manual,sessions'
+      || typeof managed.manual !== 'boolean' || !Array.isArray(managed.sessions)
+      || !managed.sessions.length || managed.sessions.length > SESSION_LIMIT
+      || !managed.sessions.every(validSession)
+      || new Set(managed.sessions.map((session) => session.id)).size !== managed.sessions.length) {
+      return publicLease('invalid', null, 'automatic session record failed validation');
+    }
+  }
   const record = {
     version: raw.version,
     worktreeKey: raw.worktreeKey,
@@ -151,8 +181,12 @@ function parseRecord(raw, target, now) {
     heartbeatAt: raw.heartbeatAt,
     expiresAt: raw.expiresAt,
     nativeLockToken: raw.nativeLockToken,
+    ...(raw.version === SESSION_RECORD_VERSION ? { managed: raw.managed } : {}),
   };
-  return expiresAt > now ? leaseWithRecord('active', record) : leaseWithRecord('expired', record);
+  const active = record.managed
+    ? (record.managed.manual && expiresAt > now) || record.managed.sessions.some((session) => Date.parse(session.expiresAt) > now)
+    : expiresAt > now;
+  return leaseWithRecord(active ? 'active' : 'expired', record, null, now);
 }
 
 function asErrorReason(error) {
@@ -198,7 +232,7 @@ export async function ownershipTarget(worktreePath, { commonDir = null } = {}) {
 
 async function readLeaseAt(target, now = Date.now()) {
   const stored = await readStableRegularFile(recordPath(target), {
-    maxBytes: 8 * 1024, requireSingleLink: true, requireOwner: true,
+    maxBytes: SESSION_MAX_BYTES, requireSingleLink: true, requireOwner: true,
   });
   if (!stored.ok) {
     if (stored.code === 'ENOENT') return publicLease('unclaimed');
@@ -219,7 +253,9 @@ async function readLeaseAt(target, now = Date.now()) {
 export async function inspectWorktreeOwnership(worktreePath, { commonDir = null, now = Date.now() } = {}) {
   const target = await ownershipTarget(worktreePath, { commonDir });
   if (!target.ok) return target.ownership;
-  return readLeaseAt(target, now);
+  const ownership = await readLeaseAt(target, now);
+  ownership.worktreeKey = target.key;
+  return ownership;
 }
 
 async function ensureOwnershipDirectories(target) {
@@ -236,7 +272,7 @@ async function ensureOwnershipDirectories(target) {
  * No rows or session state live in this database; BEGIN IMMEDIATE is the cross-platform lock.
  * Never unlink this file to recover contention: all contenders must lock the same inode.
  */
-async function withLeaseLock(target, fn) {
+export async function withLeaseLock(target, fn) {
   try {
     await ensureOwnershipDirectories(target);
   } catch (error) {
@@ -299,7 +335,26 @@ function newRecord(target, owner, ttlSeconds, now) {
 }
 
 async function writeRecord(target, record) {
-  await writePrivateFileAtomic(recordPath(target), Buffer.from(`${JSON.stringify(record)}\n`, 'utf8'));
+  const bytes = Buffer.from(`${JSON.stringify(record)}\n`, 'utf8');
+  if (bytes.length > SESSION_MAX_BYTES) throw new Error('session ledger reached its bounded storage limit');
+  await writePrivateFileAtomic(recordPath(target), bytes);
+}
+
+/** Keep one authority record while an explicit lease and automatic attachments coexist. */
+function withSessions(record, previous) {
+  if (!previous?._record?.managed?.sessions.length) return record;
+  return {
+    ...(record ?? previous._record), version: SESSION_RECORD_VERSION,
+    managed: { manual: !!record, sessions: previous._record.managed.sessions },
+  };
+}
+
+function manualEvidence(ownership, now) {
+  if (!ownership._record?.managed) return ownership;
+  if (!ownership._record.managed.manual) return publicLease('unclaimed');
+  const { managed, ...record } = ownership._record;
+  record.version = OWNERSHIP_VERSION;
+  return leaseWithRecord(Date.parse(record.expiresAt) > now ? 'active' : 'expired', record, null, now);
 }
 
 function nativeLockReason(token) {
@@ -398,11 +453,24 @@ export async function operateWorktreeOwnership(worktreePath, {
   }
 
   const guarded = await withLeaseLock(target, async () => {
-    const current = await readLeaseAt(target, now);
+    const aggregate = await readLeaseAt(target, now);
+    const current = manualEvidence(aggregate, now);
     if (current.state === 'unavailable') {
       return { ok: false, code: current.state, ownership: current };
     }
     if (operation === 'claim') {
+      if (current.state === 'invalid' && takeover) {
+        const stored = await readStableRegularFile(recordPath(target), { maxBytes: SESSION_MAX_BYTES, requireOwner: true, requireSingleLink: true });
+        if (!stored.ok) return { ok: false, code: 'recovery-required', ownership: aggregate };
+        let raw;
+        try { raw = JSON.parse(stored.bytes.toString('utf8')); } catch { raw = null; }
+        if (raw && (raw.version !== OWNERSHIP_VERSION || Object.hasOwn(raw, 'managed'))) {
+          return { ok: false, code: 'session-recovery-required', ownership: aggregate };
+        }
+        // A reviewed legacy repair still preserves every byte of the damaged authority record.
+        const saved = createHash('sha256').update(stored.bytes).digest('hex');
+        await writePrivateFileAtomic(path.join(target.root, 'record-recoveries', `${target.key}-${saved}.json`), stored.bytes);
+      }
       if (current.state === 'active' && current.owner !== owner) {
         return { ok: false, code: 'held', ownership: current };
       }
@@ -410,6 +478,7 @@ export async function operateWorktreeOwnership(worktreePath, {
         return { ok: false, code: current.state === 'expired' ? 'expired-needs-takeover' : 'invalid-needs-takeover', ownership: current };
       }
       const record = newRecord(target, owner, ttlSeconds, now);
+      if (aggregate._record?.managed) record.nativeLockToken = aggregate._record.nativeLockToken;
       if (current.state === 'active' && current.claimedAt) record.claimedAt = current.claimedAt;
       if (['active', 'expired'].includes(current.state)
         && await leaseNativeLockMatches(target, current._record?.nativeLockToken)) {
@@ -423,7 +492,7 @@ export async function operateWorktreeOwnership(worktreePath, {
       const acquiredToken = record.nativeLockToken ? null : await acquireNativeLeaseLock(target, worktreePath);
       if (acquiredToken) record.nativeLockToken = acquiredToken;
       try {
-        await writeRecord(target, record);
+        await writeRecord(target, withSessions(record, aggregate));
       } catch (error) {
         // Do not strand a native lock if its matching lease record could not be published.
         if (acquiredToken) await releaseNativeLeaseLock(target, worktreePath, acquiredToken);
@@ -432,7 +501,7 @@ export async function operateWorktreeOwnership(worktreePath, {
       return {
         ok: true,
         action: current.state === 'active' ? 'renewed' : (['expired', 'invalid'].includes(current.state) ? 'taken-over' : 'claimed'),
-        ownership: publicLease('active', record),
+        ownership: publicLease('active', withSessions(record, aggregate), null, now),
         nativeGitLock: !!record.nativeLockToken,
       };
     }
@@ -449,12 +518,17 @@ export async function operateWorktreeOwnership(worktreePath, {
         expiresAt: new Date(now + ttlSeconds * 1000).toISOString(),
         nativeLockToken: current._record?.nativeLockToken ?? null,
       };
-      await writeRecord(target, record);
-      return { ok: true, action: 'renewed', ownership: publicLease('active', record) };
+      await writeRecord(target, withSessions(record, aggregate));
+      return { ok: true, action: 'renewed', ownership: publicLease('active', withSessions(record, aggregate), null, now) };
     }
     if (operation === 'release') {
       if (!['active', 'expired'].includes(current.state) || current.owner !== owner) {
         return { ok: false, code: 'not-owner', ownership: current };
+      }
+      if (aggregate._record?.managed?.sessions.length) {
+        const retained = withSessions(null, aggregate);
+        await writeRecord(target, retained);
+        return { ok: true, action: 'released', ownership: await readLeaseAt(target, now), nativeGitLockReleased: false };
       }
       const hadMatchingNativeLock = await leaseNativeLockMatches(target, current._record?.nativeLockToken);
       if (hadMatchingNativeLock && !await releaseNativeLeaseLock(target, worktreePath, current._record?.nativeLockToken)) {
@@ -468,11 +542,174 @@ export async function operateWorktreeOwnership(worktreePath, {
     }
     const record = newRecord(target, toOwner, ttlSeconds, now);
     record.nativeLockToken = current._record?.nativeLockToken ?? null;
-    await writeRecord(target, record);
-    return { ok: true, action: 'handed-off', ownership: publicLease('active', record), previousOwner: owner };
+    await writeRecord(target, withSessions(record, aggregate));
+    return { ok: true, action: 'handed-off', ownership: publicLease('active', withSessions(record, aggregate), null, now), previousOwner: owner };
   });
   if (!guarded.ok) return { ok: false, code: guarded.code, ownership: guarded.ownership };
   return journalLifecycle(worktreePath, guarded.value, { owner, toOwner, reason });
+}
+
+/**
+ * Attach before a host grants workspace access. The private credential is non-enumerable:
+ * report serialization cannot accidentally turn a session id into a release capability.
+ * @param {string} worktreePath
+ * @param {Parameters<typeof createSession>[0] & {commonDir?:string|null,exclusive?:boolean}} [options]
+ */
+export async function openWorktreeSession(worktreePath, options = {}) {
+  const created = createSession(options);
+  if (!created) return { ok: false, code: 'invalid-session' };
+  const now = options.now ?? Date.now();
+  const target = await ownershipTarget(worktreePath, options);
+  if (!target.ok) return { ok: false, code: 'unavailable', ownership: target.ownership };
+  const guarded = await withLeaseLock(target, async () => {
+    const current = await readLeaseAt(target, now);
+    if (['invalid', 'unavailable'].includes(current.state)) return { ok: false, code: current.state, ownership: current };
+    if (options.exclusive === true && current.state !== 'unclaimed') return { ok: false, code: 'workspace-in-use', ownership: current };
+    const sessions = current._record?.managed?.sessions ?? [];
+    if (sessions.length >= SESSION_LIMIT) return { ok: false, code: 'session-limit', ownership: current };
+    const record = current._record ?? newRecord(target, 'automatic sessions', options.ttlSeconds ?? DEFAULT_LEASE_SECONDS, now);
+    const acquiredToken = record.nativeLockToken ? null : await acquireNativeLeaseLock(target, worktreePath);
+    if (acquiredToken) record.nativeLockToken = acquiredToken;
+    record.managed = { manual: current._record?.managed?.manual ?? !!current._record, sessions: [...sessions, created.session] };
+    record.version = SESSION_RECORD_VERSION;
+    try {
+      // Persist recovery authority before publishing the attachment. An interrupted client must
+      // not strand work merely because its only copy of a random credential was in memory.
+      await writePrivateFileAtomic(path.join(target.root, 'credentials', `${created.session.id}-${created.session.generation}.json`),
+        Buffer.from(JSON.stringify({ version: 1, worktreeKey: target.key, credential: created.credential }) + '\n'));
+      await writeRecord(target, record);
+    } catch (error) {
+      if (acquiredToken) await releaseNativeLeaseLock(target, worktreePath, acquiredToken);
+      throw error;
+    }
+    return { ok: true, action: 'session-attached', session: publicSession(created.session, now), ownership: await readLeaseAt(target, now) };
+  });
+  if (!guarded.ok) return { ok: false, code: guarded.code, ownership: guarded.ownership };
+  const result = guarded.value;
+  if (result.ok) await appendEvent(worktreePath, { action: 'session-attached', sessionId: created.session.id, sessionKind: created.session.kind });
+  if (result.ok) Object.defineProperty(result, 'credential', { value: created.credential, enumerable: false });
+  return /** @type {typeof result & {credential?:import('./sessions.mjs').SessionCredential}} */ (result);
+}
+
+/** Transfer this attachment under the cleanup mutex; old generation events lose authority. */
+export async function handoffWorktreeSession(worktreePath, credential, expectedSequence) {
+  const target = await ownershipTarget(worktreePath);
+  if (!target.ok) return { ok: false, code: 'unavailable' };
+  const guarded = await withLeaseLock(target, async () => {
+    const current = await readLeaseAt(target, Date.now());
+    const record = current._record;
+    const session = record?.managed?.sessions.find((item) => item.id === credential?.id);
+    if (!record?.managed || !session || !authenticSession(session, credential)) return { ok: false, code: 'session-credential-mismatch' };
+    if (session.sequence !== expectedSequence) return { ok: false, code: 'sequence-mismatch', expectedSequence: session.sequence };
+    const rotated = rotateSession(session);
+    // Keep the previous generation's recovery credential until the successor is published.
+    await writePrivateFileAtomic(path.join(target.root, 'credentials', `${rotated.session.id}-${rotated.session.generation}.json`),
+      Buffer.from(JSON.stringify({ version: 1, worktreeKey: target.key, credential: rotated.credential }) + '\n'));
+    record.managed.sessions = record.managed.sessions.map((item) => item.id === session.id ? rotated.session : item);
+    await writeRecord(target, record);
+    const result = { ok: true, session: publicSession(rotated.session), ownership: await readLeaseAt(target, Date.now()) };
+    Object.defineProperty(result, 'credential', { value: rotated.credential, enumerable: false });
+    return result;
+  });
+  if (!guarded.ok) return { ok: false, code: guarded.code };
+  if (guarded.value.ok) await appendEvent(worktreePath, { action: 'session-handed-off', sessionId: credential.id, previousGeneration: credential.generation, generation: guarded.value.session.generation });
+  return /** @type {typeof guarded.value & {credential?:import('./sessions.mjs').SessionCredential}} */ (guarded.value);
+}
+
+const closedSessionPath = (target, credential) => path.join(target.root, 'closed-sessions', `${credential.id}-${credential.generation}.json`);
+
+/**
+ * Commit a host event under the exact mutex used by cleanup. Pending work is published before
+ * its start acknowledgement. Only the credential for this generation can drain or retire it.
+ * @param {string} worktreePath
+ * @param {import('./sessions.mjs').SessionCredential} credential
+ * @param {Parameters<typeof applySessionEvent>[1]} event
+ * @param {{commonDir?:string|null,now?:number,ttlSeconds?:number}} [options]
+ */
+export async function updateWorktreeSession(worktreePath, credential, event, options = {}) {
+  const target = await ownershipTarget(worktreePath, options);
+  if (!target.ok) return { ok: false, code: 'unavailable', ownership: target.ownership };
+  const now = options.now ?? Date.now();
+  const guarded = await withLeaseLock(target, async () => {
+    const current = await readLeaseAt(target, now);
+    const record = current._record;
+    const session = record?.managed?.sessions.find((item) => item.id === credential?.id);
+    if (!record?.managed || !session || !authenticSession(session, credential)) {
+      // A lost final acknowledgement must not strand a successfully retired host. Authenticate
+      // the same exact finish against its private receipt; it cannot affect a successor.
+      if (event?.type === 'finish' && /^[0-9a-f-]{36}$/.test(credential?.id) && /^[0-9a-f-]{36}$/.test(credential?.generation)) {
+        const closed = await readStableRegularFile(closedSessionPath(target, credential), { maxBytes: SESSION_MAX_BYTES, requireOwner: true, requireSingleLink: true });
+        if (closed.ok) {
+          try {
+            const receipt = JSON.parse(closed.bytes.toString('utf8'));
+            if (receipt.version === 1 && receipt.worktreeKey === target.key && validSession(receipt.session)
+              && authenticSession(receipt.session, credential) && receipt.session.sequence === event.sequence
+              && receipt.session.lastEventHash === sessionEventHash(event) && receipt.session.phase === 'draining'
+              && !receipt.session.pending.length && !receipt.session.buffers.length) {
+              return { ok: true, repeated: true, closed: true, session: publicSession(receipt.session, now), ownership: current };
+            }
+          } catch { /* Invalid receipts grant no authority. */ }
+        }
+      }
+      return { ok: false, code: 'session-credential-mismatch', ownership: current };
+    }
+    if (event.type === 'buffer' && event.buffer?.recoveryRef) {
+      const recovery = await readBufferSnapshot(target.root, event.buffer.recoveryRef);
+      if (!recovery.ok || recovery.digest !== event.buffer.digest || recovery.snapshot?.bufferPath !== event.buffer.path) {
+        return { ok: false, code: 'buffer-recovery-unverified' };
+      }
+    }
+    const updated = applySessionEvent(session, event, options);
+    if (!updated.ok || !updated.session) return updated;
+    if (updated.repeated) return { ok: true, repeated: true, session: publicSession(session, now), ownership: current };
+    if (event.type === 'buffer-close') {
+      const buffer = session.buffers.find((item) => item.path === event.path);
+      if (buffer?.dirty) {
+        if (!buffer.recoveryRef) return { ok: false, code: 'buffer-recovery-unverified' };
+        const recovery = await readBufferSnapshot(target.root, buffer.recoveryRef);
+        if (!recovery.ok || recovery.digest !== buffer.digest || recovery.snapshot?.bufferPath !== buffer.path) {
+          return { ok: false, code: 'buffer-recovery-unverified' };
+        }
+        // Closing an editor buffer need not block the task when its exact text is captured.
+        // The recovery receipt outlives the writable attachment and keeps the copy discoverable.
+        const bufferKey = createHash('sha256').update(buffer.path).digest('hex');
+        await writePrivateFileAtomic(path.join(target.root, 'buffer-recoveries', `${session.id}-${bufferKey}-${buffer.version}.json`),
+          Buffer.from(JSON.stringify({ version: 1, worktreeKey: target.key, sessionId: session.id,
+            generation: session.generation, closedAt: new Date(now).toISOString(), buffer }) + '\n'));
+      }
+    }
+    const remaining = record.managed.sessions.filter((item) => item.id !== session.id);
+    if (updated.closed) {
+      await writePrivateFileAtomic(closedSessionPath(target, credential), Buffer.from(JSON.stringify({
+        version: 1, worktreeKey: target.key, session: updated.session,
+      }) + '\n'));
+    }
+    if (!updated.closed) remaining.push(updated.session);
+    if (remaining.length) {
+      record.managed.sessions = remaining;
+      await writeRecord(target, record);
+    } else if (record.managed.manual) {
+      const { managed, ...manual } = record;
+      manual.version = OWNERSHIP_VERSION;
+      await writeRecord(target, manual);
+    } else {
+      if (await leaseNativeLockMatches(target, record.nativeLockToken)
+        && !await releaseNativeLeaseLock(target, worktreePath, record.nativeLockToken)) {
+        return { ok: false, code: 'native-lock-release-failed', ownership: current };
+      }
+      await fs.unlink(recordPath(target));
+      await syncPrivateDirectory(path.dirname(recordPath(target)));
+    }
+    if (updated.closed) {
+      await fs.unlink(path.join(target.root, 'credentials', `${session.id}-${session.generation}.json`)).catch(() => {});
+    }
+    return { ok: true, closed: updated.closed, session: publicSession(updated.session, now), ownership: await readLeaseAt(target, now) };
+  });
+  if (!guarded.ok) return { ok: false, code: guarded.code, ownership: guarded.ownership };
+  if (guarded.value.ok && guarded.value.closed && !guarded.value.repeated) {
+    await appendEvent(worktreePath, { action: 'session-finished', sessionId: credential.id, generation: credential.generation });
+  }
+  return guarded.value;
 }
 
 /**

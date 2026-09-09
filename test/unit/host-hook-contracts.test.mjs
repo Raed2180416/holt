@@ -41,7 +41,7 @@ test('current host hook schemas use each product\'s documented project contract'
 
   const cursor = cursorHooks('holt');
   assert.equal(cursor.version, 1);
-  assert.match(cursor.hooks.stop[0].command, /hook stop --host cursor$/);
+  assert.equal(cursor.hooks.stop, undefined, 'a Stop hook must not create unsolicited follow-up prompts');
 
   const codex = codexHooks('holt');
   assert.equal(codex.hooks.PreToolUse[0].matcher, 'Bash|apply_patch|.*');
@@ -127,9 +127,8 @@ test('host verdict dialects block in the fields the current hosts consume', () =
   assert.equal(prompt.hookSpecificOutput.additionalContext, 'changed sibling context');
   assert.deepEqual(formatContext(null, { host: 'codex' }), {},
     'silence must be real silence, not additionalContext:"null" or a foreign context field');
-  assert.deepEqual(formatContext('changed sibling context', { host: 'cursor', eventName: 'Stop' }), {
-    followup_message: 'changed sibling context',
-  }, 'Cursor Stop continues through its documented followup_message field');
+  assert.deepEqual(formatContext('changed sibling context', { host: 'cursor', eventName: 'Stop' }), {},
+    'Cursor Stop must never restart the user conversation');
   assert.deepEqual(formatContext('sibling context', { host: 'claude-code', eventName: 'Stop' }), {},
     'a stale/manual Claude Stop invocation must not emit continuation feedback as passive context');
   const qwenPrompt = formatContext('changed sibling context', {

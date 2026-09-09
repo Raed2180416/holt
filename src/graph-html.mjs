@@ -662,6 +662,13 @@ function describe(i) {
       + (n.ownership?.state === 'active'
         ? '  ' + n.ownership.owner + ' until ' + n.ownership.expiresAt
         : n.ownership?.reason ? '  ' + n.ownership.reason : '') + '\\n' +
+    (n.ownership?.sessions || []).slice(0, 12).map(session =>
+      'session     ' + session.label + ' (' + session.kind + ', ' + session.state + ')'
+      + ' · ' + session.pending.length + ' pending operation(s) · ' + session.buffers.length + ' open buffer(s)'
+      + '\\n').join('') +
+    (n.checkpoints || []).slice(0, 5).map(checkpoint =>
+      'saved       ' + checkpoint.commit.slice(0, 12) + ' · available for review while the producer continues\\n'
+      + '            holt checkpoint prepare ' + checkpoint.id + '\\n').join('') +
     'committed   ' + n.committedFiles + ' file(s) base lacks\\n' +
     'uncommitted ' + n.uncommittedFiles + ' file(s)\\n' +
     'added       ' + n.addedSymbols + ' symbol(s)\\n' +

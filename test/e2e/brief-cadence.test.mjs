@@ -29,7 +29,7 @@ import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { standardFixture, newRepo } from '../fixtures.mjs';
-import { BRIEF_REFRESH_AFTER, buildBrief, evictCacheFiles } from '../../src/agent.mjs';
+import { buildBrief, evictCacheFiles } from '../../src/agent.mjs';
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'bin', 'holt.mjs');
 
@@ -173,24 +173,23 @@ test('CODEX BRIEF: UserPromptSubmit uses additionalContext once, then emits no u
       'a repeated unchanged user prompt must not receive the same sibling briefing again');
   });
 
-test('BRIEF: silence is bounded — an unchanged repository is re-briefed, never abandoned', async (t) => {
+test('BRIEF: unchanged prompts stay silent and an actual compaction refreshes context', async (t) => {
   const { fx } = await standardFixture();
   t.after(() => fx.cleanup());
 
-  const prompt = () => sh(process.execPath,
-    [BIN, 'hook', 'user-prompt-submit', '--host', 'claude-code', '--cwd', fx.root], fx.root);
+  const prompt = () => hookWithPayload('user-prompt-submit', 'claude-code', fx.root, { session_id: 'quiet-session' });
 
   const first = contextOf((await prompt()).stdout);
   assert.ok(first && first.includes('holt'), 'the fixture must produce a brief');
 
-  // A session whose context was compacted has lost the first brief. If holt never repeats itself,
-  // that session is permanently unaware of worktrees holt is holding locks on.
   let spoke = 0;
-  for (let i = 0; i < BRIEF_REFRESH_AFTER + 1; i++) {
+  for (let i = 0; i < 25; i++) {
     if (contextOf((await prompt()).stdout) !== null) spoke++;
   }
-  assert.equal(spoke, 1,
-    `over ${BRIEF_REFRESH_AFTER + 1} unchanged prompts the brief must repeat exactly once, spoke ${spoke} times`);
+  assert.equal(spoke, 0, 'prompt count alone must never cause the same warning to repeat');
+  const compacted = await hookWithPayload('session-start', 'claude-code', fx.root, { session_id: 'quiet-session', source: 'compact' });
+  assert.equal(contextOf(compacted.stdout), first, 'an actual compaction restores the relevant context');
+  assert.equal(contextOf((await prompt()).stdout), null, 'the next prompt must not repeat the compaction context');
 });
 
 test('BRIEF: SessionStart is never suppressed — a new session has seen nothing', async (t) => {
@@ -238,7 +237,7 @@ test('CURSOR STOP: a clean repo returns the documented empty response', async (t
   assert.deepEqual(JSON.parse(result.stdout), {}, 'no actionable brief means no follow-up prompt');
 });
 
-test('CURSOR STOP: followup_message is completed-only, one-loop-bounded, and change-suppressed',
+test('CURSOR STOP: even changed at-risk state never restarts the user conversation',
   async (t) => {
     const { fx } = await standardFixture();
     t.after(() => fx.cleanup());
@@ -256,8 +255,7 @@ test('CURSOR STOP: followup_message is completed-only, one-loop-bounded, and cha
     const eligible = await stop({ status: 'completed', loop_count: 0 });
     assert.equal(eligible.code, 0, `eligible Cursor Stop must succeed: ${eligible.stderr}`);
     const body = JSON.parse(eligible.stdout);
-    assert.match(body.followup_message ?? '', /holt/i,
-      `changed at-risk state must use Cursor's documented followup_message: ${eligible.stdout}`);
+    assert.deepEqual(body, {}, 'even an actionable change must not become an unsolicited new prompt');
     assert.ok(!('context' in body) && !('additionalContext' in body),
       'Cursor does not consume Claude/generic context envelopes at Stop');
 
@@ -287,6 +285,17 @@ test('SESSION-END: at-risk work produces a warning on stderr (advisory, non-bloc
   assert.equal(result.code, 0, `session-end must not block, got exit ${result.code}. stderr: ${result.stderr}`);
   assert.ok(result.stderr.length > 0, 'session-end with at-risk work should warn on stderr');
   assert.match(result.stderr, /holt/i, 'should mention holt in the warning');
+});
+
+test('BRIEF: session identity separates readers while repeated starts and session end remain quiet', async (t) => {
+  const { fx } = await standardFixture();
+  t.after(() => fx.cleanup());
+  const start = (session) => hookWithPayload('session-start', 'claude-code', fx.root, { session_id: session });
+  assert.ok(contextOf((await start('reader-a')).stdout));
+  assert.equal(contextOf((await start('reader-a')).stdout), null);
+  assert.ok(contextOf((await start('reader-b')).stdout), 'a distinct reader still receives its first context');
+  const end = await hookWithPayload('session-end', 'claude-code', fx.root, { session_id: 'reader-a' });
+  assert.equal(end.stderr, '', 'session end must not repeat context the same reader already received');
 });
 
 test('SESSION-END: a clean repo produces no warning', async (t) => {
