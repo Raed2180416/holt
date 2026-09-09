@@ -362,7 +362,7 @@ const TOOLS = [
   {
     name: 'holt_clean',
     description:
-      "Move disposable worktrees into recoverable local quarantine; list copies or restore one without overwriting or weakening prior protection. Never deletes files or branches.",
+      "Move disposable worktrees into recoverable local quarantine; list restore argv or restore one without overwriting or weakening prior protection. Never deletes files or branches.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -378,7 +378,7 @@ const TOOLS = [
   {
     name: 'holt_purge',
     description:
-      "Dry-run by default. Apply freshly verifies, anchors HEAD and uses non-forced Git removal of a clean quarantine; retains branch.",
+      "Dry-run by default. Apply re-verifies and anchors HEAD, then uses non-forced Git removal. Refuses dirt and keeps the branch.",
     inputSchema: {
       type: 'object',
       properties: {
