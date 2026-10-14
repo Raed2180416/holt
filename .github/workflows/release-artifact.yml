@@ -352,7 +352,7 @@ jobs:
           package-manager-cache: false
       - name: assert the required Git runtime and inert hooks boundary
         run: node scripts/check-git-runtime.mjs --verify-inert-hooks
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-assets
       - name: verify every downloaded byte against the build checksum
@@ -407,7 +407,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-assets
       - name: attest every checksummed release asset
@@ -452,7 +452,7 @@ jobs:
           ref: ${{ needs.quality.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-assets
       - name: refuse a moved tag or changed artifact immediately before publication
